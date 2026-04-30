@@ -1,0 +1,159 @@
+# Decisions
+
+<!--
+Template (keep entries tight — this file is always in context):
+
+## D-XXX: Short title
+**Status**: Active · **Date**: YYYY-MM-DD
+**Decision**: What was chosen.
+**Why**: Reason; rejected alternatives inline (vs X: ...).
+**Consequences**: What this forces or rules out.
+-->
+
+---
+
+## D-001: Three-tier code organization — `core/` + `customizations/` + `config/`
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: `core/` = AI-generated source (`core/src/`, `core/tests/`). `customizations/` = AI-scaffolded code humans complete or own. `config/` = per-module settings.
+**Why**: Makes the AI/human collaboration boundary explicit in the filesystem; lets `drift-check` / `regen-map` apply per-zone rules. Mirrors the proven layout from `~/work/nora` (its D-019).
+**Consequences**: All MODULE.md paths follow `core/src/<module>/MODULE.md` (core) or `customizations/<name>/MODULE.md` (customizations). CLI entrypoints invoked as `python -m core.src.<module>.<module>_cli`. In greenfield (current state — no code yet), this is convention-only; no reorg session needed. Public surface of a core module is computed from `core/src/<module>` symbols only (customizations expose their own MODULE.md). See `docs/compact/structure-conventions.md` for full layout. Cross-tier dependency semantics and the one-config-file-per-module rule are noted in `structure-conventions.md` as reference-imported from nora; ratify or supersede with dedicated DECISIONS entries during the architecture phase.
+
+---
+
+## D-002: Chat-mediated collaboration — stable error codes + compact reports
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: (a) Every service/module failure emits a stable prefixed error code (e.g., `EML-`, `MSG-`, `ITR-`, `WFL-`, `CRD-`, `LLG-`, `SHP-`, `SUB-`, `AUD-`, `RUL-`, …; the canonical list is registered in a single `error_codes.py` module — exact path TBD during architecture, canonical reference at `~/work/nora/core/src/pipeline/error_codes.py`). Format `{MODULE}-{SEVERITY}{NUMBER}` (E=error, W=warning, 3-digit). Logs persist locally; raw logs never leave the on-prem environment. (b) Every cross-boundary artifact has a paired compact format — **RPT** (run / activity report), **MET** (metrics), **FIX** (corrections — what a PM changed), **QC** (quality check — fixed-field, numbers + Y/N). One record per line; **no proprietary content** (no fragments of customer test reports, tech reports, waivers, customer feedback, customer-system payloads, PM credentials, R&D reply text, or any document/email content). (c) QC templates are fixed-field — numbers + Y/N + bounded enum tokens; never free-prose summaries of proprietary content.
+**Why**: The dev LLM cannot see production artifacts (NFR per Topic 5 / D-001 zoning). Compact pasteable reports + stable error codes are the only viable joint debugging surface across the air-gap. Mirrors `~/work/nora`'s D-012 — proven pattern. No-proprietary-content is a hard invariant.
+**Consequences**: Every new artifact type ships an error-code prefix + compact schema + QC template. `drift-check` and `close-session` hard-flag any artifact missing these. Authority for the remote-collaboration NFRs in `requirements.md`. Tests must include negative cases verifying no proprietary content leaks into RPT / MET / FIX / QC outputs or error messages. Per-module `<module>_cli.py` entrypoints expose a diagnostic mode that emits compact reports for the chat surface.
+
+---
+
+## D-003: Adapter pattern for proprietary systems — intermediate primitives + on-prem code-generated adapters
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: For each external system class HILDA integrates with (issue tracking, messenger, customer systems beyond the SharePoint frame), `core/` defines a typing.Protocol of intermediate primitives (e.g., `IssueTracker.open_issue / close_issue / add_comment / upload_file`; `Messenger.send_message / receive_message_as_rest`). Core code uses only the Protocol; concrete adapters bridge it to the actual REST API. Adapters for **public / popular** systems (e.g., Jira) live under `core/src/<system>/<vendor>_adapter.py`. Adapters for **proprietary** company-internal systems are produced by an on-prem **API Spec Ingestor** module (`core/src/api_spec_ingestor/`) that reads the proprietary API spec, runs an open-source LLM (e.g., Gemma3:12b, Qwen — configurable; never the dev LLM / Claude), and emits an adapter into `customizations/<system>/<proprietary>_adapter.py`. The Ingestor has its own diagnostic CLI per `[D-002]` emitting compact RPT / MET / QC reports the user can paste into chat to debug ingestion / generation issues without exposing the spec. **Hard invariant: the dev LLM (Claude) never reads proprietary API specs** — it sees only intermediate primitives, the Ingestor's compact diagnostic output, and the generated adapter code (which is reviewable customization-zone output).
+**Why**: Proprietary specs are corporate IP. The dev LLM cannot legally see them. Decoupling via intermediate primitives + on-prem spec ingestion preserves Claude-assisted velocity for everything that's not the spec itself, while keeping spec material on-prem. Vs. single-LLM with redaction: too brittle and revealing — adapter shape itself can leak structure. Vs. fully hand-coded adapters: scales linearly with adapter count and gets stale on every spec revision.
+**Consequences**: Three module classes per integration surface — (1) Protocol in `core/src/<system>/`, (2) public-vendor adapter (if v1 supports one) under `core/src/<system>/`, (3) proprietary-vendor adapter under `customizations/<system>/`, generated by the Ingestor. The Ingestor module is itself standard `core/src/` Python (its code is not proprietary; only its inputs are). Dev LLM may write, refactor, and test the Ingestor's orchestration logic, prompt scaffolding, output parsing, and diagnostic CLI. Dev LLM may NOT request, read, or summarize the proprietary spec files; this is a phase-prompt invariant in development.md. **v1 issue-tracking scope**: Jira adapter wired via the `IssueTracker` Protocol (Jira's spec is public; the Jira adapter is in `core/src/issue_tracker/jira_adapter.py`, optionally generated from the public Jira OpenAPI spec by the same Ingestor).
+
+---
+
+## D-004: SharePoint integration — standard API in `core/`, deployment-specific config in `customizations/`
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: SharePoint integration uses the standard SharePoint API surface (likely SharePoint REST API + on-prem AD auth given the 2017-frozen constraint — final API choice resolved by Open question #1). The API mechanics live under `core/src/sharepoint_integration/` (auth, request signing, list CRUD, document library uploads, web-part data binding). Company-specific deployment information — site URLs, list internal names, lookup-column field IDs, custom column mappings, document library paths, classic web part wiring — lives under `customizations/sharepoint_config/` and is loaded at startup. Core never has SharePoint instance details hard-coded.
+**Why**: SharePoint integration mechanics are stable and Claude-friendly; deployment specifics are per-environment and sensitive (internal site URLs, list IDs reveal corporate structure). Same air-gap principle as `[D-003]` — invariant code in `core/`, sensitive config in `customizations/`.
+**Consequences**: `customizations/sharepoint_config/` defines a typed config schema (likely a Pydantic model in `core/`) and provides per-deployment values. Dev LLM may write the schema and the consumption code in `core/`; humans / on-prem ops fill the values in `customizations/`. The split parallels the issue-tracker / messenger pattern but does not need a Spec Ingestor — SharePoint's API surface is the standard, public Microsoft surface.
+
+---
+
+## D-005: Every module independently testable through an appropriate interface
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: Every module in HILDA's workflow pipeline ships an interface that exercises it independently of the running system: (a) **functional modules** in `core/src/` (workflow engine activities, adapters, services, the API Spec Ingestor, etc.) ship `<module>_cli.py` with `main()` invokable as `python -m core.src.<module>.<module>_cli` (per `[D-001]` CLI convention); (b) **UI / web-facing modules** (SharePoint web parts, the dashboard data-binding code, any future internal-tooling web UI) ship a **mock web harness** — a local test server / `httpx.TestClient`-style harness that exercises the module against mock SharePoint List data without requiring the production SharePoint environment; (c) **side-effect-bearing modules** (Email Service, customer adapters, messenger, issue tracker) implement `--mock` / `--dry-run` modes so the CLI can be safely exercised against fixture data; (d) every test interface supports `--diagnostic` and emits compact RPT / MET / QC reports per `[D-002]`.
+**Why**: The dev LLM cannot reach production. Independent testability is the only way to validate a module without orchestrating the whole system. Per-module CLIs let the dev / user paste a compact report into chat for joint debugging — closes the loop with `[D-002]`. Mock harnesses for UI modules avoid coupling test cycles to SharePoint 2017 availability and let UI behavior be exercised offline. Vs. unit-tests-only: unit tests don't catch wiring / IO / async-ordering bugs the CLI surfaces. Vs. integration-only-via-orchestrator: makes failures hard to attribute and slow to reproduce.
+**Consequences**: Every MODULE.md curated section names its test interface (CLI command line + flags, or mock-harness entry point) under Public surface or in a dedicated paragraph. `drift-check` / `close-session` hard-flag any new `core/src/` module without a `<module>_cli.py` (or, for UI modules, without a documented mock harness). Adds dev cost per module — accepted as the price of joint-debug velocity. Anchors paired NFRs in `requirements.md`: independent CLI / mock-harness presence; `--mock` mode for side-effect modules; `--diagnostic` emits compact-report-compliant output. All test interfaces are themselves subject to `[D-002]`'s no-proprietary-content invariant.
+
+---
+
+## D-006: SharePoint integration uses REST API + on-prem AD auth (NTLM / Kerberos)
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: `core/src/sharepoint_integration/` integrates with SharePoint via the **SharePoint REST API** and authenticates using **on-premises Active Directory** (NTLM / Kerberos against the AD-joined SharePoint server). Microsoft Graph API is **not** used. Resolves Open question #1.
+**Why**: SharePoint version is frozen at 2017 (vanilla List views + classic web parts; SP Server 2016 / 2019 era). Microsoft Graph against on-prem SP is partial / unreliable in this era and assumes Azure AD identity, which on-prem deployments don't have. SharePoint REST API is fully supported on on-prem SP since 2013, exposes Lists / Document Libraries / web-part wiring, and integrates natively with on-prem AD via NTLM or Kerberos tickets. Vs. SOAP web services: REST is simpler, JSON-native, better Python tooling. Vs. CSOM: requires .NET interop.
+**Consequences**: Python-side dependency: `requests-ntlm` (NTLM) and / or `requests-kerberos` (Kerberos) for auth; `httpx` or `requests` for transport. PM credential model (`[per project credential service to be defined in architecture]`) must support AD credentials (domain\user + password, or Kerberos ticket cache). The `HILDA_Design.md` references to "Microsoft Graph API" are superseded — `core/src/sharepoint_integration/` uses SharePoint REST API. Document this supersession in the relevant MODULE.md. SharePoint REST API rate limits and `$select` / `$filter` semantics shape how the integration module batches reads and writes.
+
+---
+
+## D-007: All LLM hosting is on-premises — runtime AND code-generation
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: Both LLM tiers in HILDA run on-premises:
+1. **Runtime LLM** (DeliverableHub's internal LLM doing message classification, tech-report / waiver quality review, customer-response drafting, status summarization) — hosted on-prem (likely the same K8s cluster); accessed via the `LLMProvider` Protocol from `core/src/llm/`.
+2. **API Spec Ingestor LLM** per `[D-003]` (the open-source LLM used to ingest proprietary specs and generate adapters) — also on-prem; configurable model (Gemma3:12b, Qwen, etc.).
+No corp-proxy-to-public-cloud LLM is used. Resolves Open question #2.
+**Why**: Data sensitivity policy. Test reports, tech reports, waivers, customer feedback, customer-system payloads, R&D reply prose, and proprietary API specs all contain corporate IP that cannot leave on-prem boundaries. Public-cloud LLM via corp proxy is theoretically possible but the policy boundary is cleaner if no LLM call ever leaves the network. Vs. corp-proxied public LLM: removes a class of accidental leaks via proxy misconfig. Vs. mixed model: simpler operational model — one hosting story for both LLMs.
+**Consequences**: Hardware provisioning required for on-prem LLM serving (likely vLLM or Ollama on the K8s cluster, or dedicated GPU nodes). Model selection and inference quality become first-class capacity-planning concerns. Latency floor higher than public-cloud LLMs in some cases — workflow timeouts and Temporal activity heartbeats must be sized accordingly. Compatibility with the runtime LLM's quality requirements (classification accuracy, tech-report review utility) must be validated against the chosen on-prem model — capture as a follow-up architecture-phase concern. The `LLMProvider` Protocol and `LLMGateway` module gain a config knob for which on-prem model serves which task (smaller / faster for classification; larger / more capable for quality review and drafting). Cost model becomes capex (GPU hardware) + opex (electricity / cluster ops), not per-token.
+
+---
+
+## D-008: `IssueTracker` intermediate-primitive Protocol — async surface over sync proprietary APIs
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: `core/src/issue_tracker/` defines an async `IssueTracker` Protocol (`typing.Protocol`, structural) with the following surface (Python pseudo-signature; full Pydantic data classes accompany):
+
+```python
+class IssueTracker(Protocol):
+    source_system: str  # adapter declares its tag, e.g., "jira-public", "proprietary-issue-tracker"
+
+    async def create_issue(self, project: str, summary: str, description: str,
+                           fields: dict[str, Any] | None = None,
+                           attachments: list[AttachmentInput] | None = None,
+                           idempotency_key: str | None = None,
+                           timeout_s: float | None = None) -> IssueRef: ...
+    async def get_issue(self, ref: IssueRef, timeout_s: float | None = None) -> Issue: ...
+    async def update_issue(self, ref: IssueRef, updates: dict[str, Any],
+                           timeout_s: float | None = None) -> None: ...
+    async def transition_issue(self, ref: IssueRef, transition: str,
+                               timeout_s: float | None = None) -> None: ...
+    async def close_issue(self, ref: IssueRef, resolution: str,
+                          timeout_s: float | None = None) -> None: ...
+    async def add_comment(self, ref: IssueRef, body: str,
+                          attachments: list[AttachmentInput] | None = None,
+                          idempotency_key: str | None = None,
+                          timeout_s: float | None = None) -> CommentRef: ...
+    async def upload_attachment(self, ref: IssueRef, file: AttachmentInput,
+                                timeout_s: float | None = None) -> AttachmentRef: ...
+    async def search(self, query: IssueQuery, timeout_s: float | None = None) -> AsyncIterator[IssueRef]: ...
+    async def list_recent_changes(self, ref: IssueRef, since: datetime,
+                                  timeout_s: float | None = None) -> AsyncIterator[IssueChange]: ...
+    async def register_webhook(self, callback_url: str, events: list[str], secret: str,
+                               timeout_s: float | None = None) -> WebhookRef: ...
+    async def poll_changes(self, since: datetime,
+                           timeout_s: float | None = None) -> AsyncIterator[IssueChange]: ...  # webhook-fallback
+```
+
+Data classes: `IssueRef`, `Issue`, `IssueChange`, `IssueQuery`, `CommentRef`, `AttachmentRef`, `AttachmentInput`, `WebhookRef` — all Pydantic; every reference type carries `source_system: str` for `CommunicationLog` routing. `AttachmentInput` accepts `Path | AsyncIterable[bytes]` to support streaming uploads. Error model: `IssueTrackerError(code, context, cause)` with prefix `ITR-` per `[D-002]`; mapped codes include `ITR-E001 unauthorized`, `ITR-E002 not_found`, `ITR-E003 conflict`, `ITR-W001 rate_limited`. Idempotency keys are required-when-applicable on all mutating methods; adapters dedupe at proprietary-API layer when supported, or in a local seen-key cache otherwise.
+**Why**: Proprietary issue-tracker APIs are sync/blocking (per user input). HILDA's stack is FastAPI + asyncio + Temporal — async-native at the Protocol layer is mandatory; sync at this layer would force `asyncio.to_thread` calls into every caller. Adapters that wrap sync libraries do the wrapping internally per the sync-API wrapping convention in `structure-conventions.md`. UI-blocking is avoided because (a) async I/O lets the event loop service other requests while a single op runs in a thread, (b) any multi-second op is orchestrated by Temporal workflows — the UI awaits workflow completion via SharePoint List status updates, not a direct adapter call. Generic query DSL (`IssueQuery`) is a defined minimum subset (project, status, updated_after, assignee, labels) all adapters must support; richer queries best-effort.
+**Consequences**: `core/src/issue_tracker/__init__.py` exports the Protocol + data classes. `core/src/issue_tracker/jira_adapter.py` is the v1 public-vendor implementation. `customizations/issue_tracker/<proprietary>_adapter.py` is Ingestor-generated per `[D-003]`. Cancellation contract is documented as best-effort (cancelling the awaiter cancels the asyncio task; the underlying sync thread runs to completion — Python cannot safely kill threads). `transition_issue`'s state vocabulary: `open`, `in_progress`, `blocked`, `resolved`, `closed`, plus `custom:<name>` escape hatch — adapters map to native workflow states. Webhook secret rotation is Deferred for v1. `core/src/issue_tracker/issue_tracker_cli.py` ships per `[D-005]` with `--diagnostic`, `--mock`, `--dry-run`. Error-code prefix `ITR-` registered in central `error_codes.py` per `[D-002]` (path TBD architecture).
+
+---
+
+## D-009: `Messenger` intermediate-primitive Protocol — async surface over sync proprietary APIs
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: `core/src/messenger/` defines an async `Messenger` Protocol with the following surface:
+
+```python
+class Messenger(Protocol):
+    source_system: str  # e.g., "slack", "teams", "proprietary-messenger"
+
+    async def send_message(self, channel_or_user: str, text: str,
+                           thread_id: str | None = None,
+                           attachments: list[AttachmentInput] | None = None,
+                           idempotency_key: str | None = None,
+                           timeout_s: float | None = None) -> MessageRef: ...
+    async def reply_in_thread(self, thread_id: str, text: str,
+                              attachments: list[AttachmentInput] | None = None,
+                              idempotency_key: str | None = None,
+                              timeout_s: float | None = None) -> MessageRef: ...
+    async def get_message(self, ref: MessageRef, timeout_s: float | None = None) -> Message: ...
+    async def list_thread(self, thread_id: str, since: datetime | None = None,
+                          timeout_s: float | None = None) -> AsyncIterator[Message]: ...
+    async def list_recent(self, channel: str, since: datetime,
+                          timeout_s: float | None = None) -> AsyncIterator[Message]: ...
+    async def upload_file(self, channel_or_user: str, file: AttachmentInput,
+                          comment: str | None = None,
+                          idempotency_key: str | None = None,
+                          timeout_s: float | None = None) -> FileRef: ...
+    async def react(self, ref: MessageRef, emoji: str,
+                    timeout_s: float | None = None) -> None: ...
+    async def register_webhook(self, callback_url: str, secret: str,
+                               timeout_s: float | None = None) -> WebhookRef: ...
+    async def poll_inbound(self, since: datetime,
+                           timeout_s: float | None = None) -> AsyncIterator[Message]: ...  # webhook-fallback
+```
+
+Data classes: `MessageRef`, `Message`, `FileRef`, `WebhookRef`, `AttachmentInput` (shared with `IssueTracker` per `[D-008]`) — Pydantic; `source_system: str` on every reference. Error model: `MessengerError(code, context, cause)` with prefix `MSG-` per `[D-002]`; codes include `MSG-E001 unauthorized`, `MSG-E002 channel_not_found`, `MSG-E003 message_too_large`, `MSG-W001 rate_limited`. Idempotency keys on all sending methods.
+**Why**: Same async-over-sync rationale as `[D-008]`. Inbound channel symmetry — webhook + polling pair so adapters work whether the proprietary system pushes or only allows pull. Rule engine and `CommunicationLog` ingestion are Protocol-agnostic — they consume `AsyncIterator[Message]` whichever way it's produced.
+**Consequences**: `core/src/messenger/__init__.py` exports Protocol + data classes. `core/src/messenger/messenger_cli.py` per `[D-005]`. `customizations/messenger/<proprietary>_adapter.py` is Ingestor-generated per `[D-003]`. v1 messenger choice (proprietary first vs. public reference first) remains an Open question in PROJECT.md. Error-code prefix `MSG-` registered in central `error_codes.py` per `[D-002]`. Webhook secret rotation Deferred for v1.
+
+---
+
+## D-010: Excel / Template Schema Ingestor — proprietary customer-template schemas processed on-prem
+**Status**: Active · **Date**: 2026-04-30
+**Decision**: HILDA's customer deliverable templates (Devices → Milestones → Deliverables → DeliveryItems with customer-specific column structures, field extensions, validation rules, enumerated values, and customer-specific automation-rule parameters) carry **proprietary schema variations** that cannot be shared with the dev LLM. A new `core/src/template_schema_ingestor/` module — parallel pattern to the API Spec Ingestor `[D-003]` — runs on-premises, reads the proprietary Excel schema spec, runs an on-prem open-source LLM (Gemma3:12b / Qwen / configurable per `[D-007]`), and emits into `customizations/template_schemas/`: (a) Pydantic validators for each customer's template shape; (b) Excel parsers / column mappers for the customer's Excel template format; (c) SharePoint-List column-mapping configs feeding `[D-004]`'s `customizations/sharepoint_config/`; (d) customer-specific `AutomationRules` configurations consumed by the runtime rule engine. The Ingestor exposes a diagnostic CLI per `[D-002]` emitting compact RPT / MET / QC reports the dev pastes into chat to debug ingestion / generation issues without exposing the schema. **Hard invariant: the dev LLM (Claude) never reads proprietary customer-template schemas, never sees their content via tool calls, and does not request, summarize, or paraphrase their structure.** It works only with: the generic meta-schema (the standard Device / Milestone / Deliverable / DeliveryItem entity hierarchy from `HILDA_Design.md` §3 — public, in design-inputs); the Ingestor's compact diagnostic output (no schema content); and the generated artifacts already committed under `customizations/template_schemas/`.
+**Why**: Customer-specific template schemas reveal customer process structure, customer-specific certification requirements, internal R&D taxonomy, and customer-specific automation triggers — all corporate IP. The pattern from `[D-003]` (intermediate primitives + on-prem code-generated artifacts) extends naturally: Claude works with the public meta-schema and writes the Ingestor; the Ingestor processes proprietary customer schemas on-prem and produces concrete artifacts in `customizations/`. Vs. asking PMs to manually write Pydantic validators per customer: doesn't scale, drifts from Excel templates, requires Python skills outside the PM team. Vs. embedding customer schemas in `core/`: violates the no-proprietary-content invariant and couples the codebase to per-customer corporate IP.
+**Consequences**: Three module classes per template-customer integration — (1) generic meta-schema in `core/src/template_schema/` (public, defines the Device/Milestone/Deliverable/DeliveryItem entity types as Pydantic base models); (2) the Ingestor at `core/src/template_schema_ingestor/` (its code is not proprietary; only its inputs are); (3) per-customer concrete schema + validators + parsers + automation-rule configs at `customizations/template_schemas/<customer>/`, generated by the Ingestor. The runtime workflow engine (Temporal activities, rule engine, SharePoint integration) reads from `customizations/template_schemas/` at startup and parameterizes itself per active customer. The Ingestor's input format (Excel cell layout convention for the schema spec — column listings, enumerated values, validation rules, automation-rule overrides) is TBD architecture phase; document the convention in `core/src/template_schema_ingestor/MODULE.md`. `template_schema_ingestor_cli.py` ships per `[D-005]` with `--diagnostic`, `--mock`, `--dry-run`. Error-code prefix (likely `TSI-` for Template Schema Ingestor) registered in central `error_codes.py` per `[D-002]`. The `[D-003]` development.md invariant — dev LLM refuses to engage with proprietary spec content if pasted into chat — extends to proprietary template schema content (any customer-specific column listings, field extensions, automation-rule definitions). The Excel-import path mentioned by PM team leads in Topic 3 (template authoring via SharePoint UI + Excel) is fed by this Ingestor: PMs upload Excel templates whose structure conforms to the per-customer schema generated by the Ingestor at deployment time.
