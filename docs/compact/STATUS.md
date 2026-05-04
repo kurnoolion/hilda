@@ -33,6 +33,7 @@
 - 2026-05-04 D-017 captured (central diagnostics module at `core/src/diagnostics/` — standalone leaf node, owns error_codes.py registry + compact report schemas + QC template base class; 18 module prefixes pre-registered). `core/src/diagnostics/MODULE.md` drafted (refs: D-017).
 - 2026-05-04 D-018 captured (Template Schema Ingestor three-mode input format: schema-file YAML / row-offset + LLM column resolution / full LLM infer; recommended workflow: infer-once → commit schema.yaml → schema-file for production; resolves backlogged Flag "Template Schema Ingestor input format"). `core/src/template_schema/MODULE.md` drafted — Layer 0 complete (2/18) (refs: D-018).
 - 2026-05-04 D-019 captured (credential_service v1 = K8s Secrets / ops-provisioned; stable `get_credential` interface preserved for v2 Vault backend swap; FR-32–FR-38 deferred → DEF-14; FR-51 added for v1; PROJECT.md In scope v1 updated). (refs: D-019)
+- 2026-05-04 D-020 captured (sharepoint_integration: SpClient / SharePointListProvider Protocol separation; FileBasedListProvider boilerplate in core/; list_crud.py sole compositor; nora 3-tier config for operational values; customizations/sharepoint_config/ for business config). `core/src/sharepoint_integration/MODULE.md` drafted — Layer 1: 1/3 (3/18 overall) (refs: D-020).
 
 ## In progress
 
@@ -40,13 +41,10 @@
 
 ## Next
 
-- Architecture phase: 17 MODULE.md files remaining (`template_schema` next, then infra layer). Sequence: Layer 0 → Layer 1 → Layer 2 → Layer 3 → Layer 4 → Layer 5 → Layer 6.
-- Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json`. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
+- Architecture phase: 15 MODULE.md files remaining. Sequence: Layer 1 remaining (`storage`, `credential_service`) → Layer 2 → Layer 3 → Layer 4 → Layer 5 → Layer 6.
+- Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Architecture-phase choice for Test Report Profiler (`[D-011]`): PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless). Decide before `test_report_profiler` MODULE.md.
 - Eval-data correction surface design (per STATUS.md Flag): resolve during architecture phase when designing each AI-assisted module's MODULE.md.
-- Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
-- Decide where the central `error_codes.py` registry lives in HILDA's three-tier layout (likely a dedicated diagnostics / observability module under `core/src/`) — first architecture-phase decisions per `[D-002]`. Each module gets its 3-letter prefix as it is drafted.
-- Architecture-phase choice for the Test Report Profiler (`[D-011]`): on-prem PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless conversion).
 
 ## Flags
 
