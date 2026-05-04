@@ -1,6 +1,6 @@
 # Status
 
-**Active phase**: requirements
+**Active phase**: architecture
 **Last updated**: 2026-05-04
 **Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
 
@@ -29,6 +29,8 @@
 - 2026-05-04 D-016 captured (v1 messenger targets: Slack + proprietary internal messenger; both wired through `Messenger` Protocol `[D-009]`; Slack chosen over Teams for setup/unit-test simplicity; proprietary adapter exercises API Spec Ingestor end-to-end in v1); FR-50 added (Messenger adapter v1 targets); DEF-5 + DEF-6 revisit triggers updated; resolves backlogged Flag "v1 messenger choice" (refs: D-016).
 - 2026-05-04 Flags triage: browser-automation confirmed out of v1 (already DEF-10, closed); eval-data flag refined — multiple eval/correction surfaces during dev time (test report review, tech report review, email parsing, etc.), details deferred to architecture.
 - 2026-05-04 PROJECT.md TODOs filled from `HILDA_Design.md` §1 §2 §13 §15: one-line, Problem, Users, In scope v1 (10 bullet items), Out of scope (9 items, all mapped to DEF-N), Success criteria (7 metrics). Requirements phase exit criteria met.
+- 2026-05-04 Architecture phase started. Module list approved: 18 core modules across 6 dependency layers + 4 customization families. Sequenced by dependency order + TPM feedback priority.
+- 2026-05-04 D-017 captured (central diagnostics module at `core/src/diagnostics/` — standalone leaf node, owns error_codes.py registry + compact report schemas + QC template base class; 18 module prefixes pre-registered). `core/src/diagnostics/MODULE.md` drafted (refs: D-017).
 
 ## In progress
 
@@ -36,7 +38,10 @@
 
 ## Next
 
-- Open questions in `PROJECT.md`: all original entries resolved (D-006 through D-016). No active blocking questions. Requirements phase exit criteria met — ready for architecture phase.
+- Architecture phase: 17 MODULE.md files remaining (`template_schema` next, then infra layer). Sequence: Layer 0 → Layer 1 → Layer 2 → Layer 3 → Layer 4 → Layer 5 → Layer 6.
+- Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json`. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
+- Architecture-phase choice for Test Report Profiler (`[D-011]`): PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless). Decide before `test_report_profiler` MODULE.md.
+- Eval-data correction surface design (per STATUS.md Flag): resolve during architecture phase when designing each AI-assisted module's MODULE.md.
 - Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Decide where the central `error_codes.py` registry lives in HILDA's three-tier layout (likely a dedicated diagnostics / observability module under `core/src/`) — first architecture-phase decisions per `[D-002]`. Each module gets its 3-letter prefix as it is drafted.
 - Architecture-phase choice for the Test Report Profiler (`[D-011]`): on-prem PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless conversion).
