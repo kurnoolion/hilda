@@ -31,6 +31,7 @@
 - 2026-05-04 PROJECT.md TODOs filled from `HILDA_Design.md` §1 §2 §13 §15: one-line, Problem, Users, In scope v1 (10 bullet items), Out of scope (9 items, all mapped to DEF-N), Success criteria (7 metrics). Requirements phase exit criteria met.
 - 2026-05-04 Architecture phase started. Module list approved: 18 core modules across 6 dependency layers + 4 customization families. Sequenced by dependency order + TPM feedback priority.
 - 2026-05-04 D-017 captured (central diagnostics module at `core/src/diagnostics/` — standalone leaf node, owns error_codes.py registry + compact report schemas + QC template base class; 18 module prefixes pre-registered). `core/src/diagnostics/MODULE.md` drafted (refs: D-017).
+- 2026-05-04 D-018 captured (Template Schema Ingestor three-mode input format: schema-file YAML / row-offset + LLM column resolution / full LLM infer; recommended workflow: infer-once → commit schema.yaml → schema-file for production; resolves backlogged Flag "Template Schema Ingestor input format"). `core/src/template_schema/MODULE.md` drafted — Layer 0 complete (2/18) (refs: D-018).
 
 ## In progress
 
@@ -52,4 +53,4 @@
 
 - **[BACKLOGGED 2026-04-30; refined 2026-05-04]** **Eval-data channel — multiple dev-time eval/correction surfaces** — PM corrections flow across multiple surfaces: test report review, tech report review, email parsing, message classification, customer-response drafts. How do these corrections feed back to improve checklists / prompts? No explicit pipeline in the design doc. Each surface will need its own correction schema and eval data path. Revisit when AI/LLM modules are designed in architecture phase.
 
-- **[BACKLOGGED 2026-04-30]** **Template Schema Ingestor input format** `[D-010]` — Excel cell-layout convention for proprietary schema specs. Sub-question: standardized worksheet structure (e.g., one sheet per entity type with predictable column headers) vs. free-form Excel that the Ingestor's LLM extracts via inference? Resolve during architecture phase before starting `core/src/template_schema_ingestor/` implementation.
+- ~~**[BACKLOGGED 2026-04-30]** **Template Schema Ingestor input format**~~ — *resolved 2026-05-04 by `[D-018]`: three modes (schema-file YAML / row-offset / infer); `CustomerSchema` is the common output contract.*
