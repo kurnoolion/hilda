@@ -32,6 +32,7 @@
 - 2026-05-04 Architecture phase started. Module list approved: 18 core modules across 6 dependency layers + 4 customization families. Sequenced by dependency order + TPM feedback priority.
 - 2026-05-04 D-017 captured (central diagnostics module at `core/src/diagnostics/` — standalone leaf node, owns error_codes.py registry + compact report schemas + QC template base class; 18 module prefixes pre-registered). `core/src/diagnostics/MODULE.md` drafted (refs: D-017).
 - 2026-05-04 D-018 captured (Template Schema Ingestor three-mode input format: schema-file YAML / row-offset + LLM column resolution / full LLM infer; recommended workflow: infer-once → commit schema.yaml → schema-file for production; resolves backlogged Flag "Template Schema Ingestor input format"). `core/src/template_schema/MODULE.md` drafted — Layer 0 complete (2/18) (refs: D-018).
+- 2026-05-04 D-019 captured (credential_service v1 = K8s Secrets / ops-provisioned; stable `get_credential` interface preserved for v2 Vault backend swap; FR-32–FR-38 deferred → DEF-14; FR-51 added for v1; PROJECT.md In scope v1 updated). (refs: D-019)
 
 ## In progress
 

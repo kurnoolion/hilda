@@ -97,13 +97,14 @@ Source provenance for the v1 set:
 
 ### Credentials
 
-- **FR-32** — PM registers per-system credentials via the secure UI using OAuth2, API token, or basic auth; for OAuth2 the PM is redirected to the external system's consent page and never enters a password into HILDA.
-- **FR-33** — Credentials are encrypted at rest (AES-256) in the secrets store (Vault or K8s Sealed Secrets); SharePoint stores only credential metadata (`credential_id`, `user_id`, `system_type`, `status`).
-- **FR-34** — Credentials are decrypted in-memory only at the Credential Service request boundary; never cached, written to disk, or written to logs.
-- **FR-35** — Credential Service is the only pod with access to the secrets store; service-to-service auth is via K8s service accounts and mTLS.
-- **FR-36** — Credential Health Monitor proactively refreshes OAuth2 tokens within a configurable expiry window (default 24h) and validates non-OAuth credentials with lightweight test calls (e.g., `get current user`).
-- **FR-37** — PM can revoke any credential at any time; revocation takes effect immediately for all subsequent automation actions.
-- **FR-38** — System auto-associates the PM's credentials to DeliveryItems based on `customer_delivery_modality` at tracker creation, flags missing required credentials, and re-associates on PM reassignment.
+- **FR-51** — v1 credential_service reads PM credentials from K8s Secrets provisioned by ops at deploy time (one Secret per PM per system type); exposes `get_credential(pm_id, system_type) -> Credential` to all callers; credentials are never logged, written to disk, or written to any SharePoint List; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 (anchors `[D-019]`).
+- ~~**FR-32**~~ — *(deferred 2026-05-04 → DEF-14: PM self-service credential registration UI — v2)*
+- ~~**FR-33**~~ — *(deferred 2026-05-04 → DEF-14: Vault/AES-256 secrets store — v2)*
+- ~~**FR-34**~~ — *(deferred 2026-05-04 → DEF-14: per-request in-memory decryption boundary — v2)*
+- ~~**FR-35**~~ — *(deferred 2026-05-04 → DEF-14: secrets store pod isolation + mTLS — v2)*
+- ~~**FR-36**~~ — *(deferred 2026-05-04 → DEF-14: OAuth2 health monitor + token refresh — v2)*
+- ~~**FR-37**~~ — *(deferred 2026-05-04 → DEF-14: PM credential revocation UI — v2)*
+- ~~**FR-38**~~ — *(deferred 2026-05-04 → DEF-14: auto-association + re-association on PM reassignment — v2)*
 
 ### Templates & three-tier configuration
 
@@ -195,3 +196,4 @@ Entry format:
 - **DEF-11** — Self-service customer-template wizard (§13 Phase 4) (deferred: v4 — revisit: post-v3).
 - **DEF-12** — LLM feedback loop learning from PM corrections to AI drafts (§13 Phase 4) (deferred: v4 — revisit: linked to STATUS.md Flag "Eval-data channel").
 - **DEF-13** — Advanced analytics (cycle time per item type, customer SLAs, R&D performance) (§13 Phase 4) (deferred: v4 — revisit: same).
+- **DEF-14** — Full PM self-service credential management: registration UI (OAuth2 redirect + API token + basic auth), Vault-backed AES-256 secrets store, per-request in-memory decryption boundary, Credential Service pod isolation + mTLS, OAuth2 health monitor + proactive token refresh, PM credential revocation UI, auto-association + re-association at tracker creation / PM reassignment (FR-32–FR-38 content; deferred: v2 per `[D-019]` — v1 uses ops-provisioned K8s Secrets via FR-51; revisit: when PMs need to self-register credentials without ops involvement).

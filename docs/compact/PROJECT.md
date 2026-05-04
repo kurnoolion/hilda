@@ -10,7 +10,7 @@
 
 **In scope for v1**:
 - **Infrastructure**: SharePoint site + all 10 Lists (§3.4 data model), K8s namespace, Helm charts, CI/CD, PostgreSQL, Redis, HashiCorp Vault.
-- **Credential Service**: PM registration UI (OAuth2, API token, basic auth), Vault integration, credential health monitoring, automatic OAuth2 token refresh.
+- **Credential Service (v1 — simplified)**: K8s-Secrets-backed credential store provisioned by ops at deploy time; exposes `get_credential(pm_id, system_type)` to all adapters; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 — full PM self-service deferred to v2 per `[D-019]`.
 - **Customer template + device tracker creation**: SharePoint-based UI (from template / Excel import / manual entry); two-path template authoring — SharePoint UI + Excel upload, TPM-selectable per `[D-014]`; Template Schema Ingestor generating per-customer schemas per `[D-010]`.
 - **Email Service**: dedicated mailbox; BATCH-id multi-item outbound; three-path inbound routing (structured reply block / `mailto:` tap-links / PM triage) per `[D-012]`.
 - **Shared network drive**: `hilda-svc` writes, HILDA-mediated reads via dashboard download endpoint, per `[D-013]`; covers all artifact storage (test reports, tech reports, waivers, submission packages).
