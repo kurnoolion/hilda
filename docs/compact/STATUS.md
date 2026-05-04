@@ -28,6 +28,7 @@
 - 2026-05-04 D-015 captured (API Spec Ingestor input format: OpenAPI 3.x canonical + on-prem LLM preprocessing pass converts other formats first; `spec_normalizer.py` sub-module within the Ingestor); resolves backlogged Flag "API Spec Ingestor input format" (refs: D-015).
 - 2026-05-04 D-016 captured (v1 messenger targets: Slack + proprietary internal messenger; both wired through `Messenger` Protocol `[D-009]`; Slack chosen over Teams for setup/unit-test simplicity; proprietary adapter exercises API Spec Ingestor end-to-end in v1); FR-50 added (Messenger adapter v1 targets); DEF-5 + DEF-6 revisit triggers updated; resolves backlogged Flag "v1 messenger choice" (refs: D-016).
 - 2026-05-04 Flags triage: browser-automation confirmed out of v1 (already DEF-10, closed); eval-data flag refined — multiple eval/correction surfaces during dev time (test report review, tech report review, email parsing, etc.), details deferred to architecture.
+- 2026-05-04 PROJECT.md TODOs filled from `HILDA_Design.md` §1 §2 §13 §15: one-line, Problem, Users, In scope v1 (10 bullet items), Out of scope (9 items, all mapped to DEF-N), Success criteria (7 metrics). Requirements phase exit criteria met.
 
 ## In progress
 
@@ -35,9 +36,7 @@
 
 ## Next
 
-- Continue requirements iteration when user provides additional input. Current set is initial v1: 43 active FR + 19 NFR + 13 Deferred (3 struck-through reclassifications). User signaled more input may follow on 2026-05-01.
-- Fill remaining `docs/compact/PROJECT.md` TODOs (one-line / Problem / Users / In scope v1 / Out of scope / Success criteria) on requirements continuation, sourced from `HILDA_Design.md` §1, §2, §13, §15.
-- Open questions in `PROJECT.md`: all original entries resolved across sessions (SharePoint API → D-006; LLM hosting → D-007; intermediate-Protocol design → D-008+D-009; customer-template authoring partial → D-010). 5 sub-questions backlogged below in Flags. No active blocking questions.
+- Open questions in `PROJECT.md`: all original entries resolved (D-006 through D-016). No active blocking questions. Requirements phase exit criteria met — ready for architecture phase.
 - Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Decide where the central `error_codes.py` registry lives in HILDA's three-tier layout (likely a dedicated diagnostics / observability module under `core/src/`) — first architecture-phase decisions per `[D-002]`. Each module gets its 3-letter prefix as it is drafted.
 - Architecture-phase choice for the Test Report Profiler (`[D-011]`): on-prem PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless conversion).

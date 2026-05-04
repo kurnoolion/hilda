@@ -22,7 +22,10 @@ Source provenance for the v1 set:
 - Non-functional requirements anchored by `[D-002]` (chat-mediated collaboration),
   `[D-003]` (adapter pattern + API Spec Ingestor), `[D-004]` (SharePoint config split),
   `[D-005]` (independent testability), `[D-006]` (SharePoint REST + on-prem AD),
-  `[D-007]` (all LLM on-prem), `[D-010]` (Template Schema Ingestor).
+  `[D-007]` (all LLM on-prem), `[D-010]` (Template Schema Ingestor),
+  `[D-011]` (Test Report Profiler), `[D-012]` (BATCH-id email design),
+  `[D-013]` (NW drive ACL), `[D-014]` (two-path template authoring),
+  `[D-015]` (API Spec Ingestor input format), `[D-016]` (v1 messenger targets).
 -->
 
 ## Functional
