@@ -1,7 +1,7 @@
 # Status
 
 **Active phase**: requirements
-**Last updated**: 2026-05-01
+**Last updated**: 2026-05-04
 **Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
 
 ## Done
@@ -24,6 +24,10 @@
 - 2026-05-01 Reclassified runtime vs dev/test invariants per session feedback: FR-43 → NFR-17 (compact-reports invariant); FR-44 → NFR-18 (error-codes invariant); FR-45 split into FR-49 (runtime `--diagnostic` for ops + RPT emission) and NFR-19 (dev/test `--mock` / `--dry-run` / mock web harness); section "Audit & chat-mediated collaboration" renamed "Audit & runtime diagnostics".
 - 2026-05-01 D-012 captured (Multi-item email status updates — three-path design: structured reply block / per-item `mailto:` tap-links / PM manual triage; idempotent on `(BATCH-id, item-index, status)`; outbound multipart/alternative, ASCII-only structured block; authority for FR-9, FR-12).
 - 2026-05-01 D-013 captured (Shared network drive — single `hilda-svc` AD service account writes, HILDA-mediated reads via `https://hilda.corp/dl/<token>`, no per-customer AD groups in v1; path convention `\\share\hilda\<customer>\<device>\<milestone>\<deliverable>\<item>\` with `inbound/`/`outbound/`/`revisions/`; supersedes SharePoint Document Libraries; authority for FR-13, FR-17, FR-18, NFR-8, NFR-16).
+- 2026-05-04 D-014 captured (customer template authoring: two separately maintained paths — SharePoint UI + Excel upload — TPM-selectable; no normalization in v1; both produce identical internal data model representations); FR-39 updated to anchor `[D-014]`; resolves backlogged Flag "Customer template authoring path normalization" (refs: D-014).
+- 2026-05-04 D-015 captured (API Spec Ingestor input format: OpenAPI 3.x canonical + on-prem LLM preprocessing pass converts other formats first; `spec_normalizer.py` sub-module within the Ingestor); resolves backlogged Flag "API Spec Ingestor input format" (refs: D-015).
+- 2026-05-04 D-016 captured (v1 messenger targets: Slack + proprietary internal messenger; both wired through `Messenger` Protocol `[D-009]`; Slack chosen over Teams for setup/unit-test simplicity; proprietary adapter exercises API Spec Ingestor end-to-end in v1); FR-50 added (Messenger adapter v1 targets); DEF-5 + DEF-6 revisit triggers updated; resolves backlogged Flag "v1 messenger choice" (refs: D-016).
+- 2026-05-04 Flags triage: browser-automation confirmed out of v1 (already DEF-10, closed); eval-data flag refined — multiple eval/correction surfaces during dev time (test report review, tech report review, email parsing, etc.), details deferred to architecture.
 
 ## In progress
 
@@ -36,22 +40,12 @@
 - Open questions in `PROJECT.md`: all original entries resolved across sessions (SharePoint API → D-006; LLM hosting → D-007; intermediate-Protocol design → D-008+D-009; customer-template authoring partial → D-010). 5 sub-questions backlogged below in Flags. No active blocking questions.
 - Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Decide where the central `error_codes.py` registry lives in HILDA's three-tier layout (likely a dedicated diagnostics / observability module under `core/src/`) — first architecture-phase decisions per `[D-002]`. Each module gets its 3-letter prefix as it is drafted.
-- Resolve API Spec Ingestor input format (Open question #6) before Ingestor architecture: OpenAPI / Swagger vs. company-internal format vs. both. Affects `core/src/api_spec_ingestor/` design and the spec-format adapter sub-module.
-- Decide v1 messenger target (Open question #7): proprietary internal messenger (would exercise the Ingestor end-to-end as part of v1 acceptance) or a public reference (Slack / Teams) first.
 - Architecture-phase choice for the Test Report Profiler (`[D-011]`): on-prem PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless conversion).
 
 ## Flags
 
 - `structure-conventions.md` references `~/work/nora` as the live reference for layout details (cross-tier deps, config rules, Protocol-boundary pattern). If nora's conventions evolve, HILDA's `structure-conventions.md` does NOT auto-track — it's a one-time import, captured in D-001's "Why". Re-verify alignment when reviewing the conventions file.
 
-- **[BACKLOGGED 2026-04-30]** **Eval-data channel for runtime AI quality review** — how do PM corrections of AI assessments (tech-report quality reviews, customer-response drafts, message classifications) flow back into the system to improve checklists / prompts? No explicit pipeline in the design doc. Revisit when AI/LLM modules are designed in architecture phase, or when the first runtime LLM behavior needs tuning post-deployment.
-
-- **[BACKLOGGED 2026-04-30]** **Customer template authoring path normalization** — PM team leads use both SharePoint UI (web part forms) and Microsoft Excel (template upload). Per `[D-010]`, the Excel template schema is generated by the Template Schema Ingestor. Sub-question: does the system normalize the SharePoint-UI authoring path and Excel-upload path into one canonical representation, or maintain two parallel ingestion paths feeding a common normalized schema? Revisit during architecture when designing `core/src/template_schema/` and the SharePoint-UI authoring web parts.
-
-- **[BACKLOGGED 2026-04-30]** **Browser-automation customer adapters** — when a customer portal's HTML changes (no API available; using Playwright), do we ship versioned adapters with change-detection alerts, or accept manual failure → ticket? Revisit when designing customer adapters during architecture; out of v1 scope per `HILDA_Design.md` §13 Phase 4.
-
-- **[BACKLOGGED 2026-04-30]** **API Spec Ingestor input format** `[D-003]` — what spec format(s) does the Ingestor accept? OpenAPI / Swagger? A company-internal format? Both? Recommendation: accept OpenAPI 3.x as canonical and provide a preprocessing pass (also LLM-driven, on-prem) that converts other formats into OpenAPI 3.x before the main code-generation pipeline. Revisit when designing `core/src/api_spec_ingestor/` in architecture phase.
-
-- **[BACKLOGGED 2026-04-30]** **v1 messenger choice** `[D-009]` — issue-tracking v1 = Jira (public, hand-wireable). v1 messenger target: proprietary internal messenger (would exercise the API Spec Ingestor end-to-end as part of v1 acceptance) or a public reference (Slack / Teams) first? Revisit when scoping v1 milestones during requirements phase or early architecture.
+- **[BACKLOGGED 2026-04-30; refined 2026-05-04]** **Eval-data channel — multiple dev-time eval/correction surfaces** — PM corrections flow across multiple surfaces: test report review, tech report review, email parsing, message classification, customer-response drafts. How do these corrections feed back to improve checklists / prompts? No explicit pipeline in the design doc. Each surface will need its own correction schema and eval data path. Revisit when AI/LLM modules are designed in architecture phase.
 
 - **[BACKLOGGED 2026-04-30]** **Template Schema Ingestor input format** `[D-010]` — Excel cell-layout convention for proprietary schema specs. Sub-question: standardized worksheet structure (e.g., one sheet per entity type with predictable column headers) vs. free-form Excel that the Ingestor's LLM extracts via inference? Resolve during architecture phase before starting `core/src/template_schema_ingestor/` implementation.
