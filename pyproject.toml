@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hilda"
+version = "0.1.0"
+description = "HILDA / DeliverableHub — connected-device certification deliverable lifecycle automation"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["core/tests", "customizations"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:dateutil.*",
+]
+
+[tool.setuptools.packages.find]
+include = ["core*", "customizations*"]
