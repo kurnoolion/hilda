@@ -1,7 +1,7 @@
 # Status
 
-**Active phase**: architecture
-**Last updated**: 2026-05-04
+**Active phase**: development
+**Last updated**: 2026-05-05
 **Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
 
 ## Done
