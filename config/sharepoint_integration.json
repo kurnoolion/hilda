@@ -1,0 +1,8 @@
+{
+  "site_url": "https://sp2017.corp.example/sites/hilda",
+  "auth_type": "ntlm",
+  "timeout_seconds": 30,
+  "max_retries": 3,
+  "retry_backoff_seconds": 1.0,
+  "page_size": 100
+}

@@ -1,0 +1,22 @@
+# Example customer SP config — a shape for TPMs to copy and customize.
+# This file is consumed by FileBasedListProvider; runtime modules see only
+# canonical field names and never reference SP column names directly.
+customer_slug: example
+lists:
+  devices:
+    name: "Example - Device Tracker"
+    columns:
+      device_name: "Title"
+      assigned_pm_id: "PM_Owner"
+      target_launch_date: "Target_Launch_Date"
+      path_slug: "Path_Slug"
+  delivery_items:
+    name: "Example - Delivery Items"
+    columns:
+      item_name: "Title"
+      delivery_state: "Status"
+      expected_completion_date: "Expected_Completion"
+      owner_email: "Owner_Email"
+      tracking_modality: "Tracking_Modality"
+      customer_delivery_modality: "Customer_Delivery"
+      path_slug: "Path_Slug"
