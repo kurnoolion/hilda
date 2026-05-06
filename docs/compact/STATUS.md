@@ -1,7 +1,7 @@
 # Status
 
-**Active phase**: development
-**Last updated**: 2026-05-05
+**Active phase**: architecture
+**Last updated**: 2026-05-06
 **Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
 
 ## Done
@@ -39,6 +39,11 @@
 - 2026-05-05 `template_schema` module implemented + 24 unit tests passing: enums (DeliveryState/ItemType/TrackingModality/CustomerDeliveryModality/MilestoneStatus/RuleScope/RuleActionType/TestReportItemStatus/TestReportClassification), extensibility registries (mutable sets seeded from enums for FR-7/NFR-14), slug helpers (validate_slug + make_slug per [D-013]), Pydantic entity bases (Device/Milestone/Deliverable/DeliveryItem/CustomerTemplate/AutomationRule), CustomerSchema with YAML round-trip per [D-018], CLI with `--diagnostic` / `--validate`. TSC-E001..TSC-W002 error codes registered.
 - 2026-05-05 `sharepoint_integration` core implemented + 28 unit tests passing: GlobalSharePointConfig (3-tier: CLI > env > file; password redacted in repr/str), ListScope dataclass, _AuthHandler protocol with NoAuth/NTLM/Kerberos handlers (NoAuth active for v1 dev; NTLM/Kerberos surface SHP-E004 with detail until corp AD lab is wired), SpClient (async SP REST with retry on 429/503, 401→SHP-E004, 4xx→SHP-E001, list-name single-quote escaping, OData $select/$filter/$top + pagination), SharePointListProvider Protocol + FileBasedListProvider (3-tier scope precedence: device override → customer config → SHP-E002), SpCrud compositor (canonical→SP column translation on write, SP→canonical on read, $filter translation). Tests use httpx.MockTransport.
 - 2026-05-05 Mock SharePoint server + CLI implemented + 22 new tests passing (full suite 101): FastAPI app with two surfaces over shared InMemoryStore — SP 2017 REST endpoints (GET/POST/PATCH/DELETE; tiny OData eq evaluator) and HTML browser UI (/, /lists/&lt;name&gt;, /audit) — designed extensibly so dashboard mock can plug onto the same app object later (TPM use case). CLI: `--diagnostic` / `--mock` (in-process via httpx.ASGITransport) / `--dry-run --customer` / `--serve --port` (uvicorn for TPM browser). Sample example.yaml customer config seeded.
+- 2026-05-06 System-architecture phase opened: drafted `docs/compact/SYSTEM.md` (peer of PROJECT.md / structure-conventions.md) covering process topology, inter-component comms, persistence, deployment, observability, secrets flow, CI/CD, networking. Logged 4 conflicts with HILDA_Design.md (Graph→REST `[D-006]`, Vault→K8s-Secrets `[D-019]`, microservices→TBD, Temporal→TBD); first two pre-resolved.
+- 2026-05-06 D-021 captured (process granularity v1 = modular monolith, one image, three K8s Deployments: `hilda-api` / `hilda-worker` / `hilda-llm-gateway`; all 18 modules in-process; per-customer adapter pods deferred to customer 2; HILDA_Design.md §11's 12-pod microservices inventory preserved as v2+ target). Resolves SYSTEM.md §2 + conflict C3 (refs: D-021).
+- 2026-05-06 D-022 captured (workflow engine v1 = Celery + Redis broker + Postgres result backend; `hilda-beat` singleton Deployment loads schedule from SP `AutomationRules`; `core/src/workflow_engine/` owns Celery app + dispatcher, `core/src/rule_engine/` stays a pure evaluator; HILDA_Design.md's Temporal StatefulSet removed from v1, deferred to v2 if multi-step durable orchestration emerges). Resolves SYSTEM.md §4 + conflict C4 (refs: D-022).
+- 2026-05-06 D-023 captured (observability v1 = light stack, zero HILDA-owned pods; structured JSON stdout logs + `/metrics` Prometheus endpoint per pod + compact reports per [D-002]; dashboards/alerts as code in `deploy/grafana/dashboards/` and `deploy/prometheus/alerts/`; no HILDA-owned Grafana/Loki/Tempo; distributed tracing deferred). Resolves SYSTEM.md §6 + Open Question #3 (refs: D-023).
+- 2026-05-06 D-024 captured (CI/CD shape v1: tool-agnostic pipeline (PR → tests + build + scan; merge → tag SHA + push + deploy test + smoke; manual prod promotion with semver re-tag); single umbrella Helm chart at `deploy/charts/hilda/` with per-env values files; mock SP runs as separate test-env Deployment; specific corp-tool selections — CI runner / image registry / GitOps / env topology — remain backlogged Flag). Resolves SYSTEM.md §8 shape + Open Question #5 (refs: D-024).
 
 ## In progress
 
@@ -48,7 +53,8 @@
 
 - Wire NTLM/Kerberos auth handlers against a real SP 2017 instance (deferred until corp AD lab access). Current handlers raise SHP-E004 with detail; v1 dev path uses NoAuthHandler against the mock server.
 - TPM mock-UI feedback loop: have TPMs run `python -m core.src.sharepoint_integration.sharepoint_integration_cli --serve` and provide UX feedback before the real dashboard module is built (Layer 6).
-- Architecture phase: 15 MODULE.md files remaining. Sequence: Layer 1 remaining (`storage`, `credential_service`) → Layer 2 → Layer 3 → Layer 4 → Layer 5 → Layer 6.
+- System-level architecture: SYSTEM.md drafted; remaining open: customer YAML mount image-baked vs ConfigMap (Open Question #6 → next D-XXX); corp-ops consultation to resolve CI/CD tool-bound choices flagged by `[D-024]`.
+- Module architecture: 15 MODULE.md files remaining. Sequence: Layer 1 remaining (`storage`, `credential_service`) → Layer 2 → Layer 3 → Layer 4 → Layer 5 → Layer 6. Each MODULE.md from now on must include a "Workload assignment" curated subsection per `[D-021]` declaring which of `hilda-api` / `hilda-worker` / `hilda-llm-gateway` hosts the module.
 - Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Architecture-phase choice for Test Report Profiler (`[D-011]`): PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless). Decide before `test_report_profiler` MODULE.md.
 - Eval-data correction surface design (per STATUS.md Flag): resolve during architecture phase when designing each AI-assisted module's MODULE.md.
@@ -56,6 +62,8 @@
 ## Flags
 
 - `structure-conventions.md` references `~/work/nora` as the live reference for layout details (cross-tier deps, config rules, Protocol-boundary pattern). If nora's conventions evolve, HILDA's `structure-conventions.md` does NOT auto-track — it's a one-time import, captured in D-001's "Why". Re-verify alignment when reviewing the conventions file.
+
+- **[BACKLOGGED 2026-05-06 by `[D-024]`]** **CI/CD tool selection — pending corp-ops consultation.** Pipeline shape and Helm chart structure decided in `[D-024]`; specific tool-bound choices to fill in: (a) CI runner — GitHub Actions self-hosted / GitLab CI / Jenkins / corp-specific; (b) image registry — Harbor / Artifactory / Nexus / corp-specific; (c) GitOps tool — ArgoCD / Flux / none (CI-driven `helm upgrade`); (d) environment topology — separate clusters vs separate namespaces in one cluster. Resolve via follow-up `D-XXX` once corp ops is consulted; current pipeline shape works on any tool, only the syntax of the pipeline file changes.
 
 - **[BACKLOGGED 2026-04-30; refined 2026-05-04]** **Eval-data channel — multiple dev-time eval/correction surfaces** — PM corrections flow across multiple surfaces: test report review, tech report review, email parsing, message classification, customer-response drafts. How do these corrections feed back to improve checklists / prompts? No explicit pipeline in the design doc. Each surface will need its own correction schema and eval data path. Revisit when AI/LLM modules are designed in architecture phase.
 
