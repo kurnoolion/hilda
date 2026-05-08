@@ -26,6 +26,7 @@ Cline reads the playbook and executes the steps.
 | [`ingest-template.md`](ingest-template.md) | Run Template Schema Ingestor on a customer template file | `TSI-RPT` report (~12–18 lines) |
 | [`profile-test-report.md`](profile-test-report.md) | Profile historical test report files via Test Report Profiler | `TRP-RPT` report (~12–15 lines) *(pending impl)* |
 | [`ingest-api-spec.md`](ingest-api-spec.md) | Ingest a proprietary API spec via API Spec Ingestor | `ASI-RPT` report (~10–15 lines) *(pending impl)* |
+| [`develop-issue-tracker-adapter.md`](develop-issue-tracker-adapter.md) | Verify IssueTracker adapter scaffold: import check → unit tests → CLI contract (C01–C10) | `ITR-RPT` report (~8–12 lines) |
 | [`debug-pipeline.md`](debug-pipeline.md) | Run one or more HILDA processing stages; capture stats | `PIPE-RPT` report (~15–25 lines) |
 | [`share-back.md`](share-back.md) | Bundle multiple reports for one typing trip into Teacher LLM | `BUNDLE` report (≤40 lines) |
 

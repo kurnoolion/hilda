@@ -24,6 +24,7 @@ Each playbook produces one of these:
 | `TSI-RPT` | ingest-template | 12–18 | Template Schema Ingestor run stats |
 | `TRP-RPT` | profile-test-report | 12–15 | Test Report Profiler run stats |
 | `ASI-RPT` | ingest-api-spec | 10–15 | API Spec Ingestor run stats |
+| `ITR-RPT` | develop-issue-tracker-adapter | 8–12 | adapter import + unit tests + C01–C10 contract results |
 | `PIPE-RPT` | debug-pipeline | 15–25 | multi-stage pipeline stats |
 | `BUNDLE` | share-back | ≤40 | aggregation of multiple reports |
 
