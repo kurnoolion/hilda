@@ -14,6 +14,9 @@ requests-ntlm>=1.2,<2
 # Kerberos is actually used (corp AD lab). Commented out for v1 dev.
 # requests-kerberos>=0.14,<1
 
+# Excel parsing — used by template_schema_ingestor and api_spec_ingestor for xl-format inputs
+openpyxl>=3.1,<4
+
 # Test deps
 pytest>=8.0,<9
 pytest-asyncio>=0.23,<1
