@@ -72,19 +72,24 @@ for side-effect-bearing modules.
 ## Git workflow
 
 Two remotes are configured on this machine:
-- `origin` → github.com (Teacher LLM pushes here; you have read-only access)
-- `company` → internal GitHub (you push here; colleagues push here)
+- `origin` → github.com  (Teacher LLM pushes here; **read-only from this machine**)
+- `company` → internal GitHub (you push here; colleagues also push here)
 
 **Rules:**
-- Always `git push company main` after completing a trip. Never push to `origin`.
-- Always `git pull` (which pulls from origin by default) at the start of every trip
-  to pick up Teacher LLM's latest commits.
-- After pushing to company, tell the user: **"Run sync-work.sh to propagate to origin."**
-  The sync script merges both remotes and pushes the result to both directions,
-  so Teacher LLM sees your completed work on the next session.
+- Always `git pull` at the start of every trip. This fetches Teacher LLM's latest
+  commits from `origin` (via the default tracking branch).
+- Always `git push company main` after completing a trip. **Never attempt to push
+  to `origin`** — the corporate network blocks it.
+- After pushing to company, tell the user: **"Run sync-work.sh."**
+  The sync script merges both remotes and pushes the combined result to company,
+  so colleagues also receive Teacher LLM's latest work.
 
-**Merge safety:** Teacher LLM writes new files or new sections; you fill TODOs in
-existing scaffold files. These touch different lines — merges are almost always clean.
+**Teacher LLM never reads your completed code directly.** The compact report you
+produce (ITR-RPT, ASI-RPT, etc.) is the only channel back to Teacher. The user
+hand-types it into the chat. Keep reports within the ~30-line limit.
+
+**Merge safety:** Teacher LLM writes new files; you fill TODOs in existing scaffold
+files. These touch different lines — merges are almost always clean.
 If sync-work.sh reports a merge conflict, stop and report it to the user.
 
 ## Per-session
