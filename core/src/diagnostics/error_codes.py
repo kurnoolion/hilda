@@ -72,6 +72,9 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "ITR-W002": ErrorCode(
         "ITR-W002", "Webhook registration failed for '{system}'; falling back to poll_changes", True
     ),
+    "ITR-E007": ErrorCode(
+        "ITR-E007", "Operation '{operation}' not supported by adapter '{adapter}'", False
+    ),
 }
 
 
