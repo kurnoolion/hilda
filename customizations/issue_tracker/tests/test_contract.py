@@ -33,41 +33,7 @@ from core.src.issue_tracker import (
     WebhookRef,
 )
 from core.src.issue_tracker.mock_adapter import MockIssueTracker
-
-
-# ---------------------------------------------------------------------------
-# pytest CLI options
-# ---------------------------------------------------------------------------
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--adapter",
-        default="mock",
-        help="Adapter slug to test (default: mock). Must be discoverable by load_adapter().",
-    )
-    parser.addoption(
-        "--project",
-        default="TEST",
-        help="Project key to use for issue creation (default: TEST).",
-    )
-
-
-@pytest.fixture(scope="module")
-def adapter_slug(request: pytest.FixtureRequest) -> str:
-    return request.config.getoption("--adapter")
-
-
-@pytest.fixture(scope="module")
-def project_key(request: pytest.FixtureRequest) -> str:
-    return request.config.getoption("--project")
-
-
-@pytest.fixture(scope="module")
-def tracker(adapter_slug: str) -> IssueTracker:
-    """Instantiate the adapter under test."""
-    from core.src.issue_tracker.issue_tracker_cli import load_adapter
-    return load_adapter(adapter_slug)
+# Fixtures and CLI options (--adapter, --project) are defined in conftest.py
 
 
 # ---------------------------------------------------------------------------
