@@ -32,6 +32,7 @@ Teacher LLM. Code never moves through chat — it moves through git.
 - Write corpus-derived YAML artifacts to `customizations/sharepoint_config/` (in repo)
   when Teacher LLM instructs — e.g., a new customer config YAML after a template ingest.
 - Apply Teacher LLM's commits via `git pull`.
+- Run `docker compose up/down/logs` for v1 service management (bare-metal, per `[D-026]`).
 
 ## HILDA CLIs you run
 
