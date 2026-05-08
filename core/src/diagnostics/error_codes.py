@@ -47,6 +47,31 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "DGN-W001": ErrorCode(
         "DGN-W001", "Module '{module}' has no QC template registered", True
     ),
+    # --- issue_tracker (ITR) ---
+    "ITR-E001": ErrorCode(
+        "ITR-E001", "Unauthorized: credentials rejected by issue tracker '{system}'", False
+    ),
+    "ITR-E002": ErrorCode(
+        "ITR-E002", "Issue not found: '{issue_id}' in '{system}'", False
+    ),
+    "ITR-E003": ErrorCode(
+        "ITR-E003", "Conflict: idempotency key '{key}' already resolved to '{existing_id}'", False
+    ),
+    "ITR-E004": ErrorCode(
+        "ITR-E004", "Transition '{transition}' not available from current state on '{issue_id}'", False
+    ),
+    "ITR-E005": ErrorCode(
+        "ITR-E005", "Attachment upload failed for '{issue_id}': {reason}", False
+    ),
+    "ITR-E006": ErrorCode(
+        "ITR-E006", "Adapter '{slug}' not found in core/ or customizations/", False
+    ),
+    "ITR-W001": ErrorCode(
+        "ITR-W001", "Rate limited by '{system}'; retry after {retry_after_s}s", True
+    ),
+    "ITR-W002": ErrorCode(
+        "ITR-W002", "Webhook registration failed for '{system}'; falling back to poll_changes", True
+    ),
 }
 
 
