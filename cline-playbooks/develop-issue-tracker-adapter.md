@@ -23,7 +23,11 @@ Confirm new/changed files in `core/src/issue_tracker/` or `customizations/issue_
 ### 2. Verify module imports cleanly
 
 ```
-python -c "from core.src.issue_tracker import IssueTracker, IssueRef, MockIssueTracker; print('OK')"
+python -c "
+from core.src.issue_tracker import IssueTracker, IssueRef, IssueStatus
+from core.src.issue_tracker.mock_adapter import MockIssueTracker
+print('OK')
+"
 ```
 
 If this fails: stop and report the import error. Do not proceed.
