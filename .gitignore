@@ -10,3 +10,8 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+
+# On-prem Cline environment dir (if placed inside the repo — normally lives outside)
+# Contains: hilda-mapping.json (redaction table), reports/, input/ (proprietary files)
+hilda-env/
+**/state/hilda-mapping.json
