@@ -69,6 +69,24 @@ for side-effect-bearing modules.
   reports/                ← full reports (you write here; user reads off screen)
 ```
 
+## Git workflow
+
+Two remotes are configured on this machine:
+- `origin` → github.com (Teacher LLM pushes here; you have read-only access)
+- `company` → internal GitHub (you push here; colleagues push here)
+
+**Rules:**
+- Always `git push company main` after completing a trip. Never push to `origin`.
+- Always `git pull` (which pulls from origin by default) at the start of every trip
+  to pick up Teacher LLM's latest commits.
+- After pushing to company, tell the user: **"Run sync-work.sh to propagate to origin."**
+  The sync script merges both remotes and pushes the result to both directions,
+  so Teacher LLM sees your completed work on the next session.
+
+**Merge safety:** Teacher LLM writes new files or new sections; you fill TODOs in
+existing scaffold files. These touch different lines — merges are almost always clean.
+If sync-work.sh reports a merge conflict, stop and report it to the user.
+
 ## Per-session
 
 On first conversation each session, run `cline-playbooks/orient.md` to load project
