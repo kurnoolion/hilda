@@ -120,6 +120,56 @@ All services on `hilda_net` Docker bridge network. Service names mirror intended
 
 ---
 
+## Topology diagram
+
+Process-level view of v1 (Docker Compose on bare-metal). Node boundaries = process / container boundaries. Everything inside the subgraph shares `hilda_net`; all external nodes are reached via the host's network stack.
+
+```mermaid
+flowchart TD
+    PM(["PM / TPM\nbrowser"])
+
+    subgraph compose["hilda_net — Docker Compose v1 · K8s overlay network v2"]
+        NGINX["nginx\nTLS :443"]
+        API["hilda-api\nFastAPI / uvicorn"]
+        GW["hilda-llm-gateway\nsole LLM egress"]
+        WORKER["hilda-worker\nCelery worker"]
+        BEAT["hilda-beat\nCelery beat"]
+        RD[("redis\nCelery broker + dedup cache")]
+        PG[("postgres\nstate · audit · taskmeta")]
+    end
+
+    SP["SharePoint 2017\nSP REST + NTLM/Kerberos"]
+    LLM["On-prem LLM\nruntime + code-gen"]
+    DRIVE["SMB network drive\nhilda-svc writes\nHILDA-mediated reads"]
+    EXT["Email server\nMessenger · Issue Tracker"]
+
+    PM     -->|HTTPS| NGINX
+    NGINX  -->|HTTP :8000| API
+
+    API    -->|enqueue| RD
+    WORKER -->|dequeue| RD
+    BEAT   -->|enqueue schedules| RD
+
+    API    --> PG
+    WORKER --> PG
+
+    API    -->|HTTP internal| GW
+    WORKER -->|HTTP internal| GW
+    GW     -->|on-prem HTTP| LLM
+
+    API    -->|SP REST NTLM| SP
+    WORKER -->|SP REST NTLM| SP
+    BEAT   -->|SP REST NTLM\nread AutomationRules| SP
+
+    WORKER -->|SMTP·IMAP / API·webhook| EXT
+    API    -->|mediated DL| DRIVE
+    WORKER -->|write artifacts| DRIVE
+```
+
+**v2 K8s migration**: subgraph becomes K8s overlay network; `nginx` container → Ingress controller; Docker service names preserved as ClusterIP Service names; process boundaries and all connection patterns unchanged.
+
+---
+
 ## §6 — Observability *(Decided — `[D-023]`)*
 
 **Decision**: light stack, zero new HILDA-owned services, dashboards/alerts as code under `deploy/`.
@@ -228,5 +278,5 @@ These are parameters in the pipeline shape; resolved via follow-up `D-XXX` once 
 
 - Decisions made: append a row to the "Conflicts" table if the resolution overrides `HILDA_Design.md`; cross-link to `D-XXX`.
 - Section moves from "TBD" to "Decided" when its `D-XXX` lands. Update prose accordingly; do not delete the rationale — replace with a one-line summary linking the `D-XXX`.
-- Topology diagram: add a process-level Mermaid to a new `## Topology diagram` section when priorities allow — §2 + §5 are now decided and ready for diagramming.
+- Topology diagram: present above (added 2026-05-08). Keep MAP.md's module-graph Mermaid separate; SYSTEM.md's diagram is process-level.
 - This file is hand-curated (peer of `structure-conventions.md`), not regenerated.
