@@ -32,72 +32,74 @@ Source provenance for the v1 set:
 
 ### Tracker lifecycle & data model
 
-- **FR-1** — System creates a device tracker from one of three inputs: a customer template, an Excel import conforming to the per-customer schema, or manual entry.
-- **FR-2** — Tracker creation auto-populates the full Milestone → Deliverable → DeliveryItem hierarchy from the template, with all static fields pre-populated per `HILDA_Design.md` §3.3.
-- **FR-3** — PM can add, remove, or reassign DeliveryItems after instantiation without re-creating the tracker.
-- **FR-4** — Excel-imported data is validated against the per-customer schema before any SharePoint write.
-- **FR-5** — Hierarchical data is enforced as Devices/Milestones/Deliverables/DeliveryItems with uniqueness on (device_id, milestone_name), (milestone_id, deliverable_name), and (deliverable_id, item_name).
-- **FR-6** — Milestone and Deliverable status and `completion_pct` are computed from the states of their child DeliveryItems.
-- **FR-7** — Item types, tracking modalities, customer delivery modalities, and `delivery_state` values are extensible via configuration without code change.
+- **FR-1** `[Ph-1]` — System creates a device tracker from one of three inputs: (a) a customer template `[Ph-1]`, (b) an Excel import conforming to the per-customer schema `[Ph-2]` (deferred alongside DEF-15 — requires Template Schema Ingestor), or (c) manual entry `[Ph-1]`.
+- **FR-2** `[Ph-1]` — Tracker creation auto-populates the full Milestone → DeliveryItem hierarchy from the template, with all static fields pre-populated per `HILDA_Design.md` §3.3; DeliveryItems are grouped within a milestone by `tg_name` (anchors `[D-028]`).
+- **FR-3** `[Ph-1]` — PM can add, remove, or reassign DeliveryItems after instantiation without re-creating the tracker.
+- ~~**FR-4**~~ — *(deferred 2026-05-12 → DEF-15: Excel import schema validation — implementation phase TBD)*
+- **FR-5** `[Ph-1]` — Hierarchical data is enforced as Devices/Milestones/DeliveryItems with uniqueness on (device_id, milestone_name), (milestone_id, item_name), and (milestone_id, item_no); no Deliverable intermediate level (anchors `[D-028]`).
+- **FR-6** `[Ph-1]` — Milestone status and `completion_pct` are computed from the states of their child DeliveryItems.
+- **FR-7** `[Ph-1]` — Item types, tracking modalities, customer delivery modalities, and `delivery_state` values are extensible via configuration without code change.
 
 ### Collection kickoff & ongoing tracking
 
-- **FR-8** — PM triggers Start Collection on a tracker to begin automated owner outreach for all open DeliveryItems.
-- **FR-9** — Initial owner outreach is sent via the DeliveryItem's `tracking_modality` (Email / Messenger / Internal IssueTracker) with a structured reference tag encoding device, PM, milestone, deliverable, and item; for email, multiple DeliveryItems owned by the same recipient are consolidated into one outbound message per round identified by a stable `BATCH-<id>`, with a per-item structured reply block and per-item `mailto:` quick-update tap-links in the body.
-- **FR-10** — Rule engine sends scheduled reminders to owners when `delivery_state = "Open"` and `days_since_last_contact > N` (N is per-rule configurable).
-- **FR-11** — Rule engine escalates to owner + PM when `expected_completion_date - today ≤ N` and item is not Closed.
-- **FR-12** — Inbound email replies route to the correct DeliveryItems via three convergent paths, all keyed on the `BATCH-<id>`: (a) a structured reply block edited in place by the owner, regex-parsed from the body; (b) per-item `mailto:` tap-links that pre-compose tiny emails parsed from the subject (`[HILDA] BATCH-<id> ITEM-<n> <STATUS>`); (c) free-text replies that match neither path, recorded as comments on every item in the batch and surfaced as a Manual triage flag on the PM dashboard. Status applies are idempotent on `(BATCH-id, item-index, status)`; outbound is sent multipart/alternative and the structured block is ASCII-only. (LLM-based fallback inference is Deferred — see Deferred.)
-- **FR-13** — Inbound attachments and HILDA-generated outbound artifacts are stored on the on-prem shared network drive at `\\share\hilda\<customer_slug>\<device_slug>\<milestone_slug>\<deliverable_slug>\<item_slug>\` (slug-encoded immutable path, with `inbound/`, `outbound/`, and `revisions/` subdirectories); the DeliveryItem record holds the link; the dashboard renders attachment links as HILDA-mediated download URLs (`https://hilda.corp/dl/<scoped_token>`), never as direct UNC paths.
-- **FR-14** — PM can manually override DeliveryItem dates, owners, comments, and `delivery_state` from the dashboard, and can trigger ad-hoc reminders independent of the scheduled rule cadence.
-- **FR-15** — `last_owner_contacted` and `last_updated` timestamps update on every DeliveryItem status change.
+- **FR-8** `[Ph-1]` — PM triggers Start Collection on a tracker to begin automated owner outreach for all open DeliveryItems.
+- **FR-9** `[Ph-1]` — Initial owner outreach is sent via the DeliveryItem's `tracking_modality` (Email / Messenger / Internal IssueTracker) with a structured reference tag encoding device, PM, milestone, and item; for email, multiple DeliveryItems owned by the same recipient are consolidated into one outbound message per round identified by a stable `BATCH-<id>`, with a per-item structured reply block `[Ph-1]` and per-item `mailto:` quick-update tap-links `[Ph-2]` in the body.
+- **FR-10** `[Ph-1]` — Rule engine sends scheduled reminders to owners when `delivery_state = "Open"` and `days_since_last_contact > N` (N is per-rule configurable).
+- **FR-11** `[Ph-1]` — Rule engine escalates to owner + PM when `expected_completion_date - today ≤ N` and item is not Closed.
+- **FR-12** `[Ph-1]` — Inbound email replies route to the correct DeliveryItems via three convergent paths, all keyed on the `BATCH-<id>`: (a) `[Ph-1]` a structured reply block edited in place by the owner, regex-parsed from the body; (b) `[Ph-2]` per-item `mailto:` tap-links that pre-compose tiny emails parsed from the subject (`[HILDA] BATCH-<id> ITEM-<n> <STATUS>`); (c) `[Ph-1]` free-text replies that match neither path, recorded as comments on every item in the batch and surfaced as a Manual triage flag on the PM dashboard. Status applies are idempotent on `(BATCH-id, item-index, status)`; outbound is sent multipart/alternative and the structured block is ASCII-only; inbound email attachments are routed to DeliveryItems per FR-52. (LLM-based fallback inference is Deferred — see Deferred.)
+- **FR-13** `[Ph-1]` — Inbound attachments and HILDA-generated outbound artifacts are stored on the on-prem shared network drive at `\\share\hilda\<customer_slug>\<device_slug>\<milestone_slug>\<item_slug>\` (slug-encoded immutable path, with `inbound/`, `outbound/`, and `revisions/` subdirectories); the DeliveryItem record holds the link; the dashboard renders attachment links as HILDA-mediated download URLs (`https://hilda.corp/dl/<scoped_token>`), never as direct UNC paths.
+- **FR-52** `[Ph-1]` — When an inbound email contains attachments, the system extracts first-page content from each attachment and uses the runtime LLM to map it to the corresponding DeliveryItem in the batch, matching against item name, description, and `item_type`; confirmed matches are written to the DeliveryItem's `inbound/` subdirectory on the shared network drive per FR-13 and the DeliveryItem record is updated with the attachment link; low-confidence matches are surfaced on the PM dashboard for manual assignment.
+- **FR-14** `[Ph-1]` — PM can manually override DeliveryItem dates, owners, comments, and `delivery_state` from the dashboard, and can trigger ad-hoc reminders independent of the scheduled rule cadence.
+- **FR-15** `[Ph-1]` — `last_owner_contacted` and `last_updated` timestamps update on every DeliveryItem status change.
 
 ### PM review & resolution path (Stage 4)
 
-- **FR-16** — On test-report upload, the system runs the per-customer test report parser (generated by the Test Report Document Profiler per `[D-011]`) to extract per-item `(item_id, status ∈ {passed, failed, non-applicable, waived, not-started}, [waiver_ref])` tuples, the canonical classifier emits `final | interim` per FR-46, and the PM is presented with the classification + per-item status grid for review and resolution-path determination on unresolved failures.
-- **FR-17** — Revised report versions are stored under the DeliveryItem's `revisions/` subdirectory on the shared network drive per FR-13 and re-parsed on upload; the test report classifier (FR-46) re-runs against each new version.
-- **FR-46** — A test report is classified `final` iff every item is in `{passed, non-applicable, waived}` AND every `failed` item carries a `waiver_ref` (which reclassifies it as `waived`); otherwise the report is `interim` (anchors `[D-011]`).
-- **FR-47** — For every `failed` item without a `waiver_ref` in a test report, the system surfaces the item on the PM dashboard for resolution-path determination (fix-pre-launch / tech report / waiver), feeding FR-16's auto-create logic.
-- **FR-48** — When the PM-determined resolution path is `waiver`, the system auto-creates a Waiver DeliveryItem with its own lifecycle; the test report classifier consumes only the existence of `waiver_ref` (boolean), not the waiver's outcome — the TPM (Technical Project Manager) is not the final authority on the waiver path, which is owned by the Waiver DeliveryItem's separate workflow.
+- **FR-16** `[Ph-1]` — On test-report upload, the system runs the per-customer test report parser (generated by the Test Report Document Profiler per `[D-011]`) to extract per-item `(item_id, status ∈ {passed, failed, non-applicable, waived, not-started}, [waiver_ref])` tuples, the canonical classifier emits `final | interim` per FR-46, and the PM is presented with the classification + per-item status grid for review and resolution-path determination on unresolved failures.
+- **FR-53** `[Ph-1]` — On receipt of a test report, tech report, or waiver document linked to a DeliveryItem (via FR-52 or manual upload), the runtime LLM performs an initial quality review against the per-customer checklist generated by the Test Report Profiler `[D-011]` and surfaces findings on the PM dashboard; Ph-1 scope is initial review and findings display only — PM response tracking, owner revision communication, and multi-version re-review are deferred (DEF-2 remainder, FR-17).
+- **FR-17** `[Ph-2]` — Revised report versions are stored under the DeliveryItem's `revisions/` subdirectory on the shared network drive per FR-13 and re-parsed on upload; the test report classifier (FR-46) re-runs against each new version.
+- **FR-46** `[Ph-2]` — A test report is classified `final` iff every item is in `{passed, non-applicable, waived}` AND every `failed` item carries a `waiver_ref` (which reclassifies it as `waived`); otherwise the report is `interim` (anchors `[D-011]`).
+- **FR-47** `[Ph-2]` — For every `failed` item without a `waiver_ref` in a test report, the system surfaces the item on the PM dashboard for resolution-path determination (fix-pre-launch / tech report / waiver), feeding FR-16's auto-create logic.
+- **FR-48** `[Ph-2]` — When the PM-determined resolution path is `waiver`, the system auto-creates a Waiver DeliveryItem with its own lifecycle; the test report classifier consumes only the existence of `waiver_ref` (boolean), not the waiver's outcome — the TPM (Technical Project Manager) is not the final authority on the waiver path, which is owned by the Waiver DeliveryItem's separate workflow.
 
 ### Submission (Stage 5)
 
-- **FR-18** — System assembles the submission package from the relevant DeliveryItems' artifacts on the shared network drive (FR-13) per the customer's `customer_delivery_modality` once all DeliveryItems for a milestone reach the Ready-for-Submission state.
-- **FR-19** — Customer adapters implement the surface `{submitItem, getStatus, postComment, uploadAttachment}` and authenticate as the PM using the PM's stored credentials (never a service account).
-- **FR-20** — Submission is blocked and queued (with PM dashboard alert) when the PM's credential for the target customer system is missing or expired.
+- **FR-18** `[Ph-2]` — System assembles the submission package from the relevant DeliveryItems' artifacts on the shared network drive (FR-13) per the customer's `customer_delivery_modality` once all DeliveryItems for a milestone reach the Ready-for-Submission state.
+- **FR-19** `[Ph-2]` — Customer adapters implement the surface `{submitItem, getStatus, postComment, uploadAttachment}` and authenticate as the PM using the PM's stored credentials (never a service account).
+- **FR-20** `[Ph-2]` — Submission is blocked and queued (with PM dashboard alert) when the PM's credential for the target customer system is missing or expired.
 
 ### Customer follow-up & closure (Stage 6)
 
-- **FR-21** — System captures customer feedback from the customer's tracking system and email and surfaces it on the PM dashboard with source + timestamp.
-- **FR-22** — DeliveryItem transitions to Closed only on customer approval AND explicit PM confirmation; the Deliverable transitions to Complete when all child DeliveryItems are Closed.
+- **FR-21** `[Ph-2]` — System captures customer feedback from the customer's tracking system and email and surfaces it on the PM dashboard with source + timestamp.
+- **FR-22** `[Ph-2]` — DeliveryItem transitions to Closed only on customer approval AND explicit PM confirmation; Milestone transitions to Complete when all child DeliveryItems are Closed.
 
 ### Communication adapters — Email Service
 
-- **FR-23** — Email Service owns a dedicated mailbox, polls inbound 24/7 (or accepts push notifications from the mail server), and emits outbound on behalf of PMs with the PM's name in the signature and a stable From address.
-- **FR-24** — Outbound email subject lines embed the structured reference tag (device, PM, milestone, deliverable, item); the Email Service parses the same tag from inbound replies for routing.
+- **FR-23** `[Ph-1]` — Email Service owns a dedicated mailbox, polls inbound 24/7 (or accepts push notifications from the mail server), and emits outbound on behalf of PMs with the PM's name in the signature and a stable From address.
+- **FR-24** `[Ph-1]` — Outbound email subject lines embed the structured reference tag (device, PM, milestone, deliverable, item); the Email Service parses the same tag from inbound replies for routing.
 
 ### Communication adapters — IssueTracker (internal)
 
-- **FR-25** — IssueTracker adapter implements the `IssueTracker` Protocol per `[D-008]`; v1 target = Jira (public Jira REST API) wired via `core/src/issue_tracker/jira_adapter.py`.
-- **FR-26** — When a DeliveryItem's `tracking_modality = "Internal IssueTracker"`, the adapter creates / links the corresponding issue and syncs status, comments, and attachments via webhook + polling fallback.
+- **FR-25** `[Ph-1]` — IssueTracker adapter implements the `IssueTracker` Protocol per `[D-008]`; v1 target = Jira (public Jira REST API) wired via `core/src/issue_tracker/jira_adapter.py`.
+- **FR-26** `[Ph-1]` — When a DeliveryItem's `tracking_modality = "Internal IssueTracker"`, the adapter creates / links the corresponding issue and syncs status, comments, and attachments via webhook + polling fallback.
 
 ### Communication adapters — Messenger
 
-- **FR-50** — Messenger adapter implements the `Messenger` Protocol per `[D-009]`; v1 targets are **Slack** (adapter at `core/src/messenger/slack_adapter.py`, Slack Web API via `slack_sdk`) and the **proprietary internal messenger** (adapter at `customizations/messenger/<proprietary>_adapter.py`, generated by the API Spec Ingestor per `[D-003]` as its first end-to-end exercise in v1); both adapters must pass the same `Messenger` Protocol contract test suite (anchors `[D-016]`).
+- **FR-50** `[Ph-2]` — Messenger adapter implements the `Messenger` Protocol per `[D-009]`; v1 targets are **Slack** (adapter at `core/src/messenger/slack_adapter.py`, Slack Web API via `slack_sdk`) and the **proprietary internal messenger** (adapter at `customizations/messenger/<proprietary>_adapter.py`, generated by the API Spec Ingestor per `[D-003]` as its first end-to-end exercise in v1); both adapters must pass the same `Messenger` Protocol contract test suite (anchors `[D-016]`).
 
 ### Communication adapters — Customer systems (pluggable)
 
-- **FR-27** — Customer adapters are registered via configuration (AutomationRules + per-customer config) including endpoint URL, field mappings, and outbound templates; adding a new customer requires no code change in `core/`.
+- **FR-27** `[Ph-2]` — Customer adapters are registered via configuration (AutomationRules + per-customer config) including endpoint URL, field mappings, and outbound templates; adding a new customer requires no code change in `core/`.
 
 ### Rule engine
 
-- **FR-28** — Rule engine executes IF/THEN AutomationRules with triggers on item creation, state change, deadline proximity, and attachment upload.
-- **FR-29** — Rule actions include `SendReminder`, `Escalate`, `UpdateState`, `TriggerAIReview`, and `QueueSubmission`.
-- **FR-30** — Rules are scopeable to Global, Customer, or Device level and are customer-agnostic in shape (referencing modality fields, not hard-coded channels).
-- **FR-31** — PM can pause, customize, or manually trigger any rule-driven action on any tracker.
+- **FR-28** `[Ph-1]` — Rule engine executes IF/THEN AutomationRules with triggers on item creation, state change, deadline proximity, and attachment upload.
+- **FR-29** `[Ph-1]` — Rule actions include `SendReminder`, `Escalate`, `UpdateState`, `TriggerAIReview`, and `QueueSubmission`.
+- **FR-30** `[Ph-1]` — Rules are scopeable to Global, Customer, or Device level and are customer-agnostic in shape (referencing modality fields, not hard-coded channels).
+- **FR-31** `[Ph-1]` — PM can pause, customize, or manually trigger any rule-driven action on any tracker.
 
 ### Credentials
 
-- **FR-51** — v1 credential_service reads PM credentials from K8s Secrets provisioned by ops at deploy time (one Secret per PM per system type); exposes `get_credential(pm_id, system_type) -> Credential` to all callers; credentials are never logged, written to disk, or written to any SharePoint List; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 (anchors `[D-019]`).
+- **FR-51** `[Ph-1]` — v1 credential_service reads PM credentials from K8s Secrets provisioned by ops at deploy time (one Secret per PM per system type); exposes `get_credential(pm_id, system_type) -> Credential` to all callers; credentials are never logged, written to disk, or written to any SharePoint List; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 (anchors `[D-019]`).
 - ~~**FR-32**~~ — *(deferred 2026-05-04 → DEF-14: PM self-service credential registration UI — v2)*
 - ~~**FR-33**~~ — *(deferred 2026-05-04 → DEF-14: Vault/AES-256 secrets store — v2)*
 - ~~**FR-34**~~ — *(deferred 2026-05-04 → DEF-14: per-request in-memory decryption boundary — v2)*
@@ -108,14 +110,14 @@ Source provenance for the v1 set:
 
 ### Templates & three-tier configuration
 
-- **FR-39** — PM team leads author customer templates via one of two separately maintained paths — SharePoint UI (live editing via classic web-part forms) or Microsoft Excel upload (file conforming to the per-customer schema generated by the Template Schema Ingestor `[D-010]`); TPMs choose between the paths per workflow preference, and both produce identical internal data model representations (anchors `[D-014]`).
-- **FR-40** — Customer templates define standard milestones, deliverables, and DeliveryItems with all static fields pre-populated and are versioned (`template_version`).
-- **FR-41** — Configuration overrides apply at three runtime tiers — Global / Customer / Device — without code change or redeploy; onboarding a new customer or new device is a configuration change, not a deployment.
+- **FR-39** `[Ph-1]` — PM team leads author customer templates via one of two separately maintained paths — (a) SharePoint UI: live editing via classic web-part forms `[Ph-1]`; (b) Microsoft Excel upload: file conforming to the per-customer schema generated by the Template Schema Ingestor `[D-010]` `[Ph-2]` (deferred — Template Schema Ingestor is Ph-2, consistent with DEF-15 and FR-1 path b); TPMs choose between the paths per workflow preference, and both produce identical internal data model representations (anchors `[D-014]`).
+- **FR-40** `[Ph-1]` — Customer templates define standard milestones and DeliveryItems (grouped by `tg_name`) with all static fields pre-populated and are versioned (`template_version`); no Deliverable level (anchors `[D-028]`).
+- **FR-41** `[Ph-1]` — Configuration overrides apply at three runtime tiers — Global / Customer / Device — without code change or redeploy; onboarding a new customer or new device is a configuration change, not a deployment.
 
 ### Audit & runtime diagnostics
 
-- **FR-42** — Every external action (email send, message post, issue create/update, customer-system call, credential retrieval / refresh / use) is recorded in `CommunicationLog` with attribution to the originating PM, target system, action type, and DeliveryItem reference; credential material is never logged.
-- **FR-49** — Every functional module exposes a `--diagnostic` mode runnable in production (`python -m core.src.<module>.<module>_cli --diagnostic`) that emits a compact RPT report of the module's runtime state without restarting the service — usable by ops to inspect a live deployment and shareable in chat for joint diagnosis (anchors `[D-002]` `[D-005]`).
+- **FR-42** `[Ph-1]` — Every external action (email send, message post, issue create/update, customer-system call, credential retrieval / refresh / use) is recorded in `CommunicationLog` with attribution to the originating PM, target system, action type, and DeliveryItem reference; credential material is never logged.
+- **FR-49** `[Ph-1]` — Every functional module exposes a `--diagnostic` mode runnable in production (`python -m core.src.<module>.<module>_cli --diagnostic`) that emits a compact RPT report of the module's runtime state without restarting the service — usable by ops to inspect a live deployment and shareable in chat for joint diagnosis (anchors `[D-002]` `[D-005]`).
 - ~~**FR-43** — Every functional module emits compact RPT / MET / FIX / QC reports per `[D-002]` containing only counts, status flags, and bounded enum tokens — no proprietary content (test report fragments, tech report prose, waiver text, customer feedback, R&D reply prose, customer-system payloads, or PM credentials).~~ (moved 2026-05-01: reclassified as NFR-17 — chat-mediated collaboration invariant.)
 - ~~**FR-44** — Every service / module failure raises a registered error code from the central `error_codes.py` registry in the format `{MODULE}-{E|W}{NNN}` per `[D-002]`.~~ (moved 2026-05-01: reclassified as NFR-18 — chat-mediated collaboration invariant.)
 - ~~**FR-45** — Every functional module ships `<module>_cli.py` with `--diagnostic` (emits compact reports) and, for side-effect-bearing modules, `--mock` / `--dry-run`; every UI / web-facing module ships a mock web harness exercising it without production SharePoint access per `[D-005]`.~~ (split 2026-05-01: runtime `--diagnostic` for ops + RPT emission → FR-49; dev/test `--mock` / `--dry-run` + mock web harness → NFR-19.)
@@ -184,7 +186,7 @@ Entry format:
 -->
 
 - **DEF-1** — LLM-based inbound message classification fallback when reference-tag parsing fails (`HILDA_Design.md` §7.1, §8.2b) (deferred: runtime LLM module is Phase 2; v1 routes by tag only with manual-triage surface — revisit: when `core/src/llm/` is designed).
-- **DEF-2** — LLM tech-report and waiver quality review with PM-actionable feedback (§8.2a) (deferred: same as DEF-1 — revisit: same).
+- **DEF-2** — LLM quality review — PM feedback workflow: tracking PM response to LLM findings, owner revision communication, and multi-version re-review (§8.2a; initial one-pass review for test reports, tech reports, and waivers promoted to FR-53 2026-05-12 — revisit: Ph-2 when revision tracking workflow is in scope).
 - **DEF-3** — LLM-drafted customer responses (RAG-grounded, PM-approval-gated) (§8.2c) (deferred: same — revisit: same).
 - **DEF-4** — LLM natural-language status summarization (§8.2d) (deferred: same — revisit: same).
 - **DEF-5** — Messenger adapter full feature set (§7.2) — complete thread management, file upload, webhook secret rotation (deferred: v1 ships Slack + proprietary adapters per `[D-016]` with core `send / receive / list_thread` surface only; full feature set is v2 — revisit: post-v1 adapter acceptance testing).
@@ -196,4 +198,5 @@ Entry format:
 - **DEF-11** — Self-service customer-template wizard (§13 Phase 4) (deferred: v4 — revisit: post-v3).
 - **DEF-12** — LLM feedback loop learning from PM corrections to AI drafts (§13 Phase 4) (deferred: v4 — revisit: linked to STATUS.md Flag "Eval-data channel").
 - **DEF-13** — Advanced analytics (cycle time per item type, customer SLAs, R&D performance) (§13 Phase 4) (deferred: v4 — revisit: same).
+- **DEF-15** — Excel-imported data validated against per-customer schema before SharePoint write (FR-4 content; deferred 2026-05-12 — revisit: when Excel import is in scope for its implementation phase).
 - **DEF-14** — Full PM self-service credential management: registration UI (OAuth2 redirect + API token + basic auth), Vault-backed AES-256 secrets store, per-request in-memory decryption boundary, Credential Service pod isolation + mTLS, OAuth2 health monitor + proactive token refresh, PM credential revocation UI, auto-association + re-association at tracker creation / PM reassignment (FR-32–FR-38 content; deferred: v2 per `[D-019]` — v1 uses ops-provisioned K8s Secrets via FR-51; revisit: when PMs need to self-register credentials without ops involvement).

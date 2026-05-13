@@ -47,31 +47,28 @@ The data model is the foundation of the system. It is hierarchical, extensible, 
 ```
 Device (unique ID)
  └── Milestone (unique human-readable string)
-      └── Deliverable (human-readable string)
-           └── Delivery Item (human-readable string)
-                ├── Description
-                ├── Delivery State
-                ├── Expected Completion Date
-                ├── Type
-                ├── Owner Info
-                ├── Tracking Modality
-                ├── Actual Delivery Item Info
-                ├── Customer Delivery Modality
-                ├── Customer Delivery Info
-                ├── Comment
-                ├── Last Updated Timestamp
-                └── Last Owner Contacted Timestamp
+      └── Delivery Item (human-readable string)  [grouped by TG Name]
+           ├── Description
+           ├── Delivery State
+           ├── Expected Completion Date
+           ├── Type
+           ├── Owner Info
+           ├── Tracking Modality
+           ├── Actual Delivery Item Info
+           ├── Customer Delivery Modality
+           ├── Customer Delivery Info
+           ├── Comment
+           ├── Last Updated Timestamp
+           └── Last Owner Contacted Timestamp
 ```
 
 ### 3.2 Entity Definitions
 
 **Device:** The top-level entity representing a connected device program. Each device has a unique identifier and is associated with one customer. A device contains one or more milestones defined by the customer's certification or launch process.
 
-**Milestone:** A phase or gate in the customer's device approval process, identified by a unique human-readable string (e.g., "Lab Entry", "Phase 1 Field Test", "Launch Approval"). Each milestone contains a set of deliverables that must be completed before the milestone is considered met.
+**Milestone:** A phase or gate in the customer's device approval process, identified by a unique human-readable string (e.g., "Lab Entry", "Phase 1 Field Test", "Launch Approval"). Each milestone contains a set of delivery items that must be completed before the milestone is considered met.
 
-**Deliverable:** A logical grouping of related delivery items within a milestone, identified by a human-readable string (e.g., "RF Conformance Test Results", "Known Issues Package", "Software Release Notes"). Each deliverable contains one or more delivery items.
-
-**Delivery Item:** The atomic unit of work — the individual item that must be produced, tracked, reviewed, and potentially submitted to the customer. Each delivery item carries the full set of tracking and delivery metadata described below.
+**Delivery Item:** The atomic unit of work — the individual item that must be produced, tracked, reviewed, and potentially submitted to the customer. Delivery items belong directly to a milestone and are grouped for display purposes by their TG Name (technical group). Each delivery item carries the full set of tracking and delivery metadata described below.
 
 ### 3.3 Delivery Item Fields
 
@@ -79,17 +76,27 @@ All fields are defined below. The data model is designed to be **extensible** �
 
 | Field                              | Description                                                                          | Values / Format                                                                                          | Static vs. Dynamic                            |
 | ---------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| **Description**                    | Free-text description of what this delivery item is                                  | Text                                                                                                     | Static (set in template)                      |
+| **Item No**                        | Human-readable sequential number for the item within its milestone                   | Integer                                                                                                  | Static (auto-assigned on creation)            |
+| **TG Name**                        | Technical group responsible for this item (e.g., "Hardware", "Software") — registry-controlled, extensible via config | Text (validated against TGNameRegistry)                                                                  | Static (set in template)                      |
+| **Item Description**               | Free-text description of what this delivery item is                                  | Text                                                                                                     | Static (set in template)                      |
 | **Delivery State**                 | Current status of the item                                                           | Not Started, Open, Closed, Delayed (extensible)                                                          | Dynamic                                       |
 | **Expected Completion Date**       | Target date for completion                                                           | MM/DD/YYYY                                                                                               | Dynamic                                       |
-| **Type**                           | Category of the delivery item, determines how it is tracked and reviewed             | Binary (Yes/No), Completion %, Test Report, Software Binary, Tech Report, Waiver (extensible)            | Static (set in template)                      |
+| **Type**                           | Category of the delivery item, determines how it is tracked and reviewed             | Confirmation (Yes/No), Completion %, Test Report, Software Binary, Tech Report, Waiver (extensible)      | Static (set in template)                      |
 | **Owner Info**                     | Person responsible for producing this item                                           | Name and/or email address                                                                                | Dynamic                                       |
 | **Tracking Modality**              | Communication channel used to track this item with the internal R&D owner            | Email, Messenger, Internal Issue Tracking System (extensible)                                            | Static (agreed per customer/device/item type) |
-| **Actual Delivery Item Info**      | Reference to the produced artifact                                                   | URL to internal system, or SharePoint file path/URL                                                      | Dynamic                                       |
+| **Actual Delivery Item Info**      | HILDA-mediated download URL for artifacts on the shared network drive, or URL to internal system for non-file items | `https://hilda.corp/dl/<token>` per `[D-013]`, or URL to internal system                                 | Dynamic                                       |
+| **PLM ID**                         | PLM system document/issue ID for this item — permanent source of truth reference (e.g. Jira-style ID); one per owner typically, flexible for exceptions | Text (e.g. "PROJ-1234")                                                                                  | Dynamic                                       |
+| **Handset**                        | This work item applies to handset form factor                                        | Yes / No                                                                                                 | Static (set in template)                      |
+| **Tablet**                         | This work item applies to tablet form factor                                         | Yes / No                                                                                                 | Static (set in template)                      |
+| **Wearable**                       | This work item applies to wearable form factor                                       | Yes / No                                                                                                 | Static (set in template)                      |
+| **MR**                             | This work item applies to MR (Mixed Reality) form factor                             | Yes / No                                                                                                 | Static (set in template)                      |
+| **HMR/SMR**                        | This work item applies to HMR/SMR form factor                                        | Yes / No                                                                                                 | Static (set in template)                      |
 | **Customer Delivery Modality**     | How this item will be delivered to the customer                                      | None, Email, Customer's Tracking System, Our Own File Storage System (extensible)                        | Static (agreed per customer)                  |
 | **Customer Delivery Info**         | Routing information for customer delivery, depends on the Customer Delivery Modality | Empty (if None), email address (if Email), Credential ID (if Customer's Tracking System or File Storage) | Static (set in template per customer)         |
+| **Owner Status Note**              | Latest interim status update provided by the item owner                              | Text                                                                                                     | Dynamic (auto-populated from inbound owner message or manual PM entry) |
 | **Comment**                        | Free-form notes from PM or automation                                                | Text                                                                                                     | Dynamic                                       |
 | **Last Updated Timestamp**         | When this record was last modified                                                   | MM/DD/YYYY - HH:MM                                                                                       | Dynamic (auto-updated)                        |
+| **Actual Completion Date**         | Date the delivery item was actually completed (state moved to Closed)                | MM/DD/YYYY                                                                                               | Dynamic (auto-set on closure)                 |
 | **Last Owner Contacted Timestamp** | When the PM (or automation) last contacted the owner                                 | MM/DD/YYYY - HH:MM                                                                                       | Dynamic (auto-updated)                        |
 
 **Static vs. Dynamic distinction:** Fields marked "Static" are typically set once in the customer template and carried over when a device tracker is created. Fields marked "Dynamic" change as the delivery item progresses through its lifecycle. The automation services primarily operate on dynamic fields (updating state, timestamps, etc.) while reading static fields to determine how to communicate, track, and deliver.
@@ -142,25 +149,10 @@ One row per milestone within a device. A milestone belongs to exactly one device
 | sort_order     | Integer                 | NOT NULL                             | Display order within the device                       |
 | target_date    | Date                    |                                      | Milestone target completion date                      |
 | status         | String                  | NOT NULL, DEFAULT "Not Started"      | Not Started, In Progress, Completed, Delayed          |
+| email_cc_list  | JSON                    |                                      | CC distribution list for all emails in this milestone — array of {name, email, role} |
 
 **Indexes:** device_id, status
 **Unique constraint:** (device_id, milestone_name)
-
-#### Table: Deliverables
-
-One row per deliverable within a milestone.
-
-| Column           | Type                    | Constraints                                | Description                                   |
-| ---------------- | ----------------------- | ------------------------------------------ | --------------------------------------------- |
-| deliverable_id   | String (auto-generated) | **PK**                                     | Unique deliverable identifier                 |
-| milestone_id     | String                  | **FK → Milestones.milestone_id**, NOT NULL | Parent milestone                              |
-| deliverable_name | String                  | NOT NULL                                   | Human-readable name (e.g., "RF Test Results") |
-| sort_order       | Integer                 | NOT NULL                                   | Display order within the milestone            |
-| status           | String                  | NOT NULL, DEFAULT "Not Started"            | Computed from child delivery item states      |
-| completion_pct   | Integer                 | DEFAULT 0                                  | 0–100, computed from child items              |
-
-**Indexes:** milestone_id, status
-**Unique constraint:** (milestone_id, deliverable_name)
 
 #### Table: DeliveryItems
 
@@ -169,26 +161,36 @@ The core tracking table. One row per delivery item — the atomic unit of work. 
 | Column                          | Type                    | Constraints                                    | Description                                                                        |
 | ------------------------------- | ----------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
 | item_id                         | String (auto-generated) | **PK**                                         | Unique delivery item identifier                                                    |
-| deliverable_id                  | String                  | **FK → Deliverables.deliverable_id**, NOT NULL | Parent deliverable                                                                 |
+| item_no                         | Integer                 | NOT NULL                                       | Sequential number within the milestone (auto-assigned on creation)                 |
+| tg_name                         | String                  |                                                | Technical group responsible for this item (e.g., "Hardware", "Software")          |
+| milestone_id                    | String                  | **FK → Milestones.milestone_id**, NOT NULL     | Parent milestone                                                                   |
 | item_name                       | String                  | NOT NULL                                       | Human-readable name                                                                |
-| description                     | Text                    |                                                | What this item is (static, from template)                                          |
+| item_description                | Text                    |                                                | What this item is (static, from template)                                          |
 | delivery_state                  | String                  | NOT NULL, DEFAULT "Not Started"                | Not Started, Open, Closed, Delayed (extensible)                                    |
 | expected_completion_date        | Date                    |                                                | Target date (MM/DD/YYYY)                                                           |
-| item_type                       | String                  | NOT NULL                                       | Binary, CompletionPct, TestReport, SoftwareBinary, TechReport, Waiver (extensible) |
+| item_type                       | String                  | NOT NULL                                       | ConfirmationYesNo, CompletionPct, TestReport, SoftwareBinary, TechReport, Waiver (extensible) |
 | owner_name                      | String                  |                                                | R&D owner name                                                                     |
 | owner_email                     | String                  |                                                | R&D owner email                                                                    |
 | tracking_modality               | String                  | NOT NULL                                       | Email, Messenger, InternalIssueTracker (extensible)                                |
-| actual_item_info                | String                  |                                                | URL to internal system or SharePoint file                                          |
+| actual_item_info                | String                  |                                                | HILDA-mediated download URL (`https://hilda.corp/dl/<token>`) per [D-013], or URL to internal system |
+| plm_id                          | String                  |                                                | PLM system document/issue ID (e.g. Jira-style ID); permanent source of truth reference for this item |
+| handset                         | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to handset form factor                                           |
+| tablet                          | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to tablet form factor                                            |
+| wearable                        | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to wearable form factor                                          |
+| mr                              | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to MR (Mixed Reality) form factor                                |
+| hmr_smr                         | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to HMR/SMR form factor                                           |
 | customer_delivery_modality      | String                  | NOT NULL, DEFAULT "None"                       | None, Email, CustomerTrackingSystem, OurFileStorage (extensible)                   |
 | customer_delivery_info          | String                  |                                                | Email address, credential set ID, or empty — depends on modality                   |
 | customer_delivery_credential_id | String                  | **FK → PMCredentials.credential_id**, NULLABLE | Credential set used to authenticate with customer system for this item's delivery  |
-| comment                         | Text                    |                                                | Free-form notes                                                                    |
+| owner_status_note               | Text                    |                                                | Latest interim status update from the item owner                                   |
+| comment                         | Text                    |                                                | Free-form notes from PM or automation                                              |
 | last_updated                    | DateTime                | NOT NULL, DEFAULT NOW                          | Auto-updated on any change                                                         |
+| actual_completion_date          | Date                    |                                                | Date item was actually completed (auto-set when delivery_state → Closed)           |
 | last_owner_contacted            | DateTime                |                                                | When PM/automation last contacted owner                                            |
-| sort_order                      | Integer                 | NOT NULL                                       | Display order within the deliverable                                               |
+| sort_order                      | Integer                 | NOT NULL                                       | Display order within the milestone                                                 |
 
-**Indexes:** deliverable_id, delivery_state, item_type, tracking_modality, customer_delivery_modality, owner_email, expected_completion_date
-**Unique constraint:** (deliverable_id, item_name)
+**Indexes:** milestone_id, delivery_state, item_type, tracking_modality, customer_delivery_modality, owner_email, expected_completion_date, tg_name
+**Unique constraint:** (milestone_id, item_name), (milestone_id, item_no)
 
 #### Table: Users
 
@@ -233,7 +235,7 @@ Reusable templates that capture the standard milestone/deliverable/delivery-item
 | customer_id      | String                  | **FK → Customers.customer_id**, NOT NULL | Customer this template is for                                                     |
 | template_name    | String                  | NOT NULL                                 | Human-readable name (e.g., "Carrier Alpha Standard v2")                           |
 | template_version | Integer                 | NOT NULL, DEFAULT 1                      | Version number for tracking revisions                                             |
-| template_data    | JSON/Text               | NOT NULL                                 | Full hierarchy: milestones → deliverables → delivery items with all static fields |
+| template_data    | JSON/Text               | NOT NULL                                 | Full hierarchy: milestones → delivery items with all static fields                |
 | created_by       | String                  | **FK → Users.user_id**, NOT NULL         | Who created this template                                                         |
 | created_date     | DateTime                | NOT NULL, DEFAULT NOW                    | Creation timestamp                                                                |
 | is_active        | Boolean                 | NOT NULL, DEFAULT TRUE                   | Whether this template is available for use                                        |
@@ -290,8 +292,7 @@ Customers 1──────────M CustomerTemplates
 Users     1──────────M Devices (via assigned_pm_id)
 Users     1──────────M PMCredentials
 Devices   1──────────M Milestones
-Milestones 1─────────M Deliverables
-Deliverables 1───────M DeliveryItems
+Milestones 1─────────M DeliveryItems
 DeliveryItems 1──────M CommunicationLog
 PMCredentials 1──────M DeliveryItems (via customer_delivery_credential_id)
 PMCredentials 1──────M CommunicationLog (via credential_id)

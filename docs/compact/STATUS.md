@@ -1,7 +1,7 @@
 # Status
 
-**Active phase**: architecture
-**Last updated**: 2026-05-06
+**Active phase**: requirements
+**Last updated**: 2026-05-13
 **Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
 
 ## Done
@@ -48,7 +48,11 @@
 - 2026-05-08 Teacher/student LLM scaffold ported from `~/work/nora`: `.clinerules/` (4 files — project context, role, content-safety with 11 HILDA redaction categories, output discipline with 9 report types) + `cline-playbooks/` (8 playbooks: orient, mapping, sp-connect, ingest-template, profile-test-report, ingest-api-spec, debug-pipeline, share-back). Cline (on-prem student) runs HILDA CLIs against real SP and proprietary data; Teacher LLM (Claude) designs + codes; redacted compact reports bridge the air-gap.
 - 2026-05-08 v1 deployment platform pivot: bare-metal Linux PC + Docker Compose (not K8s). D-025 captured (customer YAML mount: v1 bind-mount, v2 ConfigMap). D-026 captured (deployment platform v1 = Docker Compose; same process boundaries, container image, task architecture; K8s is v2+ target). SYSTEM.md fully updated (C5 added to conflicts table; §2, §5, §7, §8, §9, open questions all revised). PROJECT.md Infrastructure + Credential Service bullets updated.
 - 2026-05-08 Cline git workflow clarified: one-way bridge — origin (github.com) is read-only from work PC; Cline pushes only to `company`; Teacher sees Cline's work via compact reports (hand-typed) only, never via git. `.clinerules/01-role.md` updated; `utils/git-sync/sync-work.sh` corrected (reverted erroneous push-to-origin step). D-027 captured.
-- 2026-05-08 `issue_tracker` module designed + implemented end-to-end: `core/src/issue_tracker/MODULE.md` + `customizations/issue_tracker/MODULE.md`. Full IssueTracker Protocol from [D-008], JiraAdapter + MockIssueTracker, load_adapter factory, 10-check --contract CLI suite (C01-C10). ITR-E001..E007 + ITR-W001..W002 registered in diagnostics/error_codes.py. 52 unit tests + 26 contract tests passing (mock adapter). `cline-playbooks/develop-issue-tracker-adapter.md` written for Teacher→Student adapter dev loop. `customizations/issue_tracker/defecttrack_adapter.py` scaffold written by Teacher; TODOs completed by Cline (Trip 2); contract verified: passed=7 failed=3 fail_methods=C02,C07,C08 (expected — API gaps). Serves FR-25, FR-26, FR-42. First Teacher→Student proprietary adapter exercise complete.
+- 2026-05-08 `issue_tracker` module designed + implemented end-to-end
+- 2026-05-12 Data model review session (round 2) — `HILDA_Design.md` updated with: `tg_name` marked registry-controlled (`TGNameRegistry`); `plm_id` added to DeliveryItems (PLM system ID, permanent source of truth, dynamic); `actual_item_info` description updated to HILDA-mediated download URL per `[D-013]`; form factor flags added to CustomerTemplates (`handset`, `tablet`, `wearable`, `mr`, `hmr_smr`, Boolean). `template_schema/MODULE.md` updated (TGNameRegistry, DeliveryItemBase.plm_id, CustomerTemplateBase form factors). Pending code sync extended to include these fields.
+- 2026-05-12 Data model review session (round 1) — `HILDA_Design.md` updated with: (a) D-028 captured: Deliverable level removed from hierarchy; DeliveryItems now parent directly to Milestone, grouped by `tg_name`; (b) `ItemType.Binary` → `Confirmation (Yes/No)` (owner-reply-closes, no artifact); (c) new DeliveryItem fields: `item_no`, `tg_name`, `owner_status_note`, `actual_completion_date`; (d) new Milestone field: `email_cc_list` per-milestone CC distribution list; (e) `Deliverables` SP List removed from §3.4. `requirements.md` updated (FR-2, FR-5, FR-6, FR-9, FR-13, FR-22, FR-40). `core/src/template_schema/MODULE.md` updated (Purpose, enums, MilestoneBase, DeliverableBase removed, DeliveryItemBase, EntitySchemaConfig). **Pending**: `core/src/template_schema/enums.py` and `models.py` code sync — required before next development trip.
+- 2026-05-12 Requirements phase session — switched active phase to requirements. FR-4 deferred → DEF-15 (Excel import schema validation, phase TBD). Clarified terminology: "Stage" = workflow stages 1–6 (§5 HILDA_Design.md, already used in requirements.md section headers); "Phase" = implementation rollout phases 1–4 (§13 HILDA_Design.md). Further requirements review in progress.
+- 2026-05-12 Requirements phase session (continued) — completed inline `[Ph-1]`/`[Ph-2]` tagging on all active FRs; FR-1 path (b) and FR-39 path (b) Excel flows deferred to Ph-2 (Template Schema Ingestor is Ph-2, consistent with DEF-15); FR-9/FR-12 per-item `mailto:` tap-links deferred to Ph-2 (D-012 implementation note updated); FR-52 added (Ph-1: runtime LLM attachment-to-item routing via first-page content inspection); FR-53 added (Ph-1: runtime LLM initial quality review for test reports, tech reports, and waivers); DEF-2 partially promoted to FR-53 (PM feedback workflow remains deferred); runtime LLM Ph-1 scope established (FR-52 + FR-53 functions only — DEF-1, DEF-3, DEF-4 remain deferred).
 
 ## In progress
 
@@ -63,8 +67,13 @@
 - Ratify or supersede the reference-imported sub-conventions in `structure-conventions.md` during architecture: (a) cross-tier `core ↔ customizations` deps allowed in both directions; (b) one config file per module under `config/<module>.json` for install-time settings, runtime data stays out. Each warrants its own DECISIONS entry if confirmed unchanged or if revised.
 - Architecture-phase choice for Test Report Profiler (`[D-011]`): PDF text-extraction path (`pdfplumber` / `pypdf` / `pymupdf`) and legacy `doc` handler (`antiword` / LibreOffice headless). Decide before `test_report_profiler` MODULE.md.
 - Eval-data correction surface design (per STATUS.md Flag): resolve during architecture phase when designing each AI-assisted module's MODULE.md.
+- Update HILDA_Design.md §13 from 4-phase to 3-phase implementation roadmap (3-phase structure confirmed 2026-05-12; §13 not yet updated).
+- Code sync before next development trip: `core/src/template_schema/enums.py` (rename BINARY→CONFIRMATION, add TGNameRegistry) and `models.py` (remove DeliverableBase; update DeliveryItemBase, MilestoneBase, CustomerTemplateBase per D-028 + round-2 field additions).
+- Continue requirements review — further FR review and cross-check may be needed before requirements phase exit criteria are met.
 
 ## Flags
+
+- MAP.md stale: `template_schema` module Purpose line still reads "Device / Milestone / Deliverable / DeliveryItem" — Deliverable level removed by D-028. Update before next regen-map or architecture work on this module.
 
 - `structure-conventions.md` references `~/work/nora` as the live reference for layout details (cross-tier deps, config rules, Protocol-boundary pattern). If nora's conventions evolve, HILDA's `structure-conventions.md` does NOT auto-track — it's a one-time import, captured in D-001's "Why". Re-verify alignment when reviewing the conventions file.
 

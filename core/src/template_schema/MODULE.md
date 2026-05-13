@@ -1,6 +1,6 @@
 # Module: template_schema
 
-**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / Deliverable / DeliveryItem — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, NFR-14, and anchors `[D-014]` `[D-018]`.
+**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, NFR-14, and anchors `[D-014]` `[D-018]`.
 
 *This module is pure data model — no IO, no SharePoint, no network. Runtime modules extend these base types with persistence-layer fields (SP List IDs, DB columns) in their own models.*
 
@@ -19,7 +19,7 @@ class DeliveryState(str, Enum):
     DELAYED     = "Delayed"
 
 class ItemType(str, Enum):
-    BINARY          = "Binary"
+    CONFIRMATION    = "Confirmation (Yes/No)"   # owner reply closes item; no artifact required
     COMPLETION_PCT  = "CompletionPct"
     TEST_REPORT     = "TestReport"
     SOFTWARE_BINARY = "SoftwareBinary"
@@ -80,6 +80,7 @@ DeliveryStateRegistry: set[str]   # initialized from DeliveryState enum values
 ItemTypeRegistry: set[str]        # initialized from ItemType enum values
 TrackingModalityRegistry: set[str]
 CustomerDeliveryModalityRegistry: set[str]
+TGNameRegistry: set[str]          # technical group names (e.g. "Hardware", "Software"); customer-extensible
 
 def extend_registry(registry: set[str], values: list[str]) -> None:
     """Called at startup by config loader to add customer-specific extension values."""
@@ -118,32 +119,34 @@ class MilestoneBase(BaseModel):
     sort_order:     int
     target_date:    date | None
     status:         MilestoneStatus
+    email_cc_list:  list[dict] | None   # [{name, email, role}]; applied to all emails in this milestone
     path_slug:      str
-
-class DeliverableBase(BaseModel):
-    deliverable_id:   str
-    milestone_id:     str
-    deliverable_name: str
-    sort_order:       int
-    status:           MilestoneStatus
-    completion_pct:   int = 0   # 0–100, computed from child items
-    path_slug:        str
 
 class DeliveryItemBase(BaseModel):
     item_id:                         str
-    deliverable_id:                  str
+    item_no:                         int        # sequential within milestone; unique on (milestone_id, item_no)
+    milestone_id:                    str        # parent milestone — no Deliverable level ([D-028])
+    tg_name:                         str | None # validated against TGNameRegistry; e.g. "Hardware", "Software"
     item_name:                       str
-    description:                     str | None
+    item_description:                str | None
     delivery_state:                  str   # validated against DeliveryStateRegistry
     expected_completion_date:        date | None
+    actual_completion_date:          date | None  # auto-set when delivery_state → Closed
     item_type:                       str   # validated against ItemTypeRegistry
     owner_name:                      str | None
     owner_email:                     str | None
     tracking_modality:               str   # validated against TrackingModalityRegistry
-    actual_item_info:                str | None
+    actual_item_info:                str | None  # https://hilda.corp/dl/<token> per [D-013], or URL to internal system
+    plm_id:                          str | None  # PLM system ID (e.g. Jira-style); permanent source of truth ref
+    handset:                         bool = False  # form factor applicability flags (static, from template)
+    tablet:                          bool = False
+    wearable:                        bool = False
+    mr:                              bool = False
+    hmr_smr:                         bool = False
     customer_delivery_modality:      str   # validated against CustomerDeliveryModalityRegistry
     customer_delivery_info:          str | None
     customer_delivery_credential_id: str | None
+    owner_status_note:               str | None  # latest interim owner update; auto-populated from inbound
     comment:                         str | None
     last_updated:                    datetime
     last_owner_contacted:            datetime | None
@@ -157,7 +160,7 @@ class CustomerTemplateBase(BaseModel):
     template_version: int
     # template_data is the full instantiated hierarchy — typed as nested lists of base models
     milestones: list[MilestoneBase]
-    # (deliverables and items nested within milestones in the runtime representation)
+    # DeliveryItems nested within milestones directly — no Deliverable level ([D-028])
     is_active: bool = True
 
 class AutomationRuleBase(BaseModel):
@@ -185,7 +188,7 @@ class ColumnMapping(BaseModel):
     enum_values: list[str] | None = None  # for col_type == "enum"
 
 class EntitySchemaConfig(BaseModel):
-    entity:     Literal["device", "milestone", "deliverable", "delivery_item"]
+    entity:     Literal["device", "milestone", "delivery_item"]   # no deliverable level ([D-028])
     header_row: int = 1                # which Excel row holds column headers
     columns:    list[ColumnMapping]
 
