@@ -76,7 +76,7 @@ Source provenance for the v1 set:
 
 - **FR-61** `[Ph-1]` — Each document row in FR-59 provides a HILDA-mediated download link (`https://hilda.corp/dl/<scoped_token>`) authenticated via on-prem AD and authorized against the DeliveryItem ACL per NFR-16; in Ph-1 the link resolves to the single available version (`rev1/` or `inbound/` file); `[Ph-2]` download resolves to the latest revision of that document (determined by `upload_timestamp` in the document index); download is available only for items where `item_type ≠ Confirmation`.
 
-- **FR-62** `[Ph-2]` — The SharePoint UI provides a document upload surface for each applicable DeliveryItem (`item_type ≠ Confirmation`); a document uploaded by the PM or TPM is written to the item's shared drive path per FR-13 and triggers the same routing (FR-52), initial review (FR-53), and PLM auto-upload pipeline as documents received via email or PLM poll.
+- **FR-62** `[Ph-2]` — The SharePoint UI provides a document upload surface for each applicable DeliveryItem (`item_type ≠ Confirmation`); item and `doc_type` are specified explicitly by the PM or TPM in the UI (no FR-52 routing needed); HILDA uploads the document to the owner's PLM issue, writes a local audit copy to `<doc_type_slug>/<doc_id_slug>/rev1/` per FR-13, updates the HILDA document index with `(delivery_item_id, plm_id, doc_type, doc_id_slug, plm_attachment_id, upload_timestamp)`, updates the DeliveryItem record and `actual_item_info` in SharePoint, and triggers initial review per FR-53.
 
 ### Submission (Stage 5)
 
@@ -160,7 +160,7 @@ Source provenance for the v1 set:
 ### SharePoint constraint
 
 - **NFR-7** — SharePoint deployment-specific values (site URLs, list internal names, lookup field IDs, library paths) live exclusively in `customizations/sharepoint_config/` and are loaded at startup; `core/` contains no hard-coded SharePoint instance values (anchors `[D-004]`).
-- **NFR-8** — SharePoint integration uses the SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SharePoint 2017; integration scope is List CRUD + classic web parts only — binary artifacts (attachments, reports, submission packages) are stored on the shared network drive per FR-13, not in SharePoint Document Libraries (anchors `[D-006]`).
+- **NFR-8** — SharePoint integration uses the SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SharePoint 2017; integration scope is List CRUD + classic web parts only — binary owner deliverables are stored in corp PLM per FR-13; HILDA-generated internal artifacts are stored on the shared network drive `outbound/` per FR-13; neither is stored in SharePoint Document Libraries (anchors `[D-006]`).
 
 ### Latency & reliability
 
