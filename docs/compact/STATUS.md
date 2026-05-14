@@ -2,7 +2,7 @@
 
 **Active phase**: requirements
 **Last updated**: 2026-05-13
-**Last drift-check**: never (greenfield — no FR/NFR or MODULE.md baseline yet)
+**Last drift-check**: 2026-05-13 — mode: requirements — 5 drifts resolved, 14 deferred surfaced
 
 ## Done
 
