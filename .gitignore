@@ -15,3 +15,7 @@ htmlcov/
 # Contains: hilda-mapping.json (redaction table), reports/, input/ (proprietary files)
 hilda-env/
 **/state/hilda-mapping.json
+
+todos.txt
+.claude/
+CLAUDE.md

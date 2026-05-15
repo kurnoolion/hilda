@@ -384,6 +384,14 @@ Data classes: `MessageRef`, `Message`, `FileRef`, `WebhookRef`, `AttachmentInput
 
 ---
 
+## D-039: Content hash (SHA-256) for document duplicate detection and new-vs-revision classification
+**Status**: Active · **Date**: 2026-05-15
+**Decision**: HILDA uses SHA-256 content hash (`file_hash`) as the primary signal for document duplicate detection and new-vs-revision classification at ingest time (email and NSD sources; PLM-polled documents use FR-26's `(file_name, timestamp)` mechanism). Classification proceeds in four steps after hash check: (0) `file_hash` matches existing document index row for `(delivery_item_id, doc_type)` → exact duplicate: skip, log in `CommunicationLog`, notify PM; (1) slugify `original_filename` → `candidate_slug`; if matches existing `doc_id_slug` → revision (`revN`, N = max `rev_number` + 1); (2) no slug match AND count of distinct `doc_id_slugs` < `doc_count` (for `test_report`) or `doc_type` is supplementary → new document (`doc_id_slug = candidate_slug`, `rev1`); (3) no slug match AND `doc_count` already reached → ambiguous: hold in staging, surface `Document classification ambiguous` PM flag. `file_hash` stored in the document index.
+**Why**: Filename alone is unreliable — owners use opaque lab IDs and the same file frequently arrives simultaneously via email and PLM poll. Content hash is channel-agnostic and catches true duplicates regardless of filename or source. Slug matching handles the common case of stable filenames; hash provides a safety net the slug cannot. Vs. filename + file size: still fails for same-size files with minor content changes. Vs. timestamp: channel-dependent, unreliable across email/PLM/NSD. Vs. no duplicate detection: risk of double PLM upload, double LLM review, and corrupted document index when same file arrives via two channels.
+**Consequences**: `file_hash` (SHA-256 hex digest) added to document index schema between `original_filename` and `parser_result`. Hash computed in the ingest pipeline before message queue enqueue. Ambiguous cases held in a staging store containing `(file_hash, original_filename, ingest_source, delivery_item_id, doc_type)` pending PM resolution. Authority for FR-52 Ph-2 classification behavior.
+
+---
+
 ## D-038: v1 secrets encryption at rest — sops with age keys
 **Status**: Active · **Date**: 2026-05-13
 **Decision**: v1 `.env` files containing PM credentials and service secrets are encrypted at rest using `sops` with `age` as the key provider. The age private key lives at `/etc/hilda/age.key` on the host (`chmod 400`, owned by the HILDA service user). Encrypted `.env` files may be stored in the repo — no plaintext secrets committed. The credential service decrypts at container startup into process memory via `sops --decrypt`. No Vault dependency in v1. mTLS for service-to-service communication remains a v2 K8s target per `[D-021]` / `[D-026]`.

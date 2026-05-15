@@ -2,7 +2,7 @@
 
 Defines the repository layout, what counts as a "module", and how Python visibility maps to `pub` / `internal` for the `regen-map` skill.
 
-Single language: **Python** (FastAPI + asyncio + Temporal Python SDK for the K8s automation services). Layout mirrors `~/work/nora` per `[D-001]` — that project is the live reference for the three-tier convention. Edit as conventions evolve.
+Single language: **Python** (FastAPI + asyncio + Temporal Python SDK for the K8s automation services). Layout mirrors `the reference implementation` per `[D-001]` — that project is the live reference for the three-tier convention. Edit as conventions evolve.
 
 ## Top-level layout
 
@@ -104,13 +104,13 @@ HILDA has **three Ingestor / Profiler modules**, all following the same pattern:
 
 ## Cross-tier dependency rules
 
-**Reference-imported from nora (subject to ratification via a dedicated DECISIONS entry during architecture).** `core/` and `customizations/` may import each other freely. Real dep flow is bidirectional: core defines Protocols that customizations implement; customizations expose data (e.g., per-customer templates, AutomationRules) that core's rule engine and adapters consume. Commits don't mark AI vs. human authorship — directory implies it. Manual edits to core are exceptional, not forbidden.
+**Reference-imported from the reference implementation (subject to ratification via a dedicated DECISIONS entry during architecture).** `core/` and `customizations/` may import each other freely. Real dep flow is bidirectional: core defines Protocols that customizations implement; customizations expose data (e.g., per-customer templates, AutomationRules) that core's rule engine and adapters consume. Commits don't mark AI vs. human authorship — directory implies it. Manual edits to core are exceptional, not forbidden.
 
 `drift-check` and `regen-map` accept cross-tier edges in either direction. There is no CI rule for "AI-only commits to core" — code review governs.
 
 ## Config format
 
-**Reference-imported from nora (subject to ratification via a dedicated DECISIONS entry during architecture).** One JSON file per module under `config/<module>.json` for install-time deploy settings (default endpoints, model names, timeouts, host/port bindings). Modules read only their own config file. New module config = new file under `config/`.
+**Reference-imported from the reference implementation (subject to ratification via a dedicated DECISIONS entry during architecture).** One JSON file per module under `config/<module>.json` for install-time deploy settings (default endpoints, model names, timeouts, host/port bindings). Modules read only their own config file. New module config = new file under `config/`.
 
 **Runtime data is not config.** AutomationRules, customer templates, AI checklists, and PM credentials are runtime data managed by PM team leads / PMs / Vault — they live in SharePoint (or Vault for credentials), not in `config/`. Repo-side YAML seed/fixture forms for these (when present, e.g., for tests or initial provisioning) live alongside the relevant module under `core/src/<module>/fixtures/` or `customizations/<name>/fixtures/`, not under `config/`.
 
@@ -146,14 +146,14 @@ These sections capture **either** direct code imports **or** artifact / data con
 
 ## Chat-mediated collaboration conventions `[D-002]`
 
-The dev LLM cannot reach production. Every cross-boundary artifact and every service failure must be expressible in a compact, paste-friendly form so PMs / devs can drop it into chat verbatim. Reference implementation: `~/work/nora/core/src/pipeline/error_codes.py` and `~/work/nora/core/src/pipeline/report.py`.
+The dev LLM cannot reach production. Every cross-boundary artifact and every service failure must be expressible in a compact, paste-friendly form so PMs / devs can drop it into chat verbatim. Reference implementation: `the reference implementation/core/src/pipeline/error_codes.py` and `the reference implementation/core/src/pipeline/report.py`.
 
 **Error codes**:
 - Format: `{MODULE}-{SEVERITY}{NUMBER}` — e.g., `EML-E001`, `WFL-W003`, `CRD-E012`.
 - `MODULE` is a 3-letter prefix per service / module (assigned during architecture as each module is drafted; one prefix per module, registered once in the central registry).
 - `SEVERITY`: `E` (error) or `W` (warning).
 - `NUMBER`: 3-digit, monotonic within a (module, severity) pair.
-- All codes registered in a single `error_codes.py` (exact path TBD during architecture; one registry per repo) using an `ErrorDef`-style dataclass with `code` / `message` / `hint` and a `PipelineError`-style exception with `code` / `context` / `cause`. Mirror nora's structure.
+- All codes registered in a single `error_codes.py` (exact path TBD during architecture; one registry per repo) using an `ErrorDef`-style dataclass with `code` / `message` / `hint` and a `PipelineError`-style exception with `code` / `context` / `cause`. Mirror the reference implementation's structure.
 
 **Compact report types** (one record per line, no proprietary content):
 - `RPT` — run / activity report. Per-stage / per-service line: `{prefix} {status} {elapsed} {key=value compact stats}`. Example: `EML OK 12s sent=42 bounced=1 parse_fail=0`.
