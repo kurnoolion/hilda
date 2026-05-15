@@ -110,8 +110,8 @@ Source provenance for the v1 set:
 
 ### Rule engine
 
-- **FR-28** `[Ph-1]` — Rule engine executes IF/THEN AutomationRules with triggers on item creation, state change, deadline proximity, and attachment upload.
-- **FR-29** `[Ph-1]` — Rule actions include `SendReminder`, `Escalate`, `UpdateState`, `TriggerAIReview`, and `QueueSubmission`.
+- **FR-28** `[Ph-1]` — Rule engine executes IF/THEN AutomationRules; trigger taxonomy: `ItemCreated`, `StateChange`, `LastContactThreshold`, `DeadlineProximity`, `AttachmentReceived`, `AIReviewResult`, `PMApproval`, `MilestoneAllClosed`; rule bodies are distributed across this document and cited here by ID — FR-8 (collection-start initial outreach), FR-9 (per-modality outreach format), FR-10 (reminder + messenger escalation), FR-11 (deadline escalation to owner + PM), FR-16 (test-report parser trigger on attachment), FR-22 (milestone-closure state + PM notification), FR-46 (final/interim classification on test-report receipt), FR-47 (failed-item surface on PM dashboard), FR-48 (waiver DeliveryItem auto-create), FR-53 (AI quality review trigger + state update on pass), NFR-5 (PM-approval gate before any customer-facing action), FR-18 (queue for customer submission on PM approval); rules reference data model fields directly and are customer-agnostic in shape.
+- **FR-29** `[Ph-1]` — Rule actions include `SendReminder`, `Escalate`, `UpdateState`, `TriggerParser`, `TriggerAIReview`, `QueueSubmission`, and `NotifyPM`; `TriggerParser` invokes the rule-based test-report parser (FR-16) distinct from the LLM review; `NotifyPM` surfaces a dashboard alert and/or out-of-band notification without an owner-facing outbound; action parameters (channel, recipients, template, target state) are rule-instance-specific; new action types are added via configuration without code change.
 - **FR-30** `[Ph-1]` — Rules are scopeable to Global, Customer, or Device level and are customer-agnostic in shape (referencing modality fields, not hard-coded channels).
 - **FR-31** `[Ph-1]` — PM can pause, customize, or manually trigger any rule-driven action on any tracker.
 
