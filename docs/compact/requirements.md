@@ -138,13 +138,13 @@ Source provenance for the v1 set:
 ### Credentials
 
 - **FR-51** `[Ph-1]` — v1 credential_service reads PM credentials from sops-encrypted `.env` files provisioned by ops at deploy time per `[D-038]` (one file per service, one env var per PM per system type); exposes `get_credential(pm_id, system_type) -> Credential` to all callers; credentials are decrypted at startup into process memory and never logged, written to disk, or written to any SharePoint List; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 (anchors `[D-019]`; v1 deployment mechanism superseded by `[D-026]` and `[D-038]`).
-- ~~**FR-32**~~ — *(deferred 2026-05-04 → DEF-14: PM self-service credential registration UI — v2)*
-- ~~**FR-33**~~ — *(deferred 2026-05-04 → DEF-14: Vault/AES-256 secrets store — v2)*
-- ~~**FR-34**~~ — *(deferred 2026-05-04 → DEF-14: per-request in-memory decryption boundary — v2)*
-- ~~**FR-35**~~ — *(deferred 2026-05-04 → DEF-14: secrets store pod isolation + mTLS — v2)*
-- ~~**FR-36**~~ — *(deferred 2026-05-04 → DEF-14: OAuth2 health monitor + token refresh — v2)*
-- ~~**FR-37**~~ — *(deferred 2026-05-04 → DEF-14: PM credential revocation UI — v2)*
-- ~~**FR-38**~~ — *(deferred 2026-05-04 → DEF-14: auto-association + re-association on PM reassignment — v2)*
+- ~~**FR-32**~~ — *(deferred 2026-05-04 → DEF-14: PM self-service credential registration UI — Ph-3)*
+- ~~**FR-33**~~ — *(deferred 2026-05-04 → DEF-14: Vault/AES-256 centralised secrets store — Ph-3)*
+- ~~**FR-34**~~ — *(deferred 2026-05-04 → DEF-14: per-request in-memory decryption boundary — Ph-3)*
+- ~~**FR-35**~~ — *(deferred 2026-05-04 → DEF-14: secrets store pod isolation + mTLS — Ph-3)*
+- ~~**FR-36**~~ — *(deferred 2026-05-04 → DEF-14: OAuth2 health monitor + token refresh — Ph-3)*
+- ~~**FR-37**~~ — *(deferred 2026-05-04 → DEF-14: PM credential revocation UI — Ph-3)*
+- ~~**FR-38**~~ — *(deferred 2026-05-04 → DEF-14: auto-association + re-association on PM reassignment — Ph-3)*
 
 ### Templates & three-tier configuration
 
@@ -169,8 +169,8 @@ Source provenance for the v1 set:
 
 ### Credential & security
 
-- **NFR-3** — Per-PM credential isolation — each PM's credentials are stored under their own path in the secrets store; no cross-PM credential access by the application or by ops.
-- **NFR-4** — Credential material is encrypted at rest via `sops` (AES-256-GCM, `age`-based key per `[D-038]`) — `.env` files on the host are sops-encrypted; the credential service decrypts at startup into process memory; the age private key at `/etc/hilda/age.key` (`chmod 400`, HILDA service user only) is the only plaintext secret on the filesystem; in transit, all external communications (SharePoint, PLM, customer JIRA, email server) use TLS; service-to-service mTLS is a v2 K8s target per `[D-021]` and `[D-026]`.
+- **NFR-3** — Per-PM credential isolation — each PM's credentials are stored under their own path in the secrets store; Ph-1 and Ph-2 secrets store = sops-encrypted `.env` files partitioned by PM (e.g. `/etc/hilda/pm_<pm_id>.env`) per `[D-038]`; no cross-PM credential access by the application or by ops; HashiCorp Vault or equivalent centralised secrets management service is a Ph-3+ target (anchors DEF-14).
+- **NFR-4** — Credential material is encrypted at rest via `sops` (AES-256-GCM, `age`-based key per `[D-038]`) — `.env` files on the host are sops-encrypted; the credential service decrypts at startup into process memory; the age private key at `/etc/hilda/age.key` (`chmod 400`, HILDA service user only) is the only plaintext secret on the filesystem; in transit, all external communications (SharePoint, PLM, customer JIRA, email server) use TLS; per-request in-memory decryption boundary (~~FR-34~~), secrets store pod isolation (~~FR-35~~), and service-to-service mTLS are Ph-3 MicroK8s targets per `[D-021]`, `[D-026]`, and DEF-14 — Ph-1/Ph-2 use a single startup-time decrypt into process memory.
 
 ### PM approval & accountability
 
@@ -526,8 +526,8 @@ NFRs are architectural invariants active from Phase 1 onward. None are phase-gat
 |-----|------|---------|
 | **NFR-1** | Data boundary | All HILDA services on-prem; no cloud or SaaS LLM calls |
 | **NFR-2** | Data boundary | Compact reports / logs leaving on-prem contain no proprietary content |
-| **NFR-3** | Credential security | Per-PM credential isolation; no cross-PM access |
-| **NFR-4** | Credential security | sops AES-256-GCM encryption at rest; TLS in transit; mTLS deferred to v2 |
+| **NFR-3** | Credential security | Per-PM isolation; Ph-1/Ph-2 secrets store = sops `.env` files per `[D-038]`; Vault / centralised secrets service deferred to Ph-3 (DEF-14) |
+| **NFR-4** | Credential security | Ph-1/Ph-2: sops AES-256-GCM at rest, startup-time decrypt into process memory; TLS in transit; per-request decrypt + pod isolation + mTLS deferred to Ph-3 (DEF-14) |
 | **NFR-5** | PM approval | No customer-facing outbound without explicit PM-approval signal recorded in `CommunicationLog` |
 | **NFR-6** | PM accountability | Every external action attributable to a specific PM; `CommunicationLog` append-only |
 | **NFR-7** | SharePoint | Deployment-specific SP values in `customizations/sharepoint_config/` only; none in `core/` |
