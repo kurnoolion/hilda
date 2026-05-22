@@ -79,7 +79,7 @@ Source provenance for the v1 set:
 
 - **FR-63** `[Ph-1]` — The SharePoint milestone view (FR-56) presents a **Submit to Carrier** action available to PM and TPM; enabled when all DeliveryItems in the milestone are in `ReadyForSubmission` or `SubmittedToCustomer` state, and at least one item is in `ReadyForSubmission` (otherwise the action is disabled — nothing to submit); on activation, HILDA presents an NFR-5 confirmation gate with a delta summary: for a re-submission (one or more items were previously `SubmittedToCustomer`) the summary reads "Re-submitting {N} items with updated documents. {M} previously-submitted items are unchanged and excluded from this package." — PM/TPM must confirm before proceeding; HILDA assembles the submission package from only the items currently in `ReadyForSubmission` and dispatches per FR-18 via the customer adapter; items already in `SubmittedToCustomer` are skipped and remain unchanged; on successful dispatch, the included items advance to `SubmittedToCustomer`; the event is recorded in `CommunicationLog` with `action_type: resubmission` when any items in the milestone were already `SubmittedToCustomer` at the time of this action, or `action_type: submission` for the initial full-milestone submission; the action is milestone-scoped — there is no per-item submission from the SharePoint UI.
 
-- ~~**FR-64**~~ — *(deferred 2026-05-19 → DEF-20: Close All Items SP action — deferred with FR-22; TPM uses FR-14 manual `delivery_state` override to mark items `Closed` individually when carrier acceptance is confirmed)*
+- **FR-64** `[Ph-1]` — The SharePoint milestone view (FR-56) presents a **Close All Items** action available to PM and TPM; enabled when all DeliveryItems in the milestone are in `SubmittedToCustomer` or `Closed` state and at least one item is in `SubmittedToCustomer`; on activation HILDA sets all `SubmittedToCustomer` items to `Closed` in one operation — equivalent to applying FR-14 `delivery_state` override to all such items at once; the action is logged in `CommunicationLog` with `action_type: bulk_close` and PM/TPM attribution; automated `Closed` transition (FR-22) remains deferred (DEF-20).
 
 - **FR-65** `[Ph-1]` — Each DeliveryItem row in the SharePoint milestone view (FR-56) presents a **Send Reminder** action available to PM and TPM; the action is available at any time regardless of the scheduled rule cadence (FR-10) and regardless of the item's current `delivery_state`, except when `delivery_state ∈ {OwnerClosed, ReadyForSubmission, SubmittedToCustomer, Closed}`; on activation, HILDA immediately dispatches a reminder to the item's owner via all status-capable modalities in the item's `tracking_modality` list (per FR-9 outreach format); the send is recorded in `CommunicationLog` per FR-42 with PM attribution; `last_owner_contacted` is updated per FR-15; this action is the SP UI surface for the ad-hoc reminder capability stated in FR-14 and the manual trigger capability in FR-31.
 
@@ -92,7 +92,7 @@ Source provenance for the v1 set:
 ### Customer follow-up & closure (Stage 6)
 
 - ~~**FR-21**~~ — *(deferred 2026-05-19 → DEF-19: automated customer feedback capture from carrier tracking system and email — TPM manually monitors the carrier portal; revised documents are uploaded via FR-62 and resubmitted via FR-63 — revisit: post-v1)*
-- ~~**FR-22**~~ — *(deferred 2026-05-19 → DEF-20: automated `Closed` transition requiring carrier approval + PM confirmation via Close All Items SP action (FR-64 deferred with this) — TPM manually sets items to `Closed` via FR-14 manual override when satisfied with carrier acceptance — revisit: post-v1)*
+- ~~**FR-22**~~ — *(deferred 2026-05-19 → DEF-20: automated `Closed` transition requiring carrier-acceptance signal detection + PM confirmation gate — TPM manually sets items to `Closed` via FR-14 per-item override or FR-64 bulk Close All Items action — revisit: Ph-3)*
 
 ### Communication adapters — Email Service
 
@@ -273,7 +273,7 @@ Entry format:
 - **DEF-17** — Resolution-path follow-up workflow (Ph-3): automated HILDA actions after PM selects a resolution path for a failed test case (FR-47) — (a) **fix-pre-launch**: HILDA notifies the owner via status-capable modality that a fix is required; monitors for a revised test report and re-runs FR-16 / FR-46 classification on receipt; (b) **tech report**: HILDA creates a Tech Report DeliveryItem linked to the failed test case, with its own collection and review lifecycle; (c) **waiver**: HILDA monitors the revised test report for `waiver_ref` presence; notifies PM when `waiver_ref` is received and updates the failed test case status accordingly (deferred: Ph-3 — revisit when resolution-path tracking workflow is in scope).
 - **DEF-18** — Per-DeliveryItem ACL on the HILDA-mediated download endpoint (FR-61 / NFR-16): restricting document downloads to PMs assigned to the DeliveryItem (or milestone) rather than any authenticated corp AD user — feasibility depends on whether the on-prem AD / SharePoint 2017 infra can supply per-item role membership at request time; deferred until infra capability is confirmed (deferred: Ph-3 — revisit when per-item access control is validated with corp infra team).
 - **DEF-19** — Automated customer feedback capture (FR-21): polling carrier tracking systems and email for customer feedback and surfacing it on the PM dashboard — TPM manually monitors the carrier portal in v1; revised documents are uploaded via FR-62 and resubmitted via FR-63 (deferred: post-v1 — revisit when carrier feedback volume justifies automation).
-- **DEF-20** — Automated `Closed` state transition and Close All Items SP action (FR-22, FR-64): DeliveryItem closure requiring explicit carrier approval detection + PM confirmation gate; `MilestoneAllClosed` rule engine trigger (FR-28 row 20) — TPM manually marks items `Closed` via FR-14 manual `delivery_state` override when satisfied with carrier acceptance; Milestone → `Complete` follows when all items are manually `Closed` (deferred: post-v1 — revisit when automated carrier-acceptance signal is in scope).
+- **DEF-20** — Automated `Closed` state transition (FR-22): carrier-acceptance signal detection + PM confirmation gate; `MilestoneAllClosed` rule engine trigger (FR-28 row 20) — TPM manually marks items `Closed` via FR-14 per-item override or FR-64 bulk Close All Items action (FR-64 promoted to Ph-1); Milestone → `Complete` follows when all items are `Closed` (deferred: Ph-3 — revisit when automated carrier-acceptance signal is in scope).
 - **DEF-21** — Fine-grain fault routing to distinct destinations (Ph-3+): routing processing faults (ZIP routing unresolved, extraction errors, classification failures) to the HILDA production support team queue vs. routing business/content decisions (doc classification ambiguous, duplicate filename, ODF timeout) directly to TPM/PM dashboard; Ph-1 and Ph-2 general rule promoted to FR-75 — all faults go to `HildaOpsAlert` regardless of type in Ph-1/Ph-2 (deferred: Ph-3 — revisit when support team triage workflow and TPM escalation path are defined).
 - **DEF-14** — Full PM self-service credential management: registration UI (OAuth2 redirect + API token + basic auth), Vault-backed AES-256 secrets store, per-request in-memory decryption boundary, Credential Service pod isolation + mTLS, OAuth2 health monitor + proactive token refresh, PM credential revocation UI, auto-association + re-association at tracker creation / PM reassignment (FR-32–FR-38 content; deferred: v2 per `[D-019]` — v1 uses ops-provisioned K8s Secrets via FR-51; revisit: when PMs need to self-register credentials without ops involvement).
 
@@ -322,7 +322,7 @@ These are PM/TPM-initiated milestone-level actions that call HILDA directly, byp
 |--------|-------------|------------------|-----------------|----|---------|
 | **Start Collection** | Milestone has not yet been kicked off | Create PLM issues per (owner × milestone) (idempotent); `SendInitialOutreach` for all open items per FR-9 | All open items: `Open` → `OutreachSent` | Ph-1 | FR-8, FR-9, FR-56 |
 | **Submit to Carrier** | All items = `ReadyForSubmission` or `SubmittedToCustomer`; ≥1 item = `ReadyForSubmission` | Assemble delta package from `ReadyForSubmission` items only (FR-18); NFR-5 gate with delta summary; dispatch per customer delivery modality | `ReadyForSubmission` items → `SubmittedToCustomer`; `SubmittedToCustomer` items unchanged | Ph-1 | FR-18, FR-63, NFR-5 |
-| ~~**Close All Items**~~ | *(deferred: DEF-20)* | *(deferred with FR-22/FR-64 — TPM uses FR-14 manual override instead)* | *(deferred)* | ~~Ph-1~~ | FR-22, FR-64 |
+| **Close All Items** | All items `SubmittedToCustomer` or `Closed`; ≥1 item `SubmittedToCustomer` | Set all `SubmittedToCustomer` items to `Closed`; log `CommunicationLog action_type: bulk_close` with PM/TPM attribution | `SubmittedToCustomer` items → `Closed`; already `Closed` items unchanged | Ph-1 | FR-64 |
 
 ### A.3 Delivery state machine
 
@@ -363,7 +363,7 @@ Delayed / Blocked ──[PM or owner reversal]──► (prior active state)
 
 UnderPMReview ──[PMApproval — TPM approves in SP UI]─────────────► ReadyForSubmission   [Ph-1]
 ReadyForSubmission ──[Submit to Carrier (FR-63)]─────────────────► SubmittedToCustomer  [Ph-1]
-SubmittedToCustomer ──[FR-14 manual PM/TPM override]─────────────► Closed               (automated FR-64 deferred: DEF-20)
+SubmittedToCustomer ──[FR-14 per-item or FR-64 bulk manual override]► Closed               (automated FR-22 deferred: DEF-20)
 ```
 
 **Guards:**
@@ -372,7 +372,7 @@ SubmittedToCustomer ──[FR-14 manual PM/TPM override]────────
 - `CustomerJIRA` items: reach `OwnerClosed` via HILDA detecting JIRA closure; no owner message required; transient fork applies normally.
 - `Delayed` and `Blocked` are transient overlay states — the item re-enters its prior active state when the PM or owner reverses.
 - `AIReviewResult` does **not** produce a state transition — it updates `llm_review_findings` in the document index and notifies the PM, satisfying the `OwnerClosed` guard condition (2) when all revisions are reviewed.
-- `Closed` is reachable via FR-14 manual PM/TPM `delivery_state` override only; automated transition via FR-64/FR-22 is deferred (DEF-20); Milestone → `Complete` when all items are manually `Closed`.
+- `Closed` is reachable via FR-14 manual per-item `delivery_state` override or FR-64 bulk Close All Items action; automated transition via FR-22 is deferred (DEF-20); Milestone → `Complete` when all items are `Closed`.
 
 ---
 
@@ -460,9 +460,9 @@ FRs that span both phases appear in both sections with the column **"In-phase sc
 | **FR-18** | Submission package assembly and dispatch | Assembly source = NSD `rev1/` (Ph-1 single revision); download to HILDA PC; apply `file_overwrite_policy` from FR-69 at carrier upload (`overwrite` uses `original_filename`; `rename` applies `revision_file_suffix_pattern`); dispatch per customer delivery modality |
 | **FR-19** | Customer adapter surface | `{submitItem, getStatus, postComment, uploadAttachment}`; PM credential authentication |
 | **FR-20** | Credential-expired submission queue | Block and queue submission; PM dashboard alert on credential missing/expired |
-| ~~**FR-22**~~ | ~~`Closed` state transition~~ | *(deferred: DEF-20 — TPM manually closes items via FR-14)* |
+| ~~**FR-22**~~ | ~~Automated `Closed` state transition~~ | *(deferred: DEF-20 — TPM manually closes items via FR-14 per-item or FR-64 bulk action; automated carrier-acceptance signal deferred Ph-3)* |
 | **FR-63** | Submit to Carrier SP action | Milestone-scoped; enabled when all items = `ReadyForSubmission` or `SubmittedToCustomer` and ≥1 item = `ReadyForSubmission`; NFR-5 gate with delta summary for re-submissions; only `ReadyForSubmission` items assembled and dispatched via FR-18; → `SubmittedToCustomer`; `CommunicationLog action_type: submission \| resubmission` |
-| ~~**FR-64**~~ | ~~Close All Items SP action~~ | *(deferred: DEF-20 — deferred with FR-22)* |
+| **FR-64** | Close All Items SP action | Milestone-scoped bulk close; enabled when all items `SubmittedToCustomer` or `Closed` with ≥1 `SubmittedToCustomer`; sets all `SubmittedToCustomer` items to `Closed`; `CommunicationLog action_type: bulk_close`; automated FR-22 transition remains deferred (DEF-20) |
 | **FR-70** | Per-item `item_completion_pct` | Computed from reviewed-revision count / total-revision count × 100; persisted on DeliveryItem SharePoint List row |
 | **FR-74** | Collection phase closure | Milestone-level closure threshold: all items in {ReadyForSubmission, SubmittedToCustomer, Closed}; Blocked/Delayed keep polling active; final sweep (NSD, PLM, Email) before halt; FR-26/FR-55/FR-25 polling stops; post-closure inbound silently ignored; CommunicationLog audit; closure permanent — SP UI only after threshold |
 | **FR-75** | Fault routing principle | PM-triggered actions: result surfaced in SP UI + logged to `HildaOpsAlert`; background faults: `HildaOpsAlert` only, no PM notification; single queue Ph-1/Ph-2 — fine-grain routing deferred: DEF-21 |
