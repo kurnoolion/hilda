@@ -96,7 +96,7 @@ Source provenance for the v1 set:
 
 ### Communication adapters — Email Service
 
-- **FR-23** `[Ph-1]` — Email Service owns a dedicated mailbox, polls inbound 24/7 (or accepts push notifications from the mail server), and emits outbound on behalf of PMs with the PM's name in the signature and a stable From address.
+- **FR-23** `[Ph-1]` — Email Service owns a dedicated mailbox, polls inbound 24/7 (or accepts push notifications from the mail server), and emits outbound on behalf of PMs with the PM's name in the signature and a stable From address; when polling (no push), the poll interval is governed by the same deadline-tiered `polling_schedule` AutomationRule used by FR-26 (PLM) and FR-55 (NSD) — `{days_before_deadline, interval_minutes}` breakpoints evaluated against `days_to_deadline` across all active items in the milestone; the effective interval is the shortest tier applicable across any active item in the milestone at that moment; example: baseline 60 min, ≤ 3 days → 15 min, ≤ 1 day → 5 min; push notification (IMAP IDLE or mail server webhook) overrides polling when available and delivers within seconds regardless of tier.
 - **FR-24** `[Ph-1]` — Outbound email subject lines embed the structured reference tag (device, PM, milestone, deliverable, item); the Email Service parses the same tag from inbound replies for routing and captures the sender email address alongside the tag for attribution and anomaly detection per FR-12.
 
 ### Communication adapters — IssueTracker (internal)
@@ -184,7 +184,10 @@ Source provenance for the v1 set:
 
 ### Latency & reliability
 
-- **NFR-9** — DeliveryItem state changes propagate from owner reply to PM dashboard in under 60 seconds end-to-end (webhook preferred; polling fallback ≤ 30 s).
+- **NFR-9** — DeliveryItem state changes propagate from owner action to PM dashboard within one poll interval + processing time; webhook / push is preferred and delivers within 60 s; for polled channels (Email FR-23, PLM FR-26, NSD FR-55), propagation latency equals the effective deadline-tiered `polling_schedule` interval at the time of the action — far from deadline the interval is longer (acceptable; no active submission pressure); near the deadline (≤ 1 day tier) the interval is 5–15 min target; the 60 s guarantee applies only to webhook/push-delivered events. **Architecture design notes — must address during architecture phase:**
+  1. **Async LLM tasks** — FR-52 tier-2, FR-12 path(c), FR-53, FR-54 must execute as Celery background tasks and must never block a state-change event; the state transition (DocumentReceived, OwnerStatusConfirmed) fires and propagates within the polling-interval SLA; the LLM result (AIReviewResult) arrives as a subsequent async event and updates the PM dashboard independently; architecture must enforce this decoupling at the task-dispatch boundary.
+  2. **Submission assembly progress** — FR-18 package assembly (NSD download + carrier upload) is minutes-scale for large milestones, not sub-60 s; SP UI must show immediate "in progress" feedback on Submit to Carrier click; progress granularity = per-file (`files_done / total_files × 100`, split across download phase and upload phase); progress state written to Redis by the Celery task; HILDA API exposes `GET /milestone/{id}/submission/progress`; SP web part polls at 5 s intervals until completion; individual document downloads (FR-61) stream directly from NSD with `Content-Length` set — browser handles per-file progress natively; bulk document download (Ph-2+) uses async ZIP assembly + dashboard notification with one-time download link.
+  3. **Polling channel latency** — Email (FR-23), PLM (FR-26), NSD (FR-55) share a single `polling_schedule` AutomationRule; the effective interval for a milestone is the shortest tier applicable across any of its active items; polling ceases per FR-74 collection phase closure; propagation latency from owner action to PM dashboard is bounded by the effective tier interval — not a flat fixed value.
 - **NFR-10** — Email Service polls or receives 24/7; transient external failures use exponential backoff and never fail silently — every failure produces a registered error code per `[D-002]`.
 - **NFR-11** — When a PM credential is expired or missing, the dependent automation step is queued (not lost) and the PM is alerted via the dashboard and an out-of-band channel.
 
@@ -525,7 +528,7 @@ NFRs are architectural invariants active from Phase 1 onward. None are phase-gat
 | **NFR-6** | PM accountability | Every external action attributable to a specific PM; `CommunicationLog` append-only |
 | **NFR-7** | SharePoint | Deployment-specific SP values in `customizations/sharepoint_config/` only; none in `core/` |
 | **NFR-8** | SharePoint | SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SP 2017; List CRUD + classic web parts only |
-| **NFR-9** | Latency | State changes propagate to PM dashboard in < 60 s end-to-end |
+| **NFR-9** | Latency | Webhook/push: < 60 s; polled channels: within deadline-tiered poll interval (baseline configurable; ≤1-day tier: 5–15 min target); LLM tasks async (never block state transition); submission assembly progress tracked per-file via Redis |
 | **NFR-10** | Reliability | Email Service polls 24/7; transient failures use exponential backoff; no silent failures |
 | **NFR-11** | Reliability | Expired / missing PM credential → step queued (not lost) + PM alerted |
 | **NFR-12** | Adapter / build boundary | Dev LLM has no access to proprietary API specs, template schemas, or historical test reports |
