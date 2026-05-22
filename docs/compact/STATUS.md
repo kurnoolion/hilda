@@ -2,7 +2,7 @@
 
 **Active phase**: requirements
 **Last updated**: 2026-05-13
-**Last drift-check**: 2026-05-14 — mode: requirements — 3 drifts resolved, 2 skipped → FLAGS, 1 deferred surfaced
+**Last drift-check**: 2026-05-22 — mode: requirements — 3 drifts resolved, 0 skipped, 4 deferred surfaced (all already tracked)
 
 ## Done
 
