@@ -180,7 +180,7 @@ Source provenance for the v1 set:
 ### SharePoint constraint
 
 - **NFR-7** — SharePoint deployment-specific values (site URLs, list internal names, lookup field IDs, library paths) live exclusively in `customizations/sharepoint_config/` and are loaded at startup; `core/` contains no hard-coded SharePoint instance values (anchors `[D-004]`).
-- **NFR-8** — SharePoint integration uses the SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SharePoint 2017; integration scope is List CRUD + classic web parts only — binary owner deliverables are stored in corp PLM per FR-13; HILDA-generated internal artifacts are stored on the shared network drive `outbound/` per FR-13; neither is stored in SharePoint Document Libraries (anchors `[D-006]`).
+- **NFR-8** — SharePoint integration uses the SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SharePoint 2017; integration scope is List CRUD + classic web parts only — binary owner deliverables are stored in the HILDA NSD internal tree (`\\share\hilda\internal\...`) as source of truth for in-progress work (FR-13, `[D-040]`, `[D-041]`); PLM receives copies per phase: Ph-1 immediate upload for Email and NSD ingest sources; Ph-2 deferred until post-dispatch via FR-68; CorporatePLM-sourced documents are already in PLM and are never re-uploaded; PLM is source of truth for submitted deliverables only (post-dispatch); HILDA-generated internal artifacts (QC reports, diagnostics) are stored on the shared network drive `outbound/` per FR-13; neither owner deliverables nor HILDA-generated artifacts are stored in SharePoint Document Libraries (anchors `[D-006]`).
 
 ### Latency & reliability
 
