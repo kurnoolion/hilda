@@ -429,6 +429,18 @@ Document index fields: `file_hash` (SHA-256 hex digest) and `first_page_excerpt`
 
 ---
 
+## D-043: Message broker — Redis (Ph-1/Ph-2) → RabbitMQ + Rook/Ceph + MetalLB (Ph-3)
+**Status**: Active · **Date**: 2026-05-22
+**Decision**: Ph-1 and Ph-2 use **Redis as the Celery broker** in addition to its cache/dedup role (per `[D-022]`). Ph-3 MicroK8s migration replaces Redis as broker with **RabbitMQ Quorum Queues** deployed via the RabbitMQ Cluster Operator. Redis is retained in Ph-3 as cache-only. Rook/Ceph RBD PVCs provide durable block storage per RabbitMQ node. MetalLB provides the `LoadBalancer` VIP for external access on bare metal; internal cluster traffic remains `ClusterIP`.
+**Why Redis for Ph-1/Ph-2**: Single bare-metal PC, Docker Compose, low task throughput. Redis is already in the stack (per `[D-022]`); marginal cost as broker is zero. No need for HA broker guarantees at single-machine scale.
+**Why RabbitMQ for Ph-3**: In an HA multi-node K8s cluster, RabbitMQ Quorum Queues use Raft consensus — a message is acknowledged only after a majority of nodes confirm the write; in-flight messages survive node failure. Redis broker uses async replication; messages in-flight during a failover can be lost. RabbitMQ Cluster Operator on K8s is the official, mature HA path. Rook/Ceph gives each RabbitMQ node durable storage that survives pod eviction and node loss. MetalLB is required for `LoadBalancer` service type on bare metal (no cloud provider).
+**Celery result backend**: Postgres in both phases — unchanged from `[D-022]`; Redis is not used as result backend.
+**Temporal**: Deferred to Ph-3+ per `[D-022]`; if Temporal is adopted, RabbitMQ + Temporal Workers may replace Celery + hilda-beat for durable orchestration — to be evaluated at Ph-3 architecture.
+**Migration path Ph-2 → Ph-3**: Change `HILDA_CELERY_BROKER_URL` from `redis://...` to `amqp://...`; no Python code change required (Celery broker is URL-selected); deploy RabbitMQ Operator + cluster; decommission Redis broker role.
+**Anchors**: `[D-022]`, `[D-026]`, NFR-15.
+
+---
+
 ## D-038: v1 secrets encryption at rest — sops with age keys
 **Status**: Active · **Date**: 2026-05-13
 **Decision**: v1 `.env` files containing PM credentials and service secrets are encrypted at rest using `sops` with `age` as the key provider. The age private key lives at `/etc/hilda/age.key` on the host (`chmod 400`, owned by the HILDA service user). Encrypted `.env` files may be stored in the repo — no plaintext secrets committed. The credential service decrypts at container startup into process memory via `sops --decrypt`. No Vault dependency in v1. mTLS for service-to-service communication remains a v2 K8s target per `[D-021]` / `[D-026]`.
