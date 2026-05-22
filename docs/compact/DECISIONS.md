@@ -419,6 +419,16 @@ Document index fields: `file_hash` (SHA-256 hex digest) and `first_page_excerpt`
 
 ---
 
+## D-042: Customer template storage and TPM authoring path — OPEN design question
+**Status**: Open · **Date**: 2026-05-21
+**Question**: How are customer templates (the YAML/JSON files defining standard milestones and DeliveryItems per customer) stored, and how does a TPM create or edit one without developer involvement?
+**Context**: FR-39/FR-40 define template authoring. Two options identified during requirements review: (A) YAML files under `customizations/template_schemas/<customer_slug>/` — version-controlled, ops/developer edits them, consistent with `portal_structure.yaml` pattern; TPM cannot self-edit in Ph-1/Ph-2; (B) SharePoint List — TPM edits directly via SP UI forms; not version-controlled.
+**Leaning**: Option A for Ph-1/Ph-2 — templates change infrequently (new customer or new device model); ops involvement is acceptable; TPM day-to-day adjustments go through FR-3 (add/remove items on live tracker) and FR-14 (field overrides), not template edits; DEF-11 self-service wizard (v4) is the long-term TPM authoring path.
+**Must resolve during architecture**: (1) Exact YAML schema for template files (milestones, items, tg_name groups, static field defaults, doc_count, tg_owner, default_cc_list); (2) how HILDA reads the template at tracker creation (FR-1/FR-2) — file-based loader vs SP List; (3) whether a new device model requires a new template file or parameterises an existing one; (4) ops workflow for adding a new customer template.
+**Anchors**: FR-1, FR-2, FR-39, FR-40, DEF-11.
+
+---
+
 ## D-038: v1 secrets encryption at rest — sops with age keys
 **Status**: Active · **Date**: 2026-05-13
 **Decision**: v1 `.env` files containing PM credentials and service secrets are encrypted at rest using `sops` with `age` as the key provider. The age private key lives at `/etc/hilda/age.key` on the host (`chmod 400`, owned by the HILDA service user). Encrypted `.env` files may be stored in the repo — no plaintext secrets committed. The credential service decrypts at container startup into process memory via `sops --decrypt`. No Vault dependency in v1. mTLS for service-to-service communication remains a v2 K8s target per `[D-021]` / `[D-026]`.
