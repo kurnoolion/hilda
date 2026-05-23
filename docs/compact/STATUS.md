@@ -1,7 +1,7 @@
 # Status
 
-**Active phase**: requirements
-**Last updated**: 2026-05-13
+**Active phase**: architecture
+**Last updated**: 2026-05-23
 **Last drift-check**: 2026-05-22 — mode: requirements — 3 drifts resolved, 0 skipped, 4 deferred surfaced (all already tracked)
 
 ## Done
