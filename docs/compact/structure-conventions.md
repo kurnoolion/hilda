@@ -2,45 +2,105 @@
 
 Defines the repository layout, what counts as a "module", and how Python visibility maps to `pub` / `internal` for the `regen-map` skill.
 
-Single language: **Python** (FastAPI + asyncio + Temporal Python SDK for the K8s automation services). Layout mirrors `the reference implementation` per `[D-001]` — that project is the live reference for the three-tier convention. Edit as conventions evolve.
+Single language: **Python** (FastAPI + asyncio + Celery) for the containerized HILDA services (Docker Compose Ph-1/Ph-2 per `[D-026]`; MicroK8s single-node Ph-3+ per `[D-022]` / `[D-043]`). Workflow engine is **Celery + Redis broker (Ph-1/Ph-2) / Celery + RabbitMQ Quorum Queues (Ph-3+)** per `[D-022]`; Temporal is deferred to Ph-3+ if durable multi-step orchestration becomes necessary. Layout mirrors `the reference implementation` per `[D-001]` — that project is the live reference for the three-tier convention. Edit as conventions evolve.
 
 ## Top-level layout
 
 ```
 <repo_root>/
-├── core/                              # AI-generated; manual edits exceptional [D-001]
+├── core/                                       # AI-generated; manual edits exceptional [D-001]
 │   ├── __init__.py
-│   ├── src/                           # Python source — one MODULE.md per package
+│   ├── src/                                    # Python source — one MODULE.md per package
 │   │   ├── __init__.py
 │   │   └── <module>/
 │   │       ├── __init__.py
 │   │       ├── MODULE.md
-│   │       ├── <module>_cli.py        # CLI entrypoint (when applicable)
+│   │       ├── <module>_cli.py                 # CLI entrypoint (when applicable)
 │   │       └── ...
-│   └── tests/                         # pytest suite (test_<module>.py per package)
+│   └── tests/                                  # pytest suite (test_<module>.py per package)
 │       ├── __init__.py
 │       └── test_<module>.py
-├── customizations/                    # AI-scaffolded; humans complete / edit [D-001]
+├── customizations/                             # AI-scaffolded; humans complete / edit [D-001]
 │   ├── __init__.py
-│   └── <name>/
+│   ├── sharepoint_config/                      # [D-004] / [D-020]: per-deployment SP binding
+│   │   └── <deployment>.yaml                   # site URL, list names, column internal names, web-part wiring, SP-alert subscriber address
+│   ├── template_schemas/                       # FR-39/40/41: per-customer template definitions
+│   │   └── <customer_slug>/
+│   │       ├── template.yaml                   # milestones → delivery-items hierarchy
+│   │       ├── tg_groups.yaml                  # tg_name → {tg_owner, email_group_alias, corp_id_list, default_cc_list}
+│   │       └── parser_schema.yaml              # per-customer test-report parser spec [D-011]
+│   ├── rules/                                  # FR-30: AutomationRules as YAML (3-tier resolution)
+│   │   ├── global/
+│   │   │   └── defaults.yaml
+│   │   └── <customer_slug>/
+│   │       ├── customer_rules.yaml
+│   │       └── <device_slug>/
+│   │           └── device_rules.yaml
+│   ├── test_report_parsers/                    # [D-011]: per-customer generated parsers
+│   │   └── <customer_slug>/
+│   ├── customer_adapters/                      # per-customer submission-system adapters
+│   │   └── <customer_slug>/
+│   ├── messenger/                              # [D-009] / [D-016]: proprietary messenger adapters
+│   │   └── <proprietary>_adapter.py
+│   ├── issue_tracker/                          # [D-003]: proprietary corp PLM adapter
+│   │   └── <proprietary>_adapter.py
+│   └── <other>/                                # additional scaffolded customizations
 │       ├── __init__.py
 │       ├── MODULE.md
-│       ├── tests/                     # Co-located tests
-│       │   └── __init__.py
-│       └── ...
-├── config/                            # Per-module install-time settings [D-001]
-│   ├── <module>.json                  # JSON; one file per module needing config
-│   └── README.md                      # What each file controls, who reads it
-├── sharepoint/                        # SharePoint 2017 classic web parts (non-Python)
-│   └── ...                            # Documented from src/sharepoint_integration/MODULE.md
-├── docs/compact/                      # COMPACT state files
-├── .claude/                           # COMPACT skills (when vendored)
+│       └── tests/
+├── config/                                     # Per-module install-time settings [D-001]
+│   ├── global.json                             # Cross-module settings: env name, log levels, feature flags, hilda.corp base URL, default timeouts
+│   ├── <module>.json                           # Per-module JSON; one file per module needing config
+│   └── README.md                               # What each file controls, who reads it; env-var override pattern documented here
+├── sharepoint/                                 # SharePoint 2017 classic web parts (non-Python) — owned by the SP UI engineer; see "SharePoint UI boundary" section below
+│   └── ...                                     # Documented from src/sharepoint_integration/MODULE.md
+├── deploy/                                     # Deployment artifacts (per SYSTEM.md §5 / §8)
+│   ├── compose/                                # Ph-1/Ph-2 Docker Compose
+│   │   ├── docker-compose.yaml                 # Base Compose file (all services)
+│   │   ├── docker-compose.dev.yaml             # Dev overrides (mock-sharepoint profile, debug ports)
+│   │   └── .env.example                        # Env var template (actual .env sops-encrypted per [D-038])
+│   ├── secrets/                                # sops-encrypted .env files per [D-038]
+│   │   └── <service>.env.enc
+│   ├── scripts/                                # Operational scripts
+│   │   └── deploy.sh                           # git pull → sops --decrypt → docker compose pull → up -d → alembic upgrade
+│   ├── charts/hilda/                           # Ph-3+ Helm chart placeholder per [D-024]
+│   │   └── README.md                           # Placeholder in Ph-1/Ph-2; populated when migrating to MicroK8s
+│   ├── grafana/dashboards/                     # Dashboards-as-code per [D-023]
+│   ├── prometheus/alerts/                      # Alerts-as-code per [D-023]
+│   └── Dockerfile                              # Single HILDA image (all 4 hilda-* services share it)
+├── docs/compact/                               # COMPACT state files
+├── .claude/                                    # COMPACT skills (when vendored)
 ├── CLAUDE.md  README.md  CONTRIBUTING.md
 ├── requirements.txt
+├── pyproject.toml                              # If used for tooling / poetry / build config
 └── (operational scripts and metadata)
 ```
 
 Note: the SharePoint version is frozen at 2017 (vanilla List views + classic web parts). Pure SharePoint web-part code (XSLT / JavaScript / classic web part assemblies) lives outside `core/` under `sharepoint/`. The Python-side server adapter that talks to SharePoint lives at `core/src/sharepoint_integration/` and documents the `sharepoint/` surface from its own MODULE.md.
+
+### SharePoint UI boundary — who develops what
+
+HILDA spans two distinct codebases with two distinct owners and two distinct deployment paths. They share this repo but never share Python imports:
+
+| Component | Location | Owner | Deployed where, how |
+|---|---|---|---|
+| **SharePoint 2017 web parts** — XSLT, classic web part assemblies, JavaScript that runs in the PM/TPM browser and calls SP REST API; button-click handlers that modify SP list fields to trigger SP alerts | `sharepoint/` (root) | **SP UI engineer** | Corp SharePoint server, via SP-side mechanism (PowerShell / SP Solution Package / manual upload). Independent of HILDA's Docker deploy. |
+| **HILDA Python adapter** — code that consumes SP data via REST API (HILDA → SP outbound + Kerberos), parses inbound SP-alert emails per SYSTEM.md §3.1, writes results back to SP lists | `core/src/sharepoint_integration/` | **HILDA team / dev LLM** | HILDA PC (lab subnet) inside `hilda-api` and `hilda-worker` containers. Docker Compose Ph-1/Ph-2 → MicroK8s Ph-3+. |
+| **Mock SP harness** — local fake SP server for HILDA pytest / dev runs; never serves real PMs | `mock-sharepoint` Docker service (dev profile per SYSTEM.md §5) | **HILDA team** | Dev machine / lab subnet only — never deployed to corp net or prod |
+| **Per-deployment SP binding** — site URLs, list internal names, column internal names, lookup field IDs, SP-alert subscriber config | `customizations/sharepoint_config/<deployment>.yaml` | Ops / SP UI engineer at deployment time | Bind-mounted into HILDA containers per `[D-025]` |
+
+**Shared contract between the two sides:**
+1. The SP list/column schema generated from canonical Pydantic models per `[D-046]` — SP UI engineer reads it (knows what columns are available); HILDA writes to it.
+2. The SP alert email format (see SYSTEM.md §3.1) — SP UI engineer's button-click handlers modify list fields that trigger alerts; HILDA's `sp_alert_parser` sub-module in `core/src/email_service/` parses the resulting emails.
+
+**Flow during development:**
+1. SP UI engineer prototypes a new button + list field on corp SP
+2. They send a sample alert email to the HILDA team (this is the loop that produced the format we used for SYSTEM.md §3.1)
+3. HILDA team designs the Python-side parser + Celery task in `core/src/`
+4. Mock SP harness lets HILDA pytest validate the parser on synthetic emails
+5. SP UI engineer deploys the production web parts to corp SP; HILDA team deploys the Python services to HILDA PC; the loop closes in production
+
+**The HILDA dev LLM does NOT write `sharepoint/` web-part code.** XSLT / classic web part development is the SP UI engineer's domain — they have access to the corp SP environment, which the dev LLM cannot reach per `[D-002]` chat-mediated boundary.
 
 ## Module definition
 
@@ -68,12 +128,12 @@ When a module's `__init__.py` is empty, the public surface is the union of un-un
 
 Durable contracts that span the core/customizations boundary are expressed as `typing.Protocol` (structural typing) defined in `core/`. Implementations live in dedicated modules and clients import the Protocol, not the implementation. Concrete Protocols for HILDA (refined during architecture as each module is drafted):
 
-- `IssueTracker` `[D-003]` — intermediate primitives: `open_issue`, `close_issue`, `add_comment`, `upload_file`, etc. Implementations: `JiraAdapter` under `core/src/issue_tracker/jira_adapter.py` (public spec); proprietary internal adapters under `customizations/issue_tracker/` (generated by the API Spec Ingestor).
-- `Messenger` `[D-003]` — intermediate primitives: `send_message`, `receive_message_as_rest`, etc. Implementations under `core/src/messenger/` for any public reference (TBD: Slack / Teams or none in v1) and `customizations/messenger/` for proprietary internal messengers (generated by the Ingestor).
-- `SharePointBackend` / SharePoint config schema `[D-004]` — typed config (Pydantic) defined in `core/src/sharepoint_integration/`; deployment-specific values (site URLs, list internal names, lookup field IDs, document library paths, web-part wiring) supplied from `customizations/sharepoint_config/`.
+- `IssueTracker` `[D-008]` — intermediate primitives: `open_issue`, `close_issue`, `add_comment`, `upload_file`, etc. Implementations: customer Jira adapter under `core/src/issue_tracker/jira_adapter.py` (public REST spec; outbound polling per FR-25); proprietary corp PLM adapter under `customizations/issue_tracker/` (generated by the API Spec Ingestor per `[D-003]`; **HILDA calls via `corp_plm_gateway` on the PLM gateway PC** per SYSTEM.md §3 — not directly to corp PLM).
+- `Messenger` `[D-009]` — intermediate primitives: `send_message`, `receive_message_as_rest`, etc. Implementations: Slack adapter under `core/src/messenger/slack_adapter.py` (`slack_sdk`); proprietary internal messenger adapter under `customizations/messenger/<proprietary>_adapter.py` (generated by the Ingestor per `[D-016]`; **HILDA calls via `corp_messenger_gateway` on the reverse-proxy PC** per SYSTEM.md §3 — not directly to corp messenger).
+- `SharePointBackend` / SharePoint config schema `[D-004]` — typed config (Pydantic) defined in `core/src/sharepoint_integration/`; deployment-specific values (site URLs, list internal names, lookup field IDs, web-part wiring, SP-alert subscriber address and change-trigger settings per SYSTEM.md §3.1) supplied from `customizations/sharepoint_config/<deployment>.yaml`. Note: document storage is **not** SP config — all artifacts live on NSD per `[D-013]` / `[D-041]`; NSD configuration surface is owned by `core/src/storage/` or a dedicated NSD-client module (architecture-phase decision).
 - `CustomerAdapter` — per-customer external-system adapter (`submit_item`, `get_status`, `post_comment`, `upload_attachment`). Implementations under `core/src/customer_adapters/` (Jira, generic email, our file storage) and `customizations/customer_adapters/` for sensitive per-customer connectors.
 - `LLMProvider` — abstracts the runtime LLM Gateway client; implementations under `core/src/llm/` for default providers (corp-proxied or on-prem) and `customizations/llm/` for any proprietary or per-deployment provider. **Distinct** from the on-prem code-generation LLM consumed by the API Spec Ingestor (`core/src/api_spec_ingestor/`); that one has its own configuration surface and is invoked off the runtime path.
-- `CredentialBackend` — abstracts the secrets store (`Vault`, `K8s Sealed Secrets`, etc.); a stable interface lets the deployment swap backends without touching call sites.
+- `CredentialBackend` — abstracts the secrets store: **sops-encrypted env files** with age keys (Ph-1/Ph-2 per `[D-019]` v1 / `[D-038]`); **HashiCorp Vault** (Ph-3+ per `[D-019]` v2). A stable interface lets the deployment swap backends without touching call sites. Ph-1/Ph-2 holds a shared HILDA ops-team credential set per customer system (not per-PM); Ph-3+ adds per-PM credential blobs in Vault per DEF-14.
 - `TrackingChannel` — abstracts the inbound/outbound communication adapters (Email, Messenger, Issue Tracker) so the rule engine treats them uniformly. May reduce to a thin façade over `Messenger` and `IssueTracker` plus a separate Email adapter — confirmed during architecture.
 
 Changing a Protocol signature is a hard-flag event — log a `D-XXX` entry and switch back to architecture phase before implementing.
@@ -88,7 +148,8 @@ Many proprietary APIs HILDA integrates with — internal issue trackers, interna
 - **Streaming uploads.** `AttachmentInput` accepts `Path | AsyncIterable[bytes]`. Adapters consuming `AsyncIterable[bytes]` from inside a sync wrapper bridge via a shared `queue.Queue` — async producer puts, sync consumer reads — or use a small async-to-sync adapter pattern that buffers.
 - **Progress reporting from sync to async.** When a long sync operation needs to surface progress (e.g., for a CLI `--diagnostic` output), the wrapping thread writes to a `queue.Queue` (sync-safe) that an async pump task drains. Only required for operations exceeding ~10s; shorter ones report on completion only.
 - **No global mutable state in adapters.** Adapters are constructed with their config + thread pool and operate as instance state only. Module-level singletons that hide a thread pool are forbidden.
-- **UI-blocking is never an issue at the adapter layer.** All long-running adapter calls go through Temporal workflows; the UI awaits workflow completion via SharePoint List status updates, not direct adapter calls. Direct UI invocation is limited to fast operations (`get_issue`, `get_message`) or fast `--mock` mode for harness tests.
+- **Two-stage IO for corp-system adapters (corp messenger, corp PLM).** Per SYSTEM.md §3, the HILDA-side adapter is a thin sync HTTP client of a HILDA-team-owned gateway app running on a corp-net intake PC (`corp_messenger_gateway` on the reverse-proxy PC; `corp_plm_gateway` on the PLM gateway PC). The gateway app is the actual sync client of the corp system (corp Slack / corp PLM). From HILDA's adapter perspective, the call is one sync HTTP request wrapped in `asyncio.to_thread`; the gateway app absorbs the latency of talking to the corp system. **`timeout_s` must be honored on the gateway side too** — the gateway app either propagates the timeout to its backend call or enforces it locally and returns a structured HTTP 504 + error code to HILDA. For inbound (corp system → HILDA), the gateway app POSTs to `hilda-api`'s receive endpoint (`/webhooks/messenger`, `/webhooks/plm`) over the lab subnet; `hilda-api` validates source IP and dispatches into the relevant module. Customer JIRA (`FR-25`) is the exception — polling-based outbound from HILDA only, no gateway PC; runs in `asyncio.to_thread`.
+- **UI-blocking is never an issue at the adapter layer.** All long-running adapter calls go through **Celery tasks** per `[D-022]`; the SP UI awaits task completion by polling SP list fields that HILDA writes back to as the task progresses (per SYSTEM.md §3.1 — corp browser → SP REST polling pattern). Direct UI invocation (via the IT-admin's reverse proxy → `hilda-api`) is limited to fast operations (`get_issue`, `get_message`, document-download token resolution per FR-61) or fast `--mock` mode for harness tests.
 
 ### Ingestor / Profiler pattern — proprietary inputs to on-prem code generation
 
@@ -102,6 +163,8 @@ HILDA has **three Ingestor / Profiler modules**, all following the same pattern:
 
 **Hard invariant**: the dev LLM never reads proprietary API specs `[D-003]`, proprietary customer-template schemas `[D-010]`, or proprietary historical test reports `[D-011]`; never sees their content via tool calls; and does not request, summarize, or paraphrase their structure. It interacts only with: the public meta-schemas and intermediate Protocols defined in `core/`; the Ingestors' / Profiler's compact diagnostic output; and the generated artifacts already committed under `customizations/`. Captured as a phase-prompt invariant in `phases/development.md`.
 
+**Placeholder convention for proprietary identifiers in `customizations/` scaffolds**: when Claude writes a scaffold under `customizations/` that needs to reference a proprietary external system, customer, device, or person, the proprietary identifier never appears in the scaffold itself. Stable placeholders `<SYS0>`, `<CUST0>`, `<DEV0>`, `<TG0>`, `<PERSON0>`, `<URL0>` (numbered per-file) are used instead, with a placeholder registry comment block at the top of each scaffold mapping each placeholder to a non-proprietary slug. Real values flow in at runtime via env vars / sops-encrypted `.env` files per `[D-038]` / customer YAML. Full convention in `cline-playbooks/placeholder-convention.md` — anchored by `[D-002]` and `[D-027]`.
+
 ## Cross-tier dependency rules
 
 **Reference-imported from the reference implementation (subject to ratification via a dedicated DECISIONS entry during architecture).** `core/` and `customizations/` may import each other freely. Real dep flow is bidirectional: core defines Protocols that customizations implement; customizations expose data (e.g., per-customer templates, AutomationRules) that core's rule engine and adapters consume. Commits don't mark AI vs. human authorship — directory implies it. Manual edits to core are exceptional, not forbidden.
@@ -110,9 +173,14 @@ HILDA has **three Ingestor / Profiler modules**, all following the same pattern:
 
 ## Config format
 
-**Reference-imported from the reference implementation (subject to ratification via a dedicated DECISIONS entry during architecture).** One JSON file per module under `config/<module>.json` for install-time deploy settings (default endpoints, model names, timeouts, host/port bindings). Modules read only their own config file. New module config = new file under `config/`.
+**Reference-imported from the reference implementation (subject to ratification via a dedicated DECISIONS entry during architecture).** Two tiers under `config/`:
 
-**Runtime data is not config.** AutomationRules, customer templates, AI checklists, and PM credentials are runtime data managed by PM team leads / PMs / Vault — they live in SharePoint (or Vault for credentials), not in `config/`. Repo-side YAML seed/fixture forms for these (when present, e.g., for tests or initial provisioning) live alongside the relevant module under `core/src/<module>/fixtures/` or `customizations/<name>/fixtures/`, not under `config/`.
+- **`config/global.json`** — cross-module install-time settings: env name (`dev` / `test` / `prod`), log level defaults, feature flags, `hilda.corp` base URL, default timeouts, shared file-path roots. Read by any module that needs cross-cutting context.
+- **`config/<module>.json`** — per-module install-time settings (default endpoints, model names, module-specific timeouts, host/port bindings). One file per module needing config. Modules read their own config file plus `global.json`. New module config = new file under `config/`.
+
+**Env-var override pattern.** Both `global.json` and per-module configs follow the 3-tier precedence already implemented in `sharepoint_integration` via `from_sources()`: **CLI overrides > env vars > config file > defaults**. Env var naming is `HILDA_<MODULE>_<KEY>` (e.g., `HILDA_SHAREPOINT_SITE_URL`, `HILDA_LLM_API_KEY`). This lets sops-encrypted `.env` files per `[D-038]` override JSON defaults at deploy time without rebuilding the image. Per-environment values come from env vars, **not** from environment-nested directories under `config/`.
+
+**Runtime data is not config.** Customer templates (`customizations/template_schemas/`), AutomationRules (`customizations/rules/`), AI checklists, and PM credentials are **runtime / domain data** managed by PM team leads / PMs / sops or Vault. They live under `customizations/` (templates and rules) or in the secrets backend (credentials), not in `config/`. Repo-side YAML seed/fixture forms for tests live alongside the relevant module under `core/src/<module>/fixtures/` or `customizations/<name>/fixtures/`, not under `config/`.
 
 ## Description source
 

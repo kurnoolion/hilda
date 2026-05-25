@@ -29,6 +29,7 @@ Cline reads the playbook and executes the steps.
 | [`develop-issue-tracker-adapter.md`](develop-issue-tracker-adapter.md) | Verify IssueTracker adapter scaffold: import check → unit tests → CLI contract (C01–C10) | `ITR-RPT` report (~8–12 lines) |
 | [`debug-pipeline.md`](debug-pipeline.md) | Run one or more HILDA processing stages; capture stats | `PIPE-RPT` report (~15–25 lines) |
 | [`share-back.md`](share-back.md) | Bundle multiple reports for one typing trip into Teacher LLM | `BUNDLE` report (≤40 lines) |
+| [`placeholder-convention.md`](placeholder-convention.md) | Reference document — placeholder convention for proprietary identifiers in `customizations/` scaffolds (`<SYS0>`, `<CUST0>`, `<URL0>`, etc.). Not a playbook to invoke; read on demand when reviewing scaffolds or producing compact reports. | — (reference doc) |
 
 ## Workflow loop
 
