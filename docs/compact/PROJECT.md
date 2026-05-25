@@ -6,50 +6,91 @@
 
 **Problem**: PMs managing connected-device certification programs juggle deliverables across multiple customers, each with a unique process — tracking status manually in Excel, chasing R&D owners via email and messenger, reviewing test reports and waivers, and submitting packages by logging into each customer's system individually. No shared structure exists across customers; every device starts from scratch; context is scattered across email threads, messenger channels, and multiple issue trackers. The result: high PM toil, slow turnaround, inconsistent quality, and no scalability to new customers or new PMs without proportional headcount growth (§1, §2 `HILDA_Design.md`).
 
-**Users**: Primary — PMs / Technical Project Managers (TPMs) managing connected-device certification programs; they are the daily users of the dashboard, approval gates, and manual overrides. Secondary — PM team leads (author and maintain customer templates, AutomationRules, and AI checklists). Indirect — R&D delivery owners (reply via email, messenger, or internal issue tracker; no DeliverableHub UI); customers (external, interact only via their own systems; customer adapters ingest their feedback); platform / infra / security ops (deploy and maintain K8s cluster, Vault, and SharePoint infrastructure).
+**Users**: Primary — PMs / Technical Project Managers (TPMs) managing connected-device certification programs; they are the daily users of the dashboard, approval gates, and manual overrides. Secondary — PM team leads (author and maintain customer templates, AutomationRules, and AI checklists). Indirect — R&D delivery owners (reply via email, messenger, or internal issue tracker; no DeliverableHub UI); customers (external, interact only via their own systems; customer adapters ingest their feedback); platform / infra / security ops (Ph-1/Ph-2: deploy and maintain the Docker Compose stack on bare-metal Linux PC, sops-encrypted secrets, SharePoint integration; Ph-3+: MicroK8s single-node, HashiCorp Vault, network policies, CSI drivers).
 
-**In scope for v1**:
-- **Infrastructure**: SharePoint site + all 10 Lists (§3.4 data model), Docker Compose on single bare-metal Linux PC per `[D-026]`, CI/CD pipeline, PostgreSQL, Redis; K8s namespace + Helm charts deferred to v2 per `[D-026]`; HashiCorp Vault deferred to v2 per `[D-019]`.
-- **Credential Service (v1 — simplified)**: host env-file-backed credential store provisioned by ops at deploy time (`.env` files on bare-metal per `[D-026]`; same env var names become K8s Secrets in v2 per `[D-019]`); exposes `get_credential(pm_id, system_type)` to all adapters; no PM registration UI, no Vault integration, no OAuth2 refresh in v1 — full PM self-service deferred to v2 per `[D-019]`.
-- **Customer template + device tracker creation**: SharePoint-based UI (from template / Excel import / manual entry); two-path template authoring — SharePoint UI + Excel upload, TPM-selectable per `[D-014]`; Template Schema Ingestor generating per-customer schemas per `[D-010]`.
-- **Email Service**: dedicated mailbox; BATCH-id multi-item outbound; three-path inbound routing (structured reply block / `mailto:` tap-links / PM triage) per `[D-012]`.
-- **Shared network drive**: `hilda-svc` writes, HILDA-mediated reads via dashboard download endpoint, per `[D-013]`; covers all artifact storage (test reports, tech reports, waivers, submission packages).
+**In scope by phase** — see `requirements.md` for the canonical `[Ph-N]` tags per FR/NFR; this section is a narrative roll-up.
+
+**Ph-1 — Single-customer foundation:**
+- **Infrastructure**: SharePoint site + all SharePoint Lists per the data model (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog — no Deliverables table per `[D-028]`); Docker Compose on single bare-metal Linux PC per `[D-026]` — 6 containers (`hilda-api`, `hilda-worker`, `hilda-beat`, `hilda-llm-gateway`, `postgres`, `redis`) per NFR-15; YAML files in `customizations/` bind-mounted per `[D-025]`; sops-encrypted secrets per `[D-038]` / `[D-019]` v1.
+- **Credential Service (Ph-1 — simplified)**: shared HILDA ops-team credential set per customer system, provisioned by ops via sops-encrypted `.env` files per `[D-019]` v1 / `[D-038]`; no per-PM credentials, no OAuth2 flows, no Credential Health Monitor; adapter actions appear under the shared ops-team service identity.
+- **Customer template + device tracker creation**: SharePoint UI tracker creation from template (Excel-import deferred per DEF-15); template authoring via SharePoint UI + Excel upload per `[D-014]`; Template Schema Ingestor generating per-customer schemas per `[D-010]`; templates stored as YAML under `customizations/template_schemas/<customer>/`.
+- **Email Service**: dedicated mailbox; per-owner-BATCH outbound consolidation per `[D-012]`; structured-block inbound + free-text fallback (rule-based parser → runtime LLM) per FR-12 paths (a) and (c).
+- **Shared network drive**: two-tree structure (`\\share\hilda\inbound\...` + `\\share\hilda\internal\...`) per `[D-013]` / `[D-041]`; HILDA-mediated reads via `https://hilda.corp/dl/<scoped_token>` per NFR-16; covers all artifact storage.
 - **Test Report Document Profiler**: on-prem LLM ingestion of historical proprietary test reports → per-customer deterministic parsers + `final | interim` classifier per `[D-011]`.
-- **Rule engine**: `SendReminder`, `Escalate`, `UpdateState`, `QueueSubmission`; configurable at Global / Customer / Device tier.
-- **PM Dashboard MVP**: SharePoint views + classic web parts; real-time status roll-up; manual overrides; Manual triage surface for unrouted email replies.
-- **IssueTracker adapter**: Jira (public Jira REST API) via `IssueTracker` Protocol per `[D-008]`. The Jira spec is public and hand-wireable; the API Spec Ingestor is **not** used for Jira — the Ingestor's first end-to-end exercise is the proprietary messenger adapter per `[D-016]`.
-- **Messenger adapters**: Slack (public, `slack_sdk`) + proprietary internal messenger (generated by API Spec Ingestor) via `Messenger` Protocol per `[D-009]` `[D-016]`.
-- **API Spec Ingestor**: OpenAPI 3.x canonical + on-prem LLM preprocessing pass per `[D-015]`; exercises end-to-end for proprietary messenger adapter as v1 acceptance milestone.
+- **Document review**: rule-based test-report parser per FR-16; **initial-pass LLM quality review** for test reports, tech reports, and waivers per FR-53 (originally DEF-2; promoted to Ph-1 2026-05-12) — gated by per-item `review_required`.
+- **Rule engine**: `SendReminder`, `Escalate`, `UpdateState`, `TriggerParser`, `TriggerLLMReview`, `QueueSubmission`, `PMApproval`; configurable at Global / Customer / Device tier via YAML files under `customizations/rules/` per FR-30; runtime overrides in Postgres per FR-31.
+- **PM/TPM Dashboard MVP**: SharePoint milestone view (FR-56) with document section, parser + LLM findings (FR-59/FR-60), Start Collection / Approve / Submit to Carrier / Close All Items / Send Reminder actions; manual override capabilities per FR-14.
+- **IssueTracker adapters**: **(a) Corp PLM** — proprietary adapter generated by API Spec Ingestor per `[D-003]` impl note 2026-05-14 (originally DEF-6; promoted to Ph-1) — one issue per (owner × milestone) per `[D-035]`; **(b) Customer JIRA** — public Jira REST adapter for customer-facing closure polling per FR-25 (status-only, no submission).
+- **Messenger adapters**: Slack (public, `slack_sdk`) + proprietary internal messenger (generated by API Spec Ingestor) via `Messenger` Protocol per `[D-009]` / `[D-016]`; status-only escalation channel (outbound only in Ph-1; inbound deferred to Ph-2 per FR-54).
+- **API Spec Ingestor**: OpenAPI 3.x canonical + on-prem LLM preprocessing pass per `[D-015]`; first end-to-end exercise = proprietary messenger and corp PLM adapters.
+- **First-customer submission**: customer adapter per FR-18/FR-19/FR-20; carrier `portal_structure.yaml` per FR-69; PLM-source-of-truth for submitted deliverables per `[D-040]`.
 
-**Out of scope (explicit non-goals)**:
-- LLM message classification fallback for unrouted inbound (DEF-1) — v1 routes by structured tag + PM triage only.
-- LLM tech-report and waiver quality review (DEF-2), LLM-drafted customer responses (DEF-3), LLM status summarization (DEF-4) — all Phase 2.
-- Messenger adapter full feature set / webhook secret rotation (DEF-5) — v1 ships core `send / receive / list_thread` only.
-- Proprietary internal IssueTracker adapter (DEF-6) — Ingestor exercises for messenger in v1; IssueTracker proprietary adapter is v2.
-- Customer Jira adapter as *customer-system* (DEF-7) — v1 customer submission is email + file storage only; Jira-as-internal-tracker is in scope.
-- Multi-customer scale-out: 2nd / 3rd customer onboarding (DEF-8) — v1 targets one customer end-to-end.
-- Advanced dashboard views: Kanban, cross-device matrix, charts (DEF-9).
-- Browser-automation customer adapters (DEF-10) — for customers without APIs; Phase 4.
-- Self-service customer template wizard (DEF-11), LLM feedback loop from PM corrections (DEF-12), advanced analytics (DEF-13).
+**Ph-2 — Multi-source intelligence, multi-revision, ops automation:**
+- **Multi-revision document handling** per FR-17 / `[D-039]` / `[D-040]`: revision detection across email / NSD / PLM, NSD-source-of-truth for in-progress deliverables, deferred PLM upload, post-dispatch sync verification per FR-68.
+- **Mailto: tap-link inbound** per FR-12 path (b).
+- **Corp messenger inbound** per FR-54 — runtime LLM classification, manual-triage flag.
+- **ZIP archive ingest** per FR-72; `staged/` holding for D-039 ambiguous documents.
+- **Owner self-close UI** in SP per FR-56; **version-selection workflow** for multi-revision items per FR-66.
+- **SP UI document upload** per FR-62; **PM resolution-path annotation** per FR-47.
+- **LLM quality review — PM feedback workflow** (remainder of DEF-2): tracking PM response to LLM findings, owner revision communication, multi-version re-review.
+- **Multi-customer expansion**: 2nd / 3rd customer adapters (DEF-8 partial).
+- **Excel-import flow** per FR-1(b) — revisit pending DEF-15 (Template Schema Ingestor validation).
 
-**Success criteria** (high-level; measurable thresholds become NFRs — see NFR-9 for the v1 latency SLO; quantitative baselines TBD from first production deployment):
+**Ph-3+ — Per-PM credentials, MicroK8s, CI/CD, automated downstream actions:**
+- **Orchestration upgrade**: MicroK8s single-node migration per `[D-022]` / `[D-025]` / `[D-043]` — RabbitMQ Quorum Queues replace Redis-as-broker; Rook/Ceph PVCs; MetalLB VIP; ConfigMap volumes for customizations.
+- **HashiCorp Vault** for encrypted PM credential blobs per `[D-019]` v2.
+- **Full CI/CD pipeline** per `[D-024]`: build/test pipeline, image registry, automated deployment via Helm to MicroK8s. *(Ph-1/Ph-2: basic CI runs tests on commits; deployment is manual/scripted by ops — `git pull` → `sops --decrypt` → `docker-compose pull && up -d`. `[D-024]`'s Helm-based shape applies once MicroK8s lands in Ph-3+.)*
+- **Full PM self-service credential management** per DEF-14: OAuth2 / API-token / basic-auth registration UI; per-request in-memory decryption; Credential Service pod isolation + mTLS; Credential Health Monitor with proactive token refresh; per-item `customer_delivery_credential_id` mapping; auto-association at tracker creation; PM credential revocation UI.
+- **Automated customer feedback capture** per DEF-19 (FR-21).
+- **Automated `Closed` state transition** per DEF-20 (FR-22, MilestoneAllClosed trigger).
+- **Automated resolution-path actions** per DEF-17: auto-create Tech Report DeliveryItems, monitor `waiver_ref`.
+- **Per-owner NSD inbound ACL** per DEF-16 (filesystem identity attribution).
+- **Per-DeliveryItem ACL on HILDA-mediated downloads** per DEF-18.
+- **Fine-grain fault routing** per DEF-21 (ops-team vs. TPM/PM destination split).
+- **Browser-automation adapter** per DEF-10 (customers without APIs).
+- **Advanced analytics** per DEF-13; **LLM feedback loop** per DEF-12; **AI status summarization** per DEF-4; **AI-drafted customer responses** per DEF-3.
+
+**Out of scope (explicit non-goals)** — canonical list in `requirements.md ## Deferred` with DEF-N IDs; this section is a roll-up for orientation. Items previously listed here that have since been promoted to in-scope (DEF-1, DEF-6, and the initial-review portion of DEF-2) have been removed.
+
+*Still deferred:*
+- **DEF-2 remainder** — LLM quality review **PM feedback workflow** (tracking PM responses to LLM findings, owner revision communication, multi-version re-review). The **initial one-pass LLM review** has been promoted to Ph-1 as FR-53. Revisit: Ph-2.
+- **DEF-3** — LLM-drafted customer responses (RAG-grounded, PM-approval-gated). Revisit: Ph-3+.
+- **DEF-4** — LLM natural-language status summarization. Revisit: Ph-3+.
+- **DEF-5** — Messenger adapter full feature set (complete thread management, file upload, webhook secret rotation). Ph-1 ships core `send / receive / list_thread`. Revisit: post-Ph-1 adapter acceptance.
+- **DEF-7** — Customer Jira adapter as **customer-submission system** (distinct from `CustomerJIRA` modality per FR-25, which polls customer Jira for closure status and **is** Ph-1). DEF-7 is full Jira-as-customer-submission-target. Revisit: Ph-2 customer scoping.
+- **DEF-8** — Multi-customer scale-out (2nd / 3rd customer adapters). Ph-1 targets one customer end-to-end. Revisit: Ph-2.
+- **DEF-9** — Advanced dashboard views (Kanban, cross-device matrix, charts). Revisit: Ph-2/Ph-3+.
+- **DEF-10** — Browser-automation customer adapters (Playwright / Selenium). Revisit: Ph-3+.
+- **DEF-11** — Self-service customer-template wizard. Revisit: Ph-3+.
+- **DEF-12** — LLM feedback loop learning from PM corrections. Revisit: Ph-3+.
+- **DEF-13** — Advanced analytics (cycle time, customer SLAs, R&D performance). Revisit: Ph-3+.
+- **DEF-14** — Full PM self-service credential management (registration UI, Vault-backed AES-256, mTLS, OAuth2 health monitor, revocation UI, auto-association at tracker creation / PM reassignment). Ph-1/Ph-2 uses ops-team shared credentials per `[D-019]` v1 / `[D-038]`. Revisit: Ph-3+.
+- **DEF-15** — Excel-imported data validated against per-customer schema (FR-4 / FR-1(b)). Revisit: Ph-2 when Excel import is in scope.
+- **DEF-16** — Per-owner NSD inbound ACL and filesystem identity attribution. Revisit: Ph-3+ when corp AD/SMB per-owner provisioning is validated.
+- **DEF-17** — Resolution-path follow-up workflow automation (auto-notify owner for fix-pre-launch; auto-create Tech Report DeliveryItems; monitor `waiver_ref`). PM annotates path in Ph-2 per FR-47; downstream actions are Ph-3+.
+- **DEF-18** — Per-DeliveryItem ACL on HILDA-mediated download endpoint (FR-61 / NFR-16). Ph-1/Ph-2 grants access to any authenticated corp AD user. Revisit: Ph-3+.
+- **DEF-19** — Automated customer feedback capture (carrier portal + email ingestion). Ph-1/Ph-2 TPMs monitor the carrier portal manually. Revisit: Ph-3+.
+- **DEF-20** — Automated `Closed` state transition (carrier-acceptance signal detection + PM confirmation; MilestoneAllClosed trigger). Ph-1/Ph-2 uses manual `Close All Items` per FR-64. Revisit: Ph-3+.
+- **DEF-21** — Fine-grain fault routing (separate destinations for ops processing faults vs. TPM business decisions). Ph-1/Ph-2 routes all faults to a single `HildaOpsAlert` queue per FR-75. Revisit: Ph-3+.
+
+**Success criteria** (business outcomes; quantitative baselines TBD from first production deployment. These are user-facing metrics — the technical state-propagation SLO is captured separately in NFR-9):
 - **Time to submission**: reduction in average days from collection kickoff to customer submission per milestone.
 - **Reminder-to-response time**: reduction in average days between automated reminder and delivery item completion by the R&D owner.
 - **PM hours per device program**: measurable reduction in manual tracking, context-switching, and copy-paste effort.
 - **Template reuse rate**: majority of device trackers created from customer templates rather than manual / Excel-from-scratch.
 - **Onboarding time**: new customer onboarded (template created) in days, not weeks; new device instantiated from template in minutes.
 - **Customer follow-up turnaround**: reduction in time from customer question to posted response (Stage 6 closure).
-- **Report rework rate**: fewer revision cycles before milestone submission, traceable via `CommunicationLog` revision counts (AI pre-review deferred to Phase 2; v1 baseline established by structured tracking alone).
+- **Report rework rate**: fewer revision cycles before milestone submission, traceable via `CommunicationLog` revision counts; Ph-1 baseline benefits from initial LLM quality review per FR-53 (DEF-2 initial-review portion promoted to Ph-1); PM feedback workflow remains DEF-2 deferred.
 
 **Constraints** *(maintained alongside Open questions; some may become NFRs)*:
 - All services run on-premises; no public-cloud LLM unless via corp proxy or on-prem model. Test reports, tech reports, waivers, customer credentials are corporate IP.
 - SharePoint version is **frozen at 2017** — vanilla SharePoint List views + classic web parts only; no SPFx modern, no Power Apps.
-- Every external action must be attributable to a specific PM. Per-PM credentials (no service accounts) for both internal and customer systems.
+- Every external action's attribution model is phase-scoped: **Ph-1/Ph-2** — shared HILDA ops-team credentials provisioned per system per `[D-019]` v1 / `[D-038]`; adapter actions appear under the ops-team service identity in external systems (per-PM attribution is not enforced at the credential layer in these phases). **Ph-3+** — per-PM credentials (no service accounts) for both internal and customer systems per `[D-019]` v2 / DEF-14; adapter actions appear under the assigned PM's identity in external systems.
 - No customer-facing outbound action runs without explicit PM approval (human-in-the-loop checkpoint is mandatory).
 - **Three-tier LLM access model** — three distinct LLMs with non-overlapping access:
   1. **Dev LLM (Claude or similar)** — assists with code, design, tests. **NO access** to production SharePoint, real customer artifacts, PM credentials, or proprietary API specs. Test data is synthetic. Joint debugging via compact RPT / MET / FIX / QC reports per `[D-002]`.
   2. **On-prem code-generation LLM (Gemma3:12b / Qwen / similar — open source, configurable)** — used by three Ingestor / Profiler modules that all run on company premises and emit into `customizations/`: (i) **API Spec Ingestor** `[D-003]` — proprietary issue-tracker / messenger API specs → adapter code; (ii) **Template Schema Ingestor** `[D-010]` — proprietary customer-template Excel schemas → Pydantic validators, Excel parsers, SharePoint-List column mappings, customer-specific AutomationRules; (iii) **Test Report Document Profiler** `[D-011]` — proprietary historical test reports (Excel / Word / PDF) → per-customer test report parsers and `final | interim` classification artifacts. Each ships its own diagnostic CLI emitting compact reports the dev can paste into Claude-chat to debug ingestion / generation without exposing the proprietary content.
-  3. **Runtime LLM (DeliverableHub's internal LLM doing classification, quality review, response drafting)** — runs in the K8s cluster with structured access to SharePoint data, attachments, and `CommunicationLog`. Operates at runtime, not at build time. Hosting choice (corp proxy vs. on-prem model) is Open question #2.
+  3. **Runtime LLM (DeliverableHub's internal LLM doing classification, quality review, response drafting)** — runs as the `hilda-llm-gateway` container in the HILDA service stack (Ph-1/Ph-2 Docker Compose per `[D-026]`; Ph-3+ MicroK8s Deployment per `[D-022]` / `[D-043]`) with structured access to SharePoint data, attachments, and `CommunicationLog`. Operates at runtime, not at build time. Hosting choice resolved 2026-04-30 by `[D-007]` (all LLM hosting on-premises).
 - The dev LLM **never** reads proprietary API specs (`[D-003]`), proprietary customer-template schemas (`[D-010]`), or proprietary historical test reports (`[D-011]`). Phase-prompt enforced.
 - **Every module is independently testable** through an appropriate interface: functional modules ship `<module>_cli.py`; UI / web-facing modules ship a mock web harness. Side-effect-bearing modules implement `--mock` / `--dry-run`. All test interfaces support `--diagnostic` and emit compact reports per `[D-002]`. See `[D-005]`.
 - **Three-tier code organization** — `core/` (AI-generated source) + `customizations/` (AI-scaffolded, human-completed) + `config/` (per-module install-time settings). All MODULE.md paths follow `core/src/<module>/MODULE.md` or `customizations/<name>/MODULE.md`. CLI invoked as `python -m core.src.<module>.<module>_cli`. See `[D-001]` and `docs/compact/structure-conventions.md` for the full layout (mirrored from the reference implementation).
@@ -66,11 +107,11 @@
 
 | Stakeholder / Role | Contributes | Interface | Feedback loop |
 |---|---|---|---|
-| Backend / platform devs (Python, K8s) — name TBD | Code, MODULE.md curated edits, DECISIONS entries, adapter implementations | Direct git file edit | PR review |
+| Backend / platform devs (Python, Docker Compose Ph-1/Ph-2 → MicroK8s Ph-3+) — name TBD | Code, MODULE.md curated edits, DECISIONS entries, adapter implementations | Direct git file edit | PR review |
 | PM team leads (domain experts) — name TBD | Customer-template authoring, AutomationRules tuning, AI checklist authoring | SharePoint UI + Microsoft Excel (template upload) | UI submit / Excel upload → SharePoint Lists |
 | PMs / Technical Project Managers (TPMs) — primary end users — names TBD | Bug reports, UX feedback, eval data (correct AI classifications, edit AI drafts) | DeliverableHub SharePoint UI + issue tracker | Telemetry + ticket triage |
 | R&D delivery owners — many, names TBD | Indirect — replies to automated requests via existing tools; reply patterns are eval data | Email / messenger / internal issue tracker (no DH UI) | Capture-and-curate via CommunicationLog |
-| Platform / infra / security ops — name TBD | K8s deployment, Vault config, network policies, secrets review | Helm / YAML / Vault CLI | Infra PR review |
+| Platform / infra / security ops — name TBD | Ph-1/Ph-2: Docker Compose deployment, sops-encrypted secrets provisioning, NSD SMB mount, SharePoint connectivity, network policies. Ph-3+: MicroK8s rollout, Vault config, ConfigMap/Secret management, CSI drivers, mTLS. | docker-compose / shell / sops (Ph-1/Ph-2) → kubectl / Helm / Vault CLI (Ph-3+) | Infra PR review |
 | QA — name TBD | End-to-end test scenarios, customer-adapter contract tests, eval datasets | Test files + CI; structured YAML for fixtures | CI signal |
 | Customers (external) | Implicit — submission feedback, RFIs received via their systems | Their own systems (Jira / portal / email) | Customer adapter ingestion |
 

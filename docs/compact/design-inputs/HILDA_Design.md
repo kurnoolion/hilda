@@ -10,10 +10,11 @@ This document proposes **DeliverableHub** — a unified, configurable platform t
 
 Today, PMs execute this workflow manually using Excel spreadsheets, emails, messenger, and multiple issue-tracking systems — leading to inefficiency, inconsistency, and limited scalability. DeliverableHub replaces this with a template-driven, automation-powered system where customer-specific processes are captured as reusable configuration, and routine tracking, follow-up, and submission tasks are handled by rule-based and AI-driven automation services.
 
-The platform is built on two pillars of existing corporate infrastructure:
+The platform is built on three pillars of existing corporate infrastructure:
 
-- **SharePoint** — serves as the PM dashboard/UI layer, the data store (SharePoint Lists as database tables), and the document repository for test reports, technical reports, waivers, and other artifacts.
-- **On-premises Kubernetes cluster (25 nodes)** — runs the automation service layer: the Email Service, communication adapters, workflow orchestration engine, AI/LLM agents, and all backend services. These services read configuration from and write status updates to SharePoint, which the PM sees reflected in their dashboard in real time.
+- **SharePoint** — serves as the PM/TPM dashboard/UI layer and the runtime data store (SharePoint Lists as database tables for `Customers`, `Devices`, `Milestones`, `DeliveryItems`, `Users`, `PMCredentials`, `CommunicationLog`). SharePoint does **not** hold document artifacts (test reports, tech reports, waivers, software binaries).
+- **On-prem Network Shared Drive (NSD)** — authoritative document store for all owner deliverables and HILDA-generated artifacts per `[D-013]` / `[D-041]`. Two-tree structure (`\\share\hilda\inbound\...` for owner drops, `\\share\hilda\internal\...` for HILDA-classified storage). HILDA-mediated download URLs (`https://hilda.corp/dl/<scoped_token>`) authenticated via on-prem AD per NFR-16.
+- **Containerized automation services on bare-metal Linux PC** (Ph-1 / Ph-2 — Docker Compose; Ph-3+ — MicroK8s single-node per `[D-022]`, `[D-025]`) — runs the automation service layer: the Email Service, communication adapters, workflow orchestration engine (Celery), AI/LLM agents, and backend services. These services read configuration (YAML files under `customizations/`) and runtime data (SharePoint Lists via Graph API, plus a PostgreSQL mirror for fast queries), and write updates back to SharePoint, which the PM/TPM sees reflected in their dashboard in real time.
 
 The system is designed to be **configuration-driven**: a one-time customer-specific deliverable template captures the milestones, deliverables, delivery items, tracking modalities, and customer delivery modalities for that customer. PMs use these templates as a starting point to create device-specific trackers, and the automation framework takes it from there.
 
@@ -83,7 +84,12 @@ All fields are defined below. The data model is designed to be **extensible** �
 | **Expected Completion Date**       | Target date for completion                                                           | MM/DD/YYYY                                                                                               | Dynamic                                       |
 | **Type**                           | Category of the delivery item, determines how it is tracked and reviewed             | Confirmation (Yes/No), Completion %, Test Report, Software Binary, Tech Report, Waiver (extensible)      | Static (set in template)                      |
 | **Owner Info**                     | Person responsible for producing this item                                           | Name and/or email address                                                                                | Dynamic                                       |
-| **Tracking Modality**              | Communication channel used to track this item with the internal R&D owner            | Email, Messenger, Internal Issue Tracking System (extensible)                                            | Static (agreed per customer/device/item type) |
+| **Tracking Modality**              | Communication channels used to track this item with the internal R&D owner — **multi-value list** per FR-7 (at least one status-capable + one document-capable for artifact items) | Email, CorporateMessenger, CorporatePLM, NetworkSharedDrive, CustomerJIRA (extensible)                  | Static (agreed per customer/device/item type) |
+| **doc_count**                      | Number of `test_report` documents required before item advances to `DocumentReceived` state — per FR-7; 0 for Confirmation items | Integer (default 1)                                                                                      | Static (set in template)                      |
+| **review_required**                | Whether LLM quality review (FR-53) fires on received documents — per FR-2/FR-53; always false for Confirmation items (non-editable) | Boolean (default false)                                                                                  | Static (set in template; TPM-overridable per FR-14) |
+| **review_status**                  | State of LLM quality review for this item — per FR-53                                | Enum: `pending`, `complete`, `not_required`                                                              | Dynamic                                       |
+| **item_completion_pct**            | Document-review completion percentage across all received documents — per FR-7       | Integer 0–100 (computed)                                                                                 | Dynamic (computed)                            |
+| **email_cc_list**                  | Per-item CC distribution list — pre-populated from template per-TG `default_cc_list` (FR-2); TPM-overridable per-item (FR-14) | JSON array of `{name, email, role}`                                                                      | Static (template default; TPM-overridable)    |
 | **Actual Delivery Item Info**      | HILDA-mediated download URL for artifacts on the shared network drive, or URL to internal system for non-file items | `https://hilda.corp/dl/<token>` per `[D-013]`, or URL to internal system                                 | Dynamic                                       |
 | **PLM ID**                         | PLM system document/issue ID for this item — permanent source of truth reference (e.g. Jira-style ID); one per owner typically, flexible for exceptions | Text (e.g. "PROJ-1234")                                                                                  | Dynamic                                       |
 | **Handset**                        | This work item applies to handset form factor                                        | Yes / No                                                                                                 | Static (set in template)                      |
@@ -101,9 +107,28 @@ All fields are defined below. The data model is designed to be **extensible** �
 
 **Static vs. Dynamic distinction:** Fields marked "Static" are typically set once in the customer template and carried over when a device tracker is created. Fields marked "Dynamic" change as the delivery item progresses through its lifecycle. The automation services primarily operate on dynamic fields (updating state, timestamps, etc.) while reading static fields to determine how to communicate, track, and deliver.
 
+**TG-group-level fields (per-template, not per-item):** In addition to the per-DeliveryItem fields above, each customer template defines a set of fields at the **TG-group level** (one record per `tg_name` within the template) — pre-populated at tracker creation per FR-2:
+
+| Field | Description |
+| ----- | ----------- |
+| **tg_owner** | TG coordinator who knows current engineer assignments for the group (distinct from per-item `owner` — the delivery engineer); TPM-overridable per FR-71 |
+| **email_group_alias** | Optional TG corporate email distribution alias (e.g. `ims.corp@corp.com`); when set, FR-9 sends one consolidated outreach to the alias instead of per-owner emails |
+| **corp_id_list** | Optional list of corp messenger IDs for all TG members; used by FR-10 escalation when set |
+| **default_cc_list** | Default CC distribution list for the TG; copied to each item's `email_cc_list` at tracker creation; TPM-overridable per item (FR-14) |
+
+These fields are stored within the customer template (YAML, see §3.4) and applied identically to all items sharing the same `tg_name` at tracker instantiation.
+
 ### 3.4 Database Design
 
-The data model is implemented as **SharePoint Lists** (which function as database tables), organized within a dedicated DeliverableHub SharePoint site. Below is the formal relational design with primary keys, foreign keys, indexes, and column specifications.
+The data model spans **three storage tiers** with deliberate separation between runtime data, configuration, and the mirror used for fast service queries:
+
+1. **SharePoint Lists** (runtime / transactional, PM-facing) — hold `Customers`, `Devices`, `Milestones`, `DeliveryItems`, `Users`, `PMCredentials` (metadata only — see Section 10), `CommunicationLog`. SharePoint Lists provide the PM/TPM dashboard surface and authoritative entity rows.
+2. **YAML files under `customizations/`** (configuration, code-release-time gated) — hold `CustomerTemplates` (per FR-39/40/41 under `customizations/template_schemas/<customer>/`) and `AutomationRules` (per FR-30 under `customizations/rules/{global,<customer>,<customer>/<device>}/`). These files are bind-mounted into the HILDA service containers per `[D-025]` and read directly by HILDA at startup. **SharePoint does not read YAML files** — HILDA services do.
+3. **PostgreSQL mirror** (fast-query cache, runtime overrides) — runs as a container in the Docker Compose stack (Ph-1/Ph-2; MicroK8s StatefulSet Ph-3+); mirrors critical SharePoint tables (`DeliveryItems`, `CommunicationLog`, `AutomationRules` snapshot) for high-throughput service-layer reads and holds PM/TPM runtime overrides per FR-31.
+
+**Documents are never stored in SharePoint** — all owner deliverables and HILDA-generated artifacts live on the on-prem Network Shared Drive (NSD) per `[D-013]` / `[D-041]`. SharePoint Lists hold metadata and reference URLs only.
+
+Below is the formal relational design for the SharePoint-resident tables, with primary keys, foreign keys, indexes, and column specifications. The YAML-resident entities (`CustomerTemplates`, `AutomationRules`) are documented as YAML file layouts further below.
 
 #### Table: Customers
 
@@ -168,10 +193,15 @@ The core tracking table. One row per delivery item — the atomic unit of work. 
 | item_description                | Text                    |                                                | What this item is (static, from template)                                          |
 | delivery_state                  | String                  | NOT NULL, DEFAULT "Not Started"                | Not Started, Open, Closed, Delayed (extensible)                                    |
 | expected_completion_date        | Date                    |                                                | Target date (MM/DD/YYYY)                                                           |
-| item_type                       | String                  | NOT NULL                                       | ConfirmationYesNo, CompletionPct, TestReport, SoftwareBinary, TechReport, Waiver (extensible) |
+| item_type                       | String                  | NOT NULL                                       | Confirmation, CompletionPct, TestReport, SoftwareBinary, TechReport, Waiver (extensible — per FR-7) |
 | owner_name                      | String                  |                                                | R&D owner name                                                                     |
 | owner_email                     | String                  |                                                | R&D owner email                                                                    |
-| tracking_modality               | String                  | NOT NULL                                       | Email, Messenger, InternalIssueTracker (extensible)                                |
+| tracking_modality               | JSON (array)            | NOT NULL                                       | Multi-value list per FR-7: Email, CorporateMessenger, CorporatePLM, NetworkSharedDrive, CustomerJIRA (extensible) |
+| doc_count                       | Integer                 | NOT NULL, DEFAULT 1                            | Number of `test_report` documents required before `DocumentReceived` per FR-7; 0 for Confirmation items |
+| review_required                 | Boolean                 | NOT NULL, DEFAULT FALSE                        | Gates LLM quality review per FR-2/FR-53; always FALSE and non-editable for Confirmation items |
+| review_status                   | String                  | NOT NULL, DEFAULT "pending"                    | Enum: `pending`, `complete`, `not_required` per FR-53                              |
+| item_completion_pct             | Integer                 | NULLABLE                                       | Computed document-review completion percentage per FR-7                            |
+| email_cc_list                   | JSON                    |                                                | Per-item CC distribution list (array of `{name, email, role}`); pre-populated from template per-TG `default_cc_list` per FR-2; TPM-overridable per FR-14 |
 | actual_item_info                | String                  |                                                | HILDA-mediated download URL (`https://hilda.corp/dl/<token>`) per [D-013], or URL to internal system |
 | plm_id                          | String                  |                                                | PLM system document/issue ID (e.g. Jira-style ID); permanent source of truth reference for this item |
 | handset                         | Boolean                 | NOT NULL, DEFAULT FALSE                        | Work item applies to handset form factor                                           |
@@ -225,42 +255,83 @@ Stores encrypted credential sets that PMs register for internal and external sys
 **Indexes:** user_id, system_type, status
 **Unique constraint:** (user_id, system_type, system_name)
 
-#### Table: CustomerTemplates
+#### YAML configuration: CustomerTemplates
 
-Reusable templates that capture the standard milestone/deliverable/delivery-item hierarchy for a customer.
+Reusable templates that capture the standard milestone → delivery-item hierarchy for a customer are stored as **YAML files** under `customizations/template_schemas/<customer_slug>/` (per FR-39/40/41), not as SharePoint List rows. Templates are bind-mounted into HILDA service containers per `[D-025]` and read at tracker-creation time.
 
-| Column           | Type                    | Constraints                              | Description                                                                       |
-| ---------------- | ----------------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
-| template_id      | String (auto-generated) | **PK**                                   | Unique template identifier                                                        |
-| customer_id      | String                  | **FK → Customers.customer_id**, NOT NULL | Customer this template is for                                                     |
-| template_name    | String                  | NOT NULL                                 | Human-readable name (e.g., "Carrier Alpha Standard v2")                           |
-| template_version | Integer                 | NOT NULL, DEFAULT 1                      | Version number for tracking revisions                                             |
-| template_data    | JSON/Text               | NOT NULL                                 | Full hierarchy: milestones → delivery items with all static fields                |
-| created_by       | String                  | **FK → Users.user_id**, NOT NULL         | Who created this template                                                         |
-| created_date     | DateTime                | NOT NULL, DEFAULT NOW                    | Creation timestamp                                                                |
-| is_active        | Boolean                 | NOT NULL, DEFAULT TRUE                   | Whether this template is available for use                                        |
+**Directory layout:**
 
-**Indexes:** customer_id, is_active
-**Unique constraint:** (customer_id, template_name, template_version)
+```
+customizations/template_schemas/
+├── <customer_slug>/
+│   ├── template.yaml              # milestone → delivery-item hierarchy with static fields
+│   ├── tg_groups.yaml             # tg_name → {tg_owner, email_group_alias, corp_id_list, default_cc_list}
+│   └── parser_schema.yaml         # per-customer test-report parser spec per [D-011]
+```
 
-#### Table: AutomationRules
+**`template.yaml` shape (per-customer):**
 
-Configurable IF/THEN rules that drive the workflow engine.
+```yaml
+template_name: "Carrier Alpha Standard v2"
+template_version: 2
+milestones:
+  - milestone_name: "Lab Entry"
+    sort_order: 1
+    delivery_items:
+      - item_no: 1
+        item_name: "Band-1 RF Conformance"
+        tg_name: "RF"
+        item_type: "TestReport"
+        tracking_modality: ["Email", "NetworkSharedDrive"]
+        customer_delivery_modality: "CustomerTrackingSystem"
+        doc_count: 1
+        review_required: true
+        handset: true
+        tablet: false
+        # ... other static fields per §3.3
+```
 
-| Column            | Type                    | Constraints            | Description                                                                            |
-| ----------------- | ----------------------- | ---------------------- | -------------------------------------------------------------------------------------- |
-| rule_id           | String (auto-generated) | **PK**                 | Unique rule identifier                                                                 |
-| rule_name         | String                  | NOT NULL               | Human-readable rule name                                                               |
-| scope             | String                  | NOT NULL               | Global, Customer, Device                                                               |
-| scope_id          | String                  | NULLABLE               | customer_id or device_id depending on scope (NULL if Global)                           |
-| trigger_event     | String                  | NOT NULL               | Event type that activates the rule                                                     |
-| trigger_condition | JSON/Text               | NOT NULL               | Structured condition (e.g., "delivery_state = 'Open' AND days_since_last_contact > 3") |
-| action_type       | String                  | NOT NULL               | SendReminder, Escalate, UpdateState, TriggerAIReview, QueueSubmission, etc.            |
-| action_parameters | JSON/Text               | NOT NULL               | Action-specific parameters (channel, recipients, message template, etc.)               |
-| priority          | Integer                 | NOT NULL, DEFAULT 100  | Execution priority (lower = higher priority)                                           |
-| is_active         | Boolean                 | NOT NULL, DEFAULT TRUE | Enable/disable flag                                                                    |
+**Governance:** Template content changes (adding items, changing modalities, updating per-TG CC lists) are routine customer-config edits in YAML, gated by the template-authoring workflow. **Schema changes** (introducing a new field on DeliveryItems, a new `item_type` value, a new `delivery_state`) require a HILDA code release — see §3.5 *Schema Evolution & Field Lifecycle*.
 
-**Indexes:** scope, scope_id, trigger_event, is_active
+#### YAML configuration: AutomationRules
+
+Configurable IF/THEN rules that drive the workflow engine are stored as **YAML files** under `customizations/rules/` (per FR-30), not as SharePoint List rows. Files are bind-mounted into HILDA service containers per `[D-025]` and read at startup. **Runtime overrides** (PM/TPM pause/resume + parameter customization per FR-31) are stored in PostgreSQL and take precedence over YAML values at evaluation time.
+
+**Directory layout (3-tier resolution: Device → Customer → Global):**
+
+```
+customizations/rules/
+├── global/
+│   └── defaults.yaml              # baseline rules applied to all customers/devices
+├── <customer_slug>/
+│   ├── customer_rules.yaml        # per-customer overrides + customer-specific rules
+│   └── <device_slug>/
+│       └── device_rules.yaml      # per-device overrides
+```
+
+**Resolution order:** Device-tier values override Customer-tier; Customer-tier overrides Global. PM/TPM runtime overrides from PostgreSQL (FR-31) take precedence over all three YAML tiers.
+
+**Rule shape:**
+
+```yaml
+rules:
+  - rule_id: "reminder_open_item"
+    rule_name: "Send reminder to owner for stale open items"
+    trigger_event: "ScheduledTick"
+    trigger_condition:
+      delivery_state: "Open"
+      days_since_last_contact_gt: 3
+    action_type: "SendReminder"
+    action_parameters:
+      channel: "TrackingModality"
+      template_id: "owner_reminder_v1"
+    priority: 100
+    is_active: true
+```
+
+**Beat schedule** (per-customer / per-device polling cadence used by FR-23/FR-26/FR-55) is loaded from these YAML files by `hilda-beat` at startup per `[D-022]` implementation note.
+
+**Governance:** Rule content changes are routine customer-config edits in YAML. Adding a new `trigger_event` or `action_type` requires a HILDA code release (rule engine code change) — see §3.5 *Schema Evolution & Field Lifecycle*.
 
 #### Table: CommunicationLog
 
@@ -298,9 +369,37 @@ PMCredentials 1──────M DeliveryItems (via customer_delivery_credenti
 PMCredentials 1──────M CommunicationLog (via credential_id)
 ```
 
-**SharePoint implementation notes:** SharePoint Lists support lookup columns (which function as foreign keys in the UI), indexed columns, and JSON-type columns for the template_data and condition/parameter fields. For columns that reference other lists (e.g., device_id referencing the Devices list), SharePoint Lookup columns are used to enforce referential integrity and enable cross-list filtering. The PostgreSQL instance on the K8s cluster mirrors critical tables (DeliveryItems, CommunicationLog, AutomationRules) for high-performance query access by the automation services, with a sync service maintaining consistency between SharePoint and PostgreSQL.
+**SharePoint implementation notes:** SharePoint Lists support lookup columns (which function as foreign keys in the UI) and indexed columns. For columns that reference other lists (e.g., `device_id` referencing the Devices list), SharePoint Lookup columns are used to enforce referential integrity and enable cross-list filtering. SharePoint holds entity rows only — `CustomerTemplates` and `AutomationRules` are YAML files (above), not SharePoint Lists. The PostgreSQL container in the Docker Compose stack (Ph-1/Ph-2; MicroK8s StatefulSet Ph-3+) mirrors critical SharePoint tables (`DeliveryItems`, `CommunicationLog`) and an in-memory snapshot of resolved `AutomationRules` for high-performance service-layer queries; a sync service maintains consistency between SharePoint and PostgreSQL.
 
-Document libraries within the same SharePoint site store the actual files (test reports, tech reports, waivers, software binaries), linked to delivery items via the "actual_item_info" URL field.
+**Document storage:** All document artifacts (test reports, tech reports, waivers, software binaries) live on the on-prem Network Shared Drive (NSD) per `[D-013]` / `[D-041]`, **not** in SharePoint. The `actual_item_info` field on DeliveryItems holds the PLM issue URL per FR-57; HILDA-mediated NSD download URLs (`https://hilda.corp/dl/<scoped_token>`) are returned by the document enumeration API (FR-57) for the SharePoint UI document section. SharePoint Document Libraries are not used.
+
+### 3.5 Schema Evolution & Field Lifecycle
+
+The data model spans two distinct change-governance zones, and the boundary between them is an architectural invariant:
+
+**Zone A — Code-release-gated (data model schema):**
+- New columns on SharePoint Lists, new `item_type` / `delivery_state` enum values, new entities
+- Requires a versioned HILDA code release: update Pydantic / SQLAlchemy models in `core/src`, run SharePoint List provisioning, run PostgreSQL migration, update YAML template-schema spec so customer YAML can populate the field, update template loader and all downstream consumers
+- Gated by HILDA dev/ops team
+- **SharePoint admins cannot add columns by clicking in the SP UI** — any field not in the canonical schema will not be picked up by HILDA services and will not be reflected in Postgres
+
+**Zone B — YAML-edit-gated (configuration content within existing schema):**
+- New customer template instance, new automation rule, new TG group, modified CC list, adjusted polling schedule
+- Requires only a YAML edit under `customizations/`; no code release
+- Gated by customer-config / template-authoring workflow
+
+**Adding a new DeliveryItems field — release-time propagation checklist:**
+
+1. Update the canonical schema definition in `core/src` (Pydantic model)
+2. Update SharePoint List provisioning script → run against the deployment
+3. Run PostgreSQL mirror migration (alembic)
+4. Update the YAML template-schema spec so customer templates can populate the new field
+5. Update existing customer template YAML files with default values (or document explicit omission)
+6. Update template loader to wire the new field through
+7. Update consumers (rule engine, outreach formatter, dashboard view, document enumeration API)
+8. Publish a versioned release; coordinate with deployment of customer YAML updates
+
+The same release process applies to enum additions (new `item_type`, new `delivery_state`, new `tracking_modality` value, new `doc_type`).
 
 ---
 
@@ -313,52 +412,50 @@ Each customer has a recurring, well-understood certification process. While the 
 A template defines:
 
 - The standard set of **milestones** for that customer's process.
-- Within each milestone, the standard **deliverables**.
-- Within each deliverable, the standard **delivery items** with all **static fields** pre-populated: description, type, tracking modality, customer delivery modality, and customer delivery info.
+- Within each milestone, the standard **delivery items** (grouped for display by `tg_name`) with all **static fields** pre-populated: `tg_name`, description, type, tracking modality (multi-value), customer delivery modality, `doc_count`, `review_required`, form-factor flags, etc. (per FR-2; see §3.3 for the full field list).
+- A separate per-TG group block defining `tg_owner`, `email_group_alias`, `corp_id_list`, and `default_cc_list` for each `tg_name` used in the template (per FR-2).
 
 For example, a template for "Customer Alpha" might define:
 
 ```
 Customer Alpha Template
 ├── Milestone: "Lab Entry"
-│   ├── Deliverable: "RF Test Results"
-│   │   ├── Delivery Item: "Band-1 RF Conformance" (Type: Test Report, Track via: Email, Deliver via: Customer Jira)
-│   │   ├── Delivery Item: "Band-3 RF Conformance" (Type: Test Report, Track via: Email, Deliver via: Customer Jira)
-│   │   └── Delivery Item: "RF Summary Status" (Type: Completion %, Track via: Messenger, Deliver via: None)
-│   └── Deliverable: "Known Issues Package"
-│       ├── Delivery Item: "Camera Known Issues" (Type: Tech Report, Track via: Email, Deliver via: Customer Jira)
-│       └── Delivery Item: "Modem Known Issues" (Type: Tech Report, Track via: Internal Issue Tracker, Deliver via: Customer Jira)
+│   ├── Delivery Item: "Band-1 RF Conformance"   (TG: RF, Type: TestReport, Track via: [Email, NetworkSharedDrive], Deliver via: CustomerTrackingSystem)
+│   ├── Delivery Item: "Band-3 RF Conformance"   (TG: RF, Type: TestReport, Track via: [Email, NetworkSharedDrive], Deliver via: CustomerTrackingSystem)
+│   ├── Delivery Item: "RF Summary Status"        (TG: RF, Type: CompletionPct, Track via: [Email], Deliver via: None)
+│   ├── Delivery Item: "Camera Known Issues"     (TG: Camera, Type: TechReport, Track via: [Email, CorporatePLM], Deliver via: CustomerTrackingSystem)
+│   └── Delivery Item: "Modem Known Issues"      (TG: Modem, Type: TechReport, Track via: [Email, CorporatePLM], Deliver via: CustomerTrackingSystem)
 ├── Milestone: "Field Test"
 │   └── ...
 └── Milestone: "Launch Approval"
-    └── Deliverable: "Waivers"
-        └── Delivery Item: "Post-Launch Fix Waiver" (Type: Waiver, Track via: Email, Deliver via: Email)
+    └── Delivery Item: "Post-Launch Fix Waiver"  (TG: PM, Type: Waiver, Track via: [Email], Deliver via: Email)
 ```
 
-Templates are stored in the **CustomerTemplates** SharePoint List as structured data and are created/maintained by PM team leads or system administrators via the DeliverableHub UI.
+The intermediate "Deliverable" grouping level was removed per `[D-028]` — delivery items belong directly to a milestone and are grouped for display purposes by their `tg_name`.
+
+Templates are stored as **YAML files** under `customizations/template_schemas/<customer_slug>/` (per FR-39/40/41, see §3.4) and are created/maintained by PM team leads or system administrators via the template-authoring workflow.
 
 ### 4.2 Creating a Device Tracker
 
-When a PM starts work on a new device for a given customer, they create a **Device Tracker** through one of two methods:
+When a PM/TPM starts work on a new device for a given customer, they create a **Device Tracker** through one of three methods (FR-1):
 
-**Method 1 — From Template (Recommended):**
+**Method 1 — From Template (`[Ph-1]`, Recommended):**
 
-1. PM selects "Create New Device Tracker" in the DeliverableHub UI.
-2. PM chooses the customer and selects the corresponding template.
-3. The system generates the full milestone → deliverable → delivery item hierarchy, pre-populating all static fields from the template.
-4. PM reviews and makes minor adjustments: adding or removing delivery items that are specific to this device, updating expected completion dates, assigning owners.
-5. PM confirms. The system creates all corresponding rows in the SharePoint Lists (Devices, Milestones, Deliverables, DeliveryItems).
+1. PM/TPM selects "Create New Device Tracker" in the DeliverableHub SharePoint UI.
+2. PM/TPM chooses the customer and selects the corresponding template (resolved from `customizations/template_schemas/<customer_slug>/`).
+3. HILDA reads the YAML template, generates the full milestone → delivery-item hierarchy, and pre-populates all static fields per FR-2 (TG groupings, `tg_owner`, `email_group_alias`, `corp_id_list`, `default_cc_list` per TG; `doc_count`, `review_required`, `email_cc_list` per item; `expected_completion_date` set from parent `Milestone.target_date`). `plm_id` is **not** set at tracker creation — it is assigned per (owner × milestone) at Start Collection per FR-8.
+4. PM/TPM reviews and makes adjustments: adding/removing items per FR-3, overriding `tg_owner` per FR-71, overriding `email_cc_list` or `expected_completion_date` per FR-14.
+5. PM/TPM confirms. HILDA creates the corresponding rows in the SharePoint Lists (Devices, Milestones, DeliveryItems) — no `Deliverables` table (D-028).
 
-**Method 2 — From Excel Import:**
+See FR-1 and FR-2 for the complete behavioral specification.
 
-1. PM selects "Import from Excel."
-2. PM uploads an Excel file structured with the expected columns matching the data model (the system provides a downloadable Excel template aligned with the data model).
-3. The system parses the Excel, validates the data, and creates the corresponding SharePoint List entries.
-4. PM reviews and confirms.
+**Method 2 — From Excel Import (deferred):**
 
-**Method 3 — Manual Entry:**
+Deferred per DEF-15 (originally FR-4, struck 2026-05-12) — requires the Template Schema Ingestor `[D-010]` to validate Excel against per-customer schema. Implementation phase TBD; revisit in Ph-2 or later.
 
-1. PM manually creates milestones, deliverables, and delivery items row by row in the DeliverableHub UI.
+**Method 3 — Manual Entry (`[Ph-2]`):**
+
+1. PM/TPM manually creates milestones and delivery items row-by-row in the DeliverableHub UI.
 2. Suitable for small programs or one-off adjustments.
 
 Once a device tracker is created, the **automation framework activates** — reading the static configuration fields (tracking modality, customer delivery modality, etc.) to determine how to automate each delivery item's lifecycle.
@@ -394,12 +491,16 @@ As R&D teams deliver items (test reports, tech reports, software binaries), PMs 
 
 **Issue Resolution Paths (determined during PM review):**
 
-| Scenario                                                   | Resolution                                                 | Delivery Item Created |
+*Phase scope: in Ph-1 the PM handles all paths manually outside HILDA. In Ph-2 the PM annotates the chosen path in the dashboard per FR-47 — HILDA records the annotation but takes no automated downstream action. Ph-3+ automation (auto-create Tech Report DeliveryItems, monitor `waiver_ref`) is deferred per DEF-17.*
+
+| Scenario                                                   | Resolution                                                 | Resulting Artifact    |
 | ---------------------------------------------------------- | ---------------------------------------------------------- | --------------------- |
 | Issue will be fixed before device launch                   | R&D fixes the issue; no additional delivery item needed    | None                  |
 | Issue is due to network behavior, not device               | R&D creates a tech report explaining the analysis          | Tech Report           |
 | Issue is by-design and no customer requirement is violated | R&D creates a tech report explaining the intended behavior | Tech Report           |
-| Issue will be fixed post-launch                            | R&D creates a waiver document justifying post-launch fix   | Waiver                |
+| Issue will be fixed post-launch                            | R&D (owner) creates a waiver document justifying post-launch fix | Waiver          |
+
+*Footnote: Waiver artifacts are always **owner-created** — HILDA tracks the `waiver_ref` once supplied by the owner and does not auto-create Waiver DeliveryItems. Tech Report DeliveryItem auto-creation by HILDA is Ph-3+ scope (DEF-17). FR-47 promotes the resolution choice to a formal enum: `resolution_path ∈ {fix_pre_launch, tech_report, waiver}` — the network-behavior and by-design rows above are both sub-cases of the `tech_report` path.*
 
 PMs follow up with R&D teams through the configured tracking modality to bring all reports and waivers to the required quality level. The AI/LLM layer assists by performing first-pass quality reviews against configurable checklists and suggesting improvements.
 
@@ -565,70 +666,86 @@ After submission, the customer reviews and may request clarifications or additio
 
 ## 6. Solution Architecture
 
-### 6.1 Two-Pillar Architecture
+### 6.1 Three-Pillar Architecture
 
-The platform is built on two layers with a clear separation of concerns:
+The platform is built on three layers with a clear separation of concerns:
 
-**Layer 1 — SharePoint (UI + Data + Documents)**
+**Layer 1 — SharePoint (UI + Entity Data)**
 
-SharePoint is the PM-facing layer. PMs interact with the system entirely through SharePoint. This includes the dashboard views (built on SharePoint Lists and custom SharePoint pages/web parts), the deliverable tracker data (stored as SharePoint List rows), and all document artifacts (stored in SharePoint Document Libraries). SharePoint provides native capabilities for access control, version history, co-authoring, search, and Office integration — all of which the platform leverages.
+SharePoint is the PM/TPM-facing layer. PM/TPMs interact with the system entirely through SharePoint. This includes the dashboard views (built on SharePoint Lists and custom web parts) and the runtime entity rows for Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials (metadata only), and CommunicationLog. SharePoint provides native capabilities for access control, version history, search, and Office integration. SharePoint does **not** store document artifacts and does **not** read YAML configuration files.
 
-**Layer 2 — Kubernetes Cluster (Automation Services)**
+**Layer 2 — Network Shared Drive (Documents)**
 
-The 25-node on-premises Kubernetes cluster runs all backend automation: the Email Service, communication adapters (messenger, internal issue tracker, customer systems), the workflow orchestration engine, AI/LLM agents, and the rule engine. These services read configuration and static fields from SharePoint Lists, perform their work (sending emails, parsing responses, running quality reviews), and write results back to SharePoint Lists — which are then immediately visible in the PM's dashboard.
+The on-prem NSD per `[D-013]` / `[D-041]` is the authoritative store for all owner deliverables (test reports, tech reports, waivers, software binaries) and HILDA-generated artifacts. Two-tree structure: `\\share\hilda\inbound\...` for owner drops; `\\share\hilda\internal\...` for HILDA-classified storage organized by `<tg_name_slug>/<item_slug>/<doc_type_slug>/<doc_id_slug>/revN/`. Document access is HILDA-mediated via `https://hilda.corp/dl/<scoped_token>` authenticated by on-prem AD per NFR-16.
+
+**Layer 3 — Containerized Automation Services**
+
+Backend automation runs as Docker containers on a single bare-metal Linux PC in Ph-1/Ph-2 (per `[D-022]`, `[D-025]`); migrating to MicroK8s single-node in Ph-3+. Services: `hilda-api`, `hilda-worker` (Celery), `hilda-beat` (Celery scheduler), `hilda-llm-gateway`, plus `postgres` and `redis` containers (Redis as Celery broker and cache per `[D-022]`). YAML configuration files under `customizations/` (`template_schemas/`, `rules/`, `sharepoint_config/`) are bind-mounted read-only into the application services per `[D-025]`. These services read SharePoint entity rows via Microsoft Graph API, read documents from the NSD, perform their work (outreach, parsing, LLM review, submission packaging), and write updates back to SharePoint Lists and the NSD — immediately visible on the PM/TPM dashboard.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      PM LAYER (SharePoint)                       │
+│                  PM / TPM LAYER (SharePoint)                     │
 │                                                                  │
-│  ┌──────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
-│  │  Dashboard   │  │  SharePoint     │  │  Document          │  │
-│  │  Views       │  │  Lists          │  │  Libraries         │  │
-│  │  (Web Parts) │  │  (Data Tables)  │  │  (Reports,Waivers) │  │
-│  └──────┬───────┘  └────────┬────────┘  └─────────┬──────────┘  │
-│         │                   │                      │             │
-└─────────┼───────────────────┼──────────────────────┼─────────────┘
+│  ┌──────────────┐  ┌─────────────────────────────────────────┐  │
+│  │  Dashboard   │  │  SharePoint Lists (entity rows)          │  │
+│  │  Views       │  │  Customers, Devices, Milestones,         │  │
+│  │  (Web Parts) │  │  DeliveryItems, Users, PMCredentials,    │  │
+│  │              │  │  CommunicationLog                        │  │
+│  └──────┬───────┘  └────────┬─────────────────────────────────┘  │
+│         │                   │                                    │
+└─────────┼───────────────────┼────────────────────────────────────┘
           │    Microsoft Graph API / SharePoint REST API
-          │                   │                      │
-┌─────────┼───────────────────┼──────────────────────┼─────────────┐
-│         ▼                   ▼                      ▼             │
+          │                   │
+┌─────────┼───────────────────┼────────────────────────────────────┐
+│         ▼                   ▼                                    │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │              Orchestration & Workflow Engine              │   │
-│  │           (Rule Engine + AI/LLM Agent Layer)             │   │
+│  │           (Celery + Rule Engine + LLM Gateway)            │   │
 │  └──────┬────────────┬────────────┬────────────┬────────────┘   │
 │         │            │            │            │                 │
 │    ┌────▼───┐  ┌────▼────┐  ┌───▼─────┐  ┌──▼──────────┐      │
-│    │ Email  │  │Internal │  │Internal │  │  Customer   │      │
-│    │Service │  │Messenger│  │Issue    │  │  System     │      │
-│    │(Ded.   │  │Adapter  │  │Tracker  │  │  Adapters   │      │
-│    │Mailbox)│  │         │  │Adapter  │  │  (per cust.)│      │
+│    │ Email  │  │Corp     │  │Corp PLM │  │  Customer   │      │
+│    │Service │  │Messenger│  │+ Customer│  │  System     │      │
+│    │(Ded.   │  │Adapter  │  │JIRA      │  │  Adapters   │      │
+│    │Mailbox)│  │         │  │Adapters  │  │  (per cust.)│      │
 │    └────────┘  └─────────┘  └─────────┘  └─────────────┘      │
 │                                                                  │
-│    ┌──────────┐  ┌──────────┐                                   │
-│    │PostgreSQL│  │  Redis   │                                   │
-│    │(workflow │  │(cache,   │                                   │
-│    │ state)   │  │ queues)  │                                   │
-│    └──────────┘  └──────────┘                                   │
+│    ┌──────────┐  ┌──────────┐  ┌─────────────────────────────┐  │
+│    │postgres  │  │  redis   │  │  customizations/ (YAML)     │  │
+│    │(mirror + │  │(broker + │  │  template_schemas/, rules/, │  │
+│    │ overrides)│  │ cache)   │  │  sharepoint_config/         │  │
+│    └──────────┘  └──────────┘  │  (bind-mounted [D-025])     │  │
+│                                 └─────────────────────────────┘  │
 │                                                                  │
-│              AUTOMATION LAYER (Kubernetes Cluster, 25 nodes)     │
+│       AUTOMATION LAYER (Docker Compose Ph-1/Ph-2;                │
+│                         MicroK8s single-node Ph-3+)              │
 └──────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                ┌────────────────────────────────────┐
+                │  NETWORK SHARED DRIVE (NSD)        │
+                │  \\share\hilda\inbound\...         │
+                │  \\share\hilda\internal\...        │
+                │  (all document artifacts; D-013)   │
+                └────────────────────────────────────┘
 ```
 
-### 6.2 Why SharePoint as Both UI and Data Store
+### 6.2 Why SharePoint as UI and Entity Store
 
-- **PMs already know SharePoint.** No new tool to learn for the dashboard — it is just custom views on SharePoint Lists.
-- **SharePoint Lists act as lightweight database tables** with built-in features: column types, calculated fields, filtering, grouping, sorting, conditional formatting, and custom views — all configurable without code.
-- **Document Libraries** provide native versioning, access control, metadata tagging, and full-text search for all artifacts.
-- **Custom SharePoint Web Parts / Power Apps** can be built on top of the Lists to create rich dashboard experiences (Kanban boards, status summaries, charts) without a separate frontend application.
-- **Microsoft Graph API** provides a robust, well-documented API for the K8s services to read from and write to SharePoint Lists and Libraries programmatically.
+- **PM/TPMs already know SharePoint.** No new tool to learn for the dashboard — it is just custom views on SharePoint Lists.
+- **SharePoint Lists act as lightweight database tables** with built-in features: column types, calculated fields, filtering, grouping, sorting, conditional formatting, and custom views.
+- **Custom SharePoint Web Parts** provide rich dashboard experiences (milestone Kanban, document section, action buttons per FR-56/FR-63/FR-64/FR-65) without a separate frontend application.
+- **Microsoft Graph API** provides a robust, well-documented API for the HILDA services to read from and write to SharePoint Lists programmatically.
 - **Existing infrastructure** — no additional hosting, licensing, or maintenance for the UI layer.
+- *Note: document artifacts live on the NSD per `[D-013]`, not in SharePoint Document Libraries. SharePoint holds metadata and reference URLs only.*
 
-### 6.3 Why Kubernetes for the Automation Layer
+### 6.3 Why Containerized Automation Layer
 
-- **Services need to run continuously** — the Email Service must poll the mailbox 24/7; adapters must listen for webhooks; the workflow engine must process event queues.
-- **Each service is independently deployable and scalable** — adding a new customer adapter means deploying a new pod, not modifying existing services.
-- **25-node cluster provides ample capacity** — baseline DeliverableHub services will use approximately 8–12 nodes, leaving headroom for growth.
-- **Existing infrastructure** — the cluster is already provisioned and operational.
+- **Services need to run continuously** — the Email Service must poll the mailbox 24/7; adapters must listen for webhooks; the workflow engine (Celery beat + workers) must process scheduled tasks and event queues.
+- **Each service is independently deployable** — adding a new customer adapter means deploying a new image or extending an existing one via configuration (YAML), not modifying core services.
+- **Docker Compose on bare-metal Linux PC (Ph-1/Ph-2)** — operationally simple, no orchestrator overhead, suitable for the v1 scale of a single deployment. All HILDA services + postgres + redis run on one PC per `[D-022]`.
+- **MicroK8s single-node migration (Ph-3+)** — adds self-healing, RBAC, secrets/ConfigMap management, and a path to multi-node scaling while preserving the same container images. RabbitMQ Quorum Queues replace Redis as the Celery broker; Rook/Ceph provides durable PVCs; MetalLB provides the external VIP per `[D-022]`. Customer YAML bind-mounts migrate to ConfigMap volumes per `[D-025]`. No Python code change.
+- **Existing infrastructure** — the bare-metal PC is already provisioned for Ph-1/Ph-2; MicroK8s rollout is part of the Ph-3+ release.
 
 ---
 
@@ -640,10 +757,10 @@ Each adapter is a bidirectional connector that syncs messages and attachments be
 
 A dedicated email address (e.g., `deliverablehub@company.com`) serves as the single point of contact for all automated email communication. The Email Service runs on the K8s cluster and owns this mailbox.
 
-- **Technology:** Microsoft Graph API connected to the dedicated mailbox; persistent pod with push notification subscription or scheduled polling.
-- **Structured templates:** All outbound emails embed a machine-readable reference tag in the subject line (e.g., `[DH-DeviceX-PM042-M01-D03-I07]`) that encodes the device, PM, milestone, deliverable, and delivery item. When recipients reply, the Email Service parses the tag to route the response to the correct SharePoint List row.
-- **Inbound parsing:** Rule-based parser extracts the reference tag; LLM fallback for malformed threads. Attachments are auto-uploaded to SharePoint Document Libraries and linked to the delivery item.
-- **Outbound sending:** Templates are populated from SharePoint List data (delivery item description, expected date, owner, etc.) and sent from the dedicated address with the PM's name in the signature.
+- **Technology:** Microsoft Graph API connected to the dedicated mailbox; persistent container with push notification subscription (IMAP IDLE / mail-server webhook) or deadline-tiered polling per FR-23.
+- **Structured templates — outbound is per-owner-batch, not per-item:** outreach is consolidated per FR-9 into one outbound email per `(owner × milestone)` round, identified by a stable `BATCH-<id>` reference tag in the subject line (e.g., `[HILDA] BATCH-<id>`). The email body contains one structured reply block per delivery item in the batch, grouped by `tg_name`. When `email_group_alias` is set for the TG, a single outreach is sent to the TG alias containing all items in the TG grouped by owner — each block carries its own `BATCH-<id>` so any TG member can fill in any owner's block, and HILDA routes responses by the `BATCH-<id>` in the filled block (FR-9). The BATCH-id, not a per-item tag, is the routing key.
+- **Inbound parsing:** Three convergent paths per FR-12 — `[Ph-1]` structured reply block edited in place (regex-parsed); `[Ph-2]` per-item `mailto:` tap-links with subject-encoded status; `[Ph-1]` free-text replies via rule-based parsing then runtime-LLM classification when rule-based fails. Attachments are routed per FR-52 (two-tier classification + D-039 new-vs-revision), uploaded to the owner's PLM issue (per FR-13 phase-split rules), written to the NSD classified path `<doc_type_slug>/<doc_id_slug>/revN/`, and linked to the delivery item via the document index (FR-57). Documents are **not** uploaded to SharePoint Document Libraries.
+- **Outbound sending:** Templates are populated from SharePoint List data and YAML rule configuration, sent from the dedicated address with the PM/TPM's name in the signature; CC field populated with the union of `email_cc_list` across the batch items per FR-9. Outbound is sent `multipart/alternative`; the structured block is ASCII-only for round-trip safety.
 
 ### 7.2 Internal Messenger Adapter
 
@@ -666,9 +783,12 @@ Each customer's external system gets a dedicated adapter implementing a common i
 - **Customer using email submission:** The Email Service handles it with a customer-specific template.
 - **Customer using our file storage:** Adapter uploads to the designated shared storage location.
 
-Each adapter is registered via configuration in the SharePoint **AutomationRules** list, specifying endpoint URL, field mappings, and templates.
+Each adapter is registered via configuration in the **AutomationRules YAML files** under `customizations/rules/` (per FR-30) and the per-customer config under `customizations/template_schemas/<customer>/`, specifying endpoint URL, field mappings, and outbound templates per FR-27.
 
-**Authentication:** When an adapter needs to interact with a customer system, it calls the Credential Service (see Section 10) to retrieve the assigned PM's credentials for that system. The adapter authenticates as the PM — all actions in the customer's system appear under the PM's identity. The delivery item's `customer_delivery_credential_id` field specifies which credential set to use, ensuring the correct PM's credentials are used even when multiple PMs work with the same customer.
+**Authentication:**
+
+- **Ph-1 / Ph-2 (current scope):** A single shared HILDA-ops-team credential set is provisioned per customer system (per `[D-019]` v1 — `credential_service` uses K8s Secrets / ops-provisioned credentials). All adapter calls authenticate using this shared credential — there is no per-PM credential mapping at runtime. Actions in customer systems appear under the ops-team service identity, not the individual PM's identity. The `PMCredentials` SharePoint List (§3.4) is provisioned for the Ph-3+ data model but its per-PM rows are not consumed by adapters in Ph-1/Ph-2.
+- **Ph-3+ (target):** Per-PM credentials are introduced with full PM-owned OAuth2 / API-token flows, per-item `customer_delivery_credential_id` field mapping, and the Credential Health Monitor (see Section 10 — most of which is Ph-3+ scope). Adapters authenticate as the specific PM assigned to the device; the `customer_delivery_credential_id` on DeliveryItems specifies which credential set to use. *(Note: `customer_delivery_credential_id` is shown in the §3.4 DeliveryItems schema for forward-compatibility but is **not yet captured in requirements.md** as a Ph-1/Ph-2 obligation — it activates with Section 10's Ph-3+ scope.)*
 
 ---
 
@@ -727,7 +847,13 @@ The guiding principle: **no delivery item is submitted to a customer and no exte
 
 ## 10. Credential Management & Authentication
 
-PMs log into internal and external systems (internal issue tracker, internal messenger, customer Jira, customer portals, customer file storage) using their own personal credentials. The DeliverableHub automation layer acts **on behalf of the PM** — using the PM's credentials to authenticate with these systems to read status, post comments, upload artifacts, and submit deliverables. This ensures that all actions taken by the automation are attributable to the responsible PM, maintaining accountability and audit trails in every external system.
+> **Phase scope** — *Most of this section describes the **Ph-3+ target state**: per-PM OAuth2 / API-token flows, encrypted PM-owned credential blobs in Vault, automated token refresh, Credential Health Monitor, per-item `customer_delivery_credential_id` mapping.*
+>
+> *In **Ph-1 / Ph-2**, the credential service uses a **single shared HILDA-ops-team credential set per customer system**, provisioned via `K8s Secrets` / ops-managed sops-encrypted files per `[D-019]` v1. There is no per-PM credential capture, no OAuth2 consent UI for individual PMs, no PMCredentials List population at runtime, and no Credential Health Monitor. Adapter actions appear under the shared ops-team service identity in external systems. The full per-PM model below activates with Ph-3+ migration (D-019 v2 — Vault-backed implementation).*
+>
+> *Sub-sections §10.1 through §10.7 describe the Ph-3+ target; where Ph-1/Ph-2 behavior differs (single shared credential, no health monitor, no per-PM OAuth flow), the operational reality supersedes the description until the Ph-3+ release lands.*
+
+PMs log into internal and external systems (internal issue tracker, internal messenger, customer Jira, customer portals, customer file storage) using their own personal credentials. The DeliverableHub automation layer acts **on behalf of the PM** — using the PM's credentials to authenticate with these systems to read status, post comments, upload artifacts, and submit deliverables. This ensures that all actions taken by the automation are attributable to the responsible PM, maintaining accountability and audit trails in every external system. *(Ph-3+ target — see scope note above.)*
 
 ### 10.1 Design Principles
 
@@ -742,34 +868,38 @@ PMs log into internal and external systems (internal issue tracker, internal mes
 Credentials are stored in the **PMCredentials** table (see Section 3.4 for schema). However, the `encrypted_credentials` field is not stored in SharePoint — it is stored in a **dedicated secrets store** on the K8s cluster, with only a reference pointer stored in SharePoint. This separation ensures that even if SharePoint data is accessed by unauthorized users, credential material is not exposed.
 
 ```
-┌────────────────────────┐        ┌─────────────────────────────┐
-│   SharePoint           │        │   K8s Cluster               │
-│   (PMCredentials List) │        │                             │
-│                        │        │  ┌───────────────────────┐  │
-│  credential_id  ──────────────▶│  │  HashiCorp Vault      │  │
-│  user_id               │        │  │  (or K8s Secrets +    │  │
-│  system_type           │        │  │   Sealed Secrets)     │  │
-│  system_name           │        │  │                       │  │
-│  auth_method           │        │  │  Stores:              │  │
-│  token_expiry          │        │  │  • Encrypted cred     │  │
-│  status                │        │  │    blobs keyed by     │  │
-│  (NO credential data)  │        │  │    credential_id      │  │
-│                        │        │  │  • Encryption keys    │  │
-│                        │        │  │  • OAuth tokens       │  │
-└────────────────────────┘        │  └───────────────────────┘  │
-                                  │                             │
-                                  │  ┌───────────────────────┐  │
-                                  │  │  Credential Service   │  │
-                                  │  │  (API pod)            │  │
-                                  │  │  • Stores new creds   │  │
-                                  │  │  • Retrieves for use  │  │
-                                  │  │  • Refreshes tokens   │  │
-                                  │  │  • Validates health   │  │
-                                  │  └───────────────────────┘  │
-                                  └─────────────────────────────┘
+┌────────────────────────┐        ┌────────────────────────────────────┐
+│   SharePoint           │        │  HILDA Containerized Services      │
+│   (PMCredentials List) │        │  (Docker Compose Ph-1/Ph-2;        │
+│                        │        │   MicroK8s Ph-3+)                  │
+│  credential_id  ──────────────▶│  ┌──────────────────────────────┐  │
+│  user_id               │        │  │  Secrets backend             │  │
+│  system_type           │        │  │  Ph-1/Ph-2: sops-encrypted   │  │
+│  system_name           │        │  │    files / K8s Secrets       │  │
+│  auth_method           │        │  │    [D-019] v1                │  │
+│  token_expiry          │        │  │  Ph-3+: HashiCorp Vault      │  │
+│  status                │        │  │    [D-019] v2                │  │
+│  (NO credential data)  │        │  │                              │  │
+│                        │        │  │  Stores:                     │  │
+│                        │        │  │  • Ph-1/Ph-2: one shared     │  │
+│                        │        │  │    ops-team cred per system  │  │
+│                        │        │  │  • Ph-3+: encrypted per-PM   │  │
+│                        │        │  │    blobs keyed by            │  │
+│                        │        │  │    credential_id             │  │
+└────────────────────────┘        │  └──────────────────────────────┘  │
+                                  │                                    │
+                                  │  ┌──────────────────────────────┐  │
+                                  │  │  Credential Service          │  │
+                                  │  │  (hilda-api container)       │  │
+                                  │  │  Ph-1/Ph-2: retrieve shared  │  │
+                                  │  │    ops-team cred             │  │
+                                  │  │  Ph-3+: store/retrieve/      │  │
+                                  │  │    refresh per-PM creds      │  │
+                                  │  └──────────────────────────────┘  │
+                                  └────────────────────────────────────┘
 ```
 
-**Recommended secrets backend:** HashiCorp Vault (self-hosted on the K8s cluster) provides encrypted storage, access policies, audit logging, and automatic secret rotation. If Vault is not available, Kubernetes Secrets with Sealed Secrets (Bitnami) provide a simpler alternative with encryption at rest via etcd encryption.
+**Secrets backend by phase:** Ph-1/Ph-2 uses sops-encrypted files committed to the repository, decrypted at deploy time by ops, and provided to the HILDA containers as environment variables / mounted files per `[D-019]` v1. Ph-3+ migrates to HashiCorp Vault (self-hosted on MicroK8s) for encrypted storage, access policies, audit logging, and automatic secret rotation per `[D-019]` v2.
 
 ### 10.3 Credential Registration Flow
 
@@ -819,7 +949,7 @@ Credentials are scoped by PM, system type, and system name. The mapping from del
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Encryption at rest    | AES-256 in secrets store; no plaintext credentials anywhere in SharePoint or PostgreSQL                                                      |
 | Encryption in transit | TLS for all API calls between services and to external systems                                                                               |
-| Access control        | Only the Credential Service pod can access the secrets store; service-to-service auth via K8s service accounts and mTLS                      |
+| Access control        | Only the Credential Service container can access the secrets store; service-to-service auth via Docker Compose network isolation (Ph-1/Ph-2) or K8s ServiceAccounts + mTLS (Ph-3+) |
 | Audit logging         | Every credential retrieval, refresh, and use is logged (without exposing credential material) in the CommunicationLog with the credential_id |
 | Credential isolation  | Each PM's credentials are stored under their own path in the secrets store; no PM can access another PM's credentials                        |
 | No credential sharing | Automation services never cache decrypted credentials; each use requires a fresh retrieval from the Credential Service                       |
@@ -828,28 +958,51 @@ Credentials are scoped by PM, system type, and system name. The mapping from del
 
 ---
 
-## 11. Deployment Architecture (On-Premises Kubernetes Cluster)
+## 11. Deployment Architecture
 
-All automation services run on the existing 25-node K8s cluster.
+### 11.1 Ph-1 / Ph-2 — Docker Compose on bare-metal Linux PC
 
-| Service                    | K8s Resource              | Replicas    | Notes                                                                              |
-| -------------------------- | ------------------------- | ----------- | ---------------------------------------------------------------------------------- |
-| Workflow Engine (Temporal) | StatefulSet               | 3           | Durable orchestration with persistent volumes                                      |
-| Temporal Workers           | Deployment                | 2–4         | Execute activities (email, LLM, adapter calls); scale with load                    |
-| Email Service              | Deployment                | 2           | Active-passive or partitioned by customer for HA                                   |
-| Messenger Adapter          | Deployment                | 1–2         | Webhook listener + outbound sender                                                 |
-| Issue Tracker Adapter      | Deployment                | 1–2         | Polling + webhook receiver                                                         |
-| Customer Adapter(s)        | Deployment (per customer) | 1–2 each    | New customer = new deployment from config                                          |
-| Credential Service         | Deployment                | 2           | Handles credential storage, retrieval, refresh; only pod with secrets store access |
-| Credential Health Monitor  | CronJob / Deployment      | 1           | Periodic token refresh and credential validation                                   |
-| HashiCorp Vault            | StatefulSet               | 3           | Encrypted secrets store for PM credentials; HA mode                                |
-| LLM Gateway                | Deployment                | 2           | Rate limiting, prompt management, retries                                          |
-| PostgreSQL                 | StatefulSet               | 1+1 replica | Workflow state, message queues, cache metadata                                     |
-| Redis                      | Deployment                | 1–2         | Caching, pub/sub, job queues                                                       |
+All automation services run as Docker containers on a single bare-metal Linux PC, orchestrated via `docker-compose.yaml` per `[D-022]` / `[D-025]`.
 
-The SharePoint layer (UI + data + documents) runs on existing SharePoint infrastructure — no cluster resources required for the front end.
+| Container             | Image source            | Notes                                                                                        |
+| --------------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
+| `hilda-api`           | `hilda:<version>`       | FastAPI app — REST endpoints for SP web-part calls (FR-56), document enumeration (FR-57), downloads (FR-61), Credential Service surface. Single replica. |
+| `hilda-worker`        | `hilda:<version>`       | Celery worker — executes activities (email outreach, LLM review, adapter calls, document classification, submission packaging). Single replica; concurrency tuned per workload. |
+| `hilda-beat`          | `hilda:<version>`       | Celery beat scheduler — loads schedule from YAML rule files per `[D-022]` implementation note (Device → Customer → Global resolution per FR-30). Single replica. |
+| `hilda-llm-gateway`   | `hilda:<version>`       | LLM Gateway — rate limiting, prompt management, retries; routes to on-prem LLM endpoint per `[D-007]`. Single replica. |
+| `postgres`            | official `postgres`     | SharePoint mirror (DeliveryItems, CommunicationLog), FR-31 runtime overrides, resolved AutomationRules snapshot. Single replica with volume-mounted persistence. |
+| `redis`               | official `redis`        | Celery broker + cache + dedup per `[D-022]`. Single replica. |
 
-Baseline estimate: 8–12 nodes for DeliverableHub services, leaving 13–17 nodes for other workloads and growth.
+**Volumes / bind-mounts (per `[D-025]`):**
+- `./customizations/sharepoint_config/` → read-only mount into `hilda-api`, `hilda-worker`, `hilda-beat`
+- `./customizations/template_schemas/` → read-only mount (FR-39/40/41)
+- `./customizations/rules/` → read-only mount (FR-30)
+- `\\share\hilda\` (NSD) → SMB mount into `hilda-api`, `hilda-worker` for document I/O per `[D-013]`
+
+**Secrets (Ph-1/Ph-2):** sops-encrypted files committed to repo; decrypted at deploy time and provided as env vars / mounted files per `[D-019]` v1. No Vault container in Ph-1/Ph-2.
+
+**Total: 6 containers on a single host.** No HA, no horizontal scaling; sized for v1 single-deployment scale.
+
+### 11.2 Ph-3+ — MicroK8s single-node
+
+Migration to MicroK8s single-node per `[D-022]` / `[D-025]`. Same container images; orchestration upgraded to provide self-healing, RBAC, secrets/ConfigMap management, and a path to multi-node scaling.
+
+| Service                   | K8s Resource                       | Notes                                                                                |
+| ------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| `hilda-api`               | Deployment                         | Same image as Ph-1/Ph-2; service exposed via MetalLB LoadBalancer VIP                |
+| `hilda-worker`            | Deployment                         | Scaled by replica count                                                              |
+| `hilda-beat`              | Deployment (single replica)         | Celery beat — singleton                                                              |
+| `hilda-llm-gateway`       | Deployment                         | LLM rate limiting & retry                                                            |
+| Credential Service        | Deployment (singleton)             | Per `[D-019]` v2 — Vault-backed                                                      |
+| Credential Health Monitor | CronJob                            | Periodic token refresh and credential validation (Ph-3+ scope per §10)               |
+| HashiCorp Vault           | StatefulSet                        | `[D-019]` v2 — encrypted PM credential blobs                                         |
+| PostgreSQL                | StatefulSet                        | Rook/Ceph RBD PVC for durable storage                                                |
+| RabbitMQ Quorum Queues    | RabbitMQ Cluster Operator          | Celery broker per `[D-022]` Ph-3 migration; replaces Redis-as-broker                 |
+| Redis                     | Deployment                         | Cache-only role in Ph-3 (no broker duty)                                             |
+| Customizations            | ConfigMap volumes per `[D-025]`    | YAML files migrated from bind-mounts to ConfigMap volumes — no Python change         |
+| NSD access                | CSI driver for SMB                 | Same `\\share\hilda\` mount surface                                                  |
+
+The SharePoint layer runs on existing on-prem SharePoint 2017 infrastructure in both phases — no HILDA-side resources required for the UI layer. The NSD runs on existing on-prem file-server infrastructure.
 
 ---
 
@@ -865,43 +1018,61 @@ The system uses a **three-tier configuration model**:
 
 This hierarchy means onboarding a new customer is a **template creation exercise**, and onboarding a new device is a **template instantiation exercise** — no code changes, no new deployments.
 
+**Schema vs. content boundary:** The three-tier configurability above moves **content** within an existing schema (templates, rules, scheduling, CC lists, modalities, TG groupings). **Schema changes** — adding a new field on DeliveryItems, a new `item_type` value, a new `delivery_state`, a new `trigger_event` — are a different category of change that requires a HILDA code release per §3.5. The YAML files in `customizations/` are deliberately scoped to the "what can change without core code" zone; the canonical schema is gated by HILDA dev/ops and propagates through Pydantic models → SP List provisioning → Postgres migration → YAML template-schema spec at release time.
+
 ---
 
 ## 13. Implementation Roadmap
 
-### Phase 1 — Foundation (Months 1–3)
+The roadmap uses phase-based scoping (Ph-1 / Ph-2 / Ph-3+) rather than calendar-month commitments. Each phase corresponds to a versioned release. Items are scoped to phases by `[Ph-N]` tags in `requirements.md`; this section summarizes per-phase deliverables. Detailed FR scoping in `requirements.md` is authoritative — this section is a narrative overview.
 
-- **Infrastructure:** Provision DeliverableHub SharePoint site, Lists, and Document Libraries per the data model. Set up K8s namespace, Helm charts, CI/CD, PostgreSQL, Redis, HashiCorp Vault.
-- **Data model implementation:** SharePoint Lists for Customers, Devices, Milestones, Deliverables, DeliveryItems, CustomerTemplates, AutomationRules, CommunicationLog, Users, PMCredentials.
-- **Credential management:** Credential Service, Vault integration, PM credential registration UI (OAuth2 + API token flows), credential health monitoring.
-- **Template & tracker creation UI:** SharePoint-based interface for creating customer templates and instantiating device trackers (from template, from Excel, or manual entry).
-- **Email Service:** Dedicated mailbox, configurable templates, reference-tag parsing, inbound/outbound automation.
-- **Basic rule engine:** Reminders, status sync, deadline tracking.
-- **PM Dashboard MVP:** SharePoint views/web parts showing deliverable hierarchy, status roll-ups, and manual override capabilities.
+### Ph-1 — Single-customer foundation
 
-### Phase 2 — Intelligence & Adapters (Months 4–6)
+**Goal:** end-to-end tracker → outreach → ingest → review → submit loop for a single customer on Docker Compose, single deployment.
 
-- **LLM integration:** Message classification, tech report and waiver quality review, response drafting.
-- **Messenger adapter:** Bi-directional communication support.
-- **Internal issue tracker adapter:** Bi-directional sync with internal systems.
-- **First customer adapter:** Build adapter for the highest-volume customer's external system (e.g., Jira).
-- **AI-drafted customer responses** with PM approval flow.
+- **Infrastructure:** bare-metal Linux PC; Docker Compose stack with `hilda-api`, `hilda-worker`, `hilda-beat`, `hilda-llm-gateway`, `postgres`, `redis` per §11.1. sops-encrypted secrets per `[D-019]` v1.
+- **Data model:** SharePoint Lists for Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials (metadata), CommunicationLog. No Deliverables table (D-028). YAML files in `customizations/template_schemas/` and `customizations/rules/` per FR-30 / FR-39/40/41 / `[D-025]`. Postgres mirror for fast queries.
+- **NSD:** two-tree structure (`inbound/` + `internal/`) per `[D-013]` / `[D-041]`; HILDA-mediated downloads (`https://hilda.corp/dl/<token>`) per FR-61 / NFR-16.
+- **Tracker creation:** from-template flow per FR-1(a) / FR-2 (Excel import deferred per DEF-15).
+- **Email Service:** dedicated mailbox, per-owner BATCH-id reference tags (FR-9 / FR-24), structured reply blocks, free-text fallback parsing per FR-12.
+- **PLM adapter:** corp PLM via API Spec Ingestor `[D-003]`; one issue per (owner × milestone) per FR-26 / `[D-035]`.
+- **NSD ingest:** owner-drop monitoring per FR-55; document classification per FR-52 + `[D-039]`.
+- **Customer JIRA adapter:** read-only polling per FR-25.
+- **Document review:** rule-based test-report parser per FR-16 + `[D-011]`; LLM quality review per FR-53 (gated by `review_required` per FR-2).
+- **PM/TPM SharePoint UI:** milestone view (FR-56), document section with parser + LLM findings (FR-59/FR-60), Start Collection (FR-8), Approve (FR-56), Submit to Carrier (FR-63), Close All Items (FR-64), Send Reminder (FR-65).
+- **Customer adapter:** first-customer submission per FR-18/FR-19/FR-20; carrier `portal_structure.yaml` per FR-69.
+- **Credentials:** single shared ops-team credential set per system per `[D-019]` v1; no per-PM flows.
+- **Submission flow:** PLM upload immediate on ingest; assembly from NSD; carrier dispatch.
 
-### Phase 3 — Scale & Multi-Customer (Months 7–9)
+### Ph-2 — Multi-source intelligence, multi-revision
 
-- Additional customer adapters (second and third customers).
-- **Template library:** Multiple customer templates in production; validate that template-to-tracker flow works seamlessly.
-- Onboard a second PM team using configuration only.
-- AI status summarization and stakeholder reporting.
-- Advanced dashboard views (milestone Kanban, cross-device status matrix).
+**Goal:** richer document handling (revisions, ambiguity resolution), corp messenger inbound, multi-customer, self-close UI.
 
-### Phase 4 — Optimize (Months 10–12)
+- **Multi-revision document handling** per FR-17 / `[D-039]` / `[D-040]` (NSD source-of-truth; deferred PLM upload; sync verification per FR-68).
+- **Mailto: tap-link replies** per FR-12 path (b); subject-encoded status per FR-24.
+- **Corp messenger inbound** per FR-54 — LLM classification, manual-triage flag on dashboard.
+- **ZIP archive ingest** per FR-72; `staged/` holding for ambiguous documents per FR-52 Step 3.
+- **Owner self-close** in SP UI per FR-56; **version-selection workflow** for multi-revision items per FR-66.
+- **SP UI document upload** per FR-62; **PM annotates resolution path** per FR-47.
+- **Customer adapter expansion:** second and third customers; AI-drafted customer responses (deferred pending DEF-19/DEF-20 revisit).
+- **Template library:** multiple customer templates in production; validate template-to-tracker scaling.
+- **Excel-import flow** per FR-1(b) revisit pending DEF-15.
 
-- Browser-automation adapter for customers without APIs.
-- Advanced analytics (cycle time per delivery item type, customer response SLAs, R&D team performance).
-- Feedback loop: LLM learns from PM edits to improve draft quality over time.
-- Full audit trail and compliance reporting.
-- Self-service customer template creation UI with guided wizard.
+### Ph-3+ — Per-PM credentials, MicroK8s, automated closure
+
+**Goal:** operational maturity — credential delegation, orchestration upgrade, automated downstream actions.
+
+- **MicroK8s single-node migration** per `[D-022]` / `[D-025]` §11.2. RabbitMQ Quorum Queues replace Redis-as-broker; Rook/Ceph PVCs; MetalLB VIP; ConfigMap volumes for customizations.
+- **Per-PM credential management** — Section 10 target state: OAuth2 / API-token flows, PM-owned encrypted blobs in HashiCorp Vault per `[D-019]` v2, Credential Health Monitor, per-item `customer_delivery_credential_id` mapping.
+- **Automated customer feedback capture** per DEF-19 (formerly FR-21) — carrier portal + email feedback ingestion.
+- **Automated `Closed` transition** per DEF-20 (formerly FR-22) — carrier-acceptance signal detection + PM confirmation.
+- **Automated resolution-path actions** per DEF-17 — auto-create Tech Report DeliveryItems, monitor `waiver_ref`.
+- **Filesystem identity attribution for NSD drops** per DEF-16.
+- **Per-DeliveryItem ACL** on HILDA-mediated download links per DEF-18 (currently any authenticated corp AD user per FR-61).
+- **Browser-automation adapter** for customers without APIs.
+- **Advanced analytics, AI status summarization, self-service template wizard.**
+
+**Deferred items**: see `## Deferred` in `requirements.md` for the canonical list with DEF-N IDs.
 
 ---
 
