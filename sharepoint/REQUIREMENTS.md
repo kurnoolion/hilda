@@ -156,6 +156,33 @@ Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
 | `attachments` | Multi-line text | JSON `[{filename, download_url}, ...]` |
 | `timestamp` | DateTime, default Now | |
 
+### 2.8 List: `TGGroups` — per-TG-group metadata (TG = Technical Group)
+
+A DeliveryItem belongs to a TG (e.g., "HW", "SW", "QA") via its `tg_name` field — that's already in §2.4. The TG itself has metadata that applies to **every item in the group within a given milestone**: who coordinates the TG, the TG's corp email distribution alias, the TG's corp messenger IDs, the default CC list for emails. Those are NOT stored on each DeliveryItem row (would duplicate across many items) — they live in this list, one row per `(milestone_id, tg_name)`.
+
+| Internal name | Type | Notes |
+|---|---|---|
+| `tg_group_id` | String (auto) | PK |
+| `milestone_id` | Lookup → Milestones, required | parent milestone |
+| `tg_name` | String, required | e.g. "HW" / "SW" / "QA" — must match the `tg_name` values used on DeliveryItem rows in this milestone |
+| `tg_owner_name` | String | TG coordinator's display name — knows the current engineer assignments for this TG (distinct from per-DeliveryItem `owner` who is the actual delivery engineer) |
+| `tg_owner_email` | String | TG coordinator's email |
+| `email_group_alias` | String | nullable — the TG's corporate email distribution alias (e.g., `ims.corp@corp.com`). **When set, HILDA sends outreach to this alias instead of individual `owner_email` addresses for items in this TG.** When null, HILDA sends to individual owners per item. |
+| `corp_id_list` | Multi-line text | nullable — JSON array of corp IDs for all TG members (e.g., `["mkadado", "tarasu", ...]`). **When set, HILDA uses this list for corp messenger escalation (FR-10) instead of the individual owner's corp ID.** When null, HILDA escalates to individual owner only. |
+| `default_cc_list` | Multi-line text | nullable — JSON array `[{name, email, role}, ...]`. Pre-populates per-item `email_cc_list` on DeliveryItems at tracker-creation time (per-item override is allowed via FR-14). |
+
+**Unique constraint:** `(milestone_id, tg_name)` — one row per TG per milestone; SP UI must prevent duplicates.
+
+**How rows get populated:**
+- HILDA creates these rows automatically at tracker-creation time, reading values from the customer template YAML (`customizations/template_schemas/<customer>/tg_groups.yaml`).
+- TPM can edit these rows in SP UI **before** the milestone's collection kickoff (FR-71 ODF — Phase 2; for Phase 1 the YAML values are accepted as-is).
+- After collection kickoff, edits trigger SP alerts to HILDA so the live system picks up the change (e.g., a corrected `tg_owner_email` reaches HILDA via the SP-alert email channel).
+
+**Why this is a separate list (not columns on DeliveryItems):**
+- One TG can contain 20+ items in a milestone. Putting `tg_owner_email`, `email_group_alias`, etc. on every item would mean 20× duplication and 20× consistency risk when the value changes.
+- The DeliveryItems list keeps just `tg_name` (the foreign-key-like label); SP UI does a lookup to TGGroups for display.
+- Aligns with the schema/content boundary per HILDA's `[D-045]` — TG metadata is per-group config, not per-item runtime state.
+
 ---
 
 ## 3. Views to build
@@ -166,7 +193,12 @@ The view PMs/TPMs spend most of their time in. One web part page per milestone. 
 
 **Layout:**
 - Header row: device name, milestone name, milestone status, target date
-- **Grouped by `tg_name`** (HW / SW / QA / …)
+- **Grouped by `tg_name`** (HW / SW / QA / …) — for each group, render a **TG header** at the top of the group with metadata from the matching `TGGroups` row (lookup on `(milestone_id, tg_name)`):
+  - `tg_owner_name` + `tg_owner_email` (the TG coordinator)
+  - `email_group_alias` if set, shown as `Alias: <value>` (else "—")
+  - `default_cc_list` size (e.g., "CC: 3 recipients" — click to expand)
+  - *(Phase 2)* an inline **"Edit TG metadata"** link that opens the TGGroups list-item edit form per FR-71
+- Then the per-item rows under the TG header
 - Each row shows: `item_no`, `item_name`, `owner_name`, `delivery_state`, `expected_completion_date`
 - Items where `item_type ≠ Confirmation` show a **document section** (see §5)
 - Items where `delivery_state = UnderPMReview` show a **PM Review section** (see §6)
@@ -349,7 +381,9 @@ Per FR-56, items in `UnderPMReview` need an extra section showing:
 
 ### 7.1 SP Alert configuration (required deployment step)
 
-For each of the 6 SharePoint Lists in §2, configure an alert subscription:
+For each of the **7 SharePoint Lists** in §2 (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**), configure an alert subscription:
+
+*(Note: CommunicationLog is technically append-only and shouldn't need editing, so its alert could be omitted in practice — but configuring it for completeness costs nothing and protects against future field additions. The 7 lists above all need alerts; the new TGGroups list is the critical one for TPM-driven TG metadata overrides per FR-71.)*
 
 - **Subscriber address**: HILDA's dedicated mailbox (provided by HILDA team at deployment time — e.g., `deliverablehub@<corp-domain>`)
 - **Send Alerts for These Changes**: **`Anything changes`** — NOT "specific columns." If you restrict to specific columns, HILDA misses field edits.
@@ -432,7 +466,8 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 ## 10. Phase scoping — what to build now vs later
 
 ### Phase 1 (build first — first-customer end-to-end)
-- §3.1 Milestone View (with grouping by `tg_name`)
+- §2.1–§2.8 — provision all **8 SharePoint lists** (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**)
+- §3.1 Milestone View (with grouping by `tg_name` + TG-group header rows reading from TGGroups via lookup)
 - §3.2 Device Tracker View
 - §3.3 PM Dashboard View
 - §4.1 Start Collection
@@ -443,7 +478,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 - §4.6 Send Reminder
 - §5 Document section + download links (Phase 1: single revision per document only — don't worry about revision history UI)
 - §6 PM Review section (Phase 1: Approve only; no Override Final yet)
-- §7 SP Alert configuration on all 6 lists
+- §7 SP Alert configuration on all 8 lists (including TGGroups)
 - §8.1 Live SP REST polling
 - §9 Permissions
 
@@ -453,6 +488,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 - §5.2 Expandable revision history (`?all_revisions=true`)
 - §6 Override Final revision UI
 - §8.2 In-flight status polling for submission assembly progress
+- **TGGroups inline edit link in §3.1** ("Edit TG metadata" — opens the TGGroups list-item form for TPM to override `tg_owner_email`, `email_group_alias`, `corp_id_list`, `default_cc_list` before ODF fires per FR-71)
 
 ### Phase 3+ (deferred)
 - Cross-device matrix / Kanban views
@@ -482,10 +518,10 @@ HILDA team owns:
 - All Python services that consume SP data and write back
 
 SP UI team (you) owns:
-- The 6 SharePoint Lists (column definitions per §2; create the lists with these internal names exactly)
-- All views per §3
+- The **8 SharePoint Lists** (column definitions per §2; create the lists with these internal names exactly — including the new TGGroups list per §2.8)
+- All views per §3 (including TG-group header rendering above each `tg_name` grouping in §3.1, populated by lookup to TGGroups)
 - All buttons per §4 (each writes to a SP field — no direct HILDA HTTP calls for state actions)
-- The SP-side alert configuration per §7 (this is a SP deployment step, not code)
+- The SP-side alert configuration per §7 (this is a SP deployment step, not code) — covering all 8 lists
 - The document section and PM Review section per §5 and §6 (which call HILDA's enumeration API for data + render HILDA-mediated download links)
 
 ### Open items to confirm with HILDA team
@@ -496,8 +532,7 @@ SP UI team (you) owns:
 4. **Override Final endpoint** (§6 Phase 2) — `POST https://hilda.corp/docs/<delivery_item_id>/set_final` shape TBD.
 5. **Status endpoint** (§8.2) — `GET https://hilda.corp/status/milestone/<id>/submission` shape TBD.
 6. **Upload endpoint** (§4.7 Phase 2) — `POST https://hilda.corp/upload/<delivery_item_id>` shape TBD.
-
-When you start each Phase, sync on the open items with HILDA team first.
+7. **TGGroups list (§2.8)** — added 2026-05-26. Confirm with HILDA team: (a) `corp_id_list` and `default_cc_list` JSON shape; (b) whether `(milestone_id, tg_name)` unique constraint is enforced SP-side or HILDA-side; (c) the auto-population mechanism at tracker creation — does HILDA push these rows via REST after reading the customer template YAML, or does the SP UI provide a pre-creation hook? Most likely answer: HILDA pushes via REST after tracker creation, same as for Devices / Milestones / DeliveryItems.
 
 ---
 
@@ -505,7 +540,7 @@ When you start each Phase, sync on the open items with HILDA team first.
 
 | What you build | Where it lives | What it writes / calls |
 |---|---|---|
-| 6 SharePoint Lists | Corp SP site | — (data store) |
+| 8 SharePoint Lists (incl. TGGroups per §2.8) | Corp SP site | — (data store) |
 | 3 views (milestone / device / dashboard) | SP web parts | Reads SP lists |
 | Action buttons | SP web parts | Writes SP list fields (which trigger SP alerts → HILDA) |
 | Document section | SP web parts | Calls `GET https://hilda.corp/docs/<item_id>` |
