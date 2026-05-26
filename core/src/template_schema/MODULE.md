@@ -1,6 +1,6 @@
 # Module: template_schema
 
-**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, NFR-14, and anchors `[D-014]` `[D-018]`.
+**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, FR-66, FR-70, FR-71, NFR-14, and anchors `[D-014]` `[D-018]` `[D-028]` `[D-046]` `[D-049]` `[D-051]`.
 
 *This module is pure data model — no IO, no SharePoint, no network. Runtime modules extend these base types with persistence-layer fields (SP List IDs, DB columns) in their own models.*
 
@@ -12,11 +12,18 @@
 
 ```python
 class DeliveryState(str, Enum):
-    """Extensible via DeliveryStateRegistry — new values added through config, not code."""
-    NOT_STARTED = "Not Started"
-    OPEN        = "Open"
-    CLOSED      = "Closed"
-    DELAYED     = "Delayed"
+    """Extensible via DeliveryStateRegistry — new values added through config, not code.
+    Full 10-state enum per FR-7 (rewritten 2026-05-15)."""
+    OPEN                 = "Open"                 # initial; set at tracker creation
+    OUTREACH_SENT        = "OutreachSent"         # initial outreach dispatched per FR-9
+    DOCUMENT_RECEIVED    = "DocumentReceived"     # document arrived via any ingest channel
+    UNDER_PM_REVIEW      = "UnderPMReview"        # active TPM review gate per FR-56
+    OWNER_CLOSED         = "OwnerClosed"          # owner confirmed done; transient — forks per FR-7 (D-048 multi-rev selection)
+    DELAYED              = "Delayed"              # owner-reported delay; transient
+    BLOCKED              = "Blocked"              # owner-reported blocker; transient
+    READY_FOR_SUBMISSION = "ReadyForSubmission"   # PM approved per FR-28 PMApproval trigger
+    SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer" # submission package dispatched per FR-18
+    CLOSED               = "Closed"               # manually set per FR-14 / FR-64; automated transition deferred per DEF-20
 
 class ItemType(str, Enum):
     CONFIRMATION    = "Confirmation (Yes/No)"   # owner reply closes item; no artifact required
@@ -27,9 +34,28 @@ class ItemType(str, Enum):
     WAIVER          = "Waiver"
 
 class TrackingModality(str, Enum):
-    EMAIL                  = "Email"
-    MESSENGER              = "Messenger"
-    INTERNAL_ISSUE_TRACKER = "InternalIssueTracker"
+    """Multi-value per DeliveryItem (stored as a list) per `[D-037]` (2026-05-13).
+    Five v1 values; valid combinations require at least one status-capable + one
+    document-capable modality per FR-7."""
+    EMAIL               = "Email"                 # status + documents via email reply
+    CORPORATE_MESSENGER = "CorporateMessenger"    # status only; no attachments; Ph-2 inbound per FR-54
+    CORPORATE_PLM       = "CorporatePLM"          # documents only; owner uploads to corp PLM; HILDA polls per FR-26
+    NETWORK_SHARED_DRIVE = "NetworkSharedDrive"   # documents only; owner drops in NSD inbound/ per FR-13/FR-55
+    CUSTOMER_JIRA       = "CustomerJIRA"          # status only; HILDA polls customer JIRA per FR-25
+    # InternalIssueTracker removed per [D-037] — no internal Jira tracking in v1; corp PLM serves that role.
+
+class IngestSource(str, Enum):
+    """Per FR-13 + `[D-039]` — recorded in document index for every classified document."""
+    EMAIL                = "Email"
+    CORPORATE_PLM        = "CorporatePLM"
+    NETWORK_SHARED_DRIVE = "NetworkSharedDrive"
+    SHAREPOINT_UI        = "SharePointUI"   # PM-uploaded via SP UI per FR-62 (Ph-2)
+
+class DocType(str, Enum):
+    """Per FR-7. Used as folder organizer in NSD path `<doc_type_slug>/<doc_id_slug>/revN/` per `[D-013]`."""
+    TEST_REPORT = "test_report"    # triggers FR-16 parser; triggers FR-53 LLM review when review_required=true
+    TECH_REPORT = "tech_report"    # triggers FR-53 LLM review when review_required=true
+    WAIVER      = "waiver"         # triggers FR-53 LLM review when review_required=true
 
 class CustomerDeliveryModality(str, Enum):
     NONE                   = "None"
@@ -49,11 +75,20 @@ class RuleScope(str, Enum):
     DEVICE   = "Device"
 
 class RuleActionType(str, Enum):
-    SEND_REMINDER    = "SendReminder"
-    ESCALATE         = "Escalate"
-    UPDATE_STATE     = "UpdateState"
-    TRIGGER_AI_REVIEW = "TriggerAIReview"
-    QUEUE_SUBMISSION = "QueueSubmission"
+    """Per FR-28 / FR-29 (rewritten 2026-05-15). Extensible registry; new actions added via config."""
+    SEND_REMINDER             = "SendReminder"
+    ESCALATE                  = "Escalate"
+    UPDATE_STATE              = "UpdateState"
+    TRIGGER_PARSER            = "TriggerParser"             # rule-based test-report parser per FR-16
+    TRIGGER_LLM_REVIEW        = "TriggerLLMReview"          # FR-53 LLM quality review
+    NOTIFY_PM                 = "NotifyPM"                  # dashboard alert; no owner-facing outbound
+    START_ITEM_COLLECTION     = "StartItemCollection"       # FR-8 / FR-29
+    QUEUE_SUBMISSION          = "QueueSubmission"
+    PM_APPROVAL               = "PMApproval"                # FR-28 PM approval trigger
+    TRIGGER_VERSION_SELECTION = "TriggerVersionSelection"   # `[D-048]` / FR-66 (Ph-2)
+    TRIGGER_ODF               = "TriggerODF"                # `[D-049]` / FR-71 (Ph-2)
+    TRIGGER_PLM_CLEANUP       = "TriggerPLMCleanup"         # FR-67 PLM stale-attachment deletion
+    NOTIFY_OWNER_DOC_COUNT_PENDING = "NotifyOwnerDocCountPending"  # FR-7 OwnerClosed guard violation
 
 class TestReportItemStatus(str, Enum):
     """Canonical per-item status vocabulary for test reports (anchors [D-011] FR-16)."""
@@ -126,18 +161,18 @@ class DeliveryItemBase(BaseModel):
     item_id:                         str
     item_no:                         int        # sequential within milestone; unique on (milestone_id, item_no)
     milestone_id:                    str        # parent milestone — no Deliverable level ([D-028])
-    tg_name:                         str | None # validated against TGNameRegistry; e.g. "Hardware", "Software"
+    tg_name:                         str | None # validated against TGNameRegistry; foreign-key-like label to TGGroupBase per [D-049] / [D-051]
     item_name:                       str
     item_description:                str | None
     delivery_state:                  str   # validated against DeliveryStateRegistry
     expected_completion_date:        date | None
-    actual_completion_date:          date | None  # auto-set when delivery_state → Closed
+    actual_completion_date:          date | None  # auto-set when delivery_state → OwnerClosed (per FR-15 update)
     item_type:                       str   # validated against ItemTypeRegistry
     owner_name:                      str | None
     owner_email:                     str | None
-    tracking_modality:               str   # validated against TrackingModalityRegistry
-    actual_item_info:                str | None  # https://hilda.corp/dl/<token> per [D-013], or URL to internal system
-    plm_id:                          str | None  # PLM system ID (e.g. Jira-style); permanent source of truth ref
+    tracking_modality:               list[str]  # MULTI-VALUE per [D-037] — list of TrackingModality values; validated against TrackingModalityRegistry
+    actual_item_info:                str | None  # PLM issue URL for (owner × milestone) pair per FR-57, set on first document arrival
+    plm_id:                          str | None  # PLM system ID (e.g. Jira-style); one issue per (owner × milestone) per [D-035] / FR-8
     handset:                         bool = False  # form factor applicability flags (static, from template)
     tablet:                          bool = False
     wearable:                        bool = False
@@ -152,6 +187,28 @@ class DeliveryItemBase(BaseModel):
     last_owner_contacted:            datetime | None
     sort_order:                      int
     path_slug:                       str
+    # Per-DeliveryItem fields added 2026-05-15+ (FR-2 / FR-7 / FR-53 / FR-70):
+    doc_count:                       int = 1     # per FR-7; number of test_report docs required before DocumentReceived; 0 for Confirmation items
+    review_required:                 bool = False # per FR-2 / FR-53; gates LLM quality review (FR-53); always False for Confirmation items
+    review_status:                   str   # per FR-53 / FR-60; enum: pending | complete | not_required
+    item_completion_pct:             int = 0     # per FR-70; document-review completion percentage; computed field
+    email_cc_list:                   list[dict] | None = None  # per FR-2 (per-item override); pre-populated from per-TG default_cc_list at tracker creation; array of {name, email, role}
+    milestone_gating:                bool = False  # per SP alert sample 2026-05-26 (sharepoint/REQUIREMENTS.md §2.4); does this item gate milestone closure?
+
+class TGGroupBase(BaseModel):
+    """Per-TG-group metadata per `[D-049]` (ODF) + `[D-051]` (TGGroups SP list normalization).
+    One row per `(milestone_id, tg_name)` — applies to all DeliveryItems sharing that tg_name in the milestone.
+    Source data: `customizations/template_schemas/<customer_slug>/tg_groups.yaml` per FR-2 / FR-71.
+    Runtime storage: TGGroups SP list per `sharepoint/REQUIREMENTS.md §2.8`."""
+    tg_group_id:        str
+    milestone_id:       str   # FK → MilestoneBase
+    tg_name:            str   # validated against TGNameRegistry; matches DeliveryItemBase.tg_name
+    tg_owner_name:      str | None  # TG coordinator (delivery-engineer assignment authority); distinct from per-item DeliveryItemBase.owner_name
+    tg_owner_email:     str | None
+    email_group_alias:  str | None  # TG corporate email distribution alias (e.g. "ims.corp@corp.com"); when set, replaces individual owner_email for TG outreach per FR-2 / FR-9
+    corp_id_list:       list[str] | None  # complete corp-ID list of TG members; when set, replaces individual owner corp-ID for messenger escalation per FR-10
+    default_cc_list:    list[dict] | None  # per-TG default CC list; pre-populates per-item DeliveryItemBase.email_cc_list at tracker creation
+    # Unique constraint: (milestone_id, tg_name) — enforced SP-side per [D-051]
 
 class CustomerTemplateBase(BaseModel):
     template_id:      str

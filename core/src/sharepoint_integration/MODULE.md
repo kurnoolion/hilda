@@ -4,6 +4,8 @@
 
 *SharePoint scope is frozen at 2017 Lists + classic web parts only — no SPFx, no Power Apps, no Document Libraries per `[D-006]` `[D-013]` NFR-8.*
 
+*This module is list-agnostic by design per `[D-020]` — it CRUDs any list named by `FileBasedListProvider` via `customizations/sharepoint_config/<deployment>.yaml`. The 8 SP lists in scope per `sharepoint/REQUIREMENTS.md §2` (2026-05-26: Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, TGGroups per `[D-051]`) are all served by the same SpClient + SpCrud + SharePointListProvider stack without per-list code. Adding a new SP list in a future deployment is a config-only change in customizations/sharepoint_config/.*
+
 ---
 
 ## Architecture
