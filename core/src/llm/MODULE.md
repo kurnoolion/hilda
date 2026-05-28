@@ -6,10 +6,10 @@
 
 **Workload assignment**: The `hilda-llm-gateway` container per `[D-021]` is the sole HILDA workload that issues outbound LLM calls — `hilda-api` and `hilda-worker` import this module's *client-side* Protocol surface and proxy calls to `hilda-llm-gateway` over HTTP. Concentrating egress in one workload simplifies model-endpoint network policy (one container needs egress to both Ollama and corp LLM endpoints) and contains LLM-side failures from cascading into API request handling.
 
-**Ph-1 scope per `[D-029]` impl note 2026-05-13** — three runtime functions only:
-1. FR-52 Tier-2 attachment routing (document excerpt → DeliveryItem match)
-2. FR-53 document quality review (document content + checklist → findings list)
-3. FR-12 path (c) message classification fallback (message body → intent label)
+**Ph-1 scope per `[D-029]` impl note 2026-05-13** — three runtime functions only (FR-52 attachment routing decomposes into multiple TaskKinds per `[D-052]` impl note 2026-05-28):
+1. FR-52 attachment routing — three TaskKinds: `CLASSIFY_DOC_TYPE` (filename-opaque → doc_type), `ROUTE_ATTACHMENT` (Tier-2 item match), `CLASSIFY_DOC` (D-039 Step 2 new-vs-revision).
+2. FR-53 document quality review (document content + checklist → findings list) — `REVIEW_DOCUMENT`.
+3. FR-12 path (c) message classification fallback (message body → intent label) — `CLASSIFY_MESSAGE`.
 
 **Ph-2 surface (deferred)**: DEF-3 (LLM-drafted customer responses), DEF-4 (status summarization). Not on this module's Ph-1 Protocol surface.
 
@@ -23,8 +23,9 @@
 class TaskKind(str, Enum):
     """Bounded set of runtime LLM tasks. Each value maps 1:1 to a prompt template
     in templates/ and a structured output schema in schemas.py."""
-    CLASSIFY_DOC          = "classify_doc"          # [D-039] Step 2 — Tier-2 doc-type classifier
+    CLASSIFY_DOC_TYPE     = "classify_doc_type"     # FR-52 / FR-55 — filename opaque → doc_type ∈ {test_report, tech_report, waiver}
     ROUTE_ATTACHMENT      = "route_attachment"      # [D-033] Tier-2 — attachment → DeliveryItem match
+    CLASSIFY_DOC          = "classify_doc"          # [D-039] Step 2 — new document vs revision-of-existing
     REVIEW_DOCUMENT       = "review_document"       # FR-53 — quality review against checklist
     CLASSIFY_MESSAGE      = "classify_message"      # FR-12 path (c) — message-intent fallback
     # Ph-2 (deferred per [D-029] / DEF-3 / DEF-4):
@@ -64,13 +65,26 @@ class LLMProvider(Protocol):
 ### Task input/output schemas (`schemas.py`)
 
 ```python
-# CLASSIFY_DOC — [D-039] Step 2
+# CLASSIFY_DOC_TYPE — FR-52 / FR-55 filename-opaque doc_type classification
+class ClassifyDocTypeInput(BaseModel):
+    first_page_excerpt:  str                              # bounded length per template
+    candidate_doc_types: list[str]                        # closed enum subset of DocType per [D-045]
+class ClassifyDocTypeOutput(BaseModel):
+    doc_type:   Literal["test_report", "tech_report", "waiver"]
+    confidence: float                                     # [0.0, 1.0]
+
+# CLASSIFY_DOC — [D-039] Step 2 — new document vs revision-of-existing
+@dataclass(frozen=True)
+class ExistingDocCandidate:
+    doc_id_slug:        str                               # existing slug in document index
+    first_page_excerpt: str                               # excerpt of rev1 of that doc_id_slug
 class ClassifyDocInput(BaseModel):
-    excerpt:    str               # first-page text; bounded length per template
-    candidate_doc_types: list[str]  # subset of DocType enum values per [D-045]
+    new_doc_first_page_excerpt: str
+    existing_candidates:        list[ExistingDocCandidate]  # all priors for (delivery_item_id, doc_type)
 class ClassifyDocOutput(BaseModel):
-    doc_type:   str               # one of candidate_doc_types
-    confidence: float             # [0.0, 1.0]
+    verdict:     Literal["REVISION", "NEW_DOCUMENT"]
+    revision_of: str | None                               # doc_id_slug when verdict == REVISION; None otherwise
+    confidence:  float                                    # below threshold → caller routes to D-039 Step 3 staged/
 
 # ROUTE_ATTACHMENT — [D-033] Tier-2
 class RouteAttachmentInput(BaseModel):
@@ -244,8 +258,9 @@ Per `[D-052]`, every TaskKind's `(backend, model)` pairing must be A/B-tested on
 | TaskKind | Tentative backend | Tentative model | A/B candidates to test |
 |---|---|---|---|
 | `REVIEW_DOCUMENT` (FR-53) | `ollama` | `gemma3:12b` | vs `corp_llm` / vs `qwen3:8b` — checklist-against-content quality |
-| `CLASSIFY_DOC` (D-039 Step 2) | `ollama` | `qwen3:8b-q4_k_m` | vs `corp_llm` if rate budget allows |
+| `CLASSIFY_DOC_TYPE` (FR-52 / FR-55) | `ollama` | `qwen3:8b-q4_k_m` | vs `corp_llm` — closed-enum 3-way classification |
 | `ROUTE_ATTACHMENT` (FR-52 Tier 2) | `ollama` | `qwen3:8b-q4_k_m` | vs `corp_llm` |
+| `CLASSIFY_DOC` (D-039 Step 2) | `ollama` | `qwen3:8b-q4_k_m` | vs `corp_llm` if rate budget allows |
 | `CLASSIFY_MESSAGE` (FR-12 path c) | `ollama` | `qwen3:8b-q4_k_m` | vs `corp_llm` |
 
 These placeholders live in env config, not code — production HILDA PC env vars override after A/B testing.
@@ -256,6 +271,7 @@ These placeholders live in env config, not code — production HILDA PC env vars
 
 - **Not a model hosting / serving stack.** Ollama / corp LLM serving infrastructure and GPU provisioning are out of scope for this module — handled at the deployment / infra / corp-platform layer. This module's only model-side surface is HTTP endpoint URLs in `BackendConfig`.
 - **Not a test report parser.** FR-16 (test report → per-test-case `(test_case_id, status, [waiver_ref])` tuples) and FR-46 (`final | interim` classification) are **rule-based** per `[D-011]`, implemented by the per-customer parser generated by the Test Report Profiler. This module's `REVIEW_DOCUMENT` task is FR-53 — quality-review of a document against a per-customer checklist; it does **not** enumerate test cases, does not produce parser_result rows, and is not in the FR-16 / FR-46 critical path.
+- **Not a filename-rule doc_type classifier.** When inbound document filenames match deterministic regex rules (e.g. `*test_report*.pdf` → `test_report`), `email_service` / `storage` resolve doc_type without calling this module. `CLASSIFY_DOC_TYPE` is invoked only on the opaque-filename fallback path per FR-52 / FR-55.
 - **Not a build-time LLM module.** Code-generation LLM use by `api_spec_ingestor` / `template_schema_ingestor` / `test_report_profiler` shares the same `hilda-llm-gateway` egress per `[D-007]` impl note, but those tools' Protocol surfaces live in their own modules.
 - **Not a chat / streaming interface.** No streaming responses, no multi-turn conversation state. Every task is a single request → single structured response.
 - **Not an agentic-loop framework.** No `function_calling`, no multi-step agent traversal in Ph-1. If corp LLM's agentic API becomes empirically superior on a TaskKind (per `[D-052]` A/B test), the agentic surface would be wrapped inside `LLMGatewayServer.invoke()` for that task — caller-side Protocol remains one request → one structured response.
