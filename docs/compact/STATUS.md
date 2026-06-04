@@ -1,6 +1,6 @@
 # Status
 
-**Active phase**: architecture
+**Active phase**: requirements
 **Last updated**: 2026-05-28
 **Last drift-check**: 2026-05-26 — mode: design — 11 drifts resolved, 0 skipped, 15 deferred surfaced (unbuild modules — expected gaps; tracked in Next per-layer plan)
 **Last design review**: 2026-05-23 → 2026-05-26 — HILDA_Design.md + PROJECT.md + SYSTEM.md + structure-conventions.md + phases/*.md + DECISIONS.md + sharepoint/REQUIREMENTS.md (new) + STATUS.md user-led section-by-section review. structure-conventions.md updates: §intro Temporal → Celery + K8s → Docker Compose Ph-1/Ph-2 / MicroK8s Ph-3+; top-level layout expanded with full `customizations/` YAML sub-structure (`sharepoint_config/`, `template_schemas/`, `rules/`, `test_report_parsers/`, etc.), `config/global.json` added with env-var override pattern documented, full `deploy/` directory tree (compose, secrets, scripts, charts, grafana, prometheus, Dockerfile); new "SharePoint UI boundary" subsection documenting SP UI engineer vs HILDA team ownership split and the shared-contract flow; SharePointBackend bullet dropped stale "document library paths" + added SP-alert config; CredentialBackend bullet sops Ph-1/Ph-2 + Vault Ph-3+ (Sealed Secrets removed); sync-API wrapping section added two-stage IO paragraph for corp_messenger_gateway / corp_plm_gateway model; Temporal → Celery in UI-blocking section; IssueTracker/Messenger Protocol bullets updated to reflect gateway-PC routing; Config format section rewritten with global.json + env-var override pattern + runtime-data clarification. HILDA_Design.md: 32 action items applied (§1, §3.3, §3.4 incl. new §3.5, §4.1, §4.2, §5 Stage 4, §6.1, §6.2, §6.3, §7.1, §7.4, §10, §11, §12, §13). PROJECT.md: In-scope v1 blob split into Ph-1/Ph-2/Ph-3+ (CI/CD pipeline, K8s, HashiCorp Vault all placed in Ph-3+); out-of-scope DEF list reconciled with `requirements.md ## Deferred`; per-PM credentials constraint phase-scoped; runtime LLM K8s reference corrected; success-criteria NFR-9 reference removed; Users line + Contributors table phase-scoped. SYSTEM.md: §1 three-pillar topology (SP entity rows + NSD documents + containerized services) with YAML config in boundary (Deliverables removed); §2 four-workload split with §2.1 module roster (now 20 modules — added `corp_messenger_gateway` and `corp_plm_gateway` as corp-side HILDA-team-owned modules); §3 fully rewritten with corrected network boundary model (corp/lab firewall: HILDA-PC outbound to corp allowed; corp inbound to HILDA-PC blocked unconditionally) and two corp-side intake PCs (reverse-proxy PC + PLM gateway PC); §3.1 replaced wrong on-prem-vs-outside-premises framing with corrected unified model — **SP → HILDA channel is SP alerts → email → HILDA mailbox via SP's built-in alert feature on the deliverable list; `sp_alert_parser` sub-module added to `email_service` (module 11); IMAP IDLE primary / short-interval polling fallback / FR-23 deadline-tiered as third-tier fallback only**; SP alert email format documented from sample (subject `Alert_<List>_<Suffix> - <ItemTitle>`, action verb in sub-header, key:value body, routing key `(ProjectID, MinorMilestone, ItemNumber)`); topology Mermaid diagram redrawn to show corp/lab zones + intake PCs; Conflicts table updated (C3/C5 broader deployment surface; new C6 for SP-alert channel); §5 deployment topology now shows 3 HILDA-owned hosts (HILDA PC + reverse-proxy PC + PLM gateway PC); §4 heading TBD cleaned; §5/§7/§8/§9 v1/v2 → Ph-1/Ph-2/Ph-3+ rename; hilda-llm-gateway role clarified (runtime inference + code-gen); hilda-api NSD download corrected (was "SP-mediated"); §8 phase-split CI-only (Ph-1/Ph-2) vs full CI/CD (Ph-3+); Open Questions updated: #10 resolved (SP-alert channel), new #11 (D-021/D-026 revision for 3-host surface), #12 (IMAP IDLE Exchange admin check), #13 (MilestoneGating schema gap), #14 (ItemNumber stability), #15 (SP alert "Anything changes" setting), #16 (D-024 reconciliation). 3 new ADRs (D-044 doc boundary; D-045 schema/content boundary; D-046 canonical schema source). FR-47 promoted resolution_path to formal enum. **Follow-up D-XXX needed** (architecture phase): (a) `[D-024]` CI/CD shape reconciliation pinning Helm to Ph-3+; (b) new ADR for SP-alert email channel + `sp_alert_parser` sub-module; (c) `[D-021]` / `[D-026]` revision documenting 3-host HILDA-owned deployment surface; (d) IMAP IDLE / EWS streaming confirmation from Exchange admin; (e) MilestoneGating + ItemNumber-stability schema decisions; (f) `corp_messenger_gateway` and `corp_plm_gateway` MODULE.md drafts. **2026-05-26 extension**: sharepoint/REQUIREMENTS.md created (commit `f8e9345`) and amended (commit `1c102a9` — added TGGroups SP list §2.8 closing TG-group fields propagation gap); `core/src/storage/MODULE.md` initial draft committed (`442400e`) with partial section-by-section review (Purpose narrowed to FR-31 authoritative; hilda-svc defined as AD service account; v1/v2 → Ph-aware in Deferred); `phases/development.md` review completed; **DECISIONS.md bidirectional audit closed** — backward sweep (21 impl notes appended across 21 ADRs, commit `a6d66b1`) + forward sweep (4 new ADRs D-048/D-049/D-050/D-051 captured, commit `4ae4f71`); follow-ups (a) (b) (c) above all resolved via the 2026-05-24 impl notes; (d) (e) (f) remain pending. Plus propagation discipline added (STATUS.md Next + Flags) to prevent future derivative-doc gaps.
@@ -91,7 +91,90 @@
 
 ## In progress
 
-- **Requirements-phase switch queued (2026-05-28)** — switch from architecture phase to requirements to walk through the staged-document fallback ladder per the 2026-05-28 user-raised item-6 in the email_service review round. Two questions to answer in that phase: (1) how is work-item → target-folder-path mapping done (HILDA-PC local + customer-mapped target paths via `customizations/`?); (2) what happens when a doc lands in a stale path? Expected outputs: FR-52 amendment defining the 3-step fallback ladder (folder routing → owner outreach → TPM escalation); new `[D-XXX]` ADR anchoring the design choice; new `email_service.attachment_router.py` surface specification.
+- **Requirements-phase active (since 2026-05-28)** — broader scope than initially queued: walking through user-delivered 8-item requirements update (doc types, zip handling, dual NSD, no-customer-upload, no-tracking TG, NSD ingestion structure overhaul, email/PLM routing, TPM manual handling). Sections 1, 2, 3 + parts of 6 reviewed and locked; sections 4, 5, 7, 8 pending. After section 4–5 land, batch FR amendments + new ADRs (D-054, D-055 candidates) + `requirements.md` updates + retroactive MODULE.md rollbacks (llm CLASSIFY_DOC_TYPE removal).
+
+### Requirements-phase working notes (2026-05-28; checkpoint pre section 4 review)
+
+**Section 1 — Doc types (locked):**
+- `DocType` enum stays 4-valued: `{test_report, tech_report, waiver, default}`. Compliance docs, certification docs, release notes all fold into `default`.
+- FR-16 (rule-based parser) → `test_report` only.
+- FR-46 (final/interim classifier) → `test_report` only.
+- FR-53 (LLM checklist review) → `{test_report, tech_report, waiver}` only.
+- `default` doc_type triggers no downstream processing (no parser, no classifier, no review).
+- `ItemType.DEFAULT` added (7 enum values now). 1:1 `item_type → expected_doc_type` derivation locks doc_type from item routing — no runtime doc_type LLM call needed.
+- **`CLASSIFY_DOC_TYPE` TaskKind REMOVED from llm module** (5 → 4 Ph-1 TaskKinds). Requires `llm/MODULE.md` + `[D-052]` impl note rollback when returning to architecture phase.
+
+**Section 2 — Zip handling + PLM/Carrier upload (locked):**
+- Zip files are archive-only — live in NSD `<tg>/_zip_audit/` (TG-level subdirectory); never uploaded to PLM or carrier portal.
+- Version tree operates on individual files only — zip-level versioning irrelevant; D-039 + `[D-048]` apply per-individual-file.
+- PLM uploads receive **only individual files** (Email/NSD-source: HILDA extracts + uploads; PLM-source: HILDA reads, no re-upload).
+- Carrier portal receives **only individual files**, `is_final=true` after FR-18 dispatch; same for all ingress sources.
+- PLM-source extracted files are written to HILDA NSD internal classified tree for audit consistency (`<tg>/<item>/<doc_type>/<doc_id_slug>/revN/`).
+- `_zip_audit/<zip_filename>.zip` + `_zip_audit/<zip_filename>/<extracted-tree>/` co-located.
+- New hash sync invariant: extends FR-68 — every file uploaded to carrier portal must hash-match a file present on PLM (top-level OR inside a PLM-resident zip). Non-match → `ITR-W003` PM-dashboard flag.
+
+**Section 3 — Dual-NSD topology (locked):**
+- NSD1 = bidirectional (HILDA-owned `internal/` tree + ingress); NSD2 = ingress-only.
+- Both SMB-mounted on HILDA PC simultaneously; same `hilda-svc` AD service account.
+- NSD2-sourced docs → NSD1's `internal/` tree (cross-drive write).
+- NSD2 retention: original files stay on NSD2 forever; no archiving.
+- Polling: both NSDs polled identically (same `polling_schedule`; no per-drive override).
+- Resolution: FR-13 amendment + `[D-013]` impl note 2026-05-28; no new ADR.
+
+**Section 6 partial — NSD ingestion structure overhaul (locked items):**
+- No more per-item NSD ingress folders. Flat structure: `\\NSD_X\<carrier>\<device>\<milestone>\<Folder-1..n>\`.
+- Folder name no longer authoritative for item routing.
+- FR-52 routing pipeline (5-step ladder):
+  1. **Strict substring** — `item_description` is semicolon-separated tag list; ALL tags must appear in filename.
+  2. **Fuzzy match** — rapidfuzz(filename, item_name); top scorer above threshold wins. (`item_description` repurposed; no separate `routing_tags` field; SP column addition avoided.)
+  3. **Source-folder → work-item** template (NSD-only; per-TG opt-in via `folder_routing_enabled = True`).
+  4. **LLM `ROUTE_ATTACHMENT`** — first-page excerpt.
+  5. **Staged → associated with milestone's default work-item** (FR-52 step 4); PM/TPM triage; parent NSD path tracked via new `DocumentIndexRow.unrouted_source_path: str | None`.
+- TG-level routing strategy: TG-1 style (NSD1 ingress + no folder→work-item template) vs TG-2 style (NSD2 ingress + folder→work-item template); each TG declares its own ingress NSD + folder-routing opt-in.
+- Default work-item: every milestone auto-includes one; `item_type = Default`; doesn't gate submission (per item 8).
+- Multi-item routing (one doc → many items): adopt many-to-many join table `DocumentItemAssociation(document_index_row_id, delivery_item_id, association_kind: Literal["primary", "secondary"])` for clean per-association metadata.
+- New `TGGroupBase` fields: `ingress_nsd: Literal["NSD1", "NSD2"]`, `folder_routing_enabled: bool`.
+- Consolidated `folder_routing.yaml` per customer template, per TG: `<tg>/<source-folder-path>/{work_item, target_folder}` — both fields optional.
+
+**Section 6 partial — Other (locked):**
+- 6.2.4 fuzzy folder match: substring containment (case sensitivity TBD); longest-substring-wins on multi-match conflict.
+- 6.2.5.5: source-folder template applies only to NSDx ingress (not Email/PLM).
+- Item description format: semicolon-separated tag substrings; Pydantic validation regex; emit `TSC-W003` on non-tag format at template load; existing prose-description templates need cleanup migration.
+
+**Section 7 partial — Email/PLM ingress (locked):**
+- Zips extracted recursively; each extracted file → FR-52 routing.
+- FR-52 step 3 (source-folder template) does NOT apply to zip-extracted files (no NSD source folder context); step 3 is NSD-direct only.
+- 7.1.3.1 per-work-item → target-folder mapping: subsumed into consolidated `folder_routing.yaml` Option (b).
+- 7.1.3.2: items in `staged/` block portal upload until TPM resolves.
+
+**Section 8 — TPM manual handling (locked):**
+- Default work-item does NOT gate `ReadyForSubmission` or carrier dispatch.
+- TPM downloads via existing FR-57 download endpoint (`https://hilda.corp/dl/<scoped_token>`); manually uploads to carrier portal as needed (legacy/uncaptured deliverables path).
+
+**Sections pending review:**
+- Section 4: no-customer-upload property (granularity, state semantics, TPM download flow)
+- Section 5: no-tracking TG + sub-item-only tracking (G-11/G-12/G-13 unresolved; FR-62 SP-UI upload extension question)
+
+**ADR plan (revised after Section 3 disposition):**
+- ~~`[D-053]` Dual-NSD topology~~ — superseded by `[D-013]` impl note 2026-05-28 (no new ADR).
+- **`[D-053]` candidate**: Default work-item entity + multi-item routing + ItemType.DEFAULT + item homogeneity constraint (Section 6).
+- **`[D-054]` candidate**: Per-TG `tracking_enabled` + `customer_upload_enabled` flags + customer-portal-as-carrier-submission-destination (Section 2+4+5).
+- Disposition pending Section 4–5 close.
+
+**FR amendments queued (drafts not yet written):**
+- FR-13, FR-17, FR-18, FR-19, FR-52, FR-55, FR-68 amendments.
+- FR-58 new (target-folder mapping).
+- 3+ new FRs (default work-item, multi-item association, per-TG flags).
+
+**Module rollbacks queued (apply after requirements-phase exit):**
+- `llm/MODULE.md` — `CLASSIFY_DOC_TYPE` TaskKind removed; tentative-assignments table 5→4 rows; `[D-052]` impl note revised.
+- `template_schema/MODULE.md` — `ItemType.DEFAULT` added; `item_description` semantic shift documented; `DocType` enum stays 4-valued (no compliance/cert/release_notes); new `TGGroupBase` fields.
+- `email_service/MODULE.md` — FR-52 pipeline rewrite (5-step ladder); routing-tags semantic clarification.
+- `storage/MODULE.md` — multi-item association table; `unrouted_source_path` field on `DocumentIndexRow`.
+- `customer_adapter/MODULE.md` (not yet drafted) — Google Drive only Ph-1/Ph-2 in `customizations/`.
+- `[D-050]` impl note — 5-area NSD structure simplified to `_zip_audit/` + classified + staged + outbound.
+
+**Customer-adapter placement decided**: all flavors in `customizations/customer_adapter/<carrier_slug>_adapter.py`; Ph-1/Ph-2 = Google Drive only; Ph-3+ adds web portal + JIRA customer-portal. Protocol stays in `core/src/customer_adapter/protocol.py`.
 
 ## Next
 
