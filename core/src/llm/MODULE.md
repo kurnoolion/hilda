@@ -1,16 +1,18 @@
 # Module: llm
 
-> **Status:** Draft + 2026-06-07 Phase B rollback applied (`[D-053]` routing model — CLASSIFY_DOC_TYPE removed; FR-52 5-step pipeline; REVIEW_DOCUMENT DEFAULT-skip note). Sections curated; code implementation begins after `/switch-phase development`.
+> **Status:** Draft + 2026-06-09 cascade Group 3 of 3 applied (`[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-85 2-step classification ladder + FR-86 storage matrix + FR-87 SP UI A→B→C). **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind count 4 → 5. Earlier rollbacks: 2026-06-07 (tri-backend `[D-052]` + host-topology fix + docstring clarifications + Phase B rollback original `[D-053]` framing). Sections curated; code implementation begins after `/switch-phase development`.
 >
 > **Rollback log:**
+> - **2026-06-09 (post-cascade user-review correction, same day)** — applied 2 corrections from user review of Group 3 cascade: (a) **`RouteAttachmentOutput` schema corrected** to return `list[RouteAttachmentMatch]` instead of a single `(item_id, confidence)` pair — user observation that FR-79 multi-item association requires multi-match support; new typed `RouteAttachmentMatch` model added; output schema docstring clarifies LLM-side filtering above threshold (caller does NOT re-filter; empty list → FR-52 step 5 fall-through; non-empty list → one DocumentItemAssociation row per match per `[D-055]` symmetric M:M); new `LLG-W008` warning for potential over-routing (summed-confidence threshold). (b) **`[D-029]` Ph-1 narrow surface Key choices bullet** updated from "4 TaskKinds" to **"5 TaskKinds"** — CLASSIFY_DOC_TYPE was added to the listed TaskKinds + restoration note added (the prior bullet text claiming CLASSIFY_DOC_TYPE was removed per 2026-05-28b was obsolete after the 2026-06-09 cascade restore). (c) Reserved `LLG-W007` as placeholder; LLG-W008 occupied by the over-routing warning.
+> - **2026-06-09 (Phase B Module cascade — Group 3 of 3 against the corrected `[D-053]` model — after `template_schema/MODULE.md` cascade 2026-06-08 + `storage/MODULE.md` cascade 2026-06-09)** — applied the requirements-phase redesign locked 2026-06-08 (`requirements.md` FR-7 + FR-85 + FR-86 + FR-87 + `DECISIONS.md` `[D-053]` impl note 2026-06-08): **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind enum count 4 → 5; **restricted candidate set** `{test_report, tech_report, waiver}` per FR-85 Step 2 — LLM never returns `compliance_certification_release_notes` (regex-only per FR-85 Step 1 because bundled sub-categories visually indistinguishable from test/tech/waiver content) nor `unresolved` (caller-side sentinel on low confidence). **ClassifyDocTypeInput / ClassifyDocTypeOutput schemas restored** with restricted-candidate-set design + below-threshold UNRESOLVED sentinel mapping documented. **NB note + Status header refreshed** to reflect restored TaskKind + withdrawn "1:1 derivation" framing. **Purpose anchors + Ph-1 scope** updated to 5 TaskKinds with FR-85 Step 2 context. **Key choices**: replaced `[D-053]` doc_type derivation bullet entirely with FR-85 2-step ladder + FR-86 alignment invariant + CLASSIFY_DOC_TYPE restoration explanation; REVIEW_DOCUMENT skip bullet updated for 5-value DocType (skip when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false`). **Non-goal "Not a doc_type classifier" REVERTED** → new Non-goal "IS a doc_type classifier (Step 2 of FR-85 2-step ladder)" with explicit scope (LLM only fires when regex Step 1 fails; restricted-candidate-set rationale). **Coexistence matrix per document** updated for 5-value DocType + new special-case row for test_report on Default work-item (parser_result ✓ + llm_review_findings ✗). **Tentative-assignments table** 4 → 5 rows with CLASSIFY_DOC_TYPE restored (priority lower than REVIEW_DOCUMENT). **Test interface RPT line** templates_loaded=4 → 5. **Depends-on** updated to reference 5-value DocType from template_schema. Cascade chain complete (Group 1 template_schema 2026-06-08 + Group 2 storage 2026-06-09 + Group 3 llm 2026-06-09).
 > - **2026-06-07 (host-topology clarification, same day)** — fixed stale "Ollama on the HILDA PC GPU" framing across 4 sites. Clarified that **HILDA PC is a distinct Linux box from the model-serving hosts**: HILDA PC runs the HILDA app containers (hilda-api / hilda-worker / hilda-llm-gateway per `[D-021]`/`[D-026]`) and has NO GPU; `ollama_a4000` runs on a separate **A4000 box** (Linux + RTX A4000) on the lab subnet; `vllm_dgx` runs on a separate **DGX Spark box** (GB10 + 128 GB unified) on the lab subnet; `corp_llm` is corp infrastructure. hilda-llm-gateway proxies LLM calls OUTWARD from the HILDA PC to these three hosts. Updated `[D-007]` On-prem paragraph (now enumerates 3 distinct hosts + HILDA PC); Hardware-topology table (Host column clarifies "separate machine" per backend + footer note "Distinct from HILDA PC"); BackendConfig.endpoint_url example hostnames changed from `hilda-pc:11434` to `a4000-box:11434` for ollama_a4000 + clarifying comment; tentative-assignments footer clarifies env vars live on HILDA PC but resolve to lab-subnet DNS for the model boxes. **`[D-052]` DECISIONS.md body** still contains the older "HILDA PC GPU" wording at lines 638-639 — covered by the existing STATUS.md flag ("`[D-052]` ADR body needs impl note appended") since `[D-002]` ADR-body immutability prevents direct edit; the pending impl note 2026-06-07 will document the 3-host topology.
 > - **2026-06-07 (docstring clarifications, same day)** — three additions captured from review-session Q&A: (a) `ReviewDocumentInput.checklist` docstring expanded — clarified as build-time-generated YAML (NOT hand-authored, NOT runtime-built) at `customizations/checklists/<slug>/<doc_type>.yaml`, per-customer because carriers have different acceptance criteria; (b) Non-goals "Not a test report parser" expanded into a two-phase pipeline breakdown — build-time Test Report Profiler emits BOTH the rule-based parser AND the REVIEW_DOCUMENT checklist (one profiler run, two outputs), runtime split: `test_report` module runs parser, `llm` module consumes checklist; (c) new "Relationship to `parser_result`" Non-goal section — explicit comparison table contrasting `parser_result` (content extraction, FR-16, rule-based, test_report-only) vs `llm_review_findings` (quality assessment, FR-53, LLM-driven, test_report/tech_report/waiver, gated on `review_required` + skipped for DEFAULT) + 4-quadrant coexistence matrix per document. No API surface change; pure docstring + cross-reference improvements.
 > - **2026-06-07 (tri-backend amendment, same day)** — `[D-052]` framing expanded from dual-backend to tri-backend per user clarification on hardware topology: `BackendConfig.name` Literal expanded from 2 values to 3 (`ollama_a4000`, `vllm_dgx`, `corp_llm`); added Hardware-topology section to Purpose documenting per-backend memory/bandwidth/profile with capacity-vs-bandwidth note (DGX Spark's 128 GB ≠ throughput advantage for small models — A4000's GDDR6 ~448 GB/s beats DGX Spark LPDDR5X ~273 GB/s for autoregressive inference of fits-on-A4000 models; DGX Spark wins on capacity, concurrency, vLLM batching); BackendConfig gains `cold_load_expected` + `supports_batching` informational fields; LLMGatewayServer init docstring updated for tri-backend A/B; Invariants "On-prem only" + "No code-level backend precedence" updated to enumerate all 3 backends + add no-automatic-spillover restatement; Key choices `[D-052]` bullet rewritten as tri-backend with per-backend profile + precedence rule per task (A/B winner); tentative-assignments table gains separate `vllm_dgx` A/B candidate column + model catalog note (same Ollama models served on both ollama_a4000 + vllm_dgx for direct comparability; larger models added to vllm_dgx only if small-model A/B unsatisfactory); test-interface RPT line updated to backends_total=3 with per-backend model lists. **STATUS.md follow-up flagged**: A/B-test gate flag (2026-05-28; `[D-052]` Consequences) must be updated to reflect tri-backend testing matrix (was dual-backend); `[D-052]` ADR body in DECISIONS.md needs an impl note appended (2026-06-07 dual→tri expansion) per `[D-002]` append-only convention.
 > - **2026-06-07** — Phase B Module rollback (Group 3 of N, after `template_schema/MODULE.md` + `storage/MODULE.md`): TaskKind enum reduced 5 → 4 (`CLASSIFY_DOC_TYPE` removed per `[D-053]` + `[D-052]` impl note 2026-05-28b — doc_type now derived 1:1 from `item.item_type` at routing time, not LLM-classified); removed `ClassifyDocTypeInput`/`ClassifyDocTypeOutput` schemas; updated Purpose anchors to include `[D-053]`; FR-52 framing updated from `[D-033]` 2-tier to `[D-053]` 5-step pipeline (ROUTE_ATTACHMENT now contextualized as step 4 of 5; failure falls through to step 5 default work-item per FR-78); RouteAttachmentInput docstring clarifies candidate_items come from FR-52 caller as narrowed set surviving steps 1-3 (substring / fuzzy / folder-template per FR-77 Type-2); Key choices added two bullets ([D-053] doc_type derivation + REVIEW_DOCUMENT DEFAULT-skip per FR-7 amendment); Non-goals rewrote "Not a filename-rule doc_type classifier" → "Not a doc_type classifier" with structural-derivation rationale; tentative-assignments table dropped CLASSIFY_DOC_TYPE row + added A/B-priority note (REVIEW_DOCUMENT highest); two stale "Tier-2" references in Invariants + Depended-on-by updated to step-4 framing. No new TaskKinds added for FR-77 / FR-78 / FR-79 / FR-82 / FR-83 / FR-84 — those are non-LLM concerns.
 
-**Purpose**: Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — new-vs-revision classification (Tier-2 in the `[D-039]` 4-step classifier), attachment routing (**step 4 of the FR-52 5-step routing pipeline per `[D-053]`**; `[D-033]` Tier-2 framing superseded), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). Owns prompt-template loading, per-TaskKind backend selection across **three on-prem backends** (Ollama on RTX A4000 + vLLM on DGX Spark + corp on-prem LLM per `[D-052]`), rate-limiting, retry policy, structured-output parsing, and the LLM API key handoff from `credential_service`. Anchors `[D-007]` (on-prem LLM hosting), `[D-029]` (Ph-1 LLM scope), `[D-033]` (Tier-2 framing superseded by `[D-053]`), `[D-034]`, `[D-039]`, `[D-052]` (multi-backend, empirical routing), `[D-053]` (routing model + doc_type derivation removes `CLASSIFY_DOC_TYPE`); serves FR-12, FR-52, FR-53, NFR-1, NFR-2.
+**Purpose**: Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — **doc_type classification (FR-85 Step 2 — restricted-candidate-set LLM)**, new-vs-revision classification (Tier-2 in the `[D-039]` 4-step classifier), attachment routing (**step 4 of the FR-52 5-step routing pipeline per `[D-053]`**; `[D-033]` Tier-2 framing superseded), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). Owns prompt-template loading, per-TaskKind backend selection across **three on-prem backends** (Ollama on RTX A4000 + vLLM on DGX Spark + corp on-prem LLM per `[D-052]`), rate-limiting, retry policy, structured-output parsing, and the LLM API key handoff from `credential_service`. Anchors `[D-007]` (on-prem LLM hosting), `[D-029]` (Ph-1 LLM scope), `[D-033]` (Tier-2 framing superseded by `[D-053]`), `[D-034]`, `[D-039]`, `[D-052]` (multi-backend, empirical routing), `[D-053]` (impl note 2026-06-08 corrected model — CLASSIFY_DOC_TYPE restored with restricted candidate set per FR-85; impl note 2026-05-28b "1:1 derivation" framing withdrawn); serves FR-12, FR-52, FR-53, FR-85, NFR-1, NFR-2.
 
-> **NB**: `CLASSIFY_DOC_TYPE` TaskKind was removed 2026-05-28b per `[D-052]` impl note + `[D-053]` routing model — doc_type is now derived 1:1 from `item.item_type` at routing time, not classified from document content. No runtime LLM call participates in doc_type assignment. See Non-goals.
+> **NB**: `CLASSIFY_DOC_TYPE` TaskKind is **RESTORED** per `[D-053]` impl note 2026-06-08 (un-revert of the 2026-05-28b removal). The "doc_type derived 1:1 from `item.item_type`" framing is **withdrawn** — doc_type is classified per inbound document via the FR-85 2-step ladder (filename regex Step 1 + LLM CLASSIFY_DOC_TYPE Step 2 with restricted candidate set `{test_report, tech_report, waiver}`). Alignment with `item_type` enforced per FR-86 storage matrix (misaligned pairs land on `staged-not-classified` NSD path for FR-87 step (B) TPM resolution). See Key choices + Non-goals.
 
 ### Hardware topology (Ph-1/Ph-2 on-prem)
 
@@ -38,12 +40,10 @@ All four endpoints satisfy `[D-007]` (corporate network boundary). Ph-3+ same Pr
 
 **Workload assignment**: The `hilda-llm-gateway` container per `[D-021]` is the sole HILDA workload that issues outbound LLM calls — `hilda-api` and `hilda-worker` import this module's *client-side* Protocol surface and proxy calls to `hilda-llm-gateway` over HTTP. Concentrating egress in one workload simplifies model-endpoint network policy (one container needs egress to both Ollama and corp LLM endpoints) and contains LLM-side failures from cascading into API request handling.
 
-**Ph-1 scope per `[D-029]` impl note 2026-05-13 + `[D-052]` impl note 2026-05-28b + `[D-053]`** — three runtime functions / **four TaskKinds total**:
-1. FR-52 attachment routing — **two TaskKinds**: `ROUTE_ATTACHMENT` (step 4 of FR-52 5-step pipeline — invoked only when steps 1-3 substring/fuzzy/folder-template fail; output `None` falls through to step 5 default work-item per FR-78) + `CLASSIFY_DOC` (`[D-039]` Step 2 new-vs-revision).
-2. FR-53 document quality review (document content + checklist → findings list) — `REVIEW_DOCUMENT`.
+**Ph-1 scope per `[D-029]` impl note 2026-05-13 + `[D-053]` impl note 2026-06-08** — three runtime functions / **five TaskKinds total** (CLASSIFY_DOC_TYPE restored 2026-06-09 per `[D-053]` impl note 2026-06-08):
+1. FR-52 attachment routing + FR-85 doc_type classification — **three TaskKinds**: `ROUTE_ATTACHMENT` (FR-52 step 4 of 5 — invoked only when steps 1-3 substring/fuzzy/folder-template fail; output `None` falls through to step 5 default work-item per FR-78), `CLASSIFY_DOC` (`[D-039]` Step 2 new-vs-revision), `CLASSIFY_DOC_TYPE` (FR-85 Step 2 — invoked only when FR-85 Step 1 filename regex fails or multi-matches; restricted candidate set `{test_report, tech_report, waiver}` — LLM never returns `compliance_certification_release_notes` (regex-only per Step 1) nor `unresolved` (caller-side sentinel on low-confidence).
+2. FR-53 document quality review (document content + checklist → findings list) — `REVIEW_DOCUMENT`. Skipped by caller when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false` per FR-86 alignment + FR-7 (`review_required = true` only on `TEST_TECH_WAIVER_REPORT` items).
 3. FR-12 path (c) message classification fallback (message body → intent label) — `CLASSIFY_MESSAGE`.
-
-`CLASSIFY_DOC_TYPE` (5th TaskKind in the pre-2026-05-28b design) was removed per `[D-053]` — doc_type is structural (derived 1:1 from `item.item_type`), not content-classified.
 
 **Ph-2 surface (deferred)**: DEF-3 (LLM-drafted customer responses — `DRAFT_CUSTOMER_REPLY`), DEF-4 (status summarization — `SUMMARIZE_STATUS`). Not on this module's Ph-1 Protocol surface. Adding a Ph-2 task requires four changes: a new `TaskKind` enum value, a prompt template under `templates/`, input/output Pydantic schemas in `schemas.py`, and a `task_backend_map` + `task_model_map` entry in env-config — no Protocol-surface change.
 
@@ -57,13 +57,13 @@ All four endpoints satisfy `[D-007]` (corporate network boundary). Ph-3+ same Pr
 class TaskKind(str, Enum):
     """Bounded set of runtime LLM tasks. Each value maps 1:1 to a prompt template
     in templates/ and a structured output schema in schemas.py.
-    Four Ph-1 TaskKinds (2026-05-28b: CLASSIFY_DOC_TYPE removed per `[D-053]`)."""
+    Five Ph-1 TaskKinds (CLASSIFY_DOC_TYPE restored 2026-06-09 per `[D-053]` impl note 2026-06-08
+    — un-revert of 2026-05-28b removal; the "1:1 derivation" framing was withdrawn)."""
     ROUTE_ATTACHMENT      = "route_attachment"      # FR-52 step 4 of 5 per [D-053] (was [D-033] Tier-2, framing superseded) — attachment → DeliveryItem match
     CLASSIFY_DOC          = "classify_doc"          # [D-039] Step 2 — new document vs revision-of-existing
-    REVIEW_DOCUMENT       = "review_document"       # FR-53 — quality review against checklist; skipped by caller for doc_type == DEFAULT per FR-7 amendment + [D-053]
+    CLASSIFY_DOC_TYPE     = "classify_doc_type"     # FR-85 Step 2 — restored 2026-06-09 per [D-053] impl note 2026-06-08; restricted candidate set {test_report, tech_report, waiver} (never returns compliance_certification_release_notes — regex-only per FR-85 Step 1)
+    REVIEW_DOCUMENT       = "review_document"       # FR-53 — quality review against checklist; skipped by caller when doc_type ∈ {compliance_certification_release_notes, unresolved} OR review_required = false per FR-86 alignment + FR-7 (review_required = true only on TEST_TECH_WAIVER_REPORT items)
     CLASSIFY_MESSAGE      = "classify_message"      # FR-12 path (c) — message-intent fallback
-    # Removed 2026-05-28b per [D-052] impl note + [D-053] (doc_type now derived from item.item_type):
-    # CLASSIFY_DOC_TYPE  — REMOVED
     # Ph-2 (deferred per [D-029] / DEF-3 / DEF-4):
     # DRAFT_CUSTOMER_REPLY = "draft_customer_reply"
     # SUMMARIZE_STATUS     = "summarize_status"
@@ -101,8 +101,26 @@ class LLMProvider(Protocol):
 ### Task input/output schemas (`schemas.py`)
 
 ```python
-# CLASSIFY_DOC_TYPE schemas — REMOVED 2026-05-28b per [D-052] impl note + [D-053]
-# (doc_type is derived 1:1 from item.item_type at routing time; no runtime LLM classification)
+# CLASSIFY_DOC_TYPE — FR-85 Step 2 (restored 2026-06-09 per [D-053] impl note 2026-06-08)
+class ClassifyDocTypeInput(BaseModel):
+    """Per FR-85 Step 2 — LLM-based doc_type classification. Fires only when FR-85 Step 1
+    (filename regex against per-customer rules at `customizations/<slug>/doc_type_filename_rules.yaml`)
+    fails or multi-matches. Candidate set is RESTRICTED to 3 values {test_report, tech_report,
+    waiver} — LLM never returns `compliance_certification_release_notes` (that doc_type is
+    detected EXCLUSIVELY by filename regex per Step 1 because its sub-categories bundle
+    compliance/cert/release_notes which the LLM can't reliably differentiate from
+    test_report/tech_report content). `unresolved` is also never returned by the LLM directly;
+    the caller maps below-threshold confidence to `DocType.UNRESOLVED` as a sentinel."""
+    first_page_excerpt:  str
+    candidate_doc_types: list[Literal["test_report", "tech_report", "waiver"]]   # always all 3 in Ph-1; field exists for future per-customer flex via FR-86 alignment narrowing
+
+class ClassifyDocTypeOutput(BaseModel):
+    """Per FR-85 Step 2 output. confidence below threshold (default 0.85; configurable per customer
+    at `customizations/<slug>/doc_type_classifier_config.yaml`) → caller sets
+    DocumentIndexRow.doc_type = DocType.UNRESOLVED (sentinel) → file moves to FR-86
+    staged-not-classified path → awaits FR-87 step (B) TPM resolution."""
+    doc_type:   Literal["test_report", "tech_report", "waiver"]   # 3-value restricted output; never compliance_certification_release_notes (regex-only) or unresolved (caller-side sentinel)
+    confidence: float                                              # [0.0, 1.0]; LLG-W002 emitted by caller when below threshold
 
 # CLASSIFY_DOC — [D-039] Step 2 — new document vs revision-of-existing
 @dataclass(frozen=True)
@@ -124,11 +142,28 @@ class RouteAttachmentInput(BaseModel):
                                     # caller (email_service.attachment_router) as the NARROWED
                                     # candidate set surviving steps 1-3 (substring / fuzzy / folder
                                     # template per FR-77 Type-2). LLM ranks within this set.
+
+class RouteAttachmentMatch(BaseModel):
+    """One (item_id, confidence) match — per FR-79 multi-item association, a single document
+    can land on multiple work-items when its content overlaps multiple items (e.g., a regression
+    test report covering VoLTE + handover). Each match in the output list is committed by the
+    caller per FR-52 step 4 ("above-threshold matches are committed") as a separate
+    DocumentItemAssociation row per [D-055]."""
+    item_id:    str
+    confidence: float                # [0.0, 1.0]
+
 class RouteAttachmentOutput(BaseModel):
-    item_id:           str | None  # None when confidence below threshold → caller falls through
-                                    # to FR-52 step 5 (default work-item per FR-78); routing_resolution
-                                    # recorded on DocumentIndexRow as StagedDefault
-    confidence:        float
+    """Per FR-52 step 4 — output is a LIST of above-threshold matches (revised 2026-06-09 from
+    single-pair to list per user observation that FR-79 multi-item association requires it).
+    EMPTY list → caller falls through to FR-52 step 5 (default work-item per FR-78);
+    `RoutingResolution.STAGED_DEFAULT` recorded on DocumentIndexRow. NON-EMPTY list → caller
+    creates one DocumentItemAssociation row per match per [D-055] symmetric M:M model.
+    Matches MUST already be above the LLM's per-task confidence threshold (the LLM is instructed
+    to omit low-confidence guesses); the caller does NOT re-filter — committing all returned
+    matches is the contract. If the LLM returns multiple matches whose summed-confidence
+    exceeds a customer-specific over-routing threshold, caller may emit LLG-W008 (potential
+    over-routing) for ops visibility but still commits all matches."""
+    matches:           list[RouteAttachmentMatch]   # 0..N matches; empty list → step 5 fall-through
 
 # REVIEW_DOCUMENT — FR-53
 class ReviewDocumentInput(BaseModel):
@@ -297,6 +332,8 @@ LLG-W003  Retry {n}/{max} after parse failure on task '{task}' backend '{backend
 LLG-W004  Model cold-load triggered for '{backend}/{model}'; expected latency +{n}s
 LLG-W005  Corp LLM rate limit approaching ({used}/{limit_per_min} per minute); queue depth {n}
 LLG-W006  Corp LLM rate limit exceeded; task '{task}' deferred {n}s — no automatic spillover to other backend per [D-052]
+LLG-W007  Reserved (placeholder for next storage-adjacent warning code if needed)
+LLG-W008  ROUTE_ATTACHMENT returned {n} matches with summed confidence {score} exceeding customer over-routing threshold {threshold} on document '{file_hash}' — potential over-routing; all matches committed per FR-79 contract but flagged for ops review (added 2026-06-09)
 ```
 
 ---
@@ -304,15 +341,15 @@ LLG-W006  Corp LLM rate limit exceeded; task '{task}' deferred {n}s — no autom
 ## Key choices
 
 - **`[D-007]`** — on-prem LLM hosting for both runtime and code-generation. This module is the runtime side. Code-generation LLM (used by `api_spec_ingestor`, `template_schema_ingestor`, `test_report_profiler`) runs through the same `hilda-llm-gateway` container per `[D-007]` impl note 2026-05-26, but build-time tools' use of LLM is governed by their own MODULE.md — this module specifies the runtime contract.
-- **`[D-053]` doc_type derivation removes CLASSIFY_DOC_TYPE** — Per `[D-053]` + FR-7 amendment, `doc_type` is derived 1:1 from `item.item_type` at routing time (not from document content). When routing succeeds (FR-52 5-step pipeline), doc_type is known structurally from the resolved item. When routing fails → lands on milestone's default work-item per FR-78 with `doc_type = DEFAULT`. The pre-2026-05-28b `CLASSIFY_DOC_TYPE` TaskKind that classified opaque-filename documents into `{test_report, tech_report, waiver}` was removed. Net TaskKind count dropped 5 → 4.
-- **`REVIEW_DOCUMENT` is skipped by callers for `doc_type == DEFAULT`** per FR-7 amendment + `[D-053]`. The `llm` module itself is agnostic — it will run the review against any doc_type if asked — but `workflow_engine`'s `TRIGGER_AI_REVIEW` action (renamed from `TRIGGER_LLM_REVIEW` per FR-29 revised) gates on `item.review_required`, which is hardcoded `False` for default work-items. No `REVIEW_DOCUMENT` calls reach here for DEFAULT documents under normal flow.
+- **`[D-053]` impl note 2026-06-08 — `doc_type` classified per FR-85 2-step ladder; `CLASSIFY_DOC_TYPE` RESTORED** (supersedes the withdrawn 2026-05-28b "1:1 derivation" framing). Per FR-85: (Step 1) filename regex against per-customer rules covers all 4 actionable doc_types `{test_report, tech_report, waiver, compliance_certification_release_notes}` — note `compliance_certification_release_notes` is detected by regex ONLY (LLM cannot reliably differentiate the bundled sub-categories from test/tech/waiver content). (Step 2) LLM `CLASSIFY_DOC_TYPE` fires only when Step 1 fails or multi-matches; **restricted candidate set** `{test_report, tech_report, waiver}` (3 values); below-confidence-threshold → caller sets `DocumentIndexRow.doc_type = DocType.UNRESOLVED` sentinel → file moves to FR-86 `staged-not-classified` path → FR-87 step (B) TPM resolution. **Alignment with `item_type`** enforced per FR-86 storage matrix (`TEST_TECH_WAIVER_REPORT` items ↔ `{test/tech/waiver}` doc_types; `COMPLIANCE_CERTIFICATION_RELEASE_NOTES` items ↔ `compliance_certification_release_notes`; `Default` items ↔ any of 5; `Confirmation` items ↔ none); misaligned pairs land on `staged-not-classified` for TPM resolution. TaskKind count: 4 → 5 (restored).
+- **`REVIEW_DOCUMENT` is skipped by callers when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false`** per FR-86 + FR-7 (`review_required = true` only on `TEST_TECH_WAIVER_REPORT` items; false for all other ItemTypes). The `llm` module itself is agnostic — it will run the review against any doc_type if asked — but `workflow_engine`'s `TRIGGER_AI_REVIEW` action (renamed from `TRIGGER_LLM_REVIEW` per FR-29 revised) gates on `item.review_required` AND `doc_type ∈ {test_report, tech_report, waiver}`. No `REVIEW_DOCUMENT` calls reach here for `compliance_certification_release_notes` / `unresolved` / `Default` work-item documents under normal flow.
 - **`[D-052]` Tri-backend with empirical routing** (per impl note 2026-06-07 — expanded from dual to tri) — Ph-1 has THREE on-prem LLM providers available:
   - **`ollama_a4000`** — Ollama on RTX A4000 (16 GB GDDR6, ~448 GB/s); single-stream tokens/sec leader for ≤14 GB models; VRAM-bound concurrency (1 model hot, swaps); free per call.
   - **`vllm_dgx`** — vLLM on DGX Spark (128 GB unified LPDDR5X, ~273 GB/s); per-token throughput LOWER than A4000 for the same model (lower bandwidth) but supports models the A4000 cannot fit (30B+, FP16 14B, long-context KV) + vLLM continuous batching wins at concurrency.
   - **`corp_llm`** — corporate LLM service; rate-limited per minute/hour/day; chat + agentic APIs.
 
   **No backend gets default precedence.** `task_backend_map` is env-config; each TaskKind's `(backend, model)` pairing is locked only after measured-quality A/B testing across all three backends on representative real fixtures. **Precedence rule per task**: the A/B winner is assigned. Capacity-vs-bandwidth note: DGX Spark's 128 GB capacity ≠ throughput advantage for small models — A4000 GDDR6 bandwidth (~448 GB/s) beats DGX Spark LPDDR5X (~273 GB/s) for autoregressive inference of models that fit on A4000. DGX Spark's advantage is large-model capacity, concurrency (many models hot), and vLLM batching. The A/B test result per TaskKind captures these tradeoffs empirically. **No automatic spillover** between backends on rate-limit / outage: silent fallback would risk degraded-quality results without a quality gate. Spillover surfaces as `LLG-W006` for visibility — caller / ops decides whether to manually re-route.
-- **`[D-029]` Ph-1 narrow surface** — 4 TaskKinds: `ROUTE_ATTACHMENT`, `CLASSIFY_DOC`, `REVIEW_DOCUMENT`, `CLASSIFY_MESSAGE` (DEF-1 promoted per impl note 2026-05-13; `CLASSIFY_DOC_TYPE` removed per `[D-053]` impl note 2026-05-28b). DRAFT_CUSTOMER_REPLY, SUMMARIZE_STATUS deferred to Ph-2 (DEF-3 / DEF-4). Adding a Ph-2 task = add TaskKind value + template + schema + backend mapping; no Protocol-surface change.
+- **`[D-029]` Ph-1 narrow surface** — **5 TaskKinds** (revised 2026-06-09): `ROUTE_ATTACHMENT`, `CLASSIFY_DOC`, `CLASSIFY_DOC_TYPE`, `REVIEW_DOCUMENT`, `CLASSIFY_MESSAGE` (DEF-1 promoted per impl note 2026-05-13; **`CLASSIFY_DOC_TYPE` RESTORED per `[D-053]` impl note 2026-06-08** — un-revert of the 2026-05-28b removal; the prior "1:1 derivation" framing was withdrawn after requirements-phase redesign locked the FR-85 2-step ladder + restricted-candidate-set model). DRAFT_CUSTOMER_REPLY, SUMMARIZE_STATUS deferred to Ph-2 (DEF-3 / DEF-4). Adding a Ph-2 task = add TaskKind value + template + schema + backend mapping; no Protocol-surface change.
 - **One Protocol, two implementations** — `OnPremLLMClient` (caller-side HTTP) + `LLMGatewayServer` (egress-side prompt+model orchestration + dual-backend routing) implement the same `LLMProvider` surface. Tests use either `MockLLM` (in-process) or stand up `LLMGatewayServer` with fake backend endpoints. No "client-vs-server" branching in caller code.
 - **Structured output as a hard constraint** — alternative is free-form text + caller-side parsing, which scatters parsing logic and makes the contract LLM-dependent. JSON-mode + Pydantic validation localizes the brittleness and gives callers a typed surface.
 - **Process-lifetime idempotency cache** — keys cleared on process restart; full Redis-backed persistence deferred to Ph-3+ (DEF-14 family). Acceptable for Ph-1/Ph-2 because Celery retries within the same worker process the majority of the time.
@@ -331,9 +368,10 @@ Per `[D-052]`, every TaskKind's `(backend, model)` pairing must be A/B-tested on
 | `REVIEW_DOCUMENT` (FR-53) — **highest A/B priority** | `ollama_a4000` | `gemma3:12b` | `vllm_dgx` (same model + larger if needed: `gemma3:27b`, `qwen2.5:32b`) vs `corp_llm` (chat + agentic) — checklist-against-content quality |
 | `ROUTE_ATTACHMENT` (FR-52 step 4 of 5 per `[D-053]`) | `ollama_a4000` | `qwen3:8b-q4_k_m` | `vllm_dgx` (same model — bandwidth-bound, A4000 likely wins) vs `corp_llm` |
 | `CLASSIFY_DOC` (`[D-039]` Step 2 new-vs-revision) | `ollama_a4000` | `qwen3:8b-q4_k_m` | `vllm_dgx` vs `corp_llm` if rate budget allows |
+| `CLASSIFY_DOC_TYPE` (FR-85 Step 2 — restored 2026-06-09) | `ollama_a4000` | `qwen3:8b-q4_k_m` | `vllm_dgx` (same model — small-task, A4000 likely wins) vs `corp_llm`. **A/B priority: lower than REVIEW_DOCUMENT** — task is 3-way restricted classification on first-page excerpt; less LLM-quality-sensitive than checklist-against-content review |
 | `CLASSIFY_MESSAGE` (FR-12 path c) | `ollama_a4000` | `qwen3:8b-q4_k_m` | `vllm_dgx` vs `corp_llm` |
 
-`CLASSIFY_DOC_TYPE` row removed 2026-05-28b — TaskKind eliminated per `[D-053]` (doc_type now structural, not LLM-classified).
+`CLASSIFY_DOC_TYPE` row restored 2026-06-09 — TaskKind un-reverted per `[D-053]` impl note 2026-06-08 (the prior 2026-05-28b removal + "1:1 derivation" framing was withdrawn after requirements-phase redesign).
 
 These placeholders live in env config, not code — production env vars on the HILDA PC (where `hilda-llm-gateway` reads them at startup) override after A/B testing. Endpoint URLs for `ollama_a4000` (the A4000 box) and `vllm_dgx` (the DGX Spark box) are separate env vars resolved against the lab-subnet DNS.
 
@@ -347,20 +385,21 @@ These placeholders live in env config, not code — production env vars on the H
   - **Runtime** — the `test_report` module executes the parser (no LLM in `[D-011]` current scope) producing `parser_result`. THIS module (`llm`) consumes the checklist for `REVIEW_DOCUMENT` producing `llm_review_findings`. The two outputs are written to the same `DocumentIndexRow` but address different concerns — see "Relationship to `parser_result`" below.
 
   **Open architecture-phase question (flagged 2026-05-28 in STATUS.md)**: rule-based-only parsing per `[D-011]` may be insufficient for the long tail of test reports that don't fit a template (~10% of corpus per user observation: arbitrary feature reports, battery tests, multi-tab xlsx without summary tab). HILDA's parser strategy should be generic (works for any document shape) rather than per-customer custom logic; an LLM-augmented FR-16/FR-46 path may eventually land as a new TaskKind (`EXTRACT_TEST_CASES`) in this module — deferred until the architecture-phase decision on `[D-011]` is revisited.
-- **Not a doc_type classifier.** Per `[D-053]` `doc_type` is derived 1:1 from `item.item_type` at routing time — NOT classified from document content. When the FR-52 5-step routing pipeline resolves a specific work-item, doc_type is known structurally from that item. Routing failures land on the milestone's default work-item per FR-78 with `doc_type = DEFAULT` (FR-7 amendment). No runtime LLM call participates in doc_type assignment. The pre-2026-05-28b `CLASSIFY_DOC_TYPE` TaskKind (which classified opaque-filename documents into `{test_report, tech_report, waiver}` from first-page excerpt) was removed when this design landed.
+- **IS a doc_type classifier (Step 2 of the FR-85 2-step ladder)** — but with explicit scope. This module's `CLASSIFY_DOC_TYPE` TaskKind performs ONLY Step 2 of FR-85's 2-step classification ladder: filename regex Step 1 (cheaper, deterministic) runs first in `email_service.attachment_router` against `customizations/<customer_slug>/doc_type_filename_rules.yaml`; THIS module's LLM Step 2 fires only when regex Step 1 fails or multi-matches. The LLM candidate set is **restricted to 3 values** `{test_report, tech_report, waiver}` — never returns `compliance_certification_release_notes` (regex-only because bundled sub-categories are visually indistinguishable from test/tech/waiver content via first-page excerpt) and never returns `unresolved` directly (caller-side sentinel mapped from below-threshold confidence). Reverted 2026-06-09 per `[D-053]` impl note 2026-06-08 — the prior "Not a doc_type classifier" Non-goal claim was withdrawn along with the "1:1 derivation" framing. Restricted-candidate-set rationale: keeps the LLM contract narrow (3-way classification on structurally similar content) — broader 5-way classification would invite hallucination on the bundle categories without precision gain.
 - **Not a build-time LLM module.** Code-generation LLM use by `api_spec_ingestor` / `template_schema_ingestor` / `test_report_profiler` shares the same `hilda-llm-gateway` egress per `[D-007]` impl note, but those tools' Protocol surfaces live in their own modules.
 - **Relationship to `parser_result`** — `storage.DocumentIndexRow` carries TWO independently-produced fields about a document, and they are complementary (not redundant):
 
   | Field | What it answers | Produced by | Anchor | Applies to (`doc_type`) | Gate |
   |---|---|---|---|---|---|
   | `parser_result` | "What's IN the document" — per-test-case rows `(tc_id, status, comment, waiver_ref)`, summary stats, engineer/date metadata | `test_report` module rule-based parser (NOT this module) | FR-16 / FR-46 / `[D-011]` | `test_report` only | Fires whenever a test_report is received |
-  | `llm_review_findings` | "Is the document ACCEPTABLE per customer standards" — per-checklist-criterion findings + overall verdict | `llm` module via `REVIEW_DOCUMENT` TaskKind (this module) | FR-53 / `[D-052]` | `test_report` ∪ `tech_report` ∪ `waiver` | Gates on `item.review_required = true`; skipped for `doc_type == DEFAULT` |
+  | `llm_review_findings` | "Is the document ACCEPTABLE per customer standards" — per-checklist-criterion findings + overall verdict | `llm` module via `REVIEW_DOCUMENT` TaskKind (this module) | FR-53 / `[D-052]` | `test_report` ∪ `tech_report` ∪ `waiver` only | Gates on `item.review_required = true` (true on `TEST_TECH_WAIVER_REPORT` items only per FR-7); skipped when `doc_type ∈ {compliance_certification_release_notes, unresolved}` |
 
-  **Coexistence matrix per document:**
-  - `parser_result` ✓ + `llm_review_findings` ✓ → test_report with review enabled (full coverage)
-  - `parser_result` ✓ + `llm_review_findings` ✗ → test_report with review opt-out (`review_required=false`)
-  - `parser_result` ✗ + `llm_review_findings` ✓ → tech_report or waiver (parser is test_report-specific; review still applies)
-  - `parser_result` ✗ + `llm_review_findings` ✗ → DEFAULT doc_type (default work-item; neither fires)
+  **Coexistence matrix per document** (under the 5-value DocType per `[D-053]` impl note 2026-06-08):
+  - `parser_result` ✓ + `llm_review_findings` ✓ → test_report on a `TEST_TECH_WAIVER_REPORT` item with `review_required=true` (full coverage)
+  - `parser_result` ✓ + `llm_review_findings` ✗ → test_report on a `TEST_TECH_WAIVER_REPORT` item with `review_required=false` (review opt-out)
+  - `parser_result` ✗ + `llm_review_findings` ✓ → tech_report or waiver on a `TEST_TECH_WAIVER_REPORT` item with `review_required=true` (parser is test_report-specific; review still applies)
+  - `parser_result` ✗ + `llm_review_findings` ✗ → doc_type ∈ `{compliance_certification_release_notes, unresolved}` (FR-16 + FR-53 both gate off) OR landed on `Default` work-item (`review_required` hardcoded false; FR-16 only fires if doc_type=test_report so works through Default for test_reports — see special case below)
+  - **Special case**: test_report classified on `Default` work-item → `parser_result` ✓ (FR-16 fires on doc_type=test_report regardless of item) + `llm_review_findings` ✗ (FR-53 gated off because `review_required=false` on Default). Useful for TPM at FR-83 reassignment time.
 
   Both are written to `DocumentIndexRow` via `storage.update_review_findings(file_hash, parser_result, llm_review_findings)`. The `test_report` module writes the first; `workflow_engine` (driven by `TRIGGER_AI_REVIEW` action per FR-29 revised) drives this module to write the second. Downstream consumers — FR-47 failed-no-waiver surface, FR-48 auto-waiver-item creation, PLM upload manifest — read `parser_result`; the FR-53 dashboard quality surface reads `llm_review_findings`.
 
@@ -376,7 +415,7 @@ These placeholders live in env config, not code — production env vars on the H
 
 - `diagnostics` — `ErrorCode`, `ReportWriter`, `QCTemplate` (LLG codes registered in `error_codes.py`).
 - `credential_service` — `get_credential(pm_id, SystemType.LLM_GATEWAY)` called once at `LLMGatewayServer` startup for each configured backend (one credential per backend in `BackendConfig.credential_key`).
-- `template_schema` — `DocType`, `IngestSource` enums consumed by CLASSIFY_DOC inputs.
+- `template_schema` — 5-value `DocType` enum (test_report / tech_report / waiver / compliance_certification_release_notes / unresolved per `[D-053]` impl note 2026-06-08) consumed by `CLASSIFY_DOC_TYPE` (FR-85) candidate set + `CLASSIFY_DOC` (`[D-039]` Step 2) family scope + `REVIEW_DOCUMENT` skip rule; `IngestSource` enum consumed by `CLASSIFY_DOC` inputs.
 
 ---
 
@@ -397,7 +436,7 @@ python -m core.src.llm.llm_cli --diagnostic
 ```
 Calls `LLMProvider.health()` against the configured `hilda-llm-gateway` endpoint; probes every backend in `task_backend_map`; emits no proprietary content:
 ```
-RPT|LLG|run-00001|2026-05-28T10:00:00Z|gateway_reachable=true|backends_total=3|backends_reachable=3|ollama_a4000_models=gemma3:12b,qwen3:8b-q4_k_m|vllm_dgx_models=gemma3:12b,qwen3:8b-q4_k_m|corp_llm_ready=true|templates_loaded=4
+RPT|LLG|run-00001|2026-05-28T10:00:00Z|gateway_reachable=true|backends_total=3|backends_reachable=3|ollama_a4000_models=gemma3:12b,qwen3:8b-q4_k_m|vllm_dgx_models=gemma3:12b,qwen3:8b-q4_k_m|corp_llm_ready=true|templates_loaded=5
 ```
 
 ```

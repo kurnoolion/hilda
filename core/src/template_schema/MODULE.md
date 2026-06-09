@@ -1,6 +1,12 @@
 # Module: template_schema
 
-**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, FR-66, FR-70, FR-71, FR-77 (folder routing config types), FR-78 (default work-item config), FR-79 (multi-item association keys), FR-80 (`no_customer_upload`), FR-81 (`tracking_enabled` / `force_tracking_enabled`), FR-82 (routing tag catalog + validation), FR-84 (TG-level data for `sp_alert_parser`), NFR-14, and anchors `[D-014]` `[D-018]` `[D-028]` `[D-037]` `[D-046]` `[D-049]` `[D-051]` `[D-053]` `[D-054]`.
+> **Status:** Draft + 2026-06-08 cascade applied (`[D-053]` impl note 2026-06-08 — ItemType enum collapse 7→4 + DocType enum 4→5 + alignment invariant). Sections curated; pending section-by-section user review before contract is finalized. Code implementation begins after `/switch-phase development`.
+>
+> **Rollback log:**
+> - **2026-06-08 (post-cascade incremental, same day)** — user review pass corrections: (a) `CustomerDeliveryModality` enum — added `GOOGLE_DRIVE = "GoogleDrive"` explicitly per `[D-054]` Ph-1/Ph-2 scope; removed legacy `FILE_STORAGE = "FileStorage"` as too-generic (HILDA runtime needs the specific modality to route to the right `customer_adapter` family); added phase-scoped docstring listing Ph-3+ deferred values (`WebPortal`, `CustomerJiraPortal`); Customer-extensible via `extend_registry()` if back-compat needed. (b) `MilestoneBase.default_work_item_config` — type changed `dict | None` → `DefaultWorkItemConfig | None` for type safety (Pydantic round-trip + explicit semantics); docstring rewritten to clarify FULL-replacement semantic (not partial merge) + explicit separation between STRUCTURAL config (this field) vs query-time candidate filtering at FR-83 (separate concern; per-document `inferred_tg_name` query per `[D-060]` impl note 2026-06-08).
+> - **2026-06-08 (Phase B Module cascade — Group 1 of 3 against the corrected `[D-053]` model)** — applied the requirements-phase redesign (locked 2026-06-08 in `requirements.md` FR-7 + FR-85 + FR-86 + FR-87 + amendments + `DECISIONS.md` `[D-053]` impl note 2026-06-08): **ItemType enum collapse 7 → 4** (`CONFIRMATION`, `TEST_TECH_WAIVER_REPORT`, `COMPLIANCE_CERTIFICATION_RELEASE_NOTES`, `DEFAULT` — legacy values `TEST_REPORT` / `TECH_REPORT` / `WAIVER` collapsed into `TEST_TECH_WAIVER_REPORT` per bundled-item-type model; `COMPLETION_PCT` / `SOFTWARE_BINARY` removed as vestigial — customer registry-extendable); **DocType enum expand 4 → 5** (rename `DEFAULT = "default"` → `COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"`; add `UNRESOLVED = "unresolved"`); **strike "1:1 derivation"** docstrings on both ItemType + DocType (replaced with FR-85 classification pipeline + FR-86 alignment invariant references); **add alignment invariant** to Invariants section (`TEST_TECH_WAIVER_REPORT` ↔ `{test_report, tech_report, waiver}`; `COMPLIANCE_CERTIFICATION_RELEASE_NOTES` ↔ `compliance_certification_release_notes`; `DEFAULT` ↔ any of 5; `CONFIRMATION` ↔ none); **expand Purpose anchors** to include FR-85, FR-86, FR-87 + note `[D-053]` 2026-05-28b withdrawn / 2026-06-08 active; **add Key choices bullet** capturing the corrected model + restoration of `CLASSIFY_DOC_TYPE` TaskKind in `llm/MODULE.md`. Remaining cascade Groups 2 + 3 are `storage/MODULE.md` + `llm/MODULE.md` per STATUS.md In-progress 2026-06-08.
+
+**Purpose**: Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. Defines Pydantic base models, canonical enums, extensibility registries, slug conventions, and the `CustomerSchema` output contract that `template_schema_ingestor` produces and all runtime modules consume. Serves FR-1–7, FR-39–41, FR-66, FR-70, FR-71, FR-77 (folder routing config types), FR-78 (default work-item config), FR-79 (multi-item association keys), FR-80 (`no_customer_upload`), FR-81 (`tracking_enabled` / `force_tracking_enabled`), FR-82 (routing tag catalog + validation), FR-84 (TG-level data for `sp_alert_parser`), FR-85 (doc_type classification ladder consumes DocType enum + DocTypeRegistry), FR-86 (storage matrix consumes alignment invariant + ItemType/DocType pair semantics), FR-87 (SP UI strict-order resolution validates alignment), NFR-14, and anchors `[D-014]` `[D-018]` `[D-028]` `[D-037]` `[D-046]` `[D-049]` `[D-051]` `[D-053]` (impl notes 2026-05-28b withdrawn + 2026-06-08 active) `[D-054]`.
 
 *This module is pure data model — no IO, no SharePoint, no network. Runtime modules extend these base types with persistence-layer fields (SP List IDs, DB columns) in their own models.*
 
@@ -26,19 +32,17 @@ class DeliveryState(str, Enum):
     CLOSED               = "Closed"               # manually set per FR-14 / FR-64; automated transition deferred per DEF-20
 
 class ItemType(str, Enum):
-    """item_type drives the 1:1 derivation of doc_type per [D-053] item homogeneity invariant
-    (TestReport → test_report, TechReport → tech_report, Waiver → waiver, DEFAULT → default,
-    others → no document pipeline). Extensible via ItemTypeRegistry."""
-    CONFIRMATION    = "Confirmation (Yes/No)"   # owner reply closes item; no artifact required
-    COMPLETION_PCT  = "CompletionPct"
-    TEST_REPORT     = "TestReport"
-    SOFTWARE_BINARY = "SoftwareBinary"
-    TECH_REPORT     = "TechReport"
-    WAIVER          = "Waiver"
-    DEFAULT         = "Default"                  # per FR-78 + [D-053] — used for the auto-instantiated
-                                                  # default work-item per milestone (tg_name = "_unrouted";
-                                                  # sort_order = max+1; not editable; not deletable;
-                                                  # immutable doc_count = 0, review_required = false)
+    """Four core item_types per `[D-053]` impl note 2026-06-08 (supersedes the prior 7-value enum
+    + the withdrawn "1:1 derivation of doc_type" framing per `[D-053]` impl note 2026-05-28b).
+    item_type defines the workflow category of a work-item; doc_type is classified per content
+    via FR-85 and aligned per FR-86 alignment invariant. Extensible via ItemTypeRegistry —
+    legacy values (TestReport / TechReport / Waiver / CompletionPct / SoftwareBinary) removed
+    from the core enum and may be re-added per-customer via `ItemTypeRegistry.extend_registry()`
+    if backward compatibility is needed."""
+    CONFIRMATION                           = "confirmation"                            # type 1 — owner reply closes item; no documents per item type definition (FR-9/FR-10 reply paths)
+    TEST_TECH_WAIVER_REPORT                = "test_tech_waiver_report"                 # type 2 — receives any of {test_report, tech_report, waiver}; review_required = true (FR-53 fires); doc_count counts test_reports only (FR-7)
+    COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"  # type 3 — receives compliance_certification_release_notes documents; review_required = false; no parser, no review
+    DEFAULT                                = "default"                                  # type 4 — auto-instantiated default work-item per milestone per FR-78; accepts any document whose target work-item is not resolved; tg_name = "_unrouted" sentinel; sort_order = max+1; not editable; not deletable; immutable doc_count = 0, review_required = false; `[D-039]` revision determination SKIPPED at ingest per FR-86
 
 class TrackingModality(str, Enum):
     """Multi-value per DeliveryItem (stored as a list) per `[D-037]` (2026-05-13).
@@ -59,22 +63,39 @@ class IngestSource(str, Enum):
     SHAREPOINT_UI        = "SharePointUI"   # PM-uploaded via SP UI per FR-62 (Ph-2)
 
 class DocType(str, Enum):
-    """Per FR-7. Used as folder organizer in NSD path `<doc_type_slug>/<doc_id_slug>/revN/` per `[D-013]`.
-    Derived 1:1 from `item.item_type` per `[D-053]` (no runtime doc_type LLM classification —
-    CLASSIFY_DOC_TYPE TaskKind removed per `[D-052]` impl note 2026-05-28b)."""
-    TEST_REPORT = "test_report"    # triggers FR-16 parser + FR-53 LLM review when review_required=true
-    TECH_REPORT = "tech_report"    # triggers FR-53 LLM review when review_required=true
-    WAIVER      = "waiver"         # triggers FR-53 LLM review when review_required=true
-    DEFAULT     = "default"        # per FR-7 amendment + [D-053] — catch-all for compliance docs,
-                                    # certification docs, release notes, and any other non-{test_report,
-                                    # tech_report, waiver} documents; FR-16/FR-46/FR-53 do NOT fire
-                                    # for this doc_type
+    """Five doc_type values per `[D-053]` impl note 2026-06-08 (supersedes the prior 4-value enum
+    + the withdrawn "1:1 derivation from item.item_type" framing). `doc_type` is classified per
+    inbound document via the FR-85 2-step ladder (filename regex Step 1 + LLM CLASSIFY_DOC_TYPE
+    Step 2 restricted to {test_report, tech_report, waiver}) — NOT derived from item.item_type.
+    `compliance_certification_release_notes` is detected by filename regex only (Step 1) — LLM
+    never returns this value. `unresolved` is the residual on Step 2 low-confidence + Default-
+    routed-undetermined state. Alignment with item_type enforced per FR-86 storage matrix —
+    misaligned pairs land on `staged-not-classified` for TPM resolution per FR-87. Used as
+    folder organizer in NSD path `<doc_type_slug>/<doc_id_slug>/revN/` per `[D-013]` (when set).
+    `CLASSIFY_DOC_TYPE` TaskKind restored in `llm/MODULE.md` per FR-85 Step 2 (un-revert of the
+    2026-05-28b removal)."""
+    TEST_REPORT                            = "test_report"                             # triggers FR-16 parser + FR-46 final/interim + FR-53 LLM review when review_required=true (type 2 items only)
+    TECH_REPORT                            = "tech_report"                             # triggers FR-53 LLM review when review_required=true (type 2 items only)
+    WAIVER                                 = "waiver"                                  # triggers FR-53 LLM review when review_required=true (type 2 items only)
+    COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"  # renamed from prior `default` 2026-06-08 — bundle for compliance docs / certification docs / release notes; FR-16/FR-46/FR-53 do NOT fire for this doc_type; auto-assigned for type 3 items; detected by filename regex only (no LLM)
+    UNRESOLVED                             = "unresolved"                              # FR-85 Step 2 low-confidence outcome OR Default-routed-undetermined state; no downstream actions fire; awaits TPM resolution via FR-87 step (B) on `staged-not-classified` NSD path
 
 class CustomerDeliveryModality(str, Enum):
-    NONE                   = "None"
-    EMAIL                  = "Email"
-    CUSTOMER_TRACKING_SYS  = "CustomerTrackingSystem"
-    FILE_STORAGE           = "FileStorage"
+    """Per-item delivery modality to the customer/carrier. Phase-scoped values per `[D-054]`
+    customer_adapter scope: Ph-1/Ph-2 = Google Drive only; Ph-3+ adds web portal + JIRA
+    customer portal (deferred per DEF-N). Customer-extensible via
+    `CustomerDeliveryModalityRegistry` per FR-7 / NFR-14 — registry pattern allows
+    customer-specific values without code change. Legacy value `FileStorage` removed
+    2026-06-08 as too-generic (HILDA runtime needs the specific modality to route to
+    the right `customer_adapter` family); customers needing back-compat can re-add via
+    `extend_registry()`."""
+    NONE                   = "None"                    # no automated delivery; TPM uploads manually if needed
+    EMAIL                  = "Email"                   # delivery via email attachment
+    CUSTOMER_TRACKING_SYS  = "CustomerTrackingSystem"  # customer's own tracking system (e.g., JIRA — Ph-1 read-only per FR-25; Ph-3+ write via JIRA-as-customer-portal)
+    GOOGLE_DRIVE           = "GoogleDrive"             # Ph-1/Ph-2 — shared Google Drive folder per `[D-054]`; browser-automation per `[D-054]` impl note 2026-06-05 (selenium/playwright on headless Chromium); per-carrier adapter at `customizations/customer_adapter/<carrier_slug>_adapter.py`
+    # Ph-3+ values (deferred per [D-054]):
+    # WEB_PORTAL          = "WebPortal"               # customer's web portal (TBD per-carrier)
+    # CUSTOMER_JIRA_PORTAL = "CustomerJiraPortal"     # JIRA-as-customer-portal write surface
 
 class MilestoneStatus(str, Enum):
     NOT_STARTED = "Not Started"
@@ -216,7 +237,7 @@ class MilestoneBase(BaseModel):
     email_cc_list:  list[dict] | None   # [{name, email, role}]; applied to all emails in this milestone
     path_slug:      str
     # Per-milestone fields added 2026-06-05 (FR-78 / [D-053]):
-    default_work_item_config: dict | None = None  # per FR-78 — DefaultWorkItemConfig override for this milestone (serialized DefaultWorkItemConfig); None → use tracker-wide default from CustomerTemplateBase. Exactly one default work-item per milestone (NOT per TG); TG-of-document is recorded on DocumentIndexRow.inferred_tg_name.
+    default_work_item_config: DefaultWorkItemConfig | None = None  # per FR-78 — per-milestone OVERRIDE of the tracker-wide default. Typed as `DefaultWorkItemConfig | None` for type safety (was `dict | None` pre-2026-06-08 — changed for Pydantic round-trip + explicit semantics). None → inherit tracker-wide default from CustomerTemplateBase. Non-None → REPLACES the tracker-wide config for this milestone (full replacement, NOT partial merge — callers must specify all fields explicitly). Configuration is STRUCTURAL (how the default work-item entity is instantiated: name, sort_order, immutability flags); routing/candidate filtering at FR-83 reassignment is a separate query-time concern that runs `SELECT DeliveryItem WHERE milestone_id = doc.milestone_id AND tg_name = doc.DocumentIndexRow.inferred_tg_name AND item_type ∈ actionable types` per `[D-060]` impl note 2026-06-08 — NOT stored in this config. Exactly one default work-item per milestone (NOT per TG).
 
 class DeliveryItemBase(BaseModel):
     item_id:                         str
@@ -395,6 +416,7 @@ class CustomerSchema(BaseModel):
 
 - **No IO.** No file reads, no network calls, no SharePoint access. Pure data model — validators and serialization only. IO belongs to the importing module.
 - **Registry, not closed enum, for extensible fields.** `DeliveryState`, `ItemType`, `TrackingModality`, `CustomerDeliveryModality`, `DocType`, `RuleActionType`, `RuleTriggerType`, and the tag catalog are validated against mutable registries at runtime, not against the closed enum. The enum values seed the registry at import time. Per FR-28 / FR-29 (revised 2026-06-05), new triggers and actions are added via customer config without code change.
+- **Alignment invariant** (per FR-86 + `[D-053]` impl note 2026-06-08): `TEST_TECH_WAIVER_REPORT` items hold doc_type ∈ `{test_report, tech_report, waiver}`; `COMPLIANCE_CERTIFICATION_RELEASE_NOTES` items hold doc_type = `compliance_certification_release_notes`; `DEFAULT` items hold any of the 5 doc_types; `CONFIRMATION` items hold no documents. Misaligned (item_type, doc_type) pairs at ingest land on the `staged-not-classified` NSD path per FR-86 for TPM SP UI resolution per FR-87. **doc_type is NOT derived from item.item_type** — supersedes the withdrawn `[D-053]` impl note 2026-05-28b "1:1 derivation" framing.
 - **`item_description` is a comma-separated tag list per FR-82 (revised 2026-06-05).** Validator splits on comma, strips whitespace, and checks each tag against the customer's tag catalog (TagCatalogEntry registry). Unknown tags raise `TSC-W003` (warning, not error — catalog is customer-extensible). Tag mutations fire `ItemModified.TagsModified` → `PropagateTagsToActiveTrackers` per FR-82 with narrow propagation scope `(customer_id, tg_name, item_no)`.
 - **`path_slug` is immutable after creation.** `make_slug()` is called once at entity-creation; subsequent renames do not recompute it. The stored value is authoritative. Anchors `[D-013]`.
 - **`CustomerSchema` is the only cross-module data contract for customer-specific configuration.** No module reads `customizations/` YAML directly except via `CustomerSchema.load()`. This makes the YAML format a versioned API.
@@ -409,6 +431,7 @@ class CustomerSchema(BaseModel):
 - **`[D-013]`** — slug convention (`path_slug` field on every entity, `make_slug()` + `validate_slug()` owned here as the cross-cutting convention).
 - **Extensibility via registry (FR-7 NFR-14)** — closed Python enums would require code changes for new item types or delivery states. Registry pattern allows config-file extension. The closed enum values serve as seeds and documentation; the registry is the runtime authority.
 - **`sp_list_mappings` in `CustomerSchema`** — SharePoint internal column names are customer-deployment-specific. Embedding them in `CustomerSchema` (rather than in `customizations/sharepoint_config/`) co-locates the per-customer SP mapping with the rest of the customer schema, keeping all customer-specific config in one place.
+- **`[D-053]` impl note 2026-06-08 — `doc_type` is classified per content, NOT derived from `item.item_type`** (supersedes the prior `[D-053]` impl note 2026-05-28b "1:1 derivation" framing). ItemType enum collapses 7→4 (`Confirmation`, `TEST_TECH_WAIVER_REPORT`, `COMPLIANCE_CERTIFICATION_RELEASE_NOTES`, `Default`); DocType enum expands 4→5 (rename `default` → `compliance_certification_release_notes`; add `unresolved`); alignment invariant per FR-86 enforced via storage matrix. `CLASSIFY_DOC_TYPE` TaskKind is restored in `llm/MODULE.md` per FR-85 Step 2 ladder (un-revert of the 2026-05-28b removal). Legacy ItemType values (`TestReport` / `TechReport` / `Waiver` / `CompletionPct` / `SoftwareBinary`) removed from the core enum — `TestReport`/`TechReport`/`Waiver` collapsed into `TEST_TECH_WAIVER_REPORT` per the bundled-item-type model; `CompletionPct`/`SoftwareBinary` deemed vestigial (re-addable per customer via `ItemTypeRegistry.extend_registry()` if needed).
 
 ---
 
