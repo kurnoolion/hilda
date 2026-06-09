@@ -58,6 +58,8 @@ core/src/email_service/
 
 **Test-scenario minimum subset** (revised 2026-06-09 — narrowed to one basic **Ph-1 only** end-to-end flow per user direction; the prior "80+ test reports with structured response" use case + all Ph-2 features deferred per Ph-1-first discipline): **single-TG single-document single-owner happy-path** exercising the full state machine from collection kickoff to carrier submission.
 
+> **NB on scope discipline (clarified 2026-06-09)**: this section names the **initial validation flow** for early integration testing — it is NOT the design scope of this module. **Design + development scope = full Ph-1**: every `[Ph-1]`-tagged FR / NFR in `requirements.md` with a touch point on this module is in scope for the Public surface, Invariants, Key choices, sub-modules, and Depends-on sections above. The Test-scenario subset is a deliberately narrowed first-cut that exercises end-to-end plumbing (ingest → classify → route → store → respond → review → submit → close) on a minimal milestone shape before scaling up to multi-TG / multi-doc / multi-owner / staged-resolution / FR-79 multi-item scenarios. Subsequent test scenarios will broaden coverage incrementally; the design contract remains stable across them.
+
 **Milestone shape**:
 - 1 milestone with **1 TG only** (no other TGs in scope) — TGGroupBase: tracking_modality = Email (email channel only — no NSD ingress, no PLM polling); folder_routing_enabled = False; tg_owner + email_cc_list set per template.
 - 1 work-item under the TG — item_type = TEST_TECH_WAIVER_REPORT; doc_count = 1; review_required = false (FR-53 LLM review out of Ph-1 basic flow); customer_delivery_modality = GoogleDrive; target_folder set per FR-77 outbound carrier path.
