@@ -40,6 +40,9 @@ PREFIX_REGISTRY: dict[str, str] = {
     "TSI": "template_schema_ingestor",
     "TRP": "test_report_profiler",
     "DSH": "dashboard",
+    # Added 2026-06-09 — corp-side gateway modules per SYSTEM.md §2.1 (2026-05-24 expansion):
+    "CMG": "corp_messenger_gateway",
+    "CPG": "corp_plm_gateway",
 }
 
 # Central registry: all error codes across all modules live here.
@@ -140,7 +143,7 @@ QC_REGISTRY: dict[str, QCTemplate] = {}  # key: "{prefix}:{artifact_type}"
 - **No HILDA imports.** `diagnostics` imports only stdlib + third-party (dataclasses, enum, datetime, typing, sys). Any HILDA import creates a cycle and is a hard error.
 - **No free-text in report fields.** `str` fields in `ReportRecord` must contain only bounded enum tokens or registered error codes. `QCTemplate` enforces this at class definition time via `QCField.__post_init__`. `ReportWriter` enforces it at emit time when a `QCTemplate` is registered for the module.
 - **No proprietary content.** Applies to all report output by construction — field types are int / float / bool / enum; no mechanism exists to embed arbitrary strings. Anchors `[D-002]` NFR-17 NFR-2.
-- **All 18 prefixes pre-registered.** `PREFIX_REGISTRY` and `ERROR_CODES` are populated as each MODULE.md is drafted. The `--validate` flag fails if a prefix appears in `ERROR_CODES` without a `PREFIX_REGISTRY` entry.
+- **All 20 prefixes pre-registered** (revised 2026-06-09 from 18 — added `CMG` / `CPG` for corp-side gateway modules per SYSTEM.md §2.1 2026-05-24 expansion). `PREFIX_REGISTRY` and `ERROR_CODES` are populated as each MODULE.md is drafted. The `--validate` flag fails if a prefix appears in `ERROR_CODES` without a `PREFIX_REGISTRY` entry.
 - **Error codes are stable across deployments.** Once a code is registered with a number, neither the number nor the message template may change. Deprecations add a `deprecated: True` field; codes are never renumbered or deleted.
 
 ---
@@ -168,7 +171,7 @@ QC_REGISTRY: dict[str, QCTemplate] = {}  # key: "{prefix}:{artifact_type}"
 
 ## Depended on by
 
-All 17 other core modules: `template_schema`, `sharepoint_integration`, `storage`, `credential_service`, `email_service`, `issue_tracker`, `messenger`, `customer_adapter`, `tracker`, `test_report`, `rule_engine`, `llm`, `workflow_engine`, `api_spec_ingestor`, `template_schema_ingestor`, `test_report_profiler`, `dashboard`.
+All 19 other modules (revised 2026-06-09 from 17 — added `corp_messenger_gateway` + `corp_plm_gateway` corp-side gateway modules per SYSTEM.md §2.1 2026-05-24 expansion): `template_schema`, `sharepoint_integration`, `storage`, `credential_service`, `email_service`, `issue_tracker`, `messenger`, `customer_adapter`, `tracker`, `test_report`, `rule_engine`, `llm`, `workflow_engine`, `api_spec_ingestor`, `template_schema_ingestor`, `test_report_profiler`, `dashboard`, `corp_messenger_gateway`, `corp_plm_gateway`.
 
 ---
 
@@ -194,12 +197,12 @@ No `--mock` or `--dry-run` needed — no side effects, no network, no disk write
 
 **Sample `--diagnostic` output** (pasteable into chat):
 ```
-RPT|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=18|code_count=3|modules=DGN,TSC,SHP,STO,CRD,EML,ITR,MSG,CAD,TRK,TRC,RUL,LLG,WFL,ASI,TSI,TRP,DSH
+RPT|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|modules=DGN,TSC,SHP,STO,CRD,EML,ITR,MSG,CAD,TRK,TRC,RUL,LLG,WFL,ASI,TSI,TRP,DSH,CMG,CPG
 ```
 
 **Sample `--validate` output**:
 ```
-QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=18|code_count=3|duplicate_prefixes=false|orphan_codes=false|missing_qc_templates=true|result=WARN
+QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|duplicate_prefixes=false|orphan_codes=false|missing_qc_templates=true|result=WARN
 ```
 
 ---

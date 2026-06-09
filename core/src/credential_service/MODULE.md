@@ -1,6 +1,6 @@
 # Module: credential_service
 
-**Purpose**: Single read-only interface (`get_credential(pm_id, system_type) -> Credential`) that returns the credential material every outbound adapter needs to authenticate against external systems (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account). Owns the sops-encrypted `.env` file layout, age-key decryption at process start, and the in-memory credential cache for the process lifetime. Anchors `[D-019]`, `[D-038]`; serves FR-51, FR-42, NFR-3, NFR-4.
+**Purpose**: Single read-only interface (`get_credential(pm_id, system_type) -> Credential`) that returns the credential material every outbound adapter needs to authenticate against external systems (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account). Owns the sops-encrypted `.env` file layout, age-key decryption at process start, and the in-memory credential cache for the process lifetime. Anchors `[D-019]`, `[D-038]`, `[D-052]` (tri-backend LLM credential split per impl note 2026-06-08); serves FR-51, FR-42, NFR-3, NFR-4.
 
 **Ph-1/Ph-2 model per `[D-019]` impl note 2026-05-24**: HILDA operates with a **shared ops-team credential set per customer system**, not per-PM credentials. The `get_credential(pm_id, ...)` interface accepts a `pm_id` argument and is stable across phases, but Ph-1/Ph-2 returns the shared ops-team credential under the hood regardless of `pm_id`. Per-PM provisioning + isolation lands at Ph-3+ alongside Vault per DEF-14. NFR-3 (per-PM isolation) is therefore an interface-level invariant in Ph-1/Ph-2, not an enforced runtime property — attribution lives in `CommunicationLog` per FR-42.
 
@@ -33,13 +33,17 @@ class Credential:
 
 ```python
 class SystemType(str, Enum):
-    """Bounded set of external system kinds credential_service serves credentials for."""
-    ISSUE_TRACKER  = "issue_tracker"   # corp PLM (via corp_plm_gateway) + customer JIRA
-    MESSENGER      = "messenger"        # corp messenger (via corp_messenger_gateway)
-    CUSTOMER       = "customer"         # customer portal / submission system
-    EMAIL          = "email"            # IMAP/SMTP mailbox per [D-016]
-    SHAREPOINT     = "sharepoint"       # SP service account (NTLM/Kerberos)
-    LLM_GATEWAY    = "llm_gateway"      # corp LLM proxy API key per [D-007]
+    """Bounded set of external system kinds credential_service serves credentials for.
+    Tri-backend LLM split per `[D-052]` impl note 2026-06-08 — was single LLM_GATEWAY pre-2026-06-09."""
+    ISSUE_TRACKER     = "issue_tracker"      # corp PLM (via corp_plm_gateway) + customer JIRA
+    MESSENGER         = "messenger"           # corp messenger (via corp_messenger_gateway)
+    CUSTOMER          = "customer"            # customer portal / submission system (Ph-1/Ph-2 Google Drive per `[D-054]`)
+    EMAIL             = "email"               # IMAP/SMTP mailbox per `[D-016]`
+    SHAREPOINT        = "sharepoint"          # SP service account (NTLM/Kerberos)
+    # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single LLM_GATEWAY):
+    LLM_OLLAMA_A4000  = "llm_ollama_a4000"   # Ollama on RTX A4000 box (lab subnet); typically no auth or basic per per-deployment policy
+    LLM_VLLM_DGX      = "llm_vllm_dgx"        # vLLM on DGX Spark box (lab subnet); typically no auth or basic per per-deployment policy
+    LLM_CORP_LLM      = "llm_corp_llm"        # corp on-prem LLM (off-lab); API token / OAuth2 per `[D-007]` / corp policy
 ```
 
 ### `service.py`
@@ -103,7 +107,10 @@ class MockCredentialService:
     customer.enc.env
     email.enc.env
     sharepoint.enc.env
-    llm_gateway.enc.env
+    # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single llm_gateway.enc.env):
+    llm_ollama_a4000.enc.env                   ← may be empty / no-auth in default lab deployment
+    llm_vllm_dgx.enc.env                       ← may be empty / no-auth in default lab deployment
+    llm_corp_llm.enc.env                       ← API token / OAuth2 per `[D-007]`
 ```
 
 Each `.enc.env` declares env-var-style entries for the shared ops-team credential of that system. Ph-3+ Vault path layout is `secret/hilda/<pm_id>/<system_type>` per `[D-019]` (interface-stable migration target; loader swaps, callers don't).
@@ -171,7 +178,7 @@ CRD-W002  Credential reload triggered by SIGHUP — cache rebuilt
 - `email_service` (mailbox poll auth).
 - `sharepoint_integration` (NTLM/Kerberos auth for SpClient — at startup, since the SP service account is process-wide not per-PM).
 - `workflow_engine` (passes through to adapters; does not call directly).
-- `llm` / `hilda-llm-gateway` (LLM API key on startup).
+- `llm` / `hilda-llm-gateway` (LLM credentials on startup — **three SystemType values per `[D-052]` tri-backend** per impl note 2026-06-08: `LLM_OLLAMA_A4000`, `LLM_VLLM_DGX`, `LLM_CORP_LLM`; `LLMGatewayServer` retrieves one credential per configured `BackendConfig` at startup).
 
 ---
 
@@ -182,7 +189,7 @@ python -m core.src.credential_service.credential_service_cli --diagnostic
 ```
 Loads all `.enc.env` files, decrypts each, validates that every required env var per SystemType is present. Emits no credential values:
 ```
-RPT|CRD|run-00001|2026-05-27T10:00:00Z|files_found=6|files_decrypted=6|files_failed=0|systems_covered=6
+RPT|CRD|run-00001|2026-05-27T10:00:00Z|files_found=8|files_decrypted=8|files_failed=0|systems_covered=8
 ```
 
 ```
