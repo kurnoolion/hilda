@@ -493,7 +493,7 @@ GET https://<sp-site>/_api/web/lists/getbytitle('DeliveryItems')/items
 
 When the response differs from the cached client-side state, re-render the affected rows in place — no full page reload.
 
-**Recommended poll interval**: 5–10 seconds while the page is in the foreground; longer (30–60s) when backgrounded.
+**Refresh model: focus-aware** (per SP UI engineer 2026-06-10; supersedes the prior poll-interval framing). On tab/window focus-gain → re-fetch list deltas + re-render via the SP REST GET above (Page Visibility API + focus event triggers). In-focus refresh strategy (continuous interval / interaction-triggered / hybrid) is the SP UI engineer's implementation choice. Backgrounded tab does no SP work — saves SP server load. This refresh model applies to all SP UI views surfacing HILDA-written state (milestone view, delivery items, CommunicationLog, etc.). Anchors `[D-064]` (HILDA→SP REST as sole HILDA-initiated state writeback channel).
 
 **Why poll SP and not HILDA**: SP REST is corp-to-corp (no firewall issues; sub-second latency). HILDA is on a separate network; the SP UI doesn't talk directly to HILDA for state.
 
