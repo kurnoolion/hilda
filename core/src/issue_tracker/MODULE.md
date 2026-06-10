@@ -327,4 +327,28 @@ Fields: tests (int), passed (int), failed (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
+### `issue_tracker_cli.py`
+- `load_adapter(slug, config=None) -> IssueTracker` — function — pub — Resolves adapter slug to instance: "mock" → MockIssueTracker; else searches core then customizations; raises ITR-E006 if not found.
+- `main() -> None` — function — pub — CLI entrypoint: `--diagnostic` (adapter inventory RPT), `--mock --dry-run` (mock CRUD cycle), `--contract --adapter <slug>` (C01–C10 suite).
+
+### `jira_adapter.py`
+- `JiraAdapter` — class — pub — IssueTracker Protocol implementation against Jira REST API v2 (httpx, idempotency cache, status/transition mapping).
+- `JiraAdapterConfig` — dataclass — pub — Config (base_url, auth_type, project_key, status_map, transition_map); `from_env(prefix)` classmethod loads from `HILDA_JIRA_*` vars.
+- `make_adapter(config=None) -> JiraAdapter` — function — pub — Factory for `load_adapter`; wires basic auth from env.
+
+### `mock_adapter.py`
+- `MockIssueTracker` — class — pub — In-memory IssueTracker for tests; full Protocol surface, asyncio.Lock-guarded, idempotency-keyed dedup, IssueChange log.
+
+### `protocol.py`
+- `AttachmentInput` — type alias — pub (via `__all__`) — `Path | AsyncIterable[bytes]`; cross-module attachment primitive re-exported here for `messenger`.
+- `AttachmentRef` — frozendataclass — pub (via `__all__`) — Post-upload attachment handle (attachment_id, issue_ref, filename, source_system).
+- `CommentRef` — frozendataclass — pub (via `__all__`) — Post-add comment handle (comment_id, issue_ref, source_system).
+- `Issue` — dataclass — pub (via `__all__`) — Canonical issue body (ref, summary, description, status, priority, assignee, labels, timestamps).
+- `IssueChange` — frozendataclass — pub (via `__all__`) — Audit-log entry for one field transition (field, old/new, changed_at, changed_by).
+- `IssuePriority` — Enum — pub (via `__all__`) — Low/Medium/High/Critical.
+- `IssueQuery` — dataclass — pub (via `__all__`) — Search predicate (project, status, updated_after, assignee, labels).
+- `IssueRef` — frozendataclass — pub (via `__all__`) — Stable issue handle (issue_id, source_system, url).
+- `IssueStatus` — Enum — pub (via `__all__`) — Open/InProgress/Resolved/Closed.
+- `IssueTracker` — Protocol — pub (via `__all__`) — Async-native IssueTracker contract per [D-008]; 11 methods (create/get/update/transition/close/comment/upload/search/list_recent_changes/register_webhook/poll_changes).
+- `WebhookRef` — frozendataclass — pub (via `__all__`) — Registered-webhook handle (webhook_id, source_system, callback_url).
 <!-- END:STRUCTURE -->

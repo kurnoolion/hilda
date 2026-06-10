@@ -467,4 +467,5 @@ Fields: task (enum: TaskKind values), schema_valid (bool), latency_ms (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
+[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
 <!-- END:STRUCTURE -->

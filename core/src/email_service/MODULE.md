@@ -593,4 +593,5 @@ Fields: messages_fetched (int), owner_reply (int), sp_alert (int), other (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
+[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
 <!-- END:STRUCTURE -->

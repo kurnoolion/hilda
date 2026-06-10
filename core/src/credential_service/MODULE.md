@@ -216,4 +216,5 @@ Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_be
 ---
 
 <!-- BEGIN:STRUCTURE -->
+[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
 <!-- END:STRUCTURE -->

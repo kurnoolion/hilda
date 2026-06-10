@@ -496,4 +496,45 @@ Fields: entity_count (int), columns_mapped (int), required_fields_covered (bool)
 ---
 
 <!-- BEGIN:STRUCTURE -->
+### `enums.py`
+- `CustomerDeliveryModality` — Enum — pub (via `__all__`) — Carrier submission modality (extensible via registry).
+- `DeliveryState` — Enum — pub (via `__all__`) — 10-state DeliveryItem lifecycle (Open..Closed) per FR-7.
+- `ItemType` — Enum — pub (via `__all__`) — Work-item type discriminator (extensible).
+- `MilestoneStatus` — Enum — pub (via `__all__`) — Milestone-status discriminator.
+- `RuleActionType` — Enum — pub (via `__all__`) — AutomationRule action discriminator.
+- `RuleScope` — Enum — pub (via `__all__`) — AutomationRule scoping level (global / customer / device).
+- `TestReportClassification` — Enum — pub (via `__all__`) — final / interim classification per [D-011].
+- `TestReportItemStatus` — Enum — pub (via `__all__`) — Per-item status (passed / failed / waived / non_applicable).
+- `TrackingModality` — Enum — pub (via `__all__`) — Per-item tracking source discriminator.
+
+### `error_codes.py`
+- (no public top-level names — registers TSC error codes on import via `register_code` side-effect.)
+
+### `models.py`
+- `AutomationRuleBase` — Pydantic BaseModel — pub (via `__all__`) — AutomationRule canonical fields (id, name, scope, trigger, action, priority).
+- `ColumnMapping` — Pydantic BaseModel — pub (via `__all__`) — Source-column → canonical-field mapping (col_type, required, format, enum_values).
+- `CustomerSchema` — Pydantic BaseModel — pub (via `__all__`) — Ingestor→runtime contract (customer_slug, schema_version, entity_hierarchy, sp_list_mappings).
+- `CustomerTemplateBase` — Pydantic BaseModel — pub (via `__all__`) — Customer template (template_id, version, milestones list, active flag).
+- `DeliverableBase` — Pydantic BaseModel — pub (via `__all__`) — Deliverable canonical fields (id, milestone_id, name, sort, status, completion_pct, slug).
+- `DeliveryItemBase` — Pydantic BaseModel — pub (via `__all__`) — Work-item canonical fields (id, deliverable_id, name, state, item_type, owner, etc.).
+- `DeviceBase` — Pydantic BaseModel — pub (via `__all__`) — Device canonical fields (id, name, customer, assigned PM, status, slug, launch date).
+- `EntitySchemaConfig` — Pydantic BaseModel — pub (via `__all__`) — Per-entity ingestor schema config (entity, header_row, columns).
+- `MilestoneBase` — Pydantic BaseModel — pub (via `__all__`) — Milestone canonical fields (id, device_id, name, sort, target_date, status, slug).
+
+### `registry.py`
+- `CustomerDeliveryModalityRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `CustomerDeliveryModality`.
+- `DeliveryStateRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `DeliveryState` values for FR-7 extensibility.
+- `ItemTypeRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `ItemType`.
+- `TrackingModalityRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `TrackingModality`.
+- `extend_registry(registry, values) -> None` — function — pub (via `__all__`) — Add config-supplied values to a registry at startup.
+- `validate_in_registry(registry, value, registry_name) -> str` — function — pub (via `__all__`) — Field-validator helper; raises ValueError when value absent.
+
+### `slug.py`
+- `SLUG_PATTERN` — module constant (re.Pattern) — pub (via `__all__`) — Canonical slug regex `^[a-zA-Z0-9_-]+$` per [D-013].
+- `make_slug(human_name) -> str` — function — pub (via `__all__`) — Lossy slugifier (alphanum / underscore, length-capped).
+- `validate_slug(value) -> str` — function — pub (via `__all__`) — Validate against `SLUG_PATTERN`; raises ValueError on mismatch.
+
+### `template_schema_cli.py`
+- `DEFAULT_BASE` — module constant — pub — Default `customizations/template_schemas` path.
+- `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` (TSC-RPT) / `--validate` (round-trips each customer schema).
 <!-- END:STRUCTURE -->

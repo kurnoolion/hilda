@@ -359,4 +359,5 @@ Fields: carrier_slug (enum: registered carrier slugs), selectors_version (str â€
 ---
 
 <!-- BEGIN:STRUCTURE -->
+[DRAFT] No code present yet (only empty `__init__.py`) â€” architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
 <!-- END:STRUCTURE -->

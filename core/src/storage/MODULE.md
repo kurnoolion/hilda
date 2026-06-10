@@ -775,4 +775,5 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - **Default work-item path namespace evolution** — Ph-1 uses the `_unrouted` sentinel under `internal\<milestone>\` per FR-78. If FR-83 TPM-reassignment volume grows or per-TG default work-items become desirable (FR-78 revisit), the path convention may need a TG-scoped variant; would require migration script + `NSDPath` update.
 
 <!-- BEGIN:STRUCTURE -->
+[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
 <!-- END:STRUCTURE -->

@@ -267,4 +267,38 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
+### `auth.py`
+- `KerberosAuthHandler` — class — pub — Kerberos/SPNEGO handler; raises SHP-E004 until corp AD lab + httpx-native adapter wired.
+- `NoAuthHandler` — class — pub — Pass-through handler for mock-server dev.
+- `NtlmAuthHandler` — class — pub — NTLM handler via httpx-ntlm; falls back to SHP-E004 when no httpx adapter available.
+- `make_handler(config) -> _AuthHandler` — function — pub — Factory: picks NoAuth/Ntlm/Kerberos from `config.auth_type`; raises SHP-E004 on misconfig.
+
+### `config.py`
+- `GlobalSharePointConfig` — Pydantic BaseModel — pub (via `__all__`) — Operational SP config (site_url, auth_type, creds, timeouts, page_size); secret-redacted `__repr__`; `from_sources(config_path, cli_overrides, env_prefix)` 3-tier loader.
+- `ListScope` — frozendataclass — pub (via `__all__`) — Lookup scope (customer_slug, optional device_slug for override path).
+
+### `error_codes.py`
+- (no public top-level names — registers SHP-E001..E004 + SHP-W001 on import via `register_code` side-effect.)
+
+### `list_crud.py`
+- `SpCrud` — class — pub (via `__all__`) — Sole public CRUD compositor over SpClient + SharePointListProvider; canonical-in / canonical-out; `get_items/create_item/update_item/delete_item/batch_create/batch_update`.
+
+### `list_provider.py`
+- `FileBasedListProvider` — class — pub (via `__all__`) — YAML-backed SharePointListProvider; reads customer + device-override files from `customizations/sharepoint_config/`; raises SHP-E002 on scope miss.
+- `SharePointListProvider` — Protocol — pub (via `__all__`) — Pure lookup: `get_list_name`, `get_column_map`, `to_sp_fields`, `from_sp_fields`.
+
+### `mock_server/app.py`
+- `build_app(store=None) -> FastAPI` — function — pub — Builds the mock SP FastAPI app exposing SP 2017 REST + HTML browser UI over a shared `InMemoryStore`.
+
+### `mock_server/store.py`
+- `InMemoryStore` — dataclass — pub — Thread-safe in-memory list store backing the mock server; lists addressed by display name; monotonic per-list item IDs; audit log.
+- `ListNotFoundError` — class (KeyError) — pub — Raised when a list referenced by name does not exist.
+
+### `sharepoint_integration_cli.py`
+- `DEFAULT_BASE` — module constant — pub — Default `customizations/sharepoint_config` path.
+- `DEFAULT_CONFIG` — module constant — pub — Default `config/sharepoint_integration.json` path.
+- `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` / `--mock` / `--dry-run --customer` / `--serve --port` modes.
+
+### `sp_client.py`
+- `SpClient` — class — pub (via `__all__`) — Async SP 2017 REST HTTP client (httpx); list-item GET/POST/PATCH/DELETE + batch + pagination; retry on 429/503; OData $select/$filter/$top; SP error → SHP-E001/E004 mapping.
 <!-- END:STRUCTURE -->

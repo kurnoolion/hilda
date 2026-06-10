@@ -208,4 +208,27 @@ QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|duplicate_pre
 ---
 
 <!-- BEGIN:STRUCTURE -->
+### `diagnostics_cli.py`
+- `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` emits DGN-RPT (prefix_count, code_count, modules); `--validate` runs QC over registries.
+
+### `error_codes.py`
+- `ERROR_CODES` — module constant — pub (via `__all__`) — Registered error-code dict; seeded with DGN-/ITR- codes.
+- `ErrorCode` — frozendataclass — pub (via `__all__`) — Immutable error definition (code, message, recoverable).
+- `ErrorSeverity` — Enum — pub (via `__all__`) — Severity discriminator (E/W).
+- `PREFIX_REGISTRY` — module constant — pub (via `__all__`) — 18-entry prefix→module map (DGN, TSC, SHP, STO, CRD, EML, ITR, MSG, CAD, TRK, TRC, RUL, LLG, WFL, ASI, TSI, TRP, DSH).
+- `PipelineError` — class (Exception) — pub (via `__all__`) — Structured error carrying registered code + context dict + optional cause.
+- `format_code(code, **kwargs) -> str` — function — pub (via `__all__`) — Format a registered code's message with placeholder values.
+- `get_code(code) -> ErrorCode` — function — pub (via `__all__`) — Lookup; raises DGN-E002 if unknown.
+- `register_code(code) -> None` — function — pub (via `__all__`) — Idempotent register; raises DGN-E001 on unknown prefix, ValueError on definition conflict.
+
+### `qc.py`
+- `QC_REGISTRY` — module constant — pub (via `__all__`) — Registered QCTemplate dict keyed by `<prefix>:<artifact_type>`.
+- `QCField` — frozendataclass — pub (via `__all__`) — Single QC field spec (name, field_type ∈ {int,float,bool,enum}, enum_values).
+- `QCTemplate` — frozendataclass — pub (via `__all__`) — Fixed-field QC schema; `validate_record(rec) -> list[str]` enforces no-free-text invariant; `sample_line()` renders skeleton.
+- `register_template(template) -> None` — function — pub (via `__all__`) — Idempotent template register; raises ValueError on definition conflict.
+
+### `report.py`
+- `ReportRecord` — dataclass — pub (via `__all__`) — Compact-report row (type, prefix, run_id, timestamp, fields); `to_line()` / `from_line()` round-trip.
+- `ReportType` — Enum — pub (via `__all__`) — RPT / MET / FIX / QC discriminator.
+- `ReportWriter` — class — pub (via `__all__`) — Buffered compact-report emitter; `emit`/`make`/`flush`; context-manager support.
 <!-- END:STRUCTURE -->
