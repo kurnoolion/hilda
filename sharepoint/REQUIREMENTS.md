@@ -1,5 +1,7 @@
 # SharePoint UI Requirements — HILDA
 
+> **Status:** Initial draft 2026-05-26 + 2026-06-09 cascade Group 5 of 4-module Phase B (against the corrected `[D-053]` model locked at requirements close 2026-06-08 + the FR-77/FR-78/FR-79/FR-85/FR-86/FR-87 + `[D-052]` / `[D-053]` / `[D-054]` / `[D-060]` impl notes 2026-06-08/09). 11-group update pass applied: list count 6→8; `item_type` Choice collapsed 6→4 values per `[D-053]`; `customer_delivery_modality` Choice updated for `[D-054]` (GoogleDrive); 5 new DeliveryItems fields (`target_folder`, `no_customer_upload`, 3 TPM-resolution fields per FR-87); 3 new TGGroups fields (`ingress_nsd`, `folder_routing_enabled`, `tracking_enabled`); 3 new §4.9–§4.11 TPM-resolution buttons (FR-87 strict A→B→C); §5 document section updated for 5-value DocType + `nsd_path_type` + `inferred_tg_name`; new §7.4 SP-alert action-verb mapping; §10 Phase-1 scope updated; §12 open items resolved/added. Net effect: SP UI engineer can proceed with Ph-1 build against the corrected canonical schema; Ph-2 / Ph-3+ items remain explicitly deferred. Confirm with HILDA team: items #1–#10 in §12.
+
 **Audience**: SP UI engineer building HILDA's SharePoint 2017 web parts.
 
 **Scope**: This document is everything you need to develop the SharePoint side of HILDA. It does **not** cover the Python services that consume SP data (that side is independently developed; you don't need to know its internals).
@@ -28,7 +30,7 @@ Through SP, they:
 
 ## 2. The SP Lists you'll build views on
 
-HILDA's data lives in **6 SharePoint Lists** within a dedicated DeliverableHub SP site. Column names and types below — please use these **internal names exactly** so HILDA's REST API client can read/write them without per-deployment translation.
+HILDA's data lives in **8 SharePoint Lists** within a dedicated DeliverableHub SP site (revised 2026-06-09 from 6 — TGGroups added 2026-05-26 + count corrected for CommunicationLog). Column names and types below — please use these **internal names exactly** so HILDA's REST API client can read/write them without per-deployment translation.
 
 > **Note**: `CustomerTemplates` and `AutomationRules` are **NOT** SharePoint Lists in HILDA — they live in YAML files on the HILDA Linux server and are managed by ops, not by SP UI. You don't need to render them.
 
@@ -88,14 +90,14 @@ Unique constraint: `(device_id, milestone_name)`
 | `delivery_state` | Choice | Not Started / Open / OutreachSent / DocumentReceived / UnderPMReview / OwnerClosed / Delayed / Blocked / ReadyForSubmission / SubmittedToCustomer / Closed |
 | `expected_completion_date` | Date | |
 | `actual_completion_date` | Date | nullable — auto-set when state→OwnerClosed |
-| `item_type` | Choice | Confirmation / CompletionPct / TestReport / SoftwareBinary / TechReport / Waiver |
+| `item_type` | Choice | **Confirmation / TEST_TECH_WAIVER_REPORT / COMPLIANCE_CERTIFICATION_RELEASE_NOTES / Default** (revised 2026-06-09 per `[D-053]` impl note 2026-06-08 — collapsed 6-value → 4-value; prior values `TestReport`/`TechReport`/`Waiver` bundled into `TEST_TECH_WAIVER_REPORT`; `CompletionPct`/`SoftwareBinary` removed as vestigial; `Default` is the auto-instantiated default work-item per FR-78) |
 | `owner_name` | String | |
 | `owner_email` | String | |
 | `tracking_modality` | Choice (multi-select) | Email / CorporateMessenger / CorporatePLM / NetworkSharedDrive / CustomerJIRA — this is **multi-value** (an item can be tracked via multiple modalities) |
 | `actual_item_info` | URL | PLM issue URL (set by HILDA on first document arrival) |
 | `plm_id` | String | PLM issue ID (e.g. "PROJ-1234") |
 | `handset`, `tablet`, `wearable`, `mr`, `hmr_smr` | Boolean each | form factor flags |
-| `customer_delivery_modality` | Choice | None / Email / CustomerTrackingSystem / OurFileStorage |
+| `customer_delivery_modality` | Choice | **None / Email / CustomerTrackingSystem / GoogleDrive** (revised 2026-06-09 per `[D-054]` Ph-1/Ph-2 — `OurFileStorage` removed as too-generic; `GoogleDrive` added — Ph-3+ adds `WebPortal` + `CustomerJiraPortal`) |
 | `customer_delivery_info` | String | email address / credential ID / empty |
 | `owner_status_note` | Multi-line text | latest interim status |
 | `comment` | Multi-line text | |
@@ -108,6 +110,11 @@ Unique constraint: `(device_id, milestone_name)`
 | `last_updated` | DateTime, auto-updated | |
 | `last_owner_contacted` | DateTime | nullable |
 | `last_reminder_triggered_at` | DateTime | nullable — set by **Send Reminder** action |
+| `target_folder` | String | nullable — **[Ph-1]** FR-77 OUTBOUND customer-portal upload destination per `[D-054]` (e.g., Google Drive folder path on the carrier side). Distinct from INBOUND ingress paths. Added 2026-06-09. |
+| `no_customer_upload` | Boolean, default No | **[Ph-1]** FR-80 — when Yes, item is excluded from carrier upload (TPM-handled instead per FR-7 TPM-Mark-Closed manual path). Added 2026-06-09. |
+| `tpm_reassignment_target_item_id` | String | nullable — **[Ph-1]** FR-87 step A field — TPM sets via §4.9 Reassign Work-Item button on unrouted docs; HILDA reads via SP alert per `tpm_reassign_to_workitem` action verb. Added 2026-06-09. |
+| `tpm_resolved_doc_type` | Choice | nullable — **[Ph-1]** FR-87 step B field — TPM sets via §4.10 Resolve doc_type button; values `{test_report, tech_report, waiver, compliance_certification_release_notes}`; HILDA reads via SP alert per `tpm_resolve_doc_type` action verb. Added 2026-06-09. |
+| `tpm_revision_resolution` | String | nullable — **[Ph-1]** FR-87 step C field — TPM sets via §4.11 Resolve revision button; values `NEW` or existing `<doc_id_slug>`; HILDA reads via SP alert per `tpm_resolve_revision` action verb. Added 2026-06-09. |
 | `sort_order` | Integer, required | display order within milestone |
 
 Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
@@ -128,7 +135,7 @@ Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
 |---|---|---|
 | `credential_id` | String (auto) | PK |
 | `user_id` | Lookup → Users | required |
-| `system_type` | Choice | InternalIssueTracker / CustomerJira / CustomerPortal / etc. |
+| `system_type` | Choice | InternalIssueTracker / CustomerJira / CustomerPortal / etc. **Note 2026-06-09: PMCredentials list is Phase 3+ (deferred); when built, align values exactly with HILDA's `credential_service.SystemType` enum (per `[D-019]`) — current values are `issue_tracker / messenger / customer / email / sharepoint / llm_ollama_a4000 / llm_vllm_dgx / llm_corp_llm` per `[D-052]` impl note 2026-06-08 tri-backend split. Confirm enum values with HILDA team at Phase 3 build time.** |
 | `system_name` | String, required | display name |
 | `auth_method` | Choice | OAuth2 / APIToken / BasicAuth / SessionCookie |
 | `token_expiry` | DateTime | nullable |
@@ -170,6 +177,9 @@ A DeliveryItem belongs to a TG (e.g., "HW", "SW", "QA") via its `tg_name` field 
 | `email_group_alias` | String | nullable — the TG's corporate email distribution alias (e.g., `ims.corp@corp.com`). **When set, HILDA sends outreach to this alias instead of individual `owner_email` addresses for items in this TG.** When null, HILDA sends to individual owners per item. |
 | `corp_id_list` | Multi-line text | nullable — JSON array of corp IDs for all TG members (e.g., `["mkadado", "tarasu", ...]`). **When set, HILDA uses this list for corp messenger escalation (FR-10) instead of the individual owner's corp ID.** When null, HILDA escalates to individual owner only. |
 | `default_cc_list` | Multi-line text | nullable — JSON array `[{name, email, role}, ...]`. Pre-populates per-item `email_cc_list` on DeliveryItems at tracker-creation time (per-item override is allowed via FR-14). |
+| `ingress_nsd` | Choice (`NSD1` / `NSD2`) | **[Ph-1]** `[D-013]` dual-NSD topology — identifies which NSD this TG's documents arrive on (relevant when `tracking_modality` includes `NetworkSharedDrive`). Default `NSD1`. Added 2026-06-09. |
+| `folder_routing_enabled` | Boolean, default No | **[Ph-1]** FR-77 Type-2 routing — when Yes, HILDA uses the per-TG `folder_routing.yaml` (lives in HILDA YAML, not SP) for NSD-direct files to resolve work-item. Added 2026-06-09. |
+| `tracking_enabled` | Boolean, default Yes | **[Ph-2]** — when No, HILDA does not track items in this TG. Per-item `force_tracking_enabled` override exists on DeliveryItems. Added 2026-06-09. |
 
 **Unique constraint:** `(milestone_id, tg_name)` — one row per TG per milestone; SP UI must prevent duplicates.
 
@@ -313,6 +323,40 @@ For each action: enabled when, what field gets modified, user prompt (if any).
 | **Enabled when** | `item.delivery_state` ∉ {OwnerClosed, ReadyForSubmission, SubmittedToCustomer, Closed} |
 | **What happens on click** | Set `DeliveryItems.delivery_state = OwnerClosed` |
 
+### 4.9 *(Phase 1)* Reassign Work-Item — TPM-manual unrouted-document resolution (FR-87 step A — added 2026-06-09 per `[D-053]` impl note 2026-06-08)
+
+| Aspect | Detail |
+|---|---|
+| **Where** | Per-document row on the milestone's **default work-item** (the auto-instantiated catch-all per FR-78; receives docs that HILDA's FR-52 5-step routing pipeline could not resolve) |
+| **Enabled when** | The default work-item has one or more unrouted documents pending TPM resolution |
+| **User prompt** | Dropdown of candidate work-items within the milestone, filtered by `inferred_tg_name` (the channel-resolved TG attached to the document per `[D-060]`). TPM selects target item. Confirmation: "Reassign document `<filename>` to work-item `<item_name>`?" (Yes / Cancel) |
+| **What happens on click** | Set `DeliveryItems.tpm_reassignment_target_item_id = <selected item_id>` on the new target item row |
+| **What HILDA does next** | (Background) `email_service.sp_alert_parser` receives the alert with `action_type = tpm_reassign_to_workitem`; HILDA moves the file from `_unrouted/` NSD path to the target item's classified path per FR-86 storage matrix; updates `DocumentItemAssociation` per `[D-055]`; runs `[D-039]` revision determination (deferred at ingest per FR-86 skip rule). Item rows update via §8 live polling. |
+| **Permission** | TPM only |
+
+### 4.10 *(Phase 1)* Resolve doc_type — TPM-manual classification resolution (FR-87 step B — added 2026-06-09 per `[D-053]` impl note 2026-06-08)
+
+| Aspect | Detail |
+|---|---|
+| **Where** | Per-document row where `doc_type = unresolved` (HILDA's FR-85 2-step classification ladder didn't resolve) OR `(item_type, doc_type)` misaligned per FR-86 storage matrix (e.g., a `TEST_TECH_WAIVER_REPORT` item received a `compliance_certification_release_notes`-classified document) |
+| **Enabled when** | The item has one or more documents in `staged-not-classified` NSD path |
+| **User prompt** | Dropdown of `{test_report, tech_report, waiver, compliance_certification_release_notes}`. TPM selects target doc_type. SP UI validates alignment with `item_type` (e.g., if item is `TEST_TECH_WAIVER_REPORT`, only `{test_report, tech_report, waiver}` selectable; if item is `COMPLIANCE_CERTIFICATION_RELEASE_NOTES`, only `compliance_certification_release_notes` selectable). Confirmation: "Resolve doc_type for `<filename>` → `<selected>`?" (Yes / Cancel) |
+| **What happens on click** | Set `DeliveryItems.tpm_resolved_doc_type = <selected>` |
+| **What HILDA does next** | (Background) `sp_alert_parser` receives the alert with `action_type = tpm_resolve_doc_type`; HILDA validates FR-86 alignment; runs `[D-039]` revision determination (was skipped at ingest per FR-86 skip rule); moves file from `_staged_classification/` to canonical `classified` NSD path (or to `_staged_revision/` if `[D-039]` returned ambiguous). Item rows update via §8 live polling. |
+| **Permission** | TPM only |
+| **FR-87 strict order**: must complete BEFORE §4.11 (Resolve revision is gated on doc_type being set). |
+
+### 4.11 *(Phase 1)* Resolve revision — TPM-manual revision-determination resolution (FR-87 step C — added 2026-06-09 per `[D-053]` impl note 2026-06-08)
+
+| Aspect | Detail |
+|---|---|
+| **Where** | Per-document row where the document is in `_staged_revision/` NSD path (`[D-039]` LLM Step 3 returned ambiguous on NEW-vs-REVISION classification) |
+| **Enabled when** | The item has one or more documents in `staged-not-revision-determined` NSD path AND `doc_type` is set (Steps A + B complete per FR-87 strict order) |
+| **User prompt** | Two-option radio: "NEW" or "Revision of `<doc_id_slug>`" (dropdown of existing `doc_id_slug` values for this `(item, doc_type)` family). TPM selects. Confirmation: "Resolve `<filename>` as `<selected>`?" (Yes / Cancel) |
+| **What happens on click** | Set `DeliveryItems.tpm_revision_resolution = NEW` or `<doc_id_slug>` |
+| **What HILDA does next** | (Background) `sp_alert_parser` receives the alert with `action_type = tpm_resolve_revision`; HILDA assigns `doc_id_slug` + `rev_number`; moves file from `_staged_revision/` to canonical `classified` NSD path; fires FR-77 carrier-upload trigger if `delivery_state` advances. Item rows update via §8 live polling. |
+| **Permission** | TPM only |
+
 ---
 
 ## 5. Document section (for items where `item_type ≠ Confirmation`)
@@ -328,28 +372,31 @@ GET https://hilda.corp/docs/<delivery_item_id>
   (Phase 2 with ?all_revisions=true) → returns all revision rows ordered by rev_number ascending
 ```
 
-**Response shape** (JSON):
+**Response shape** (JSON; revised 2026-06-09 per `[D-053]` / `[D-055]` / `[D-060]` impl notes 2026-06-08/09):
 ```json
 [
   {
-    "doc_type": "test_report",
-    "doc_id_slug": "band_1_rf_conformance",
-    "rev_number": 1,
+    "doc_type": "test_report",          // 5-value enum: test_report | tech_report | waiver | compliance_certification_release_notes | unresolved
+    "doc_id_slug": "band_1_rf_conformance",  // null when nsd_path_type in {staged_not_revision, staged_not_classified, unrouted}
+    "rev_number": 1,                     // null when doc_id_slug null
     "original_filename": "band1_rf_conformance.pdf",
     "download_url": "https://hilda.corp/dl/<scoped_token>",
-    "parser_result": { ... },           // for test_reports only; null otherwise
-    "llm_review_findings": { ... }       // null when review_required=false
+    "parser_result": { ... },           // for doc_type=test_report only; null otherwise
+    "llm_review_findings": { ... },      // null when review_required=false OR doc_type ∈ {compliance_certification_release_notes, unresolved}
+    "inferred_tg_name": "HW",            // per [D-060] — channel-resolved TG; shown when the doc is on the default work-item (unrouted) so TPM sees which TG it came from
+    "nsd_path_type": "classified"        // [D-055] impl note 2026-06-09 — one of: classified | staged_not_classified | staged_not_revision | unrouted; drives the TPM-resolution button visibility in §4.9/§4.10/§4.11
   },
   ...
 ]
 ```
 
-### 5.2 Rendering (per FR-58 / FR-59 / FR-60)
+### 5.2 Rendering (per FR-58 / FR-59 / FR-60; revised 2026-06-09 for 5-value DocType + FR-86 staged-path indicators)
 
-- Group by `doc_type` (test_report / tech_report / waiver)
+- Group by `doc_type` (5-value: test_report / tech_report / waiver / compliance_certification_release_notes / unresolved)
 - One row per document
-- Each row shows: `doc_type`, `doc_id_slug` (human-readable), `rev_number`, `original_filename`, download link, parser_result summary (for test reports), llm_review_findings summary
-- **View in PLM** link per item — points to `item.actual_item_info` URL
+- Each row shows: `doc_type`, `doc_id_slug` (human-readable; "—" when null), `rev_number` (or "—"), `original_filename`, download link, parser_result summary (for test_report only), llm_review_findings summary (for test/tech/waiver only), **`nsd_path_type` indicator** (badge / icon — classified docs vs staged-not-classified vs staged-not-revision-determined vs unrouted), and for unrouted docs **show `inferred_tg_name`** (helps TPM group default-work-item docs by their channel-resolved TG before reassigning via §4.9)
+- Staged-path docs (`nsd_path_type ∈ {staged_not_classified, staged_not_revision, unrouted}`) surface their corresponding TPM-resolution button (§4.9 / §4.10 / §4.11) inline on the row
+- **View in PLM** link per item — points to `item.actual_item_info` URL (null for documents in staged paths since PLM upload happens only after FR-86 classified state is reached)
 - *(Phase 2)* When multiple revisions exist, show only the latest in the main list; provide an "expand history" toggle that calls the API with `?all_revisions=true`
 
 ### 5.3 Download link (per FR-61)
@@ -381,7 +428,7 @@ Per FR-56, items in `UnderPMReview` need an extra section showing:
 
 ### 7.1 SP Alert configuration (required deployment step)
 
-For each of the **7 SharePoint Lists** in §2 (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**), configure an alert subscription:
+For each of the **8 SharePoint Lists** in §2 (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**), configure an alert subscription:
 
 *(Note: CommunicationLog is technically append-only and shouldn't need editing, so its alert could be omitted in practice — but configuring it for completeness costs nothing and protects against future field additions. The 7 lists above all need alerts; the new TGGroups list is the critical one for TPM-driven TG metadata overrides per FR-71.)*
 
@@ -412,6 +459,23 @@ Body:
 ### 7.3 Why this matters
 
 HILDA's SP-alert parser reads these emails to discover what changed in SP. If alerts are not fired (or restricted to subset columns), HILDA does not learn about the change — even though the field is updated in SP. Result: the workflow stalls silently.
+
+### 7.4 Action verb conventions (added 2026-06-09 — FR-87 strict A→B→C TPM resolution)
+
+HILDA's `sp_alert_parser` infers what action TPM took by parsing **which field** was modified in the alert body's key:value pairs. SP UI engineer doesn't generate these verbs — they're inferred by HILDA from the field-name → verb mapping. **For the FR-87 TPM-resolution buttons added in §4.9–§4.11**, the mapping is:
+
+| Field modified (key in alert body) | Inferred action_type | Triggered by button |
+|---|---|---|
+| `tpm_reassignment_target_item_id` | `tpm_reassign_to_workitem` | §4.9 Reassign Work-Item |
+| `tpm_resolved_doc_type` | `tpm_resolve_doc_type` | §4.10 Resolve doc_type |
+| `tpm_revision_resolution` | `tpm_resolve_revision` | §4.11 Resolve revision |
+| `milestone_collection_started_at` | `start_collection` | §4.1 Start Collection |
+| `milestone_submission_triggered_at` | `submit_to_carrier` | §4.3 Submit to Carrier |
+| `refresh_requested_at` | `refresh` | §4.5 Refresh |
+| `last_reminder_triggered_at` | `send_reminder` | §4.6 Send Reminder |
+| `delivery_state` change to `ReadyForSubmission` | `pm_approval` | §4.2 Approve |
+
+**SP UI engineer responsibility**: ensure the new fields (§2.4 additions for FR-87) trigger SP alerts via the "Anything changes" setting per §7.1. **Field write is what HILDA sees** — the SP UI does not generate the verb itself; HILDA's parser does the field → verb inference.
 
 ---
 
@@ -466,7 +530,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 ## 10. Phase scoping — what to build now vs later
 
 ### Phase 1 (build first — first-customer end-to-end)
-- §2.1–§2.8 — provision all **8 SharePoint lists** (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**)
+- §2.1–§2.8 — provision all **8 SharePoint lists** (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**) with the field corrections + additions per 2026-06-09 cascade (4-value `item_type`, 4-value `customer_delivery_modality`, new `target_folder` / `no_customer_upload` / `tpm_reassignment_target_item_id` / `tpm_resolved_doc_type` / `tpm_revision_resolution` on DeliveryItems; new `ingress_nsd` / `folder_routing_enabled` on TGGroups)
 - §3.1 Milestone View (with grouping by `tg_name` + TG-group header rows reading from TGGroups via lookup)
 - §3.2 Device Tracker View
 - §3.3 PM Dashboard View
@@ -476,9 +540,12 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 - §4.4 Close All Items
 - §4.5 Refresh
 - §4.6 Send Reminder
-- §5 Document section + download links (Phase 1: single revision per document only — don't worry about revision history UI)
+- **§4.9 Reassign Work-Item** (FR-87 step A — TPM unrouted-document resolution; added 2026-06-09)
+- **§4.10 Resolve doc_type** (FR-87 step B — TPM classification resolution; added 2026-06-09)
+- **§4.11 Resolve revision** (FR-87 step C — TPM revision-determination resolution; added 2026-06-09)
+- §5 Document section + download links (Phase 1: single revision per document only — don't worry about revision history UI; **DO render 5-value doc_type + `nsd_path_type` indicator + `inferred_tg_name` on unrouted docs per 2026-06-09 cascade**)
 - §6 PM Review section (Phase 1: Approve only; no Override Final yet)
-- §7 SP Alert configuration on all 8 lists (including TGGroups)
+- §7 SP Alert configuration on all 8 lists (including TGGroups) + **§7.4 action verb conventions** (added 2026-06-09)
 - §8.1 Live SP REST polling
 - §9 Permissions
 
@@ -532,7 +599,10 @@ SP UI team (you) owns:
 4. **Override Final endpoint** (§6 Phase 2) — `POST https://hilda.corp/docs/<delivery_item_id>/set_final` shape TBD.
 5. **Status endpoint** (§8.2) — `GET https://hilda.corp/status/milestone/<id>/submission` shape TBD.
 6. **Upload endpoint** (§4.7 Phase 2) — `POST https://hilda.corp/upload/<delivery_item_id>` shape TBD.
-7. **TGGroups list (§2.8)** — added 2026-05-26. Confirm with HILDA team: (a) `corp_id_list` and `default_cc_list` JSON shape; (b) whether `(milestone_id, tg_name)` unique constraint is enforced SP-side or HILDA-side; (c) the auto-population mechanism at tracker creation — does HILDA push these rows via REST after reading the customer template YAML, or does the SP UI provide a pre-creation hook? Most likely answer: HILDA pushes via REST after tracker creation, same as for Devices / Milestones / DeliveryItems.
+7. ~~**TGGroups list (§2.8)** — added 2026-05-26~~ *— RESOLVED 2026-06-09: TGGroups list field shape (`corp_id_list` and `default_cc_list` JSON arrays); `(milestone_id, tg_name)` unique constraint enforced SP-side per `[D-051]` ; auto-population mechanism — HILDA pushes via REST after reading the customer template YAML, same as for Devices / Milestones / DeliveryItems.*
+8. **NEW 2026-06-09: TPM-resolution field names** (§4.9–§4.11) — confirm SP-side internal names match the prototype exactly: `tpm_reassignment_target_item_id`, `tpm_resolved_doc_type`, `tpm_revision_resolution`. HILDA's `sp_alert_parser` field → action_type inference (§7.4) depends on these names.
+9. **NEW 2026-06-09: TPM-resolution button visibility logic** (§4.9–§4.11) — confirm with SP UI engineer: the buttons are inline on each document row (per §5.2 staged-path-docs surface the button), NOT in a separate "Resolution Queue" view. Confirm UX preference + verify the document-enumeration API response (§5.1) carries `nsd_path_type` so SP UI can drive button visibility client-side without a separate API call.
+10. **NEW 2026-06-09: `inferred_tg_name` display on unrouted docs** (§5.2) — confirm: does TPM want a separate filter ("Show all unrouted docs from TG X") at the milestone level, or is per-document `inferred_tg_name` rendering sufficient?
 
 ---
 
