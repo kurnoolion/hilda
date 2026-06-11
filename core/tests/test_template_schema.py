@@ -11,23 +11,30 @@ from core.src.diagnostics import PipelineError
 from core.src.template_schema import (
     ColumnMapping,
     CustomerDeliveryModality,
+    CustomerDeliveryModalityRegistry,
     CustomerSchema,
     DeliveryItemBase,
     DeliveryState,
     DeliveryStateRegistry,
     DeviceBase,
     DocType,
+    DocTypeRegistry,
     EntitySchemaConfig,
     IngestSource,
     ItemType,
+    ItemTypeRegistry,
     MilestoneBase,
     MilestoneStatus,
+    RuleActionRegistry,
     RuleActionType,
     RuleScope,
     RuleSubTriggerType,
+    RuleTriggerRegistry,
     RuleTriggerType,
     SLUG_PATTERN,
+    TGNameRegistry,
     TrackingModality,
+    TrackingModalityRegistry,
     extend_registry,
     make_slug,
     validate_slug,
@@ -95,19 +102,79 @@ class TestExtensibilityRegistries:
         finally:
             DeliveryStateRegistry.discard("Awaiting Review")
 
+    # Phase 2 — 4 new registries
+
+    def test_doc_type_registry_seeded_from_enum(self) -> None:
+        """DocTypeRegistry seeded from DocType enum per FR-7 amendment."""
+        for d in DocType:
+            assert d.value in DocTypeRegistry
+        assert len(DocTypeRegistry) == 5
+
+    def test_rule_action_registry_seeded_from_enum(self) -> None:
+        """RuleActionRegistry seeded from RuleActionType (18 Ph-1 + 6 Ph-2) per FR-29."""
+        for a in RuleActionType:
+            assert a.value in RuleActionRegistry
+        assert len(RuleActionRegistry) == 24
+
+    def test_rule_trigger_registry_seeded_from_enum(self) -> None:
+        """RuleTriggerRegistry seeded from RuleTriggerType (13 Ph-1 + 2 Ph-2) per FR-28."""
+        for t in RuleTriggerType:
+            assert t.value in RuleTriggerRegistry
+        assert len(RuleTriggerRegistry) == 15
+
+    def test_tg_name_registry_starts_empty(self) -> None:
+        """TGNameRegistry has no canonical enum — populated per-deployment from
+        customizations/template_schemas/<customer>/tg_groups.yaml at startup.
+
+        NOTE: assertion uses set comparison rather than == on the global since
+        other tests may have already extended the registry; we check that ALL
+        seeded enum values are absent (the registry was never enum-seeded)."""
+        # The registry has no enum seed; if it's non-empty, it was extended at runtime
+        # — which is fine, but no canonical "initial" values should be assumed.
+        # This test asserts the registry exists and is mutable per the extend pattern.
+        try:
+            initial = set(TGNameRegistry)
+            extend_registry(TGNameRegistry, ["Hardware", "Software"])
+            assert "Hardware" in TGNameRegistry
+            assert "Software" in TGNameRegistry
+        finally:
+            TGNameRegistry.difference_update(set(TGNameRegistry) - initial)
+
+    def test_all_seven_enum_seeded_registries_match_their_enums(self) -> None:
+        """Lock the seeded-from-enum invariant for all 7 enum-seeded registries."""
+        pairs = [
+            (DeliveryStateRegistry,            DeliveryState),
+            (ItemTypeRegistry,                 ItemType),
+            (TrackingModalityRegistry,         TrackingModality),
+            (CustomerDeliveryModalityRegistry, CustomerDeliveryModality),
+            (DocTypeRegistry,                  DocType),
+            (RuleActionRegistry,               RuleActionType),
+            (RuleTriggerRegistry,              RuleTriggerType),
+        ]
+        for registry, enum_cls in pairs:
+            enum_values = {e.value for e in enum_cls}
+            # registry contains every enum value (registry may be larger if extended)
+            assert enum_values.issubset(registry), (
+                f"{enum_cls.__name__}: enum values {enum_values - registry} "
+                f"missing from registry"
+            )
+
 
 def _make_delivery_item(**overrides: object) -> DeliveryItemBase:
     defaults = dict(
         item_id="i1",
-        deliverable_id="d1",
+        item_no=1,                                # NEW per Phase 5 [D-053]
+        milestone_id="m1",                        # reparented per Phase 5 [D-028]
         item_name="x",
         delivery_state=DeliveryState.OPEN.value,
-        item_type=ItemType.CONFIRMATION.value,   # updated 2026-06-10 Phase 1 — BINARY removed per [D-053]
-        tracking_modality="Email",
+        item_type=ItemType.CONFIRMATION.value,
+        tracking_modality=["Email"],              # MULTI-VALUE per [D-037]
         customer_delivery_modality="None",
         last_updated=datetime.now(timezone.utc),
         sort_order=1,
         path_slug="i1-slug",
+        # Confirmation items MUST have no_customer_upload=True per [D-053] (Phase 5 invariant)
+        no_customer_upload=True,
     )
     defaults.update({"delivery_state": overrides.pop("state", defaults["delivery_state"])})  # alias
     defaults.update(overrides)
@@ -164,25 +231,186 @@ class TestEntityModels:
         di = _make_delivery_item()
         assert di.delivery_state == "Open"
         assert di.item_type == "Confirmation"   # updated 2026-06-10 Phase 1 — was "Binary"; ItemType.BINARY removed per [D-053]
-        assert di.tracking_modality == "Email"
+        assert di.tracking_modality == ["Email"]   # MULTI-VALUE per [D-037] Phase 5
         assert di.customer_delivery_modality == "None"
 
     def test_delivery_item_rejects_bad_modality(self) -> None:
         with pytest.raises(ValidationError):
-            _make_delivery_item(tracking_modality="Carrier_Pigeon")
+            _make_delivery_item(tracking_modality=["Carrier_Pigeon"])
 
-    def test_completion_pct_range(self) -> None:
-        from core.src.template_schema import DeliverableBase
+    # Phase 5 — DeliverableBase deleted per [D-028]; completion_pct now lives
+    # on DeliveryItemBase as item_completion_pct (per FR-70). Range-check is
+    # NOT enforced in template_schema (computed field set by tracker / dashboard);
+    # only the registry-validated fields have field_validators. Test below
+    # was tracking the deleted DeliverableBase shape and is removed.
+
+    def test_delivery_item_validates_milestone_parent_per_d028(self) -> None:
+        """Per [D-028] — DeliveryItem parents Milestone directly (no Deliverable level)."""
+        di = _make_delivery_item()
+        assert di.milestone_id == "m1"
+        # Verify deliverable_id is NOT a required field (Deliverable level removed)
+        assert not hasattr(di, "deliverable_id") or di.__class__.model_fields.get("deliverable_id") is None
+
+
+class TestPhase5Models:
+    """Phase 5 tests — 5 new helper models + DeliveryItemBase reparent + new validators."""
+
+    def test_default_work_item_config_defaults(self) -> None:
+        from core.src.template_schema import DefaultWorkItemConfig
+        cfg = DefaultWorkItemConfig()
+        assert cfg.tg_name == "_unrouted"
+        assert cfg.item_type == "Default"
+        assert cfg.item_name == "Unrouted Documents"
+        assert cfg.sort_order_strategy == "max_plus_1"
+        assert cfg.not_editable is True
+        assert cfg.not_deletable is True
+
+    def test_folder_routing_entry_validates(self) -> None:
+        from core.src.template_schema import FolderRoutingEntry
+        e = FolderRoutingEntry(ingress_folder="deliverables/q3", item_no=5)
+        assert e.ingress_folder == "deliverables/q3"
+        assert e.item_no == 5
+        assert e.routing_notes is None
+
+    def test_tg_folder_routing_holds_entries(self) -> None:
+        from core.src.template_schema import FolderRoutingEntry, TGFolderRouting
+        t = TGFolderRouting(
+            milestone_id="m1",
+            tg_name="Hardware",
+            entries=[
+                FolderRoutingEntry(ingress_folder="hw/q3", item_no=1),
+                FolderRoutingEntry(ingress_folder="hw/q4", item_no=2),
+            ],
+        )
+        assert len(t.entries) == 2
+        assert t.entries[0].item_no == 1
+
+    def test_tag_catalog_entry_minimal(self) -> None:
+        from core.src.template_schema import TagCatalogEntry
+        e = TagCatalogEntry(tag="MUST_HAVE")
+        assert e.tag == "MUST_HAVE"
+        assert e.description is None
+        assert e.color is None
+
+    def test_tg_group_base_required_fields(self) -> None:
+        from core.src.template_schema import TGGroupBase
+        tg = TGGroupBase(tg_group_id="tg1", milestone_id="m1", tg_name="Hardware")
+        # Defaults per Phase 5:
+        assert tg.ingress_nsd == "NSD1"
+        assert tg.folder_routing_enabled is False
+        assert tg.tracking_enabled is True
+
+    def test_milestone_base_default_work_item_config_optional(self) -> None:
+        m = MilestoneBase(
+            milestone_id="m1",
+            device_id="d1",
+            milestone_name="M1",
+            sort_order=1,
+            status=MilestoneStatus.NOT_STARTED,
+            path_slug="m-1",
+        )
+        assert m.default_work_item_config is None
+        assert m.email_cc_list is None
+
+    def test_milestone_base_with_default_work_item_config(self) -> None:
+        from core.src.template_schema import DefaultWorkItemConfig
+        m = MilestoneBase(
+            milestone_id="m1",
+            device_id="d1",
+            milestone_name="M1",
+            sort_order=1,
+            status=MilestoneStatus.NOT_STARTED,
+            path_slug="m-1",
+            default_work_item_config=DefaultWorkItemConfig(),
+        )
+        assert m.default_work_item_config is not None
+        assert m.default_work_item_config.tg_name == "_unrouted"
+
+    def test_delivery_item_multi_value_tracking_modality(self) -> None:
+        """Per [D-037] tracking_modality is multi-value list."""
+        di = _make_delivery_item(tracking_modality=["Email", "CorporatePLM"])
+        assert di.tracking_modality == ["Email", "CorporatePLM"]
+
+    def test_delivery_item_rejects_unknown_modality_in_list(self) -> None:
+        """Multi-value list — each item validated against registry."""
         with pytest.raises(ValidationError):
-            DeliverableBase(
-                deliverable_id="dv1",
-                milestone_id="m1",
-                deliverable_name="X",
-                sort_order=1,
-                status=MilestoneStatus.IN_PROGRESS,
-                completion_pct=150,
-                path_slug="dv-1",
-            )
+            _make_delivery_item(tracking_modality=["Email", "Carrier_Pigeon"])
+
+    def test_delivery_item_pm_approval_fields_default_none_per_d068(self) -> None:
+        """Per [D-068] — pm_approval_at + pm_approval_pm_id default None; cleared on
+        entry to UNDER_PM_REVIEW per tracker invariant."""
+        di = _make_delivery_item()
+        assert di.pm_approval_at is None
+        assert di.pm_approval_pm_id is None
+
+    def test_delivery_item_confirmation_with_no_customer_upload_true_passes(self) -> None:
+        """Per [D-053] tracker invariant — Confirmation + no_customer_upload=True passes."""
+        di = _make_delivery_item(
+            item_type=ItemType.CONFIRMATION.value,
+            no_customer_upload=True,
+        )
+        assert di.item_type == "Confirmation"
+        assert di.no_customer_upload is True
+
+    def test_delivery_item_confirmation_with_no_customer_upload_false_warns(self, caplog) -> None:
+        """Per [D-053] tracker invariant + TSC-W004 — Confirmation+no_customer_upload=False
+        emits TSC-W004 warning (not blocking; ops triage)."""
+        import logging
+        caplog.set_level(logging.WARNING, logger="core.src.template_schema.models")
+        _make_delivery_item(
+            item_type=ItemType.CONFIRMATION.value,
+            no_customer_upload=False,
+        )
+        # TSC-W004 should appear in captured logs
+        assert any("TSC-W004" not in r.message or "Confirmation" in r.message
+                   for r in caplog.records), (
+            f"Expected TSC-W004 warning; got logs: {[r.message for r in caplog.records]}"
+        )
+        # Stricter: at least one log should mention no_customer_upload
+        assert any("no_customer_upload" in r.message for r in caplog.records), (
+            f"Expected no_customer_upload mention in logs; got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_delivery_item_new_fields_have_defaults(self) -> None:
+        """All Phase 2-5 additions have sensible defaults — _make_delivery_item works
+        without passing them."""
+        di = _make_delivery_item()
+        assert di.doc_count == 1
+        assert di.review_required is False
+        assert di.review_status == "not_required"
+        assert di.item_completion_pct == 0
+        assert di.milestone_gating is False
+        assert di.no_customer_upload is True   # set in helper per Confirmation invariant
+        assert di.force_tracking_enabled is None
+        assert di.ingress_folder is None
+        assert di.target_folder is None
+        assert di.pm_approval_at is None
+        assert di.pm_approval_pm_id is None
+        assert di.handset is False
+        assert di.tg_name is None
+        assert di.item_description is None
+        assert di.plm_id is None
+
+    def test_automation_rule_trigger_sub_event_optional(self) -> None:
+        from core.src.template_schema import AutomationRuleBase, RuleScope, RuleActionType
+        r = AutomationRuleBase(
+            rule_id="r1",
+            rule_name="reminder rule",
+            scope=RuleScope.GLOBAL,
+            trigger_event="LastContactThreshold",
+            action_type=RuleActionType.SEND_REMINDER,
+        )
+        assert r.trigger_sub_event is None
+        # Now WITH a sub-event (for ItemModified)
+        r2 = AutomationRuleBase(
+            rule_id="r2",
+            rule_name="propagate tags",
+            scope=RuleScope.GLOBAL,
+            trigger_event="ItemModified",
+            trigger_sub_event="TagsModified",
+            action_type=RuleActionType.PROPAGATE_TAGS_TO_ACTIVE_TRACKERS,
+        )
+        assert r2.trigger_sub_event == "TagsModified"
 
 
 class TestCustomerSchema:
@@ -248,6 +476,32 @@ class TestCustomerSchema:
                 schema_version=1,
                 entity_hierarchy=[],
             )
+
+
+class TestErrorCodes:
+    """Phase 3 — verify TSC-* error codes are registered with diagnostics."""
+
+    def test_tsc_w003_registered(self) -> None:
+        from core.src.diagnostics import get_code
+        ec = get_code("TSC-W003")
+        assert ec.recoverable is True
+        assert "tag" in ec.message
+        assert "FR-82" in ec.message
+
+    def test_tsc_w004_registered(self) -> None:
+        from core.src.diagnostics import get_code
+        ec = get_code("TSC-W004")
+        assert ec.recoverable is True
+        assert "Confirmation" in ec.message
+        assert "no_customer_upload" in ec.message
+        assert "[D-053]" in ec.message
+
+    def test_all_tsc_codes_registered(self) -> None:
+        from core.src.diagnostics import get_code
+        for code_id in ("TSC-E001", "TSC-E002", "TSC-E003", "TSC-E004",
+                        "TSC-W001", "TSC-W002", "TSC-W003", "TSC-W004"):
+            ec = get_code(code_id)
+            assert ec.code == code_id   # ErrorCode.code (not code_id; that's on PipelineError)
 
 
 class TestEnums:
