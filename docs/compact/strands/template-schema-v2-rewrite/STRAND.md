@@ -5,7 +5,7 @@
 **Landed:**
 **Assignees:** architect (user)
 **Target modules:** core/src/template_schema/
-**Active phase:**
+**Active phase:** development
 
 ## Summary
 

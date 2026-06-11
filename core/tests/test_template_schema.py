@@ -10,16 +10,24 @@ from pydantic import ValidationError
 from core.src.diagnostics import PipelineError
 from core.src.template_schema import (
     ColumnMapping,
+    CustomerDeliveryModality,
     CustomerSchema,
     DeliveryItemBase,
     DeliveryState,
     DeliveryStateRegistry,
     DeviceBase,
+    DocType,
     EntitySchemaConfig,
+    IngestSource,
     ItemType,
     MilestoneBase,
     MilestoneStatus,
+    RuleActionType,
+    RuleScope,
+    RuleSubTriggerType,
+    RuleTriggerType,
     SLUG_PATTERN,
+    TrackingModality,
     extend_registry,
     make_slug,
     validate_slug,
@@ -94,7 +102,7 @@ def _make_delivery_item(**overrides: object) -> DeliveryItemBase:
         deliverable_id="d1",
         item_name="x",
         delivery_state=DeliveryState.OPEN.value,
-        item_type=ItemType.BINARY.value,
+        item_type=ItemType.CONFIRMATION.value,   # updated 2026-06-10 Phase 1 — BINARY removed per [D-053]
         tracking_modality="Email",
         customer_delivery_modality="None",
         last_updated=datetime.now(timezone.utc),
@@ -155,7 +163,7 @@ class TestEntityModels:
     def test_delivery_item_validates_all_registries(self) -> None:
         di = _make_delivery_item()
         assert di.delivery_state == "Open"
-        assert di.item_type == "Binary"
+        assert di.item_type == "Confirmation"   # updated 2026-06-10 Phase 1 — was "Binary"; ItemType.BINARY removed per [D-053]
         assert di.tracking_modality == "Email"
         assert di.customer_delivery_modality == "None"
 
@@ -243,6 +251,8 @@ class TestCustomerSchema:
 
 
 class TestEnums:
+    """Value-set tests — locks the enum contract per MODULE.md Public surface."""
+
     def test_test_report_classification_values(self) -> None:
         assert _TRClassification.FINAL.value == "final"
         assert _TRClassification.INTERIM.value == "interim"
@@ -255,4 +265,106 @@ class TestEnums:
             "non-applicable",
             "waived",
             "not-started",
+        }
+
+    def test_delivery_state_11_values_per_fr7(self) -> None:
+        """Per FR-7 — 11-value canonical enum (Not Started + 8 happy-path + Delayed + Blocked)."""
+        assert len(DeliveryState) == 11
+        assert {s.value for s in DeliveryState} == {
+            "Not Started", "Open", "OutreachSent", "DocumentReceived",
+            "OwnerClosed", "UnderPMReview", "ReadyForSubmission",
+            "SubmittedToCustomer", "Closed", "Delayed", "Blocked",
+        }
+
+    def test_item_type_4_values_per_d053(self) -> None:
+        """Per [D-053] impl note 2026-06-08 — 4-value collapsed enum."""
+        assert len(ItemType) == 4
+        assert {s.value for s in ItemType} == {
+            "Confirmation",
+            "TestTechWaiverReport",
+            "ComplianceCertificationReleaseNotes",
+            "Default",
+        }
+
+    def test_tracking_modality_5_values_per_d037(self) -> None:
+        """Per [D-037] — 5 Ph-1 values; valid combinations require status + document capable."""
+        assert len(TrackingModality) == 5
+        assert {s.value for s in TrackingModality} == {
+            "Email", "CorporateMessenger", "CorporatePLM",
+            "NetworkSharedDrive", "CustomerJIRA",
+        }
+
+    def test_ingest_source_4_values_per_fr13(self) -> None:
+        """Per FR-13 + [D-039] — recorded in document index."""
+        assert len(IngestSource) == 4
+        assert {s.value for s in IngestSource} == {
+            "Email", "CorporatePLM", "NetworkSharedDrive", "SharePointUI",
+        }
+
+    def test_doc_type_5_values_per_d053(self) -> None:
+        """Per [D-053] impl note 2026-06-08 — 5-value enum (test_report, tech_report,
+        waiver, compliance_certification_release_notes, unresolved)."""
+        assert len(DocType) == 5
+        assert {s.value for s in DocType} == {
+            "test_report",
+            "tech_report",
+            "waiver",
+            "compliance_certification_release_notes",
+            "unresolved",
+        }
+
+    def test_customer_delivery_modality_4_values_per_d054(self) -> None:
+        """Per [D-054] — Ph-1/Ph-2 = Google Drive only; Ph-3+ values deferred."""
+        assert len(CustomerDeliveryModality) == 4
+        assert {s.value for s in CustomerDeliveryModality} == {
+            "None", "Email", "CustomerTrackingSystem", "GoogleDrive",
+        }
+
+    def test_milestone_status_4_values(self) -> None:
+        assert len(MilestoneStatus) == 4
+        assert {s.value for s in MilestoneStatus} == {
+            "Not Started", "In Progress", "Completed", "Delayed",
+        }
+
+    def test_rule_scope_3_values_per_fr30(self) -> None:
+        assert len(RuleScope) == 3
+        assert {s.value for s in RuleScope} == {"Global", "Customer", "Device"}
+
+    def test_rule_action_type_24_values_per_fr29(self) -> None:
+        """Per FR-29 — 18 Ph-1 + 6 Ph-2 = 24 total. Ph-2 values present in enum
+        but rules using them are rejected at load time per customizations/rules/MODULE.md."""
+        assert len(RuleActionType) == 24
+        # Spot-check Ph-1 actions (FR-28 / FR-29 canonical names)
+        ph1 = {
+            "SendReminder", "Escalate", "UpdateState", "StartItemCollection",
+            "SendInitialOutreach", "NotifyNewOwner", "TriggerParser",
+            "TriggerAIReview", "QueueSubmission", "NotifyPM", "NotifyHildaOps",
+            "InstantiateDefaultWorkItem", "MilestoneStorageCleanup",
+            "HaltMilestonePolling", "FinalSweep", "ReassignDocumentToWorkItem",
+            "PropagateTagsToActiveTrackers", "PMApproval",
+        }
+        ph2 = {
+            "CancelOutstanding", "NotifyOwnerDocCountPending",
+            "TriggerVersionSelection", "TriggerPLMCleanup", "TriggerODF",
+            "SendOwnerRoutingQuery",
+        }
+        assert {s.value for s in RuleActionType} == ph1 | ph2
+
+    def test_rule_trigger_type_15_values_per_fr28(self) -> None:
+        """Per FR-28 — 13 Ph-1 + 2 Ph-2 = 15 total."""
+        assert len(RuleTriggerType) == 15
+        ph1 = {
+            "ItemCreated", "ItemModified", "StateChange", "OwnerStatusConfirmed",
+            "LastContactThreshold", "DeadlineProximity", "AttachmentReceived",
+            "AIReviewResult", "PMApproval", "TrackerCreated", "MilestoneAllClosed",
+            "CollectionPhaseClosureReached", "CredentialExpired",
+        }
+        ph2 = {"ItemDeleted", "UnroutedDocumentAccumulated"}
+        assert {s.value for s in RuleTriggerType} == ph1 | ph2
+
+    def test_rule_sub_trigger_type_3_values_per_fr28(self) -> None:
+        """Sub-triggers under ItemModified per FR-28."""
+        assert len(RuleSubTriggerType) == 3
+        assert {s.value for s in RuleSubTriggerType} == {
+            "OwnerReassigned", "DeadlineMoved", "TagsModified",
         }
