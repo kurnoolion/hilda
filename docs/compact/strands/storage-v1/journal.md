@@ -73,3 +73,41 @@ findings (see open items).
   `extract_first_page(pdf)` unblocks; already a STATUS.md Next item.
 - `--mock-postgres` / `--validate` need `HILDA_TEST_POSTGRES_URL` / real customer schemas.
 - session_scope additive surface — acknowledged this session; no DECISIONS entry.
+
+## 2026-06-11 — session 2: FR-87 TPM resolution APIs (closes the Ph-1 storage gap)
+
+Resolved finding #2 from session 1's retro ripple-check (the FR-87 storage-API gap),
+per the architect's full spec.
+
+**Added (architect-ruled thin persistence primitives; Option A / caller-resolves):**
+- `document_ops.tpm_resolve_doc_type` (FR-87 step B) — caller passes resolved values; storage
+  moves `staged_not_classification` → `classified` (slug+rev given) or → `staged_not_revision`
+  (both omitted) + field update + audit. STR-E010 asymmetric-NULL guard; STR-E009 state
+  mismatch; STR-W008 idempotent re-call.
+- `document_ops.tpm_resolve_revision` (FR-87 step C) — `RevisionResolution.new()` (slug from
+  filename + rev 1) / `.revision_of(slug)` (MAX(family)+1); moves `staged_not_revision` →
+  `classified`. STR-E009 / STR-W008.
+- `models.RevisionResolution` tagged-union (`.new()` / `.revision_of()` factories).
+- `diagnostics.error_codes` STR-E009 / STR-E010 / STR-W008; 2 action_types
+  (`tpm_resolve_doc_type` / `tpm_resolve_revision`).
+- NSD-move-precedes-DB-write ordering (architect crash-safety rationale).
+
+**Naming:** `tpm_resolve_*` not `update_*` — signals one-way state transition (NULL slug →
+populated never reverts per the staged-fill Invariant).
+
+**Classification:** soft-flag, purely additive (2 methods + 1 value type + 3 codes + 2
+action_types; nothing existing changed); inline-in-dev per the established precedent;
+captured in MODULE.md rollback log; architect pre-cleared "accept as idiomatic".
+
+**Verification:** 13 new tests (storage 59; full suite **317**); mock CLI 9/9.
+Problem hit + fixed: `audit_ops` NameError → local cycle-avoidance import.
+
+**Updates to session-1 open items:**
+- Finding #2 (missing FR-87 storage APIs) → **RESOLVED** this session.
+- Findings #1 / #3 / #4 remain — they are **email_service / tracker / workflow_engine**
+  concerns (their Ph-1 scope), not storage's. **Cross-module follow-up flagged**:
+  email_service's FR-87 handler docstrings still describe the fat-method shape and must be
+  reconciled to call these thin primitives + own the `[D-039]` re-run in workflow_engine
+  (the architect's caller-side sketch shows parse→llm→storage). Owner: email_service.
+- Storage-side FR-87 gap is now closed → **storage Ph-1 is complete on the storage side**;
+  ready to land after this close-session.

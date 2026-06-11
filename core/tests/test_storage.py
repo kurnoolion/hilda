@@ -21,6 +21,7 @@ from core.src.storage import (
     DocumentItemAssociation,
     NSDPath,
     NSDPathType,
+    RevisionResolution,
     RoutingResolution,
     TGFolderRoutingRow,
     TagCatalogRow,
@@ -62,6 +63,8 @@ from core.src.storage import (
     set_is_final,
     set_override,
     set_redis_client,
+    tpm_resolve_doc_type,
+    tpm_resolve_revision,
     update_association_plm_attachment,
     update_review_findings,
     upsert_tag,
@@ -365,6 +368,140 @@ class TestAssociations:
         assert doc.inferred_tg_name == "tg-sw"
         audit = await query_communications(action_type="reassign_to_workitem")
         assert len(audit) == 1 and audit[0].credential_id == "pm-42"
+
+
+# ---------------------------------------------------------------------------
+# FR-87 TPM staged-document resolution (steps B + C)
+# ---------------------------------------------------------------------------
+
+
+async def _stage_doc(file_hash=HASH_A, nsd_path_type=NSDPathType.STAGED_NOT_CLASSIFIED,
+                     doc_type=DocType.UNRESOLVED, slug=None, rev=None, item="item-1",
+                     tg="tg-hw", filename="Report A.xlsx"):
+    """Create a DocumentIndexRow + association at a staged NSD path, with the file present."""
+    await add_document_index_row(make_doc(file_hash=file_hash, slug=slug, rev=rev,
+                                          doc_type=doc_type, original_filename=filename))
+    if nsd_path_type == NSDPathType.STAGED_NOT_CLASSIFIED:
+        path = NSDPath.internal_staged_classification("carrier-a", "device-x", "ms-1", tg, item, filename)
+    else:  # STAGED_NOT_REVISION
+        path = NSDPath.internal_staged_revision("carrier-a", "device-x", "ms-1", tg, item,
+                                                doc_type.value, filename)
+    await write_file(NSDPath(path.segments + ()), _bytes(b"staged content"))
+    await add_document_item_association(make_assoc(
+        file_hash=file_hash, item=item, plm=None,
+        local_nsd_path=path.to_relative(), nsd_path_type=nsd_path_type))
+    return path
+
+
+class TestTpmResolveDocType:
+    async def test_resolved_branch_moves_to_classified(self):
+        src = await _stage_doc()
+        await tpm_resolve_doc_type(HASH_A, "item-1", DocType.TEST_REPORT,
+                                   doc_id_slug="report-a", rev_number=1, pm_id="pm-9")
+        assoc = (await list_associations_for_file(HASH_A))[0]
+        assert assoc.nsd_path_type == NSDPathType.CLASSIFIED
+        assert "test_report/report-a/rev1" in assoc.local_nsd_path
+        assert not src.to_local().exists()
+        assert NSDPath.from_relative(assoc.local_nsd_path).to_local().exists()
+        doc = await get_document_index_row_by_hash(HASH_A)
+        assert (doc.doc_type, doc.doc_id_slug, doc.rev_number) == (DocType.TEST_REPORT, "report-a", 1)
+        audit = await query_communications(action_type="tpm_resolve_doc_type")
+        assert len(audit) == 1 and audit[0].credential_id == "pm-9"
+
+    async def test_ambiguous_branch_moves_to_staged_revision(self):
+        await _stage_doc()
+        await tpm_resolve_doc_type(HASH_A, "item-1", DocType.WAIVER, pm_id="pm-9")
+        assoc = (await list_associations_for_file(HASH_A))[0]
+        assert assoc.nsd_path_type == NSDPathType.STAGED_NOT_REVISION
+        assert "_staged_revision" in assoc.local_nsd_path
+        doc = await get_document_index_row_by_hash(HASH_A)
+        assert doc.doc_type == DocType.WAIVER
+        assert doc.doc_id_slug is None and doc.rev_number is None
+
+    async def test_asymmetric_null_raises_e010(self):
+        await _stage_doc()
+        with pytest.raises(PipelineError) as exc:
+            await tpm_resolve_doc_type(HASH_A, "item-1", DocType.TEST_REPORT,
+                                       doc_id_slug="report-a", pm_id="pm-9")  # rev omitted
+        assert exc.value.code_id == "STR-E010"
+
+    async def test_state_mismatch_raises_e009(self):
+        # File at CLASSIFIED (not the staged_not_classification source) → E009
+        await add_document_index_row(make_doc(slug="report-a", rev=1))
+        await add_document_item_association(make_assoc())  # CLASSIFIED
+        with pytest.raises(PipelineError) as exc:
+            await tpm_resolve_doc_type(HASH_A, "item-1", DocType.TECH_REPORT, pm_id="pm-9")
+        assert exc.value.code_id == "STR-E009"
+
+    async def test_idempotent_recall_warns_w008(self):
+        await _stage_doc()
+        await tpm_resolve_doc_type(HASH_A, "item-1", DocType.TEST_REPORT,
+                                   doc_id_slug="report-a", rev_number=1, pm_id="pm-9")
+        # second call at target state → no-op + W008 audit row, no error
+        await tpm_resolve_doc_type(HASH_A, "item-1", DocType.TEST_REPORT,
+                                   doc_id_slug="report-a", rev_number=1, pm_id="pm-9")
+        w008 = [c for c in await query_communications(delivery_item_id="item-1")
+                if c.summary and "STR-W008" in c.summary]
+        assert len(w008) == 1
+
+
+class TestTpmResolveRevision:
+    async def test_new_assigns_slug_from_filename_rev1(self):
+        src = await _stage_doc(nsd_path_type=NSDPathType.STAGED_NOT_REVISION,
+                               doc_type=DocType.TEST_REPORT, filename="Battery Test.xlsx")
+        await tpm_resolve_revision(HASH_A, "item-1", RevisionResolution.new(), pm_id="pm-3")
+        assoc = (await list_associations_for_file(HASH_A))[0]
+        assert assoc.nsd_path_type == NSDPathType.CLASSIFIED
+        doc = await get_document_index_row_by_hash(HASH_A)
+        assert doc.doc_id_slug == "battery-test-xlsx" and doc.rev_number == 1
+        assert not src.to_local().exists()
+        audit = await query_communications(action_type="tpm_resolve_revision")
+        assert len(audit) == 1 and "NEW" in audit[0].summary
+
+    async def test_revision_of_computes_next_rev(self):
+        # existing rev1 in family + a staged doc resolved as revision_of → rev2
+        await add_document_index_row(make_doc(file_hash=HASH_B, slug="report-a", rev=1,
+                                              doc_type=DocType.TEST_REPORT))
+        await _stage_doc(file_hash=HASH_A, nsd_path_type=NSDPathType.STAGED_NOT_REVISION,
+                         doc_type=DocType.TEST_REPORT)
+        await tpm_resolve_revision(HASH_A, "item-1",
+                                   RevisionResolution.revision_of("report-a"), pm_id="pm-3")
+        doc = await get_document_index_row_by_hash(HASH_A)
+        assert doc.doc_id_slug == "report-a" and doc.rev_number == 2
+        audit = await query_communications(action_type="tpm_resolve_revision")
+        assert "REVISION_OF" in audit[0].summary
+
+    async def test_state_mismatch_raises_e009(self):
+        await _stage_doc(nsd_path_type=NSDPathType.STAGED_NOT_CLASSIFIED)  # wrong source state
+        with pytest.raises(PipelineError) as exc:
+            await tpm_resolve_revision(HASH_A, "item-1", RevisionResolution.new(), pm_id="pm-3")
+        assert exc.value.code_id == "STR-E009"
+
+    async def test_idempotent_recall_warns_w008(self):
+        await _stage_doc(nsd_path_type=NSDPathType.STAGED_NOT_REVISION, doc_type=DocType.TEST_REPORT)
+        await tpm_resolve_revision(HASH_A, "item-1", RevisionResolution.new(), pm_id="pm-3")
+        await tpm_resolve_revision(HASH_A, "item-1", RevisionResolution.new(), pm_id="pm-3")
+        w008 = [c for c in await query_communications(delivery_item_id="item-1")
+                if c.summary and "STR-W008" in c.summary]
+        assert len(w008) == 1
+
+
+class TestRevisionResolution:
+    def test_new_factory(self):
+        r = RevisionResolution.new()
+        assert r.kind == "new" and r.revised_doc_id_slug is None
+
+    def test_revision_of_factory(self):
+        r = RevisionResolution.revision_of("slug-x")
+        assert r.kind == "revision_of" and r.revised_doc_id_slug == "slug-x"
+
+    def test_revision_of_requires_slug(self):
+        with pytest.raises(ValueError):
+            RevisionResolution(kind="revision_of")
+
+    def test_new_rejects_slug(self):
+        with pytest.raises(ValueError):
+            RevisionResolution(kind="new", revised_doc_id_slug="x")
 
 
 # ---------------------------------------------------------------------------

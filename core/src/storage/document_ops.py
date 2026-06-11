@@ -26,6 +26,7 @@ from core.src.storage.models import (
     DocumentItemAssociation,
     NSDPathType,
     PLMFanOutTarget,
+    RevisionResolution,
     RoutingResolution,
 )
 from core.src.storage.nsd import NSDPath
@@ -48,6 +49,8 @@ __all__ = [
     "reassign_document_to_workitem",
     "resolve_download_token",
     "set_is_final",
+    "tpm_resolve_doc_type",
+    "tpm_resolve_revision",
     "update_association_plm_attachment",
     "update_review_findings",
 ]
@@ -473,6 +476,228 @@ async def reassign_document_to_workitem(
             summary=f"inferred_tg_name: {old_tg} -> {target_tg_name}",
             attachments=[{"file_hash": file_hash, "source_item": source_delivery_item_id,
                           "target_item": target_delivery_item_id}],
+        )
+    )
+
+
+# --- FR-87 TPM staged-document resolution (steps B + C) ----------------------------
+
+
+def _internal_segments(relative_path: str) -> tuple[str, str, str, str, str]:
+    """Extract (carrier, device, milestone, tg, item) from an internal-tree staged path.
+    Staged paths share the prefix internal/<carrier>/<device>/<milestone>/<tg>/<item>/..."""
+    segs = NSDPath.from_relative(relative_path).segments
+    if len(segs) < 6 or segs[0] != "internal":
+        raise PipelineError(
+            "STR-E004", context={"path": relative_path, "reason": "not a staged internal-tree path"}
+        )
+    return segs[1], segs[2], segs[3], segs[4], segs[5]
+
+
+async def _move_nsd_file(source_rel: str, target_rel: str) -> None:
+    """Copy source→target then delete source (NSD-move-precedes-DB-write per FR-87 spec:
+    if the later DB write fails, the file is at target while the row still reads STAGED_*,
+    which the next reconcile/TPM-retry detects — readers never see a CLASSIFIED row whose
+    file is missing)."""
+    import asyncio
+
+    src_local = NSDPath.from_relative(source_rel).to_local()
+    dst_local = NSDPath.from_relative(target_rel).to_local()
+
+    def _move():
+        if src_local.is_file():
+            dst_local.parent.mkdir(parents=True, exist_ok=True)
+            dst_local.write_bytes(src_local.read_bytes())
+            src_local.unlink()
+
+    await asyncio.to_thread(_move)
+
+
+async def tpm_resolve_doc_type(
+    file_hash: str,
+    delivery_item_id: str,
+    new_doc_type: DocType,
+    *,
+    doc_id_slug: str | None = None,
+    rev_number: int | None = None,
+    pm_id: str,
+) -> None:
+    """FR-87 step (B) — TPM picks doc_type for a file at `staged_not_classification`.
+
+    Caller (workflow_engine task body, after `email_service.sp_alert_parser` decodes the
+    SP-alert email) owns all upstream resolution per the Option A / caller-resolves
+    discipline: it re-runs `[D-039]` via the `llm` module (storage is NOT the [D-039]
+    runner) and passes resolved values:
+      - [D-039] PASSED   → pass doc_id_slug + rev_number (both non-NULL); file moves
+        staged_not_classification → classified; nsd_path_type → CLASSIFIED.
+      - [D-039] AMBIGUOUS→ omit both (both NULL); file moves staged_not_classification →
+        staged_not_revision; nsd_path_type → STAGED_NOT_REVISION; awaits step (C).
+
+    Both doc_id_slug + rev_number together or neither — asymmetric None raises STR-E010 at
+    the boundary. State mismatch (file not at staged_not_classification) raises STR-E009.
+    Idempotent on (file_hash, delivery_item_id, target_state): re-call at target state is a
+    no-op warning STR-W008. NSD move precedes DB write (crash-safety, see _move_nsd_file).
+    Does NOT run [D-039], does NOT fire FR-77 (caller orchestrates per Non-goals).
+    """
+    from core.src.storage import audit_ops  # local import — avoids cycle at module load
+
+    if (doc_id_slug is None) != (rev_number is None):
+        raise PipelineError("STR-E010", context={})
+
+    resolved = doc_id_slug is not None
+    target_type = NSDPathType.CLASSIFIED if resolved else NSDPathType.STAGED_NOT_REVISION
+
+    async with _session() as session:
+        assoc = await session.get(DocumentItemAssociationTable, (file_hash, delivery_item_id))
+        if assoc is None:
+            raise PipelineError(
+                "STR-E002",
+                context={"entity": "DocumentItemAssociation", "key": f"{file_hash}/{delivery_item_id}"},
+            )
+        if assoc.nsd_path_type == target_type.value:
+            await audit_W008(file_hash, delivery_item_id, "tpm_resolve_doc_type")
+            return
+        if assoc.nsd_path_type != NSDPathType.STAGED_NOT_CLASSIFIED.value:
+            raise PipelineError(
+                "STR-E009",
+                context={"file_hash": file_hash, "delivery_item_id": delivery_item_id,
+                         "expected": NSDPathType.STAGED_NOT_CLASSIFIED.value, "actual": assoc.nsd_path_type},
+            )
+        doc = await session.get(DocumentIndexTable, file_hash)
+        carrier, device, milestone, tg, item = _internal_segments(assoc.local_nsd_path)
+        original = doc.original_filename if doc else file_hash
+        if resolved:
+            target = NSDPath.internal_classified(
+                carrier, device, milestone, tg, item, new_doc_type.value, doc_id_slug, rev_number,
+            )
+        else:
+            target = NSDPath.internal_staged_revision(
+                carrier, device, milestone, tg, item, new_doc_type.value, original,
+            )
+        source_rel = assoc.local_nsd_path
+        target_rel = target.to_relative()
+
+    await _move_nsd_file(source_rel, target_rel)
+
+    async with _session() as session:
+        doc = await session.get(DocumentIndexTable, file_hash)
+        if doc is not None:
+            doc.doc_type = new_doc_type.value
+            if resolved:
+                doc.doc_id_slug = doc_id_slug
+                doc.rev_number = rev_number
+        assoc = await session.get(DocumentItemAssociationTable, (file_hash, delivery_item_id))
+        if assoc is not None:
+            assoc.local_nsd_path = target_rel
+            assoc.nsd_path_type = target_type.value
+        await session.commit()
+
+    await audit_ops.log_communication(
+        CommunicationLogRow(
+            log_id=uuid.uuid4().hex, channel=Channel.SHAREPOINT, direction=Direction.INBOUND,
+            timestamp=datetime.now(timezone.utc), delivery_item_id=delivery_item_id,
+            credential_id=pm_id, action_type="tpm_resolve_doc_type",
+            summary=f"doc_type={new_doc_type.value}; {'classified' if resolved else 'staged_not_revision'}",
+            attachments=[{"file_hash": file_hash}],
+        )
+    )
+
+
+async def tpm_resolve_revision(
+    file_hash: str,
+    delivery_item_id: str,
+    resolution: "RevisionResolution",
+    *,
+    pm_id: str,
+) -> None:
+    """FR-87 step (C) — TPM picks revision resolution for a file at `staged_not_revision`.
+
+    Caller passes `RevisionResolution.new()` (storage assigns doc_id_slug from
+    original_filename per [D-039] Step 0 + rev_number=1) or
+    `RevisionResolution.revision_of(doc_id_slug=...)` (storage sets that slug + computes
+    rev_number = MAX(family) + 1 atomically). File moves staged_not_revision → classified;
+    nsd_path_type → CLASSIFIED. State mismatch raises STR-E009; idempotent re-call (already
+    CLASSIFIED) warns STR-W008. NSD move precedes DB write. Does NOT fire FR-77.
+    """
+    from core.src.storage import audit_ops  # local import — avoids cycle at module load
+    from core.src.template_schema import make_slug
+
+    async with _session() as session:
+        assoc = await session.get(DocumentItemAssociationTable, (file_hash, delivery_item_id))
+        if assoc is None:
+            raise PipelineError(
+                "STR-E002",
+                context={"entity": "DocumentItemAssociation", "key": f"{file_hash}/{delivery_item_id}"},
+            )
+        if assoc.nsd_path_type == NSDPathType.CLASSIFIED.value:
+            await audit_W008(file_hash, delivery_item_id, "tpm_resolve_revision")
+            return
+        if assoc.nsd_path_type != NSDPathType.STAGED_NOT_REVISION.value:
+            raise PipelineError(
+                "STR-E009",
+                context={"file_hash": file_hash, "delivery_item_id": delivery_item_id,
+                         "expected": NSDPathType.STAGED_NOT_REVISION.value, "actual": assoc.nsd_path_type},
+            )
+        doc = await session.get(DocumentIndexTable, file_hash)
+        if doc is None:
+            raise PipelineError("STR-E002", context={"entity": "DocumentIndexRow", "key": file_hash})
+
+        if resolution.kind == "new":
+            new_slug = make_slug(doc.original_filename)
+            new_rev = 1
+        else:
+            new_slug = resolution.revised_doc_id_slug
+            fam = await session.execute(
+                select(DocumentIndexTable.rev_number).where(
+                    DocumentIndexTable.milestone_id == doc.milestone_id,
+                    DocumentIndexTable.doc_id_slug == new_slug,
+                )
+            )
+            existing = [r for (r,) in fam.all() if r is not None]
+            new_rev = (max(existing) + 1) if existing else 1
+
+        carrier, device, milestone, tg, item = _internal_segments(assoc.local_nsd_path)
+        target = NSDPath.internal_classified(
+            carrier, device, milestone, tg, item, doc.doc_type, new_slug, new_rev,
+        )
+        source_rel = assoc.local_nsd_path
+        target_rel = target.to_relative()
+        summary = (f"NEW: doc_id_slug={new_slug}" if resolution.kind == "new"
+                   else f"REVISION_OF: {new_slug} -> rev={new_rev}")
+
+    await _move_nsd_file(source_rel, target_rel)
+
+    async with _session() as session:
+        doc = await session.get(DocumentIndexTable, file_hash)
+        if doc is not None:
+            doc.doc_id_slug = new_slug
+            doc.rev_number = new_rev
+        assoc = await session.get(DocumentItemAssociationTable, (file_hash, delivery_item_id))
+        if assoc is not None:
+            assoc.local_nsd_path = target_rel
+            assoc.nsd_path_type = NSDPathType.CLASSIFIED.value
+        await session.commit()
+
+    await audit_ops.log_communication(
+        CommunicationLogRow(
+            log_id=uuid.uuid4().hex, channel=Channel.SHAREPOINT, direction=Direction.INBOUND,
+            timestamp=datetime.now(timezone.utc), delivery_item_id=delivery_item_id,
+            credential_id=pm_id, action_type="tpm_resolve_revision",
+            summary=summary, attachments=[{"file_hash": file_hash}],
+        )
+    )
+
+
+async def audit_W008(file_hash: str, delivery_item_id: str, action: str) -> None:
+    """Emit the STR-W008 idempotent-re-call warning to CommunicationLog (informational)."""
+    from core.src.storage import audit_ops  # local import — avoids cycle at module load
+
+    await audit_ops.log_communication(
+        CommunicationLogRow(
+            log_id=uuid.uuid4().hex, channel=Channel.SHAREPOINT, direction=Direction.INBOUND,
+            timestamp=datetime.now(timezone.utc), delivery_item_id=delivery_item_id,
+            action_type=action, summary="STR-W008 idempotent re-call — already at target state",
+            attachments=[{"file_hash": file_hash}],
         )
     )
 

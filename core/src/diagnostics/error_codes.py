@@ -140,6 +140,15 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "STR-W007": ErrorCode(
         "STR-W007", "Document in staged NSD path older than {age_days}d — TPM resolution pending", True
     ),
+    "STR-E009": ErrorCode(
+        "STR-E009", "TPM resolution on '{file_hash}'/'{delivery_item_id}': file not at expected source state '{expected}' (found '{actual}')", False
+    ),
+    "STR-E010": ErrorCode(
+        "STR-E010", "tpm_resolve_doc_type called with asymmetric doc_id_slug/rev_number — pass both or neither per FR-86 staged-fill", False
+    ),
+    "STR-W008": ErrorCode(
+        "STR-W008", "TPM resolution idempotent re-call for '{file_hash}'/'{delivery_item_id}' — already at target state", True
+    ),
 }
 
 

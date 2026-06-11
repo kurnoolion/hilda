@@ -6,10 +6,11 @@ storage-side enums (Channel, Direction, NSDPathType, RoutingResolution) and rows
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -25,6 +26,7 @@ __all__ = [
     "DocumentItemAssociation",
     "NSDPathType",
     "PLMFanOutTarget",
+    "RevisionResolution",
     "RoutingResolution",
     "TGFolderRoutingRow",
     "TagCatalogRow",
@@ -58,6 +60,30 @@ class NSDPathType(str, Enum):
     STAGED_NOT_CLASSIFIED = "staged_not_classified"  # (item_type, doc_type) misaligned; awaits FR-87 step (B)
     STAGED_NOT_REVISION = "staged_not_revision"      # aligned but [D-039] ambiguous; awaits FR-87 step (C)
     UNROUTED = "unrouted"                            # landed on Default work-item; [D-039] skipped at ingest
+
+
+@dataclass(frozen=True)
+class RevisionResolution:
+    """FR-87 step (C) revision discriminator — TPM's NEW vs REVISION_OF choice.
+    Tagged union (clearer than `Literal["new"] | tuple[Literal["revision_of"], str]`);
+    factory methods give grep-able names and self-validating construction."""
+
+    kind: Literal["new", "revision_of"]
+    revised_doc_id_slug: str | None = None  # required when kind="revision_of"
+
+    @classmethod
+    def new(cls) -> "RevisionResolution":
+        return cls(kind="new")
+
+    @classmethod
+    def revision_of(cls, doc_id_slug: str) -> "RevisionResolution":
+        return cls(kind="revision_of", revised_doc_id_slug=doc_id_slug)
+
+    def __post_init__(self) -> None:
+        if self.kind == "revision_of" and not self.revised_doc_id_slug:
+            raise ValueError("revision_of resolution requires revised_doc_id_slug")
+        if self.kind == "new" and self.revised_doc_id_slug:
+            raise ValueError("new resolution must not provide revised_doc_id_slug")
 
 
 class RoutingResolution(str, Enum):
