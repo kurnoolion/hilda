@@ -355,6 +355,24 @@ class TestSpClient:
         assert captured["if_match"] == "*"
 
     @pytest.mark.asyncio
+    async def test_delete_list_item_uses_delete_with_if_match(self) -> None:
+        """Per drift sweep 2026-06-10 — verify SpClient.delete_list_item issues DELETE with IF-MATCH header."""
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["method"] = request.method
+            captured["if_match"] = request.headers.get("if-match")
+            captured["url"] = str(request.url)
+            return httpx.Response(204)
+
+        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
+        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
+            await client.delete_list_item("MyList", "42")
+        assert captured["method"] == "DELETE"
+        assert captured["if_match"] == "*"
+        assert "items(42)" in captured["url"]
+
+    @pytest.mark.asyncio
     async def test_4xx_raises_shp_e001(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -457,6 +475,45 @@ class TestSpCrud:
         assert item_id == "42"
         assert captured["body"] == {"Title": "Band-1", "Owner_Email": "rd@corp.com"}
         assert "getbytitle('CA-Delivery')" in captured["url"]
+
+    @pytest.mark.asyncio
+    async def test_delete_item_resolves_list_name_and_issues_delete(
+        self, tmp_path: Path
+    ) -> None:
+        """Per drift sweep 2026-06-10 — verify SpCrud.delete_item resolves the
+        scope+entity to SP list name, then issues DELETE on items(<id>)."""
+        _write_customer(
+            tmp_path,
+            "carrier-alpha",
+            {
+                "delivery_items": {
+                    "name": "CA-Delivery",
+                    "columns": {"item_name": "Title"},
+                },
+            },
+        )
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["method"] = request.method
+            captured["url"] = str(request.url)
+            captured["if_match"] = request.headers.get("if-match")
+            return httpx.Response(204)
+
+        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
+        client = SpClient(cfg, transport=_mock_handler(handler))
+        provider = FileBasedListProvider(tmp_path)
+        crud = SpCrud(client, provider)
+        async with client:
+            await crud.delete_item(
+                "delivery_items",
+                ListScope("carrier-alpha"),
+                "42",
+            )
+        assert captured["method"] == "DELETE"
+        assert "getbytitle('CA-Delivery')" in captured["url"]
+        assert "items(42)" in captured["url"]
+        assert captured["if_match"] == "*"
 
     @pytest.mark.asyncio
     async def test_get_items_translates_back_to_canonical(

@@ -245,8 +245,8 @@ Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_be
 
 ### `protocol.py`
 - `AuthType` — type alias — pub (via `__all__`) — Literal of the five auth types (api_token | basic | ntlm | kerberos | oauth2_bearer).
-- `Credential` — frozendataclass — pub (via `__all__`) — One credential as served to adapters; secret-free `__repr__`/`__str__`; `value_carriers_consistent()` consistency check.
-- `SYSTEM_ENV_PREFIX` — module constant — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`).
+- `Credential` — frozen dataclass — pub (via `__all__`) — One credential as served to adapters; secret-free `__repr__`/`__str__`; `value_carriers_consistent()` consistency check.
+- `SYSTEM_ENV_PREFIX` — module constant (dict) — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`).
 - `SystemType` — Enum — pub (via `__all__`) — 8-value closed enum of external system kinds (5 systems + 3 LLM backends per [D-052]).
 
 ### `qc_templates.py`

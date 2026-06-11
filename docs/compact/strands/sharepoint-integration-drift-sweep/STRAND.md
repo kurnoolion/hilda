@@ -5,7 +5,7 @@
 **Landed:**
 **Assignees:** architect (user — strand 1)
 **Target modules:** core/src/sharepoint_integration/
-**Active phase:**
+**Active phase:** development
 
 ## Summary
 
