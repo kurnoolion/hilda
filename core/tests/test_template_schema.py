@@ -413,6 +413,86 @@ class TestPhase5Models:
         assert r2.trigger_sub_event == "TagsModified"
 
 
+class TestCLI:
+    """Phase 6 — exercise template_schema_cli per [D-005] test interface contract."""
+
+    def test_diagnostic_mode_on_empty_dir(self, tmp_path: Path) -> None:
+        """--diagnostic with no customer schemas emits TSC-RPT with zero counts."""
+        from core.src.template_schema.template_schema_cli import main
+        empty = tmp_path / "template_schemas"
+        empty.mkdir()
+        rc = main(["--diagnostic", "--base-path", str(empty)])
+        assert rc == 0
+
+    def test_diagnostic_mode_finds_valid_customer(self, tmp_path: Path, capsys) -> None:
+        """--diagnostic with one valid customer schema reports schemas_valid=1."""
+        from core.src.template_schema.template_schema_cli import main
+        base = tmp_path / "template_schemas"
+        cust_dir = base / "carrier-alpha"
+        cust_dir.mkdir(parents=True)
+        # Minimal valid CustomerSchema YAML — uses post-[D-028] entity vocabulary (no "deliverable")
+        (cust_dir / "schema.yaml").write_text(
+            "customer_slug: carrier-alpha\n"
+            "schema_version: 1\n"
+            "entity_hierarchy:\n"
+            "  - entity: device\n"
+            "    header_row: 1\n"
+            "    columns:\n"
+            "      - source: Device Name\n"
+            "        canonical: device_name\n"
+            "        col_type: str\n"
+            "        required: true\n"
+            "sp_list_mappings:\n"
+            "  device_name: Title\n",
+            encoding="utf-8",
+        )
+        rc = main(["--diagnostic", "--base-path", str(base), "--run-id", "test-001"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "schemas_valid=1" in captured.out
+        assert "schemas_invalid=0" in captured.out
+
+    def test_validate_mode_emits_qc(self, tmp_path: Path, capsys) -> None:
+        """--validate --customer <slug> emits TSC-QC with OK result on valid schema."""
+        from core.src.template_schema.template_schema_cli import main
+        base = tmp_path / "template_schemas"
+        cust_dir = base / "carrier-alpha"
+        cust_dir.mkdir(parents=True)
+        (cust_dir / "schema.yaml").write_text(
+            "customer_slug: carrier-alpha\n"
+            "schema_version: 1\n"
+            "entity_hierarchy:\n"
+            "  - entity: delivery_item\n"
+            "    header_row: 2\n"
+            "    columns:\n"
+            "      - source: Item Name\n"
+            "        canonical: item_name\n"
+            "        col_type: str\n"
+            "        required: true\n"
+            "sp_list_mappings:\n"
+            "  item_name: Title\n",
+            encoding="utf-8",
+        )
+        rc = main(["--validate", "--customer", "carrier-alpha", "--base-path", str(base),
+                   "--run-id", "test-002"])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "QC|TSC|" in captured.out
+        assert "result=OK" in captured.out
+        assert "customer=carrier-alpha" in captured.out
+
+    def test_validate_mode_fails_on_missing_customer(self, tmp_path: Path, capsys) -> None:
+        """--validate on a nonexistent customer returns exit 1 + emits TSC-QC with FAIL."""
+        from core.src.template_schema.template_schema_cli import main
+        base = tmp_path / "template_schemas"
+        base.mkdir()
+        rc = main(["--validate", "--customer", "ghost-customer", "--base-path", str(base),
+                   "--run-id", "test-003"])
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "result=FAIL" in captured.out
+
+
 class TestCustomerSchema:
     def _sample(self) -> CustomerSchema:
         return CustomerSchema(
