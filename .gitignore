@@ -19,3 +19,6 @@ hilda-env/
 todos.txt
 .claude/
 CLAUDE.md
+
+# COMPACT per-clone session binding (do not commit)
+.compact/
