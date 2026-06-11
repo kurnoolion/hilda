@@ -12,6 +12,7 @@ _Generated 2026-06-10 by regen-map. Do not hand-edit._
 | [issue_tracker (customizations)](../../customizations/issue_tracker/MODULE.md) | Drop-in directory for proprietary IssueTracker adapters. | |
 | [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | [DRAFT] |
 | [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). | [DRAFT] |
+| [rules (customizations)](../../customizations/rules/MODULE.md) | **Per-deployment drop-zone** for HILDA AutomationRules + polling-schedule rules that `core/src/rule_engine.RuleSet.load` consumes at startup (and on SIGHUP `reload()`) per FR-30. | [DRAFT] |
 | [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
 | [sharepoint_integration](../../core/src/sharepoint_integration/MODULE.md) | All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. | |
 | [storage](../../core/src/storage/MODULE.md) | Owns HILDA's internal persistence — Postgres (SQLAlchemy 2.x async + Alembic) for the document index, `CommunicationLog`, BATCH-id idempotency cache, FR-31 runtime overrides, and Celery result backend; Redis client (Celery broker Ph-1/Ph-2 per `[D-022]`; cache-only Ph-3+ per `[D-043]`); NSD SMB client for the two-tree document store per `[D-013]` / `[D-041]`. | [DRAFT] |
@@ -31,6 +32,7 @@ flowchart LR
     m_issue_tracker_cust[issue_tracker · customizations]
     m_llm[llm]
     m_rule_engine[rule_engine]
+    m_rules_cust[rules · customizations]
     m_sharepoint_config[sharepoint_config · customizations]
     m_sharepoint_integration[sharepoint_integration]
     m_storage[storage]
@@ -189,6 +191,9 @@ hilda/
 │   │       ├── __init__.py
 │   │       ├── conftest.py                    # conftest.py — pytest fixtures and CLI options for IssueTracker contract tests.
 │   │       └── test_contract.py               # Contract test suite for IssueTracker adapters (C01-C10).
+│   ├── rules/                                 # Per-deployment drop-zone for HILDA AutomationRules + polling-schedule rules that core/src/rule_engine.RuleSet.load consumes at startup (and on SIGHUP reload()) per FR-30.
+│   │   ├── MODULE.md
+│   │   └── __init__.py
 │   └── sharepoint_config/                     # Per-customer-deployment drop-zone for SP list/column mappings that core/src/sharepoint_integration/FileBasedListProvider consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names.
 │       ├── MODULE.md
 │       ├── __init__.py
