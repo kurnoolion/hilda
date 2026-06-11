@@ -222,15 +222,15 @@ hilda/
 │   │   ├── project-init-interview.md
 │   │   ├── requirements.md
 │   │   ├── strands/
-│   │   │   ├── _archive/
-│   │   │   │   └── template-schema-v2-rewrite/
-│   │   │   │       ├── STRAND.md
-│   │   │   │       ├── decisions-draft.md
-│   │   │   │       └── journal.md
-│   │   │   └── credential-service-v1-implementation/
-│   │   │       ├── STRAND.md
-│   │   │       ├── decisions-draft.md
-│   │   │       └── journal.md
+│   │   │   └── _archive/
+│   │   │       ├── credential-service-v1-implementation/
+│   │   │       │   ├── STRAND.md
+│   │   │       │   ├── decisions-draft.md
+│   │   │       │   └── journal.md
+│   │   │       └── template-schema-v2-rewrite/
+│   │   │           ├── STRAND.md
+│   │   │           ├── decisions-draft.md
+│   │   │           └── journal.md
 │   │   └── structure-conventions.md
 │   └── sp_ui_engineer/
 │       └── HILDA_SP_Schema.xlsx
