@@ -1,8 +1,8 @@
 # sharepoint-integration-drift-sweep
 
-**Status:** in-flight
+**Status:** landed
 **Opened:** 2026-06-10
-**Landed:**
+**Landed:** 2026-06-11
 **Assignees:** architect (user — strand 1)
 **Target modules:** core/src/sharepoint_integration/
 **Active phase:** development
@@ -29,3 +29,5 @@ Land trigger: all drift areas verified or fixed + 50+ tests passing + `sharepoin
 Coordination notes: Strand 2 (`storage-v1-implementation`) running in parallel on teammate's machine; truly independent at Python import level — neither imports the other. Both consume template_schema (just landed). Land sequentially or independently — no dependency edge between this strand and storage. Storage is foundational for tracker/rule_engine/workflow_engine/email_service downstream; sharepoint_integration is used by tracker/dashboard/email_service/customer_adapter (indirectly) for SP writebacks per `[D-064]` and CommunicationLog writes per FR-42. Teammate to pull main after either lands; rebase + continue strand work as usual.
 
 ## Notes
+
+Landed on 2026-06-11 with 0 promoted decisions. Strand was substantively a **verification exercise** rather than reconciliation work — the May 2026 implementation was already aligned with the post-2026-06-08 MODULE.md drift sweep (commit `54819a8`). Code-level checks confirmed `SpCrud.delete_item`, `SharePointListProvider.from_sp_fields`, list-agnostic design per `[D-020]`, no `FILE_STORAGE` references, no `tracking_modality` enum-value typing issues. Test coverage extended from 35 → 37 with 2 new tests locking `SpClient.delete_list_item` + `SpCrud.delete_item`. CLI per `[D-005]` verified. Regen-map run at close-session refreshed `template_schema/MODULE.md` Structure block (resolved teammate-flagged staleness — DeliverableBase dropped + 5 new models added).
