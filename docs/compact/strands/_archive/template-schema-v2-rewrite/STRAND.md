@@ -1,8 +1,8 @@
 # template-schema-v2-rewrite
 
-**Status:** in-flight
+**Status:** landed
 **Opened:** 2026-06-10
-**Landed:**
+**Landed:** 2026-06-10
 **Assignees:** architect (user)
 **Target modules:** core/src/template_schema/
 **Active phase:** development
@@ -18,3 +18,5 @@ Land trigger: all 7 phases complete + tests passing + template_schema_cli --diag
 Coordination notes: Strand 2 (credential-service-v1-implementation) running in parallel on teammate's machine; truly independent at Python import level per credential_service/MODULE.md Depends-on review 2026-06-10. Land sequentially — this strand lands first since template_schema is foundational for storage/sharepoint_integration/llm/rule_engine/workflow_engine/tracker downstream consumers. Teammate to pull main after this strand lands, then land their strand.
 
 ## Notes
+
+Landed on 2026-06-10 with 0 promoted decisions. All architecture-phase decisions (`[D-067]` customer RFI rewind, `[D-068]` PM approval field) were captured in canonical DECISIONS.md before this strand opened — they're consumed by template_schema's MODULE.md contract (pm_approval_at + pm_approval_pm_id fields per `[D-068]`; rewind paths cleared in tracker). Strand was purely implementation work against an existing, ADR-anchored contract; no new ADRs surfaced during the 7-phase execution. 61 unit tests cover the implementation; `template_schema_cli --diagnostic` + `--validate` verified per `[D-005]`.
