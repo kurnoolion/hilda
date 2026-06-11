@@ -1,10 +1,10 @@
-_Generated 2026-06-10 by regen-map. Do not hand-edit._
+_Generated 2026-06-11 by regen-map. Do not hand-edit._
 
 # Module map
 
 | Module | Purpose | Status |
 |---|---|---|
-| [credential_service](../../core/src/credential_service/MODULE.md) | Single read-only interface (`get_credential(pm_id, system_type) -> Credential`) that returns the credential material every outbound adapter needs to authenticate against external systems (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account). | [DRAFT] |
+| [credential_service](../../core/src/credential_service/MODULE.md) | Single read-only interface (`get_credential(pm_id, system_type) -> Credential`) that returns the credential material every outbound adapter needs to authenticate against external systems (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account). | |
 | [customer_adapter](../../core/src/customer_adapter/MODULE.md) | Single Protocol-mediated surface (`CustomerAdapter`) for HILDA's outbound carrier submission — upload individual document files (per `[D-054]` — individual files only, never zips) to each carrier's submission destination + emit `CommunicationLog` entries per FR-42. | [DRAFT] |
 | [diagnostics](../../core/src/diagnostics/MODULE.md) | Central registry and schema library for HILDA's chat-mediated collaboration surface. | |
 | [email_service](../../core/src/email_service/MODULE.md) | All email-mediated communication for HILDA — inbound owner replies (FR-12), inbound SP-alert notifications (`[D-047]` + FR-84 + FR-87), outbound owner outreach (FR-9), outbound reminders + escalations (FR-10), the FR-52 5-step routing pipeline driver, the FR-85 doc_type classification driver, and the FR-86 storage matrix dispatcher. | [DRAFT] |
@@ -116,7 +116,13 @@ hilda/
 │   ├── src/
 │   │   ├── __init__.py
 │   │   ├── credential_service/                # Single read-only interface that returns credential material for outbound adapters (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account).
-│   │   │   └── MODULE.md
+│   │   │   ├── MODULE.md
+│   │   │   ├── __init__.py                    # credential_service — stable read-only credential interface per [D-019] [D-038].
+│   │   │   ├── credential_service_cli.py      # credential_service CLI: --diagnostic, --mock, --validate --system <type>.
+│   │   │   ├── mock_service.py                # MockCredentialService — in-memory credential store for tests.
+│   │   │   ├── protocol.py                    # Credential data types. Anchors [D-019] [D-038]; serves FR-51, FR-42, NFR-3, NFR-4.
+│   │   │   ├── qc_templates.py                # CRD QC templates — registered in the central diagnostics QC registry at import.
+│   │   │   └── service.py                     # CredentialService Protocol + Ph-1/Ph-2 sops-backed implementation.
 │   │   ├── customer_adapter/                  # Single Protocol-mediated surface (CustomerAdapter) for HILDA's outbound carrier submission — uploads individual document files per [D-054] and emits CommunicationLog entries per FR-42.
 │   │   │   ├── MODULE.md
 │   │   │   └── __init__.py
@@ -175,6 +181,7 @@ hilda/
 │   │       └── __init__.py
 │   └── tests/
 │       ├── __init__.py
+│       ├── test_credential_service.py         # credential_service tests — protocol, sops service (decrypt patched), mock, CLI, leak checks.
 │       ├── test_diagnostics.py                # Unit tests for core.src.diagnostics.
 │       ├── test_issue_tracker.py              # Unit tests for core.src.issue_tracker — Protocol, data classes, MockIssueTracker, load_adapter.
 │       ├── test_mock_server.py                # Unit tests for mock SP server (REST + UI).
@@ -214,6 +221,16 @@ hilda/
 │   │   │   └── requirements.md
 │   │   ├── project-init-interview.md
 │   │   ├── requirements.md
+│   │   ├── strands/
+│   │   │   ├── _archive/
+│   │   │   │   └── template-schema-v2-rewrite/
+│   │   │   │       ├── STRAND.md
+│   │   │   │       ├── decisions-draft.md
+│   │   │   │       └── journal.md
+│   │   │   └── credential-service-v1-implementation/
+│   │   │       ├── STRAND.md
+│   │   │       ├── decisions-draft.md
+│   │   │       └── journal.md
 │   │   └── structure-conventions.md
 │   └── sp_ui_engineer/
 │       └── HILDA_SP_Schema.xlsx

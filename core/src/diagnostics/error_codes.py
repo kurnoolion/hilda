@@ -75,6 +75,25 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "ITR-E007": ErrorCode(
         "ITR-E007", "Operation '{operation}' not supported by adapter '{adapter}'", False
     ),
+    # --- credential_service (CRD) ---
+    "CRD-E001": ErrorCode(
+        "CRD-E001", "No credential for pm_id='{pm_id}' system_type='{system}'", False
+    ),
+    "CRD-E002": ErrorCode(
+        "CRD-E002", "sops decrypt failed for '{file}': {reason}", False
+    ),
+    "CRD-E003": ErrorCode(
+        "CRD-E003", "Unknown system_type '{system}' — not in SystemType enum", False
+    ),
+    "CRD-E004": ErrorCode(
+        "CRD-E004", "Credential file '{file}' malformed: missing required field '{field}'", False
+    ),
+    "CRD-W001": ErrorCode(
+        "CRD-W001", "Credential cache miss for pm_id='{pm_id}' — falling back to ops-team credential", True
+    ),
+    "CRD-W002": ErrorCode(
+        "CRD-W002", "Credential reload triggered by SIGHUP — cache rebuilt", True
+    ),
 }
 
 

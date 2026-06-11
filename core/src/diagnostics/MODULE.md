@@ -212,7 +212,7 @@ QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|duplicate_pre
 - `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` emits DGN-RPT (prefix_count, code_count, modules); `--validate` runs QC over registries.
 
 ### `error_codes.py`
-- `ERROR_CODES` — module constant — pub (via `__all__`) — Registered error-code dict; seeded with DGN-/ITR- codes.
+- `ERROR_CODES` — module constant — pub (via `__all__`) — Registered error-code dict; seeded with DGN-/ITR-/CRD- codes.
 - `ErrorCode` — frozendataclass — pub (via `__all__`) — Immutable error definition (code, message, recoverable).
 - `ErrorSeverity` — Enum — pub (via `__all__`) — Severity discriminator (E/W).
 - `PREFIX_REGISTRY` — module constant — pub (via `__all__`) — 18-entry prefix→module map (DGN, TSC, SHP, STO, CRD, EML, ITR, MSG, CAD, TRK, TRC, RUL, LLG, WFL, ASI, TSI, TRP, DSH).

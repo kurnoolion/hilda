@@ -29,6 +29,10 @@ class Credential:
     def __repr__(self) -> str:
         """Returns 'Credential(pm_id=..., system_type=..., auth_type=...)' only.
         No secret material in the repr. Used by diagnostics dumps."""
+
+    def value_carriers_consistent(self) -> bool:
+        """True when the populated value carriers match auth_type's requirement.
+        Backs the --validate QC surface. (Added at implementation 2026-06-11.)"""
 ```
 
 ```python
@@ -79,8 +83,20 @@ class SopsCredentialService:
 
     async def reload(self) -> None:
         """Re-runs `sops --decrypt` on every file in env_dir and rebuilds the cache.
-        Called by ops via SIGHUP / admin endpoint after rotating an .env file.
-        No hot-reload in normal operation."""
+        Called by ops via SIGHUP after rotating an .env file (SIGHUP-only per
+        strand draft decision 2026-06-11; HTTP admin endpoint deliberately
+        deferred Ph-1/Ph-2). No hot-reload in normal operation."""
+
+    async def load(self) -> int:
+        """Decrypt-once-at-startup entry point; idempotent (reload() is the
+        post-rotation rebuild). Returns cached credential count. Workload
+        entrypoints call this once at container start. (Added 2026-06-11.)"""
+
+    def install_sighup_handler(self) -> bool:
+        """Wires SIGHUP → reload() on the running event loop. Returns False
+        (no-op, never raises) where SIGHUP or add_signal_handler is unavailable
+        (Windows dev boxes); production runtime is the Linux HILDA PC per
+        [D-026]. (Added 2026-06-11.)"""
 ```
 
 ### `MockCredentialService`
@@ -114,6 +130,8 @@ class MockCredentialService:
 ```
 
 Each `.enc.env` declares env-var-style entries for the shared ops-team credential of that system. Ph-3+ Vault path layout is `secret/hilda/<pm_id>/<system_type>` per `[D-019]` (interface-stable migration target; loader swaps, callers don't).
+
+**Env-var layout inside each decrypted file** (implementation 2026-06-11; ops-facing contract — see strand draft decision): `HILDA_<PREFIX>_<FIELD>`, where `<PREFIX>` comes from `SYSTEM_ENV_PREFIX` in `protocol.py` (module-prefix abbreviation where one exists — `ITR` / `MSG` / `CAD` / `EML` / `SHP`; LLM backends use the uppercased system_type). Fields: `AUTH_TYPE` (required when any credential is declared) plus the carriers that auth_type requires (`API_TOKEN`; `USERNAME` + `PASSWORD`; `KEYTAB_PATH`; `BEARER`), optional `PM_ID` (default `ops-team`) and `EXPIRES_AT` (ISO-8601). An empty or carrier-free file declares no credential — legal for the no-auth lab LLM backends (lookups raise CRD-E001); a declared-but-incomplete credential raises CRD-E004 naming the missing field. `--validate --system <type>` is the ops-side conformance check.
 
 ---
 
@@ -207,14 +225,35 @@ QC|CRD|run-00001|2026-05-27T10:00:00Z|system=issue_tracker|present=true|auth_typ
 
 No `--dry-run` — credential_service has no write surface, so dry-run is a no-op.
 
-**QC template** (`CRD:credential_completeness` — registered in `diagnostics/qc.py`):
+All CLI modes accept `--env-dir` / `--age-key` overrides (defaults `/etc/hilda/credentials` / `/etc/hilda/age.key`) so lab and test environments can point at non-production paths. (Added 2026-06-11.)
+
+**QC template** (`CRD:credential_completeness` — registered via `core/src/credential_service/qc_templates.py` into the central `diagnostics` QC registry):
 ```
-Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_bearer),
+Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_bearer|none),
         value_carriers_consistent (bool), result (enum: OK / WARN / FAIL)
 ```
+(`none` covers the file-absent / no-credential case so the QC record stays fixed-field — added 2026-06-11.)
 
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+### `credential_service_cli.py`
+- `main() -> None` — function — pub — CLI entrypoint: `--diagnostic` (decrypt + validate every .enc.env, CRD-RPT), `--mock` (MockCredentialService round-trip per SystemType), `--validate --system <type>` (CRD-QC); `--env-dir` / `--age-key` path overrides.
+
+### `mock_service.py`
+- `MockCredentialService` — class — pub (via `__all__`) — In-memory exact-match credential store for tests; `register()` + `get_credential()`; CRD-E001 on unknown pair, CRD-E003 on unknown system; `with_all_system_types()` fixture factory.
+
+### `protocol.py`
+- `AuthType` — type alias — pub (via `__all__`) — Literal of the five auth types (api_token | basic | ntlm | kerberos | oauth2_bearer).
+- `Credential` — frozendataclass — pub (via `__all__`) — One credential as served to adapters; secret-free `__repr__`/`__str__`; `value_carriers_consistent()` consistency check.
+- `SYSTEM_ENV_PREFIX` — module constant — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`).
+- `SystemType` — Enum — pub (via `__all__`) — 8-value closed enum of external system kinds (5 systems + 3 LLM backends per [D-052]).
+
+### `qc_templates.py`
+- `CREDENTIAL_COMPLETENESS` — module constant — pub (via `__all__`) — `CRD:credential_completeness` QCTemplate (present / auth_type / value_carriers_consistent / result); registered into the central QC registry at import.
+
+### `service.py`
+- `CredentialService` — Protocol — pub (via `__all__`) — Async credential-retrieval contract per [D-019]: `get_credential(pm_id, system_type) -> Credential`.
+- `OPS_TEAM_PM_ID` — module constant — pub (via `__all__`) — Ph-1/Ph-2 shared ops-team attribution token ("ops-team") per [D-019] impl note 2026-05-24.
+- `SopsCredentialService` — class — pub (via `__all__`) — sops-backed implementation: idempotent decrypt-once `load()`, process-lifetime cache, exact → ops-team fallback → CRD-E001 resolution, ops-triggered `reload()`, Windows-safe `install_sighup_handler() -> bool`.
 <!-- END:STRUCTURE -->

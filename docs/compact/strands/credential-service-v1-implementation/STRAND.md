@@ -5,7 +5,7 @@
 **Landed:**
 **Assignees:** trepository
 **Target modules:** credential_service, diagnostics
-**Active phase:**
+**Active phase:** development
 
 ## Summary
 
