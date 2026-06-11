@@ -3,6 +3,11 @@
 > **Status:** Draft + 2026-06-09 cascade Group 2 of 3 applied (`[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-86 4-path NSD storage matrix; `[D-060]` impl note 2026-06-08 inferred_tg_name in unrouted path; `NSDPath` helpers renamed/added; new `NSDPathType` enum + `local_nsd_path` rename per user-review correction 2026-06-09). Earlier rollbacks: 2026-06-07 (FR-77 / FR-78 / FR-79 revised / FR-82 / FR-83 / FR-84 / `[D-053]` original framing). Initial draft 2026-05-24. Sections curated; pending section-by-section user review before contract is finalized. Code implementation begins after `/switch-phase development`.
 >
 > **Rollback log:**
+> - **2026-06-11 (storage Ph-1 dev — NSD IO model alignment with [D-013] hilda-svc invariant)** — NSD IO targets the pre-mounted filesystem at `HILDA_NSD_MOUNT_ROOT` (host-level Kerberos-authenticated cifs/smb3 mount as `hilda-svc`, bind-mounted into containers per [D-013]) rather than direct `smbprotocol` SMB calls. This was already specified by [D-013]'s invariant ("containers see a pre-mounted local filesystem and write to it normally" — line 700) but the Key choices line declared `smbprotocol` as the IO mechanism, carried over from an earlier framing where containers did SMB directly. Resolution: NSD IO is plain stdlib filesystem (`pathlib.Path` + `aiofiles` for async write/read; sync stdlib for stat/readdir wrapped in `asyncio.to_thread` per structure-conventions Sync-API wrapping rule). `smbprotocol` library stays in the dependency manifest as an available fallback for diagnostic CLI (verify share visibility independent of kernel mount) + dev troubleshooting (host-mount unavailable scenarios), but is NOT exercised in the routine NSD IO path. NSDPath helpers now compose paths under the configured mount root rather than emitting UNC-style `\\share\hilda\...` strings; UNC syntax in MODULE.md docstrings is illustrative of the corp NSD share, not the literal filesystem path the code sees. No D-XXX — clarification of [D-013]'s already-locked model; Key choices line was the bug, not the IO mechanism. Soft-flag: tooling-role clarification + Invariants text refinement; no Public surface change, no Depends-on edge change.
+> - **2026-06-11 (storage Ph-1 dev — `clear_override` signature alignment)** — `clear_override` gained required `pm_id` kwarg. The function's docstring already required `credential_id=<calling pm_id>` on the emitted CommunicationLog audit row, but the signature `(scope, scope_id, rule_id, parameter_name)` exposed no pm_id source — caller had no way to satisfy the audit contract without violating it. Compare with `set_override(override: AutomationRuleOverride)` which sources pm_id from `override.set_by_pm_id` on the Pydantic model. `clear_override` has no override object, so pm_id must be an explicit param. Signature widened (additive new required kwarg); docstring unchanged in audit-row semantics. No D-XXX — bug-fix, signature alignment with documented audit contract. Soft-flag classification with one caveat: this is a Public-surface signature WIDENING (new required param), which would normally hard-flag for architecture round-trip — but the docstring already required pm_id, so this is "make signature match docstring," not "add new capability." Documented inline in dev phase per pragmatic equivalence rule (same precedent as the 2026-06-11 `doc_id_slug` NULL fix earlier today).
+> - **2026-06-11 (storage Ph-1 dev — async Redis client naming correction)** — `aioredis` references corrected to `redis.asyncio` throughout. The standalone `aioredis` package was absorbed into `redis-py` 4.2 (Dec 2021); the standalone repo is archived. Same async rationale; identical API surface; storage's Public surface (`cache_set`, `cache_get`, `cache_delete`, `check_batch_idempotency`, `record_batch_idempotency`, `get_celery_broker_url`) is unchanged. Storage-only naming fix — does NOT propagate to requirements.md, template_schema/MODULE.md, or any other module's contract. Dependency manifest (`pyproject.toml` / `requirements.txt`) drops `aioredis>=2.0` and relies on `redis>=4.2` (already required for sync `redis-py` calls if any; otherwise adds `redis>=5.0` as the canonical pin). No flag classification — clarification of an outdated library name, not a constraint change.
+> - **2026-06-11 (storage Ph-1 dev — internal contradiction resolved)** — `doc_id_slug` and `rev_number` on `DocumentIndexRow` reclassified from non-null to **nullable** to match FR-86 staged-fill timing already declared in the same file's `DocumentIndexRow` class docstring (lines 41-47: "doc_id_slug + rev_number NULL until TPM resolves per FR-87 step (C)"). Internal contradiction flagged during storage Ph-1 dev: docstring required NULL-while-staged, field declaration required non-null. Resolution: nullability matches FR-86 — the docstring was correct, the field declaration was the bug (carried over from pre-`[D-053]` 2026-05-24 initial draft when staged-fill timing wasn't yet specified). Secondary uniqueness changed from `UNIQUE (milestone_id, doc_id_slug, rev_number)` to a **partial unique index** `... WHERE doc_id_slug IS NOT NULL AND rev_number IS NOT NULL` (SQL NULL doesn't deduplicate; full UNIQUE would either reject legitimate staged-NULL siblings or break under NULL-equality semantics depending on backend). Added staged-fill lifecycle Invariant + NULL-handling contract on `get_document_index_row_by_slug` and `list_revisions`. Storage-only change — does NOT propagate to requirements.md (FR-86 already specified the staged-fill timing) or template_schema/MODULE.md (no template_schema field is affected). Soft-flag classification: relaxes a constraint without breaking callers — non-null callers still receive non-null values post-resolution.
+> - **2026-06-11 (implementation session 1 — architect review correction)** — **no DeliveryItem mirror in storage; caller-resolves discipline.** Implementation had introduced a minimal `DeliveryItemMirrorTable` + `upsert_delivery_item_mirror` to back `get_default_work_item_for_milestone` and `set_folder_routing_for_tg`'s item_no validation. Architect rejected: storage holds no DeliveryItem schema, no bidirectional tracker↔storage dep, no single-writer discipline burden. Resolution: (a) mirror table + upsert REMOVED; (b) `get_default_work_item_for_milestone` REMOVED from storage — a pure entity lookup; callers (workflow_engine task bodies) resolve via `sharepoint_integration` get_items; (c) `reassign_document_to_workitem` gains explicit keyword params `target_tg_name` / `target_owner_email` / `target_plm_id` (caller resolves from SP before invoking); (d) `set_folder_routing_for_tg` gains required `valid_item_nos: set[int]` (caller-supplied; STR-E006 validation stays in storage). STR-W003 (default work-item missing) remains registered as the CALLER's signal. Draft decision in strand `storage-v1` decisions-draft.
 > - **2026-06-09 (post-cascade user-review correction, same day)** — applied 4 corrections from user review of Group 2 cascade: (a) **status header refreshed** to reflect 2026-06-09 cascade Group 2 of 3 + 2026-06-09 user-review correction. (b) **DocumentItemAssociation docstring** gained explicit "same file may occupy 2+ NSD paths simultaneously" rationale per `[D-055]` (rejected-alternative symbolic-link model documented; TPM expectation noted). (c) **`local_classified_path` renamed → `local_nsd_path`** across the file (10 references — 7 active + 3 historical-context preserved in rollback log) — the prior name implied "classified" specifically but the field holds whichever of the 4 FR-86 path types (classified / staged_classification / staged_revision / unrouted) the file is currently at. (d) **New `nsd_path_type: NSDPathType` column** added to DocumentItemAssociation per user observation that path TYPE was only derivable via string-parsing the path string (brittle + non-indexable); new `NSDPathType` enum (4 values mirroring FR-86 path types) added next to `RoutingResolution` enum (peer storage-internal enum); STR-W007 stale-staged-document query updated to use the new indexed column instead of LIKE-pattern on path strings. (e) Storage-only change — does NOT propagate to requirements.md or template_schema/MODULE.md (NSDPathType is a storage-implementation concern; FR-86's 4 path types are the requirements-side spec; template_schema owns cross-tier data contracts not storage-internal enums).
 > - **2026-06-09 (Phase B Module cascade — Group 2 of 3 against the corrected `[D-053]` model — after `template_schema/MODULE.md` cascade 2026-06-08)** — applied the requirements-phase redesign locked 2026-06-08 (FR-7 + FR-85 + FR-86 + FR-87 + `[D-053]` impl note 2026-06-08 + `[D-060]` impl note 2026-06-08): **DocumentIndexRow.doc_type** docstring updated to 5-value enum (test_report / tech_report / waiver / compliance_certification_release_notes / unresolved) — UNRESOLVED is explicit enum sentinel value (NOT Optional[DocType] = None); FR-85 classification + FR-86 alignment + downstream trigger rules documented per the corrected model. **parser_result + llm_review_findings** docstrings updated for 5-value DocType (null on compliance_certification_release_notes / unresolved per FR-86). **DocumentIndexRow class docstring** gained FR-86 storage matrix paragraph documenting the 4 NSD paths the row's file lives in + state transitions via FR-84 SP-alert channel. **`NSDPath.internal_default_workitem()`** signature added `inferred_tg_name_slug` parameter per `[D-060]` impl note 2026-06-08 — path now `internal/<carrier>/<device>/<milestone>/<inferred_tg_name>/_unrouted/<filename>` (was: no TG segment). **`NSDPath.internal_staged` renamed → `NSDPath.internal_staged_revision`** with explicit name + `_staged_revision/` path segment + full 7-arg signature; added explicit ambiguity-class distinction docstring. **New `NSDPath.internal_staged_classification`** helper — path `internal/<carrier>/<device>/<milestone>/<tg>/<item>/_staged_classification/<filename>` (no `<doc_type>` segment); for FR-86 misaligned-pair documents; awaits FR-87 step (B) TPM resolution. **New error code `STR-W007`** — stale staged document warning (age > threshold per `customizations/<customer>/storage_alerts.yaml`; default 7 days) surfaced on `--diagnostic`. Cascade Group 3 of 3 (`llm/MODULE.md`) is next per STATUS.md In-progress 2026-06-08.
 > - **2026-06-07** — Phase B Module rollback (Group 2 of N, after `template_schema/MODULE.md`): added `DocumentItemAssociation` M:M for FR-79 multi-item + PLM fan-out across distinct (owner × milestone) pairs; new `DocumentIndexRow` fields (`milestone_id`, `inferred_tg_name` per FR-78/FR-83, `routing_resolution`); new `RoutingResolution` enum (6 values mirroring FR-52 5-step pipeline + FR-83 reassignment); new `TGFolderRoutingRow` (FR-77 Type-2 with `ingress_folder` naming per inbound/outbound discipline); new `TagCatalogRow` (FR-82 revised); new NSDPath helpers (`internal_default_workitem` for FR-78 `_unrouted` sentinel; `ingress_folder` for FR-77 NSD1/NSD2 inbound paths); association/fan-out API methods + FR-83 `reassign_document_to_workitem`; expanded `CommunicationLogRow.action_type` example registry per FR-29 revised; new error codes (`STR-E005` / `STR-E006` / `STR-W002` / `STR-W003`); invariants added for ingress/target naming discipline, single-milestone association scope, per-association PLM attachment, channel→TG resolution, registry-based action/trigger validation, soft-deactivate tag catalog; Deferred items added for cross-milestone associations, tag-catalog audit history, default-work-item path namespace evolution.
@@ -53,8 +58,8 @@ class DocumentIndexRow:
     file_hash: str                 # PK — SHA-256 per [D-039] Step 0; cross-association identity key per FR-79
     milestone_id: str              # FK → MilestoneBase; denormalized — FR-79 single-milestone invariant guarantees stability across associations
     doc_type: DocType              # 5-value enum per `[D-053]` impl note 2026-06-08: test_report | tech_report | waiver | compliance_certification_release_notes | unresolved. Classified per FR-85 ladder (filename regex Step 1 + LLM CLASSIFY_DOC_TYPE Step 2 restricted to {test/tech/waiver}); UNRESOLVED is the sentinel value (NOT Python None — always set in the row) for low-confidence classifications + Default-routed-undetermined state. Alignment with item_type enforced per FR-86 storage matrix — misaligned pairs land on staged-not-classified NSD path for TPM resolution per FR-87. **Downstream triggering**: FR-16 fires on `test_report` regardless of landing item; FR-53 fires on `{test_report, tech_report, waiver}` when review_required=true (TEST_TECH_WAIVER_REPORT items only); neither fires on `{compliance_certification_release_notes, unresolved}`. Supersedes the prior 4-value framing per `[D-053]` impl note 2026-05-28b (withdrawn).
-    doc_id_slug: str               # slugified first-received filename; stable across revisions per FR-57
-    rev_number: int                # 1 for new, ≥2 for revisions per FR-17
+    doc_id_slug: str | None        # slugified first-received filename; stable across revisions per FR-57. **NULL while file is at `staged_not_classification` or `staged_not_revision` or `unrouted` NSD path** per FR-86 staged-fill — populated when classification + `[D-039]` revision determination complete; never reverted to NULL once set.
+    rev_number: int | None         # 1 for new, ≥2 for revisions per FR-17. NULL with same semantics as doc_id_slug — both fields share the staged-fill lifecycle (always both NULL or both populated per FR-86 invariant).
     ingest_source: IngestSource    # enum: Email | CorporatePLM | NetworkSharedDrive | SharePointUI — channel of FIRST ingest (idempotent on retry)
     original_filename: str         # as-received; preserved without transformation per FR-57
     first_page_excerpt: str        # for [D-039] Tier-2 LLM new-vs-revision classification
@@ -234,9 +239,13 @@ async def get_document_index_row_by_hash(file_hash: str) -> DocumentIndexRow | N
 async def get_document_index_row_by_slug(
     milestone_id: str, doc_id_slug: str, rev_number: int
 ) -> DocumentIndexRow | None
-    """FR-57 lookup — by the secondary unique constraint. Used by `[D-039]` slug-match
+    """FR-57 lookup — by the partial unique index. Used by `[D-039]` slug-match
     flow that doesn't yet have the file_hash in hand (e.g., revision detection from
-    inbound filename match)."""
+    inbound filename match). Both `doc_id_slug` and `rev_number` are required non-null
+    params — staged-fill rows (doc_id_slug/rev_number NULL on DocumentIndexRow) are
+    NOT discoverable through this path by design; callers chasing such rows must
+    use `get_document_index_row_by_hash(file_hash)` or query via
+    DocumentItemAssociation.nsd_path_type ∈ {STAGED_*, UNROUTED}."""
 
 async def find_doc_id_slugs_for_item(
     delivery_item_id: str, doc_type: DocType
@@ -248,7 +257,9 @@ async def list_revisions(
     milestone_id: str, doc_id_slug: str
 ) -> list[DocumentIndexRow]
     """Supports FR-60 expandable history view (Ph-2). All revisions of a (milestone, doc_id_slug)
-    family — note: doc_id_slug is stable across revisions per FR-57; rev_number distinguishes them."""
+    family — note: doc_id_slug is stable across revisions per FR-57; rev_number distinguishes them.
+    Returns only RESOLVED rows — staged-fill rows with NULL doc_id_slug are filtered out
+    (they are not yet members of any revision family per the staged-fill lifecycle Invariant)."""
 
 async def update_review_findings(
     file_hash: str,
@@ -345,7 +356,9 @@ async def update_association_plm_attachment(
 
 async def reassign_document_to_workitem(
     file_hash: str, source_delivery_item_id: str,
-    target_delivery_item_id: str, pm_id: str
+    target_delivery_item_id: str, pm_id: str,
+    *, target_tg_name: str | None, target_owner_email: str,
+    target_plm_id: str | None = None,
 ) -> None
     """FR-83 — TPM-manual reassignment from default work-item (or any item) to a specific
     work-item. Transactional — all steps succeed or all roll back:
@@ -369,11 +382,11 @@ async def reassign_document_to_workitem(
     CommunicationLog summary field as 'inferred_tg_name: <old> → <new>' so the original
     channel-resolved TG remains discoverable via comm-log query."""
 
-# Default work-item lookup (FR-78)
-async def get_default_work_item_for_milestone(milestone_id: str) -> str | None
-    """Returns the delivery_item_id of the milestone's auto-instantiated default work-item
-    (item_type = ItemType.DEFAULT per [D-053]). Returns None if not yet instantiated — caller
-    (FR-52 pipeline) should fire INSTANTIATE_DEFAULT_WORK_ITEM action via rule_engine."""
+# Default work-item lookup (FR-78) — REMOVED from storage 2026-06-11 (architect review):
+# a pure entity lookup; the FR-52 caller resolves the milestone's default work-item via
+# sharepoint_integration get_items (item_type = Default) and fires
+# INSTANTIATE_DEFAULT_WORK_ITEM (STR-W003 signal) when absent. Storage holds no
+# DeliveryItem mirror — see rollback log 2026-06-11.
 
 # Download token operations (FR-61 — HILDA-mediated download per NFR-16)
 async def make_download_token(
@@ -396,11 +409,13 @@ async def get_folder_routing_for_tg(milestone_id: str, tg_name: str) -> list[TGF
     """Used by FR-52 step 3 routing pipeline. Cached in-process; refreshed on TGGroupBase update."""
 
 async def set_folder_routing_for_tg(
-    milestone_id: str, tg_name: str, entries: list[TGFolderRoutingRow]
+    milestone_id: str, tg_name: str, entries: list[TGFolderRoutingRow],
+    *, valid_item_nos: set[int],
 ) -> None
     """Replace-all semantics — TG's full routing table is overwritten atomically.
-    Validates every entry's item_no exists on DeliveryItemBase within the milestone; raises
-    STR-E006 if any item_no is unknown."""
+    Validates every entry's item_no against caller-supplied `valid_item_nos`; raises
+    STR-E006 if any item_no is unknown. The CALLER resolves the milestone's item_no
+    set from SharePoint (no DeliveryItem mirror in storage — 2026-06-11)."""
 
 # Tag catalog operations (FR-82 revised)
 async def get_tag_catalog(customer_id: str) -> set[str]
@@ -471,9 +486,16 @@ async def set_override(override: AutomationRuleOverride) -> None
     credential_id=set_by_pm_id for FR-31 audit accountability. Evicts rule_engine cache via
     cache_delete on the affected scope key."""
 
-async def clear_override(scope: Scope, scope_id: str | None, rule_id: str, parameter_name: str) -> None
-    """Logs CommunicationLog action_type='clear_override' with credential_id=<calling pm_id>.
-    Evicts rule_engine cache via cache_delete."""
+async def clear_override(
+    scope: Scope, scope_id: str | None, rule_id: str, parameter_name: str, *, pm_id: str
+) -> None
+    """Removes the override identified by (scope, scope_id, rule_id, parameter_name).
+    `pm_id` is REQUIRED keyword-only — the emitted CommunicationLog audit row
+    sets `credential_id=pm_id` per FR-31 audit accountability (mirrors `set_override`
+    which sources pm_id from `override.set_by_pm_id` on its AutomationRuleOverride
+    arg; clear_override has no override object so pm_id is an explicit param).
+    Evicts rule_engine cache via cache_delete. Idempotent: clearing a non-existent
+    override still emits the audit row (records the intent) but does no DB delete."""
 
 async def list_all_override_rule_ids() -> set[str]
     """Per rule_engine startup audit — returns DISTINCT rule_ids referenced by any active
@@ -631,7 +653,19 @@ class NSDPath:
         not NSD paths at all; they live on the customer portal). The folder_path corresponds
         to TGFolderRoutingRow.ingress_folder."""
 
-    def to_unc(self) -> str                # \\share\hilda\... — used by hilda-api internally only
+    def to_relative(self) -> str           # share-relative POSIX path — the PERSISTED form of
+                                           # DocumentItemAssociation.local_nsd_path (mount-root-independent)
+    @classmethod
+    def from_relative(cls, relative: str) -> NSDPath   # inverse; STR-E004 on absolute/empty
+    def to_local(self) -> Path             # absolute path under GlobalStorageConfig.nsd_mount_root —
+                                           # what file IO actually targets per [D-013] host mount
+    def to_unc(self) -> str                # \\share\hilda\... — DIAGNOSTIC / display only (illustrative
+                                           # corp-share rendering); NOT the path the IO code sees
+    @classmethod
+    def from_unc(cls, unc: str) -> NSDPath              # inverse of to_unc; diagnostic use
+    # Persisted-path convention (2026-06-11 [D-013] alignment): local_nsd_path stores the
+    # to_relative() form; callers compose absolute paths via to_local() at IO time. to_unc/from_unc
+    # are retained for diagnostics + human-facing docs only.
     # NOTE: download-token generation lives at the storage-API layer (make_download_token /
     # resolve_download_token), NOT on NSDPath — tokens are bound to (file_hash, delivery_item_id)
     # association, which an NSDPath alone cannot disambiguate post-FR-79 (same file may exist
@@ -653,7 +687,32 @@ async def list_inbound_drops(
     """FR-55 polling support — returns files dropped by owners since last poll."""
 
 async def extract_first_page(path: NSDPath) -> str
-    """First-page text extraction for [D-039] Tier-2 LLM comparison; supports PDF, DOCX, XLSX, DOC."""
+    """First-page text extraction for [D-039] Tier-2 LLM comparison. Ph-1 scope:
+    txt/csv/md/log + XLSX (openpyxl). PDF / DOCX / DOC raise STR-E004 with a pointer
+    to the open [D-011] extraction-library decision (pypdf vs pdfplumber vs pymupdf;
+    python-docx vs docx2txt — footprint/license/quality tradeoffs; STATUS.md Next) —
+    deliberately NOT silently chosen here. Graceful degradation until [D-011] lands:
+    FR-52 step 4 cannot run for those formats → falls through to step 5 default
+    work-item → TPM resolves via FR-87. The first strand needing extract_first_page(pdf)
+    forces [D-011] resolution."""
+```
+
+### Operational config (`config.py`)
+
+```python
+class GlobalStorageConfig(BaseModel):
+    """Operational values only — runtime/domain data lives in customizations/.
+    3-tier precedence per structure-conventions Config format:
+    CLI overrides > env vars > config/storage.json > defaults."""
+    nsd_mount_root: Path = Path("/nsd")        # [D-013] host cifs/smb3 mount; env HILDA_NSD_MOUNT_ROOT
+    db_url:         str  = "postgresql+asyncpg://hilda@localhost:5432/hilda"  # env HILDA_STORAGE_DB_URL
+    redis_url:      str  = "redis://localhost:6379/0"                          # env HILDA_REDIS_URL
+
+    @classmethod
+    def from_sources(cls, config_path=None, cli_overrides=None) -> "GlobalStorageConfig": ...
+
+def get_storage_config() -> GlobalStorageConfig   # process-wide, lazily resolved
+def set_storage_config(config: GlobalStorageConfig | None) -> None  # inject / reset (tests, CLI)
 ```
 
 ### Alembic migration interface
@@ -693,18 +752,20 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 
 ## Invariants
 
-- **Document index identity**: `DocumentIndexRow.file_hash` is the primary key (SHA-256 per `[D-039]`). A secondary unique constraint `(milestone_id, doc_id_slug, rev_number)` preserves the FR-57 lookup contract — given a (milestone, doc_id_slug, rev_number) triple, exactly one file is identifiable. Per-item resolution uses a JOIN through `DocumentItemAssociation`. The pre-refactor key `(delivery_item_id, doc_type, doc_id_slug, rev_number)` no longer applies since `delivery_item_id` is per-association, not per-file.
+- **Document index identity**: `DocumentIndexRow.file_hash` is the primary key (SHA-256 per `[D-039]`). A **partial unique index** `(milestone_id, doc_id_slug, rev_number) WHERE doc_id_slug IS NOT NULL AND rev_number IS NOT NULL` preserves the FR-57 lookup contract — given a populated (milestone, doc_id_slug, rev_number) triple, exactly one file is identifiable. Cannot be a full UNIQUE constraint because both columns are nullable per FR-86 staged-fill (SQL NULL does not deduplicate), and any number of staged rows may legitimately co-exist with NULLs before TPM resolution. Per-item resolution uses a JOIN through `DocumentItemAssociation`. The pre-refactor key `(delivery_item_id, doc_type, doc_id_slug, rev_number)` no longer applies since `delivery_item_id` is per-association, not per-file.
+- **`doc_id_slug` + `rev_number` staged-fill lifecycle** per FR-86: both fields are NULL between document ingest and resolution of (classification + `[D-039]` revision determination); both are populated together — atomic transition NULL → non-NULL on the row when the file moves from a staged/unrouted NSD path to `classified`. Never reverted to NULL once set. Callers that read these fields must handle NULL as the "pre-resolution" state, not as "missing/error". Specifically: `get_document_index_row_by_slug(...)` is undefined when the slug-row is still NULL — caller must lookup by `file_hash` for pre-resolution rows; `list_revisions(milestone_id, doc_id_slug)` returns only resolved rows (NULL-slug rows are filtered out — they're not yet in any revision family).
 - **`add_document_index_row` is idempotent on `file_hash`**: a re-ingest of the same physical file (same SHA-256) returns the existing row unchanged. Idempotent across channels — same file arriving via Email and PLM produces ONE row; subsequent arrivals do not overwrite per-ingest fields (`ingest_source`, `inferred_tg_name`, `routing_resolution`, `ingested_at`) — first arrival wins.
 - **`add_document_item_association` is idempotent on `(file_hash, delivery_item_id)`**: re-association of the same file to the same item is a no-op; does not duplicate rows or reset per-association timestamps.
 - **`CommunicationLog` is append-only**: no UPDATE or DELETE on existing rows per NFR-6 audit semantics.
 - **All NSD writes go through `hilda-svc` AD identity** per `[D-013]`. **`CORP\hilda-svc` is a dedicated Active Directory service account — not a HILDA process or container.** It owns Modify permission on the NSD share (`\\share\hilda\`); the HILDA PC's host-level SMB mount authenticates to the corp file server as `hilda-svc` via Kerberos keytab. From the corp file server's perspective every write appears as `hilda-svc`, regardless of which HILDA container (hilda-api, hilda-worker) actually performed the write — the containers see a pre-mounted local filesystem and write to it normally. Per-PM attribution lives in HILDA's `CommunicationLog` (application layer), not in the filesystem ACL.
 - **NSD-classified path is the source of truth for in-progress deliverables** per `[D-040]`; submission assembly reads from there per `[D-041]`.
 - **Redis cache TTL ≤ 24 hours** per `[D-012]` short-TTL invariant; no durable state in Redis.
-- **Async-native**: all DB and Redis IO via async SQLAlchemy + aioredis. SMB IO is sync (via `smbprotocol`) — wrapped in `asyncio.to_thread` per `structure-conventions.md` Sync-API wrapping convention.
+- **Async-native**: all DB and Redis IO via async SQLAlchemy + `redis.asyncio` (the modern async client shipped inside `redis-py` 4.2+; the legacy standalone `aioredis` package was absorbed upstream and is archived). **NSD IO** uses the pre-mounted host filesystem at `HILDA_NSD_MOUNT_ROOT` per `[D-013]`'s `hilda-svc` invariant (kernel-level cifs/smb3 mount on the HILDA host; bind-mounted into `hilda-api` / `hilda-worker` containers per `[D-025]`) — async writes via `aiofiles`; sync stat/readdir operations wrapped in `asyncio.to_thread` per `structure-conventions.md` Sync-API wrapping convention. **`smbprotocol` is NOT exercised in the routine IO path** — retained as a declared dependency only for diagnostic CLI (independent share-visibility verification) and as a fallback for dev scenarios where host-mount is unavailable.
 - **Schema is canonical** per `[D-046]`: Pydantic models in `core/src/storage/models.py` are the single source from which the SP List provisioning script, Alembic migrations, and YAML template-schema spec are generated. CI gates enforce sync — schema-shape drift between Pydantic models and any of the three generated artifacts is a hard build failure.
 - **No credential material stored, logged, or transmitted**: this module never writes decrypted credentials to Postgres, Redis, NSD, logs, compact reports, or error messages. `credential_id` in `CommunicationLogRow` is an opaque reference; resolution to plaintext is `credential_service`'s exclusive responsibility per `[D-019]`.
 - **Error-code contract**: all module errors raised as `PipelineError` with `STR-E001..STR-W003` codes registered in `core/src/diagnostics/error_codes.py` per `[D-002]` + `[D-017]`. Compact reports (RPT/MET/QC) emitted per `[D-002]` use only counts, status flags, and bounded enum tokens — never file content or proprietary identifiers. Codes added 2026-06-07: `STR-E005` (cross-milestone association violation per FR-79), `STR-E006` (FolderRoutingTable references unknown item_no per FR-77), `STR-E007` (invalid or expired download token per FR-61), `STR-W002` (unknown tag per FR-82, mirrors TSC-W003), `STR-W003` (default work-item missing for milestone — instantiation race per FR-78), `STR-W004` (orphan override — rule_id not found in any loaded YAML rule per FR-30/FR-31), `STR-E008` (cache_set TTL exceeds 24h cap per `[D-012]`), `STR-W005` (orphan DocumentIndexRow — no DocumentItemAssociation references; surfaced on `--diagnostic`), `STR-W006` (PLM fan-out target has plm_id=None — owner has no PLM issue for this milestone; Ph-2 edge case). Code added 2026-06-09: `STR-W007` (document in staged NSD path age > threshold — TPM resolution pending per FR-87; surfaced on `--diagnostic`; queried via `DocumentItemAssociation.nsd_path_type ∈ {STAGED_NOT_CLASSIFIED, STAGED_NOT_REVISION, UNROUTED}` indexed lookup — added 2026-06-09; default age threshold 7 days, configurable in `customizations/<customer_slug>/storage_alerts.yaml`).
 - **NSD path-construction is deterministic from entity attributes**: given a fixed set of slugs, `NSDPath.internal_classified(...)` returns the same path on every host (lab, dev, test). No path mutation after entity creation.
+- **Persisted `local_nsd_path` is share-relative POSIX form** (added 2026-06-11 per [D-013] NSD-IO alignment): `DocumentItemAssociation.local_nsd_path` stores `NSDPath.to_relative()` (e.g. `inbound/<carrier>/<device>/<milestone>/<item>/file.pdf`) — **never** a UNC string (`\\share\hilda\...`) or a mount-root-prefixed absolute path. This keeps Postgres rows mount-root-independent: the same row resolves correctly under any `HILDA_NSD_MOUNT_ROOT` (dev `/tmp/test-nsd` vs prod `/nsd`) without a migration when the mount root changes. Runtime prefixing is done by `to_local()` at IO time; `to_unc()`/`from_unc()` exist for diagnostic display only. Persisting a UNC or mount-prefixed string would re-introduce mount-root coupling and is a contract violation.
 - **`ingress_folder` vs `target_folder` — naming discipline** (2026-06-07): `ingress_folder` always refers to INBOUND NSD-side paths (HILDA-PC under `TGGroupBase.ingress_nsd`); `target_folder` is reserved for OUTBOUND customer-portal upload destinations (FR-73 / FR-19). The two namespaces are never conflated in storage APIs, models, or path helpers. `NSDPath.ingress_folder(...)` is inbound-only; outbound customer-portal paths are not NSD paths.
 - **Symmetric M:M, no primary/secondary** (2026-06-07): `DocumentItemAssociation` is a pure M:M; no `is_primary` flag. The same file may exist at multiple NSD paths simultaneously (one per item's `local_nsd_path` per `[D-040]` / FR-13). Per-(file, item) properties (`local_nsd_path`, `nsd_path_type`, `plm_id`, `plm_attachment_id`, `owner_email`, `upload_timestamp`) live exclusively on the M:M row; per-file properties (`parser_result`, `llm_review_findings`, `inferred_tg_name`, `routing_resolution`, etc.) live exclusively on `DocumentIndexRow`. No dual-write hazard across the two tables.
 - **Single-milestone association scope** per FR-79 (Ph-1/Ph-2): all `DocumentItemAssociation` rows for a given `file_hash` share the same `milestone_id`. Cross-milestone associations deferred to Ph-3+; enforcement raises `STR-E005`.
@@ -727,8 +788,8 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - `[D-046]` — Canonical schema source = Pydantic models in this module
 - `[D-012]` — BATCH-id idempotency stored in Redis with short TTL (not Postgres)
 - **SQLAlchemy 2.x async + Alembic** chosen as the ORM stack (vs Django ORM / peewee / raw asyncpg) — broad ecosystem, async-native, mature Alembic; reference implementation also uses this stack
-- **`aioredis`** chosen (vs blocking `redis-py`) for async-native client matching the rest of HILDA
-- **`smbprotocol` library** chosen for Linux SMB access (vs `pysmb`) — actively maintained, supports SMB 2/3, async-friendly via `asyncio.to_thread`
+- **`redis.asyncio`** chosen (vs blocking sync `redis-py` calls) for async-native client matching the rest of HILDA. Note: `redis.asyncio` is the canonical async client shipped inside `redis-py` 4.2+ — the standalone `aioredis` package (referenced in earlier drafts of this MODULE.md) was absorbed upstream and is now archived; the import path is `from redis import asyncio as aioredis` (alias convention) or `import redis.asyncio` directly.
+- **Host-mounted NSD filesystem** chosen as the routine NSD IO path per `[D-013]`'s `hilda-svc` invariant: the corp NSD share is mounted at `HILDA_NSD_MOUNT_ROOT` on the HILDA host via Kerberos keytab as `hilda-svc` (kernel-level cifs/smb3); HILDA containers bind-mount this path per `[D-025]` and read/write via plain stdlib filesystem (`pathlib.Path` + `aiofiles`). Rejected alternative: direct `smbprotocol`-based SMB calls from the Python layer — this would require credential material (or delegation) inside the container, contradicting `[D-019]` credential discipline and `[D-013]`'s "containers see a pre-mounted local filesystem" model. `smbprotocol` is retained as a declared dependency for diagnostic CLI and dev fallback only (see Invariants).
 - **NSD path encapsulated as `NSDPath` value object** (vs raw strings) — type safety, prevents hand-rolled path bugs, single point of update when path conventions evolve (cf. the 2026-05-14 + 2026-05-21 path-convention rewrites)
 
 ## Non-goals
@@ -750,7 +811,7 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 
 ## Depended on by
 
-- `tracker` — entity CRUD via Postgres mirror + SP sync
+- `tracker` — document-index + association reads/writes through the injected `StorageWriter` Protocol; **no entity CRUD here** — DeliveryItem entities live in SP only (no Postgres mirror per 2026-06-11 architect decision; tracker resolves entity attributes via `sharepoint_integration` and passes them as explicit params)
 - `workflow_engine` — Celery broker URL + result backend connection
 - `rule_engine` — reads `AutomationRuleOverride` for FR-31 precedence ordering
 - `email_service` — `CommunicationLog` writes + BATCH-id idempotency checks + NSD reads for inbound classification
@@ -775,5 +836,79 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - **Default work-item path namespace evolution** — Ph-1 uses the `_unrouted` sentinel under `internal\<milestone>\` per FR-78. If FR-83 TPM-reassignment volume grows or per-TG default work-items become desirable (FR-78 revisit), the path convention may need a TG-scoped variant; would require migration script + `NSDPath` update.
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+### `audit_ops.py`
+- `clear_override(scope, scope_id, rule_id, parameter_name, *, pm_id) -> None` — function — pub (via `__all__`) — FR-31 override delete + audit row (credential_id=pm_id) + cache evict; idempotent.
+- `deactivate_tag(customer_id, tag) -> None` — function — pub (via `__all__`) — FR-82 soft-deactivate; preserves historical references.
+- `get_active_overrides(scope, scope_id, rule_id) -> list` — function — pub (via `__all__`) — FR-31 hot-path override lookup (expiry-filtered).
+- `get_folder_routing_for_tg(milestone_id, tg_name) -> list` — function — pub (via `__all__`) — FR-77 Type-2 routing rows for a TG.
+- `get_tag_catalog(customer_id) -> set[str]` — function — pub (via `__all__`) — active tag strings (validation hot path).
+- `list_active_overrides(*, scope, scope_id) -> list` — function — pub (via `__all__`) — bulk override load for rule_engine startup.
+- `list_all_override_rule_ids() -> set[str]` — function — pub (via `__all__`) — DISTINCT override rule_ids for STR-W004 orphan audit.
+- `list_tag_catalog_entries(customer_id, include_inactive=False) -> list` — function — pub (via `__all__`) — full tag rows for dashboard.
+- `log_communication(row) -> None` — function — pub (via `__all__`) — append-only CommunicationLog write per NFR-6.
+- `query_communications(*, ...filters, limit=100, offset=0) -> list` — function — pub (via `__all__`) — AND-composed audit query, timestamp DESC, cap 1000.
+- `reactivate_tag(customer_id, tag) -> None` — function — pub (via `__all__`) — undo deactivate_tag.
+- `set_folder_routing_for_tg(milestone_id, tg_name, entries, *, valid_item_nos) -> None` — function — pub (via `__all__`) — FR-77 replace-all; STR-E006 on unknown caller-supplied item_no.
+- `set_override(override) -> None` — function — pub (via `__all__`) — FR-31 insert/replace + audit + cache evict.
+- `upsert_tag(row) -> None` — function — pub (via `__all__`) — FR-82 tag insert/update; cache evict.
+
+### `config.py`
+- `GlobalStorageConfig` — Pydantic BaseModel — pub (via `__all__`) — operational config (nsd_mount_root / db_url / redis_url); 3-tier `from_sources()`.
+- `get_storage_config() -> GlobalStorageConfig` — function — pub (via `__all__`) — process-wide config, lazily resolved.
+- `set_storage_config(config) -> None` — function — pub (via `__all__`) — TEST/CLI-MOCK ONLY config injection/reset.
+
+### `db.py`
+- `AutomationRuleOverrideTable` / `CommunicationLogTable` / `DocumentIndexTable` / `DocumentItemAssociationTable` / `TGFolderRoutingTable` / `TagCatalogTable` — ORM table — pub (via `__all__`) — SQLAlchemy mappings of the storage rows (DocumentIndexTable carries the partial unique index).
+- `Base` — DeclarativeBase — pub (via `__all__`) — ORM metadata root for Alembic.
+- `configure_engine(url=None, *, echo=False) -> AsyncEngine` — function — pub (via `__all__`) — (re)configure module engine; StaticPool for in-memory sqlite.
+- `get_engine() -> AsyncEngine` — function — pub (via `__all__`) — lazily-resolved module engine.
+- `get_session() -> AsyncIterator[AsyncSession]` — function — pub (via `__all__`) — plain session iterator.
+- `init_db() -> None` — function — pub (via `__all__`) — create schema (dev/test only).
+- `session_scope() -> AsyncIterator[AsyncSession]` — function — pub (via `__all__`) — session context with STR-E001 error contract; ops modules' session entry.
+
+### `document_ops.py`
+- `add_document_index_row(row) -> None` — function — pub (via `__all__`) — idempotent-on-file_hash index insert (cross-channel first-write-wins).
+- `add_document_item_association(assoc) -> None` — function — pub (via `__all__`) — idempotent M:M insert; STR-E005 cross-milestone guard.
+- `delete_document_item_association(file_hash, delivery_item_id, *, delete_file=True) -> None` — function — pub (via `__all__`) — remove one M:M row + optional per-item NSD copy.
+- `fan_out_plm_associations(file_hash) -> list` — function — pub (via `__all__`) — DISTINCT (owner, plm) PLM upload targets per FR-79.
+- `find_doc_id_slugs_for_item(delivery_item_id, doc_type) -> list[str]` — function — pub (via `__all__`) — [D-039] Step 1 slug match / Step 2 short-circuit.
+- `get_document_index_row_by_hash(file_hash) -> DocumentIndexRow | None` — function — pub (via `__all__`) — primary content-identity lookup.
+- `get_document_index_row_by_slug(milestone_id, doc_id_slug, rev_number) -> DocumentIndexRow | None` — function — pub (via `__all__`) — FR-57 partial-index lookup (resolved rows only).
+- `get_documents_for_item(delivery_item_id) -> list` — function — pub (via `__all__`) — JOIN-through-M:M per-item doc list.
+- `list_associations_for_file(file_hash) -> list` — function — pub (via `__all__`) — all (file, item) associations.
+- `list_associations_for_item(delivery_item_id) -> list` — function — pub (via `__all__`) — FR-67 cleanup support.
+- `list_documents_for_milestone(milestone_id, doc_type=None, is_final_only=False) -> list` — function — pub (via `__all__`) — milestone doc enumeration.
+- `list_revisions(milestone_id, doc_id_slug) -> list` — function — pub (via `__all__`) — resolved revision family (NULL-slug excluded).
+- `make_download_token(file_hash, delivery_item_id, ttl_seconds=300) -> str` — function — pub (via `__all__`) — FR-61 short-lived HMAC token (never persisted).
+- `reassign_document_to_workitem(file_hash, source, target, pm_id, *, target_tg_name, target_owner_email, target_plm_id=None) -> None` — function — pub (via `__all__`) — FR-83 transactional reassign (caller-resolved target attrs).
+- `resolve_download_token(token) -> tuple[str, str, NSDPath]` — function — pub (via `__all__`) — verify token; STR-E007 on invalid/expired.
+- `set_is_final(file_hash, is_final) -> None` — function — pub (via `__all__`) — FR-66; auto-clears sibling revisions.
+- `update_association_plm_attachment(file_hash, delivery_item_id, plm_attachment_id, upload_timestamp) -> None` — function — pub (via `__all__`) — FR-79 fan-out result replication.
+- `update_review_findings(file_hash, parser_result, llm_review_findings) -> None` — function — pub (via `__all__`) — per-file FR-16/FR-53 result write.
+
+### `models.py`
+- `AutomationRuleOverride` / `BatchIdempotencyKey` / `CommunicationLogRow` / `DocumentIndexRow` / `DocumentItemAssociation` / `PLMFanOutTarget` / `TGFolderRoutingRow` / `TagCatalogRow` — Pydantic BaseModel — pub (via `__all__`) — canonical storage row schemas per `[D-046]`.
+- `Channel` / `Direction` / `NSDPathType` / `RoutingResolution` — Enum — pub (via `__all__`) — storage-side enums (Channel/Direction for CommunicationLog; NSDPathType FR-86 state; RoutingResolution FR-52 step).
+
+### `nsd.py`
+- `NSDPath` — frozendataclass — pub (via `__all__`) — two-tree NSD path value object; 9 path constructors, `to_relative`/`from_relative` (persisted form), `to_local` (mount IO), `to_unc`/`from_unc` (diagnostic).
+- `compute_file_hash(path) -> str` — function — pub (via `__all__`) — SHA-256 per [D-039] Step 0.
+- `extract_first_page(path) -> str` — function — pub (via `__all__`) — txt/xlsx first-page text; PDF/DOCX → STR-E004 pending [D-011].
+- `list_inbound_drops(carrier, device, milestone, item) -> list` — function — pub (via `__all__`) — FR-55 inbound-folder poll.
+- `read_file(path) -> AsyncIterator[bytes]` — function — pub (via `__all__`) — aiofiles stream from host mount (FR-61).
+- `write_file(path, content) -> None` — function — pub (via `__all__`) — atomic idempotent write via host mount.
+
+### `qc_templates.py`
+- `SCHEMA_ROUNDTRIP` — QCTemplate — pub (via `__all__`) — `STR:schema_roundtrip` QC template; registered at import.
+
+### `redis_client.py`
+- `MAX_CACHE_TTL_SECONDS` — module constant — pub (via `__all__`) — 24h cap per [D-012].
+- `cache_delete(key) -> None` / `cache_get(key) -> bytes | None` / `cache_set(key, value, ttl_seconds) -> None` — function — pub (via `__all__`) — cache ops; cache_set raises STR-E008 over the cap.
+- `check_batch_idempotency(batch_id, item_index) -> str | None` — function — pub (via `__all__`) — [D-012] BATCH idempotency check.
+- `get_celery_broker_url() -> str` — function — pub (via `__all__`) — Ph-1/Ph-2 Redis broker URL.
+- `record_batch_idempotency(key) -> None` — function — pub (via `__all__`) — idempotent BATCH record.
+- `set_redis_client(client) -> None` — function — pub (via `__all__`) — inject client (tests pass fakeredis).
+
+### `storage_cli.py`
+- `main() -> None` — function — pub — CLI: `--diagnostic` / `--mock` / `--mock-postgres` / `--validate --customer` / `--alembic-roundtrip`.
 <!-- END:STRUCTURE -->

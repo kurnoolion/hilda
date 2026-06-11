@@ -94,6 +94,52 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "CRD-W002": ErrorCode(
         "CRD-W002", "Credential reload triggered by SIGHUP — cache rebuilt", True
     ),
+    # --- storage (STR) ---
+    "STR-E001": ErrorCode(
+        "STR-E001", "Postgres unavailable or session failure: {reason}", False
+    ),
+    "STR-E002": ErrorCode(
+        "STR-E002", "Record not found: {entity} '{key}'", False
+    ),
+    "STR-E003": ErrorCode(
+        "STR-E003", "Constraint violation on {entity}: {reason}", False
+    ),
+    "STR-E004": ErrorCode(
+        "STR-E004", "NSD IO failure at '{path}': {reason}", False
+    ),
+    "STR-E005": ErrorCode(
+        "STR-E005", "Cross-milestone association rejected: file '{file_hash}' already bound to milestone '{existing_milestone}'", False
+    ),
+    "STR-E006": ErrorCode(
+        "STR-E006", "Folder routing references unknown item_no {item_no} in milestone '{milestone_id}'", False
+    ),
+    "STR-E007": ErrorCode(
+        "STR-E007", "Invalid or expired download token", False
+    ),
+    "STR-E008": ErrorCode(
+        "STR-E008", "Cache TTL {ttl_seconds}s exceeds 24h cap per [D-012]", False
+    ),
+    "STR-W001": ErrorCode(
+        "STR-W001", "NSD mount unavailable; file operations degraded", True
+    ),
+    "STR-W002": ErrorCode(
+        "STR-W002", "Unknown tag '{tag}' for customer '{customer_id}' — not in tag catalog", True
+    ),
+    "STR-W003": ErrorCode(
+        "STR-W003", "Default work-item missing for milestone '{milestone_id}'", True
+    ),
+    "STR-W004": ErrorCode(
+        "STR-W004", "Orphan override: rule_id '{rule_id}' not found in any loaded YAML rule", True
+    ),
+    "STR-W005": ErrorCode(
+        "STR-W005", "Orphan DocumentIndexRow '{file_hash}' — no associations reference it", True
+    ),
+    "STR-W006": ErrorCode(
+        "STR-W006", "PLM fan-out target for '{file_hash}' has no plm_id (owner '{owner_email}' lacks PLM issue)", True
+    ),
+    "STR-W007": ErrorCode(
+        "STR-W007", "Document in staged NSD path older than {age_days}d — TPM resolution pending", True
+    ),
 }
 
 

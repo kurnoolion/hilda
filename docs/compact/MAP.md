@@ -15,7 +15,7 @@ _Generated 2026-06-11 by regen-map. Do not hand-edit._
 | [rules (customizations)](../../customizations/rules/MODULE.md) | **Per-deployment drop-zone** for HILDA AutomationRules + polling-schedule rules that `core/src/rule_engine.RuleSet.load` consumes at startup (and on SIGHUP `reload()`) per FR-30. | [DRAFT] |
 | [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
 | [sharepoint_integration](../../core/src/sharepoint_integration/MODULE.md) | All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. | |
-| [storage](../../core/src/storage/MODULE.md) | Owns HILDA's internal persistence — Postgres (SQLAlchemy 2.x async + Alembic) for the document index, `CommunicationLog`, BATCH-id idempotency cache, FR-31 runtime overrides, and Celery result backend; Redis client (Celery broker Ph-1/Ph-2 per `[D-022]`; cache-only Ph-3+ per `[D-043]`); NSD SMB client for the two-tree document store per `[D-013]` / `[D-041]`. | [DRAFT] |
+| [storage](../../core/src/storage/MODULE.md) | Owns HILDA's internal persistence — Postgres (SQLAlchemy 2.x async + Alembic) for the document index, `CommunicationLog`, BATCH-id idempotency cache, FR-31 runtime overrides, and Celery result backend; Redis client (Celery broker Ph-1/Ph-2 per `[D-022]`; cache-only Ph-3+ per `[D-043]`); NSD host-mount client for the two-tree document store per `[D-013]` / `[D-041]`. | |
 | [template_schema](../../core/src/template_schema/MODULE.md) | Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. | |
 | [tracker](../../core/src/tracker/MODULE.md) | `tracker` is HILDA's **DeliveryItem lifecycle orchestrator**. | [DRAFT] |
 | [workflow_engine](../../core/src/workflow_engine/MODULE.md) | HILDA's Celery app + central task dispatcher per `[D-022]`. | [DRAFT] |
@@ -161,9 +161,23 @@ hilda/
 │   │   │   │   └── store.py                   # In-memory SP list store — pluggable backend for the mock server.
 │   │   │   ├── sharepoint_integration_cli.py  # sharepoint_integration CLI per [D-005].
 │   │   │   └── sp_client.py                   # SpClient: async SP 2017 REST HTTP client.
-│   │   ├── storage/                           # Owns HILDA's internal persistence — Postgres for the document index, CommunicationLog, BATCH-id idempotency cache, FR-31 runtime overrides, Celery result backend; Redis client; NSD SMB client for the two-tree document store per [D-013] / [D-041].
+│   │   ├── storage/                           # Owns HILDA's internal persistence — Postgres for the document index, CommunicationLog, BATCH-id idempotency cache, FR-31 runtime overrides, Celery result backend; Redis client; NSD host-mount client for the two-tree document store per [D-013] / [D-041].
 │   │   │   ├── MODULE.md
-│   │   │   └── __init__.py
+│   │   │   ├── __init__.py                    # storage — HILDA internal persistence: Postgres, Redis, NSD per MODULE.md.
+│   │   │   ├── audit_ops.py                   # CommunicationLog (append-only per NFR-6), FR-31 overrides, folder routing, tag catalog.
+│   │   │   ├── config.py                      # storage operational config — 3-tier precedence per structure-conventions Config format.
+│   │   │   ├── db.py                          # SQLAlchemy 2.x async engine, session management, and ORM tables.
+│   │   │   ├── document_ops.py                # Document index + association operations per FR-13/17/52/55/57/79/83 and FR-61 tokens.
+│   │   │   ├── migrations/                    # Alembic migrations (async env; metadata-driven baseline).
+│   │   │   │   ├── env.py                     # Alembic async env — target metadata is storage's Base; URL from config -x or env.
+│   │   │   │   ├── script.py.mako
+│   │   │   │   └── versions/
+│   │   │   │       └── 0001_baseline.py       # Baseline schema — all storage tables from Base.metadata.
+│   │   │   ├── models.py                      # Canonical storage models per [D-046] — document index, associations, audit, overrides.
+│   │   │   ├── nsd.py                         # NSD client per [D-013] / [D-041] — two-tree path model + file operations.
+│   │   │   ├── qc_templates.py                # STR QC templates — registered in the central diagnostics QC registry at import.
+│   │   │   ├── redis_client.py                # Redis client — broker URL (Ph-1/Ph-2), 24h-capped cache, BATCH-id idempotency.
+│   │   │   └── storage_cli.py                 # storage CLI: --diagnostic / --mock / --mock-postgres / --validate / --alembic-roundtrip.
 │   │   ├── template_schema/                   # Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata — and the contract types shared across all runtime modules.
 │   │   │   ├── MODULE.md
 │   │   │   ├── __init__.py                    # template_schema — canonical data model for HILDA's entity hierarchy.
@@ -187,6 +201,7 @@ hilda/
 │       ├── test_mock_server.py                # Unit tests for mock SP server (REST + UI).
 │       ├── test_sharepoint_integration.py     # Unit tests for sharepoint_integration core (no mock server).
 │       ├── test_sharepoint_integration_cli.py # Integration tests for sharepoint_integration_cli.
+│       ├── test_storage.py                    # storage tests — NSD paths/IO, document index, associations, fan-out, tokens, redis TTL cap, overrides, folder routing, tag catalog, comm-log, CLI smoke.
 │       └── test_template_schema.py            # Unit tests for core.src.template_schema.
 ├── customizations/
 │   ├── __init__.py

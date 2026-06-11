@@ -2,6 +2,10 @@
 pydantic>=2.5,<3
 httpx>=0.27,<1
 fastapi>=0.110,<1
+# starlette 1.x deprecates httpx-based TestClient ("install httpx2"), which
+# pyproject's filterwarnings=error escalates to a collection error in
+# core/tests/test_mock_server.py — pin below 1.0 until the suite migrates.
+starlette>=0.37,<1
 uvicorn[standard]>=0.27,<1
 jinja2>=3.1,<4
 pyyaml>=6.0,<7
@@ -17,6 +21,17 @@ requests-ntlm>=1.2,<2
 # Excel parsing — used by template_schema_ingestor and api_spec_ingestor for xl-format inputs
 openpyxl>=3.1,<4
 
+# storage module — Postgres ORM + migrations + Redis + NSD mount IO
+# (smbprotocol is diagnostic/fallback only — routine NSD IO is the [D-013] host mount)
+sqlalchemy[asyncio]>=2.0,<3
+alembic>=1.13,<2
+asyncpg>=0.29,<1
+redis>=5.0,<6
+aiofiles>=23.2,<25
+smbprotocol>=1.12,<2
+
 # Test deps
 pytest>=8.0,<9
 pytest-asyncio>=0.23,<1
+aiosqlite>=0.20,<1
+fakeredis>=2.21,<3
