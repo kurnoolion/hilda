@@ -12,10 +12,12 @@ _Generated 2026-06-10 by regen-map. Do not hand-edit._
 | [issue_tracker (customizations)](../../customizations/issue_tracker/MODULE.md) | Drop-in directory for proprietary IssueTracker adapters. | |
 | [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | [DRAFT] |
 | [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). | [DRAFT] |
-| sharepoint_config (customizations) | _(no MODULE.md; YAML config drop zone with empty `__init__.py` + `customers/`)_ | [NEW] |
+| [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
 | [sharepoint_integration](../../core/src/sharepoint_integration/MODULE.md) | All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. | |
 | [storage](../../core/src/storage/MODULE.md) | Owns HILDA's internal persistence — Postgres (SQLAlchemy 2.x async + Alembic) for the document index, `CommunicationLog`, BATCH-id idempotency cache, FR-31 runtime overrides, and Celery result backend; Redis client (Celery broker Ph-1/Ph-2 per `[D-022]`; cache-only Ph-3+ per `[D-043]`); NSD SMB client for the two-tree document store per `[D-013]` / `[D-041]`. | [DRAFT] |
 | [template_schema](../../core/src/template_schema/MODULE.md) | Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. | |
+| [tracker](../../core/src/tracker/MODULE.md) | `tracker` is HILDA's **DeliveryItem lifecycle orchestrator**. | [DRAFT] |
+| [workflow_engine](../../core/src/workflow_engine/MODULE.md) | HILDA's Celery app + central task dispatcher per `[D-022]`. | [DRAFT] |
 
 ## Dependency graph
 
@@ -33,6 +35,8 @@ flowchart LR
     m_sharepoint_integration[sharepoint_integration]
     m_storage[storage]
     m_template_schema[template_schema]
+    m_tracker[tracker]
+    m_workflow_engine[workflow_engine]
 
     m_credential_service --> m_diagnostics
     m_customer_adapter --> m_diagnostics
@@ -59,7 +63,23 @@ flowchart LR
     m_sharepoint_integration --> m_template_schema
     m_sharepoint_integration --> m_sharepoint_config
     m_storage --> m_diagnostics
+    m_storage --> m_template_schema
     m_template_schema --> m_diagnostics
+    m_tracker --> m_diagnostics
+    m_tracker --> m_template_schema
+    m_tracker --> m_storage
+    m_tracker --> m_sharepoint_integration
+    m_workflow_engine --> m_diagnostics
+    m_workflow_engine --> m_template_schema
+    m_workflow_engine --> m_rule_engine
+    m_workflow_engine --> m_storage
+    m_workflow_engine --> m_credential_service
+    m_workflow_engine --> m_sharepoint_integration
+    m_workflow_engine --> m_email_service
+    m_workflow_engine --> m_customer_adapter
+    m_workflow_engine --> m_issue_tracker
+    m_workflow_engine --> m_llm
+    m_workflow_engine --> m_tracker
 ```
 
 ## Project File Structure
@@ -136,15 +156,21 @@ hilda/
 │   │   ├── storage/                           # Owns HILDA's internal persistence — Postgres for the document index, CommunicationLog, BATCH-id idempotency cache, FR-31 runtime overrides, Celery result backend; Redis client; NSD SMB client for the two-tree document store per [D-013] / [D-041].
 │   │   │   ├── MODULE.md
 │   │   │   └── __init__.py
-│   │   └── template_schema/                   # Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata — and the contract types shared across all runtime modules.
+│   │   ├── template_schema/                   # Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata — and the contract types shared across all runtime modules.
+│   │   │   ├── MODULE.md
+│   │   │   ├── __init__.py                    # template_schema — canonical data model for HILDA's entity hierarchy.
+│   │   │   ├── enums.py                       # Canonical enums for HILDA's entity hierarchy. Anchors FR-7, NFR-14, [D-011].
+│   │   │   ├── error_codes.py                 # TSC-prefixed error codes for template_schema.
+│   │   │   ├── models.py                      # Pydantic base models for HILDA entities + CustomerSchema contract.
+│   │   │   ├── registry.py                    # Extensibility registries for FR-7, NFR-14.
+│   │   │   ├── slug.py                        # Slug convention for path_slug fields. Anchors [D-013].
+│   │   │   └── template_schema_cli.py         # template_schema CLI: --diagnostic / --validate per [D-005].
+│   │   ├── tracker/                           # tracker is HILDA's DeliveryItem lifecycle orchestrator.
+│   │   │   ├── MODULE.md
+│   │   │   └── __init__.py
+│   │   └── workflow_engine/                   # HILDA's Celery app + central task dispatcher per [D-022].
 │   │       ├── MODULE.md
-│   │       ├── __init__.py                    # template_schema — canonical data model for HILDA's entity hierarchy.
-│   │       ├── enums.py                       # Canonical enums for HILDA's entity hierarchy. Anchors FR-7, NFR-14, [D-011].
-│   │       ├── error_codes.py                 # TSC-prefixed error codes for template_schema.
-│   │       ├── models.py                      # Pydantic base models for HILDA entities + CustomerSchema contract.
-│   │       ├── registry.py                    # Extensibility registries for FR-7, NFR-14.
-│   │       ├── slug.py                        # Slug convention for path_slug fields. Anchors [D-013].
-│   │       └── template_schema_cli.py         # template_schema CLI: --diagnostic / --validate per [D-005].
+│   │       └── __init__.py
 │   └── tests/
 │       ├── __init__.py
 │       ├── test_diagnostics.py                # Unit tests for core.src.diagnostics.
@@ -163,26 +189,29 @@ hilda/
 │   │       ├── __init__.py
 │   │       ├── conftest.py                    # conftest.py — pytest fixtures and CLI options for IssueTracker contract tests.
 │   │       └── test_contract.py               # Contract test suite for IssueTracker adapters (C01-C10).
-│   └── sharepoint_config/
+│   └── sharepoint_config/                     # Per-customer-deployment drop-zone for SP list/column mappings that core/src/sharepoint_integration/FileBasedListProvider consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names.
+│       ├── MODULE.md
 │       ├── __init__.py
 │       └── customers/
 │           └── example.yaml                   # Example customer SP config — a shape for TPMs to copy and customize.
 ├── docs/
-│   └── compact/
-│       ├── DECISIONS.md
-│       ├── MAP.md
-│       ├── PROJECT.md
-│       ├── STATUS.md
-│       ├── SYSTEM.md
-│       ├── design-inputs/
-│       │   └── HILDA_Design.md
-│       ├── phases/
-│       │   ├── architecture.md
-│       │   ├── development.md
-│       │   └── requirements.md
-│       ├── project-init-interview.md
-│       ├── requirements.md
-│       └── structure-conventions.md
+│   ├── compact/
+│   │   ├── DECISIONS.md
+│   │   ├── MAP.md
+│   │   ├── PROJECT.md
+│   │   ├── STATUS.md
+│   │   ├── SYSTEM.md
+│   │   ├── design-inputs/
+│   │   │   └── HILDA_Design.md
+│   │   ├── phases/
+│   │   │   ├── architecture.md
+│   │   │   ├── development.md
+│   │   │   └── requirements.md
+│   │   ├── project-init-interview.md
+│   │   ├── requirements.md
+│   │   └── structure-conventions.md
+│   └── sp_ui_engineer/
+│       └── HILDA_SP_Schema.xlsx
 ├── pyproject.toml
 ├── requirements.txt
 └── sharepoint/
