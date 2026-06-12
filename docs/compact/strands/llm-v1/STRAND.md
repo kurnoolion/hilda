@@ -13,6 +13,13 @@ Ph-1 implementation of LLMGatewayServer per `[D-021]` + `[D-052]` tri-backend (o
 
 ## Notes
 
+**🔒 LAND GATE (architect, 2026-06-12):** Do **not** run `/land-strand llm-v1` yet.
+Landing is sequenced **after** `dashboard-v1` lands — dashboard-v1 is active and will
+complete first; land llm-v1 only once that is done. This supersedes the session-1
+close note's "land whenever real callers wire in" trigger. Landing promotes the
+`[D-052]` impl-note addendum in `decisions-draft.md` to canonical DECISIONS.md, so the
+order also keeps DECISIONS.md numbering/append sequencing clean across the two strands.
+
 **First-week plan (from architect):**
 1. Read `core/src/llm/MODULE.md` end-to-end.
 2. Decide test-harness strategy — mock LLM server first, or real Ollama from day 1.
