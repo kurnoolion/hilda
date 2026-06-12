@@ -218,7 +218,7 @@ class DeliveryItemBase(_Base):
     review_status:                   str   = "not_required"
     item_completion_pct:             int   = 0
     email_cc_list:                   list[dict] | None = None
-    milestone_gating:                bool  = False
+    is_milestone_gating:             bool  = False
     # Phase 3 additions ([D-053] / [D-054] / FR-77 / FR-78):
     no_customer_upload:              bool  = False
     force_tracking_enabled:          bool | None = None

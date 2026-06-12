@@ -379,7 +379,7 @@ class TestPhase5Models:
         assert di.review_required is False
         assert di.review_status == "not_required"
         assert di.item_completion_pct == 0
-        assert di.milestone_gating is False
+        assert di.is_milestone_gating is False
         assert di.no_customer_upload is True   # set in helper per Confirmation invariant
         assert di.force_tracking_enabled is None
         assert di.ingress_folder is None
