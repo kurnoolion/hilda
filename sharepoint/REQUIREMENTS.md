@@ -1,6 +1,12 @@
 # SharePoint UI Requirements — HILDA
 
-> **Status:** Initial draft 2026-05-26 + 2026-06-09 cascade Group 5 of 4-module Phase B (against the corrected `[D-053]` model locked at requirements close 2026-06-08 + the FR-77/FR-78/FR-79/FR-85/FR-86/FR-87 + `[D-052]` / `[D-053]` / `[D-054]` / `[D-060]` impl notes 2026-06-08/09). 11-group update pass applied: list count 6→8; `item_type` Choice collapsed 6→4 values per `[D-053]`; `customer_delivery_modality` Choice updated for `[D-054]` (GoogleDrive); 5 new DeliveryItems fields (`target_folder`, `no_customer_upload`, 3 TPM-resolution fields per FR-87); 3 new TGGroups fields (`ingress_nsd`, `folder_routing_enabled`, `tracking_enabled`); 3 new §4.9–§4.11 TPM-resolution buttons (FR-87 strict A→B→C); §5 document section updated for 5-value DocType + `nsd_path_type` + `inferred_tg_name`; new §7.4 SP-alert action-verb mapping; §10 Phase-1 scope updated; §12 open items resolved/added. Net effect: SP UI engineer can proceed with Ph-1 build against the corrected canonical schema; Ph-2 / Ph-3+ items remain explicitly deferred. Confirm with HILDA team: items #1–#10 in §12.
+> **Status:** Initial draft 2026-05-26 + 2026-06-09 cascade Group 5 + **2026-06-12 SP UI engineer review absorption (D-073 / D-074 / `[D-051]` impl note)**. 2026-06-12 changes:
+> - **List count 8 → 7**: `TGGroups` REMOVED as a separate SP list (per `[D-051]` impl note 2026-06-12 / D-DRAFT-Y); 9 TG metadata fields are DENORMALIZED onto each `DeliveryItems` row as SP-side READ-ONLY display mirrors (write-once at DI creation by HILDA from customer YAML via `[D-064]` writeback). §2.8 is now an "OBSOLETE" reference; §2.4 carries the denormalized TG columns; §3.1 TG-header rendering reads from the DI rows directly (no separate lookup).
+> - **SP UI engineer manually provisions SP lists** per **D-073** (corp SP-2017 SP-alert + custom-SP-task constraint that REST cannot express). HILDA does NOT call REST to create lists; `sharepoint_integration` REST writeback per `[D-064]` is unchanged (HILDA writes existing rows in already-provisioned lists). Customer onboarding gains an explicit SP UI engineer ceremony step. See §0 (added below).
+> - **SP↔HILDA integration via Variant A** per **D-074** — HILDA's `dashboard` module server-side-renders document pages; SP web parts render link-out (`<a href="https://hilda-proxy.corp/docs/<delivery_item_id>" target="_blank">`); browser navigates top-level (no SP-side cross-origin XHR — that path is blocked by corp policy in our environment). Two clicks per download (open HILDA tab + click download). §5.1 / §5.3 reworded accordingly.
+> - **Schema deltas absorbed**: `milestone_gating` → `is_milestone_gating` (§2.4); ADD `pm_approval_at` + `pm_approval_pm_id` per `[D-068]` (§2.4); ADD `owner_corp_id` on DeliveryItems (denormalized) + Users (canonical) (§2.4 / §2.5); DROP `last_updated` column (use SP built-in `Modified`) (§2.4); ADD `close_all_items_triggered_at` on Milestones (§2.3 / §4.4); `default_work_item_config` is NOT a SP column (lives in YAML; §2.3 note); DROP `source_system` from CommunicationLog (channel column covers it; §2.7); ADD `milestone_id` / `tg_name` / `credential_id` on CommunicationLog (Ph-1; were already on storage's `CommunicationLogRow`); ADD `owner_corp_id` + `TPM` role on Users (§2.5); `ingress_nsd` Choice updated to `none / nsd1 / nsd2` (§2.4 denormalized + §2.8 OBSOLETE); SP system columns (`Created` / `Modified` / `Author` / `Editor`) NOT duplicated as custom columns (§2.4 / §2.5 notes); `item_no` declared IMMUTABLE per item lifetime (referential integrity for FR-77 + storage.TGFolderRoutingRow; §2.4 note).
+>
+> Original status preceding 2026-06-12 amendments: 11-group update pass applied 2026-06-09 (list count 6→8 at that time; `item_type` Choice 6→4 per `[D-053]`; `customer_delivery_modality` Choice updated for `[D-054]` GoogleDrive; 5 new DeliveryItems fields incl. `target_folder` / `no_customer_upload` / 3 TPM-resolution fields per FR-87; 3 new TGGroups fields then; 3 new §4.9–§4.11 TPM-resolution buttons FR-87 strict A→B→C; §5 document section updated for 5-value DocType + `nsd_path_type` + `inferred_tg_name`; new §7.4 SP-alert action-verb mapping; §10 Phase-1 scope updated; §12 open items resolved/added).
 
 **Audience**: SP UI engineer building HILDA's SharePoint 2017 web parts.
 
@@ -9,6 +15,41 @@
 **Stack constraint**: SharePoint 2017 on-prem. **Vanilla SharePoint Lists + classic web parts only.** No SPFx modern, no Power Apps, no Office 365 features.
 
 **Authentication**: PM/TPM browsers are already authenticated to corp SP via on-prem AD (NTLM/Kerberos). No SSO bridge needed for SP itself.
+
+---
+
+## 0. How you and HILDA work together (added 2026-06-12 per D-073 / D-074)
+
+**Two new architectural decisions land here as a section because they shape EVERYTHING below — your role, your inputs, your outputs, your integration touchpoints with HILDA.**
+
+### 0.1 You manually create the SP lists (D-073)
+
+For each customer deployment:
+
+1. **You read two artifacts** at deployment time:
+   - `docs/sp_ui_engineer/HILDA_SP_Schema.xlsx` (the authoritative comm channel — column-level detail per list, type, Choice values, Phase, Required, Source FR/Decision, Notes)
+   - `customizations/sharepoint_config/customers/<customer_slug>.yaml` (the canonical → SP-internal column-name mapping HILDA's REST writeback needs at runtime)
+2. **You create the SP lists + columns in SP UI directly** — by hand, in the SharePoint web UI. Including: alert subscriptions per §7.1, any custom SP workflows / custom field types, the column-level permissions noted in §9.
+3. **You assign SP internal column names** as you create each column. SP auto-generates them from your display names (typically `Display_x0020_Name`). Record the SP internal names back in the customer YAML so HILDA can address them via REST.
+4. **HILDA never calls REST to create lists**. `sharepoint_integration` REST writeback per `[D-064]` is unchanged from §7 — HILDA writes existing rows in already-provisioned lists, but does NOT create lists or columns programmatically.
+
+Why this ceremony exists: corp SP 2017's SP-alert email triggers + custom SP tasks (workflows, custom field types, alert-trigger configuration) cannot be expressed via the REST API surface HILDA uses. SP-side provisioning is structurally necessary. HILDA's `tracker` module assumes SP lists pre-exist; if you haven't provisioned them at deployment time, HILDA won't auto-recover. Any YAML change to the canonical-field set (new fields, renames, removals) requires you to manually update SP lists before HILDA can write to them — coordinate through the HILDA_SP_Schema.xlsx comm channel per `[D-065]`.
+
+### 0.2 SP-side UI talks to HILDA via top-level browser navigation, NOT cross-origin XHR (D-074)
+
+Your SP web parts (classic content editor / script editor, or SPFx) render **link-out anchors** to HILDA's `dashboard` module:
+
+```html
+<a href="https://hilda-proxy.corp/docs/<delivery_item_id>" target="_blank">View Documents</a>
+```
+
+The TPM clicks → browser opens a new tab → corp reverse proxy forwards → HILDA server-side-renders the document section as HTML (Jinja2 templates; doc list + per-doc download links embedded with short-lived scoped tokens). TPM clicks a download link inside HILDA's tab → browser does its own direct GET to `/dl/<scoped_token>` → HILDA streams the file with the right `Content-Disposition` per §5.3.
+
+**Two clicks** total per download (open HILDA tab + click download). Auth on both endpoints is Windows Integrated (Kerberos / SPNEGO) — auto-attached by browser; requires `hilda-proxy.corp` to be in TPMs' Local Intranet zone via group policy. **Single-click download is not architecturally achievable** in this corp environment.
+
+**Why this pattern**: SP web-part JS `fetch()` to HILDA — cross-origin XHR with `credentials: 'include'` — was tested and fails in our corp environment. Likely cause is corp SharePoint farm's Content Security Policy (`connect-src` restricted to SP origins only) or corp network ACL blocking SP-origin browser tabs from reaching `hilda.corp` directly. Either way the JS-fetch path is structurally closed for this deployment. Iframe embedding (variant β) is reserved as a possible Ph-2 polish if "new tab" UX proves disruptive. Top-level navigation works through any corp policy because the browser is doing the GET directly, not via an SP-page-JS XHR.
+
+Implication for your build: **you do NOT need any JS that fetches HILDA**. No CORS configuration on your side. No retry/fallback logic. You render bare `<a href>` anchors. HILDA does all the rendering on its side.
 
 ---
 
@@ -30,7 +71,7 @@ Through SP, they:
 
 ## 2. The SP Lists you'll build views on
 
-HILDA's data lives in **8 SharePoint Lists** within a dedicated DeliverableHub SP site (revised 2026-06-09 from 6 — TGGroups added 2026-05-26 + count corrected for CommunicationLog). Column names and types below — please use these **internal names exactly** so HILDA's REST API client can read/write them without per-deployment translation.
+HILDA's data lives in **7 SharePoint Lists** within a dedicated DeliverableHub SP site (revised 2026-06-12 from 8 per `[D-051]` impl note 2026-06-12 / D-DRAFT-Y — `TGGroups` removed as separate list; 9 TG fields denormalized onto DeliveryItems as SP-side read-only display mirrors). Column names and types below — please use these **internal names exactly** so HILDA's REST API client can read/write them without per-deployment translation.
 
 > **Note**: `CustomerTemplates` and `AutomationRules` are **NOT** SharePoint Lists in HILDA — they live in YAML files on the HILDA Linux server and are managed by ops, not by SP UI. You don't need to render them.
 
@@ -74,6 +115,9 @@ HILDA's data lives in **8 SharePoint Lists** within a dedicated DeliverableHub S
 | `milestone_collection_started_at` | DateTime | nullable — set by clicking **Start Collection** |
 | `milestone_submission_triggered_at` | DateTime | nullable — set by clicking **Submit to Carrier** |
 | `refresh_requested_at` | DateTime | nullable — hidden field set by **Refresh** action |
+| `close_all_items_triggered_at` | DateTime | nullable — set by **Close All Items** action per §4.4. **SP-side ONLY field** (no HILDA Postgres mirror — SP is system-of-record for this audit timestamp). Added 2026-06-12 per SP UI engineer 2026-06-10 review. |
+
+> **NOTE (added 2026-06-12)**: `default_work_item_config` is NOT a SP column on Milestones. It's customer-deployment-fixed config that lives in `customizations/template_schemas/<customer_slug>/milestones.yaml` per FR-78 / `[D-053]`. Not TPM-editable.
 
 Unique constraint: `(device_id, milestone_name)`
 
@@ -106,8 +150,7 @@ Unique constraint: `(device_id, milestone_name)`
 | `review_status` | Choice | pending / complete / not_required |
 | `item_completion_pct` | Integer (computed/read-only) | document-review completion % |
 | `email_cc_list` | Multi-line text | JSON array — per-item CC override |
-| `milestone_gating` | Boolean | does this item gate milestone closure? *(field name TBD — confirm with HILDA team if your prototype uses a different name)* |
-| `last_updated` | DateTime, auto-updated | |
+| `is_milestone_gating` | Boolean | does this item gate milestone closure (FR-64 Close All Items enablement)? Renamed 2026-06-12 from `milestone_gating` per SP UI engineer 2026-06-10 review. |
 | `last_owner_contacted` | DateTime | nullable |
 | `last_reminder_triggered_at` | DateTime | nullable — set by **Send Reminder** action |
 | `target_folder` | String | nullable — **[Ph-1]** FR-77 OUTBOUND customer-portal upload destination per `[D-054]` (e.g., Google Drive folder path on the carrier side). Distinct from INBOUND ingress paths. Added 2026-06-09. |
@@ -116,6 +159,27 @@ Unique constraint: `(device_id, milestone_name)`
 | `tpm_resolved_doc_type` | Choice | nullable — **[Ph-1]** FR-87 step B field — TPM sets via §4.10 Resolve doc_type button; values `{test_report, tech_report, waiver, compliance_certification_release_notes}`; HILDA reads via SP alert per `tpm_resolve_doc_type` action verb. Added 2026-06-09. |
 | `tpm_revision_resolution` | String | nullable — **[Ph-1]** FR-87 step C field — TPM sets via §4.11 Resolve revision button; values `NEW` or existing `<doc_id_slug>`; HILDA reads via SP alert per `tpm_resolve_revision` action verb. Added 2026-06-09. |
 | `sort_order` | Integer, required | display order within milestone |
+| `pm_approval_at` | DateTime | nullable — **[Ph-1]** `[D-068]` PM-approval recording. Set by HILDA's workflow_engine PMApproval task body BEFORE transitioning item to `ReadyForSubmission`; cleared on `[D-067]` rewind path. **Configure SP alert subscription on this field change** (HILDA fires the PMApproval trigger on the alert). Added 2026-06-12. |
+| `pm_approval_pm_id` | User (Person/Group field) | nullable — **[Ph-1]** `[D-068]` — PM/TPM attribution for the PMApproval action. Cleared together with `pm_approval_at`. Added 2026-06-12. |
+| `owner_corp_id` | String | nullable — **[Ph-1]** denormalized from `Users.owner_corp_id` at DI creation per D-073 (HILDA mirrors at write time). Reused by corp messenger Ph-2 (replaces dropped `user_corp_messenger_handle`). Added 2026-06-12. |
+
+**Denormalized TG fields** (added 2026-06-12 per `[D-051]` impl note 2026-06-12 / D-DRAFT-Y) — `TGGroups` is no longer a separate SP list; these 9 fields are SP-side READ-ONLY display mirrors of TG metadata sourced from `customizations/template_schemas/<customer_slug>/tg_groups.yaml`. HILDA writes them once at DI creation via `[D-064]` writeback; **TPM SP UI MUST NOT allow editing these columns on DI rows** (would diverge from siblings in the same TG and from YAML source-of-truth). For per-TG TG-level editing in Ph-2, see deferred items in §10 (TG-level editing is gone in Ph-1 because TGGroups list is gone).
+
+| Internal name | Type | Notes |
+|---|---|---|
+| `ingress_nsd` | Choice (`none` / `nsd1` / `nsd2`) | **[Ph-1]** Choice values updated 2026-06-12 per SP UI engineer 2026-06-10 (was `NSD1` / `NSD2`; `none` added). Denormalized from TGGroupBase. |
+| `tracking_modality_tg` | Choice (multi-select) | **[Ph-1]** TG-level default tracking modality (Email / CorporateMessenger / CorporatePLM / NetworkSharedDrive / CustomerJIRA). DISTINCT column name from per-item `tracking_modality` above. Denormalized from TGGroupBase. |
+| `email_group_alias` | String | **[Ph-1]** Denormalized from TGGroupBase. Nullable. |
+| `tg_owner_name` | String | **[Ph-1]** Denormalized from TGGroupBase. TG coordinator name. |
+| `tg_owner_email` | String | **[Ph-1]** Denormalized from TGGroupBase. |
+| `default_cc_list` | Multi-line text (JSON list) | **[Ph-1]** Denormalized from TGGroupBase. Per-TG default CC. |
+| `folder_routing_enabled` | Boolean, default No | **[Ph-1]** FR-77 Type-2 enablement. Denormalized from TGGroupBase. |
+| `tracking_enabled` | Boolean, default Yes | **[Ph-1]** FR-81 enablement. Denormalized from TGGroupBase. |
+| `corp_id_list` | Multi-line text (JSON list) | **[Ph-2]** Denormalized from TGGroupBase. Deferred Ph-2 per SP UI engineer 2026-06-10. |
+
+> **NOTE (added 2026-06-12)**: `last_updated` was removed as a custom column 2026-06-12 — use SP's built-in `Modified` field instead. SP system columns (`Created` / `Modified` / `Author` / `Editor`) MUST NOT be duplicated as custom columns — discipline added per SP UI engineer 2026-06-10 review.
+>
+> **`item_no` IMMUTABILITY (added 2026-06-12)**: `item_no` is **immutable per item lifetime** per template_schema/MODULE.md Invariant 2026-06-12. SP UI reorder operations MUST NOT mutate `item_no` (user-visible reordering is `sort_order`'s job). Referential integrity for FR-77 folder routing + storage.TGFolderRoutingRow.item_no FK depends on this.
 
 Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
 
@@ -126,8 +190,11 @@ Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
 | `user_id` | String (auto) | PK |
 | `display_name` | String, required | |
 | `email` | String, required, unique | corp email; used for SSO matching |
-| `role` | Choice | PM / TeamLead / Admin |
+| `owner_corp_id` | String | nullable — **[Ph-1]** canonical per-person corp ID. Denormalized onto DeliveryItems at DI creation per D-073. Reused by corp messenger Ph-2 (replaces dropped `user_corp_messenger_handle` per user 2026-06-12). Added 2026-06-12. |
+| `role` | Choice | PM / TPM / TeamLead / Admin |
 | `is_active` | Boolean, default Yes | |
+
+> **NOTE (added 2026-06-12)**: SP system columns (`Created` / `Modified` / `Author` / `Editor`) MUST NOT be duplicated as custom columns — discipline added per SP UI engineer 2026-06-10 review.
 
 ### 2.6 List: `PMCredentials` (metadata only — actual secrets stored elsewhere by HILDA)
 
@@ -162,8 +229,23 @@ Unique constraints: `(milestone_id, item_name)`, `(milestone_id, item_no)`
 | `action_type` | String | e.g. "submission" / "resubmission" / "bulk_close" |
 | `attachments` | Multi-line text | JSON `[{filename, download_url}, ...]` |
 | `timestamp` | DateTime, default Now | |
+| `milestone_id` | Lookup → Milestones | nullable — **[Ph-1]** Added 2026-06-12; already on storage's `CommunicationLogRow`. For milestone-level audit queries. |
+| `tg_name` | String | nullable — **[Ph-1]** Added 2026-06-12; already on storage's `CommunicationLogRow`. For TG-scoped audit queries. |
+| `credential_id` | String | nullable — **[Ph-1]** Added 2026-06-12; already on storage's `CommunicationLogRow`. Opaque reference to credential_service per `[D-019]`; **never the credential material itself**. For per-PM accountability on credential-using operations. |
 
-### 2.8 List: `TGGroups` — per-TG-group metadata (TG = Technical Group)
+> **NOTE (added 2026-06-12)**: `source_system` was requested in earlier review but DROPPED 2026-06-12 — the `channel` column already covers the use case (Email / Messenger / CorporatePLM / NetworkSharedDrive / CustomerJIRA / SharePoint enumerates the originating system).
+
+### 2.8 List: `TGGroups` — REMOVED 2026-06-12 (denormalized onto DeliveryItems per `[D-051]` impl note)
+
+> **OBSOLETE — do NOT create this SP list.** Original [D-051] specified `TGGroups` as a separate SP list with one row per `(milestone_id, tg_name)`. On 2026-06-12 the architect accepted SP UI engineer's 2026-06-10 review proposal to DENORMALIZE the 9 TG metadata fields onto each `DeliveryItems` row instead — one SP list to view/edit, no SP-side joins needed, accepted row-level duplication tradeoff. **The 9 TG fields now live on `DeliveryItems` (see §2.4 — `ingress_nsd`, `tracking_modality_tg`, `email_group_alias`, `tg_owner_name`, `tg_owner_email`, `default_cc_list`, `folder_routing_enabled`, `tracking_enabled`, plus `corp_id_list` Ph-2).** Source-of-truth lives in customer YAML at `customizations/template_schemas/<customer_slug>/tg_groups.yaml` per template_schema's `TGGroupBase` Pydantic model. HILDA writes TG fields onto DI rows at DI creation via `[D-064]` writeback; SP UI MUST NOT allow TPMs to edit TG columns on DI rows (would diverge from siblings + YAML).
+
+The original §2.8 schema is preserved below as **historical reference only**; ignore it when provisioning the 7 lists. SP UI engineer should:
+- NOT create a `TGGroups` SP list.
+- Render TG-level metadata in §3.1 milestone-view TG headers by READING the denormalized columns on the first DeliveryItem row in each `tg_name` group (all rows in the same TG carry identical values for those 9 fields).
+- NOT provide an "Edit TG metadata" link (was Ph-2 §4 deferred item; gone now — TG-level editing in SP is no longer modeled; TG schema changes go through YAML + HILDA tracker rewriting all DI rows for the affected TG).
+
+<details>
+<summary>Historical §2.8 schema (do NOT use)</summary>
 
 A DeliveryItem belongs to a TG (e.g., "HW", "SW", "QA") via its `tg_name` field — that's already in §2.4. The TG itself has metadata that applies to **every item in the group within a given milestone**: who coordinates the TG, the TG's corp email distribution alias, the TG's corp messenger IDs, the default CC list for emails. Those are NOT stored on each DeliveryItem row (would duplicate across many items) — they live in this list, one row per `(milestone_id, tg_name)`.
 
@@ -193,6 +275,8 @@ A DeliveryItem belongs to a TG (e.g., "HW", "SW", "QA") via its `tg_name` field 
 - The DeliveryItems list keeps just `tg_name` (the foreign-key-like label); SP UI does a lookup to TGGroups for display.
 - Aligns with the schema/content boundary per HILDA's `[D-045]` — TG metadata is per-group config, not per-item runtime state.
 
+</details>
+
 ---
 
 ## 3. Views to build
@@ -203,11 +287,11 @@ The view PMs/TPMs spend most of their time in. One web part page per milestone. 
 
 **Layout:**
 - Header row: device name, milestone name, milestone status, target date
-- **Grouped by `tg_name`** (HW / SW / QA / …) — for each group, render a **TG header** at the top of the group with metadata from the matching `TGGroups` row (lookup on `(milestone_id, tg_name)`):
+- **Grouped by `tg_name`** (HW / SW / QA / …) — for each group, render a **TG header** at the top of the group with metadata READ FROM THE DENORMALIZED TG COLUMNS on the first DeliveryItem row in the group (per `[D-051]` impl note 2026-06-12 — all DI rows in the same TG carry identical values for these 9 columns; reading from the first row in the group is equivalent to a lookup):
   - `tg_owner_name` + `tg_owner_email` (the TG coordinator)
   - `email_group_alias` if set, shown as `Alias: <value>` (else "—")
   - `default_cc_list` size (e.g., "CC: 3 recipients" — click to expand)
-  - *(Phase 2)* an inline **"Edit TG metadata"** link that opens the TGGroups list-item edit form per FR-71
+  - ~~*(Phase 2)* an inline **"Edit TG metadata"** link~~ — REMOVED 2026-06-12 (TGGroups list no longer exists; TG schema changes go through YAML + HILDA tracker rewriting all DI rows for the affected TG; no SP-side editing of TG fields).
 - Then the per-item rows under the TG header
 - Each row shows: `item_no`, `item_name`, `owner_name`, `delivery_state`, `expected_completion_date`
 - Items where `item_type ≠ Confirmation` show a **document section** (see §5)
@@ -284,7 +368,7 @@ For each action: enabled when, what field gets modified, user prompt (if any).
 | **Where** | Milestone View top bar |
 | **Enabled when** | All items in milestone are in {SubmittedToCustomer, Closed} AND at least one item is in SubmittedToCustomer |
 | **User prompt** | "Close all submitted items for milestone <name>?" (Confirm / Cancel) |
-| **What happens on click** | Set `Milestones.status` field to indicate close — actual mechanism TBD. Possible: write to a hidden `close_all_triggered_at` field; HILDA flips each item's `delivery_state` to `Closed`. *(Confirm field name with HILDA team.)* |
+| **What happens on click** | Set `Milestones.close_all_items_triggered_at = <now>` (field added 2026-06-12 per §2.3 — SP-side ONLY field, no HILDA Postgres mirror). HILDA flips each item's `delivery_state` to `Closed` after reading the SP-alert per `[D-047]`. |
 
 ### 4.5 Refresh (milestone-level — soft refresh)
 
@@ -428,9 +512,9 @@ Per FR-56, items in `UnderPMReview` need an extra section showing:
 
 ### 7.1 SP Alert configuration (required deployment step)
 
-For each of the **8 SharePoint Lists** in §2 (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**), configure an alert subscription:
+For each of the **7 SharePoint Lists** in §2 (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog — TGGroups removed 2026-06-12 per `[D-051]` impl note; 9 TG fields denormalized onto DeliveryItems), configure an alert subscription:
 
-*(Note: CommunicationLog is technically append-only and shouldn't need editing, so its alert could be omitted in practice — but configuring it for completeness costs nothing and protects against future field additions. The 7 lists above all need alerts; the new TGGroups list is the critical one for TPM-driven TG metadata overrides per FR-71.)*
+*(Note: CommunicationLog is technically append-only and shouldn't need editing, so its alert could be omitted in practice — but configuring it for completeness costs nothing and protects against future field additions. The 7 lists above all need alerts. **Note 2026-06-12**: the original 2026-06-09 note flagged TGGroups as "the critical one for TPM-driven TG metadata overrides per FR-71" — that list no longer exists; TG-field overrides are no longer surfaced in SP UI per `[D-051]` impl note 2026-06-12. The critical alerts are now on DeliveryItems (TPM-driven field edits including FR-87 resolutions and `pm_approval_at` / `pm_approval_pm_id`) and Milestones (button-click timestamps).)*
 
 - **Subscriber address**: HILDA's dedicated mailbox (provided by HILDA team at deployment time — e.g., `deliverablehub@<corp-domain>`)
 - **Send Alerts for These Changes**: **`Anything changes`** — NOT "specific columns." If you restrict to specific columns, HILDA misses field edits.
@@ -530,7 +614,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 ## 10. Phase scoping — what to build now vs later
 
 ### Phase 1 (build first — first-customer end-to-end)
-- §2.1–§2.8 — provision all **8 SharePoint lists** (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, **TGGroups**) with the field corrections + additions per 2026-06-09 cascade (4-value `item_type`, 4-value `customer_delivery_modality`, new `target_folder` / `no_customer_upload` / `tpm_reassignment_target_item_id` / `tpm_resolved_doc_type` / `tpm_revision_resolution` on DeliveryItems; new `ingress_nsd` / `folder_routing_enabled` on TGGroups)
+- §2.1–§2.7 — provision **7 SharePoint lists** (Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog — TGGroups removed 2026-06-12) with the field corrections + additions per 2026-06-09 cascade (4-value `item_type`, 4-value `customer_delivery_modality`, `target_folder` / `no_customer_upload` / 3 FR-87 TPM-resolution fields on DeliveryItems) PLUS 2026-06-12 additions (`is_milestone_gating` rename; `pm_approval_at` + `pm_approval_pm_id` per `[D-068]`; `owner_corp_id` on DeliveryItems + Users; `close_all_items_triggered_at` on Milestones; 9 denormalized TG columns on DeliveryItems per `[D-051]` impl note; `TPM` role on Users; `milestone_id` / `tg_name` / `credential_id` on CommunicationLog; SP system columns NOT duplicated as custom columns; `item_no` immutability)
 - §3.1 Milestone View (with grouping by `tg_name` + TG-group header rows reading from TGGroups via lookup)
 - §3.2 Device Tracker View
 - §3.3 PM Dashboard View
@@ -545,7 +629,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 - **§4.11 Resolve revision** (FR-87 step C — TPM revision-determination resolution; added 2026-06-09)
 - §5 Document section + download links (Phase 1: single revision per document only — don't worry about revision history UI; **DO render 5-value doc_type + `nsd_path_type` indicator + `inferred_tg_name` on unrouted docs per 2026-06-09 cascade**)
 - §6 PM Review section (Phase 1: Approve only; no Override Final yet)
-- §7 SP Alert configuration on all 8 lists (including TGGroups) + **§7.4 action verb conventions** (added 2026-06-09)
+- §7 SP Alert configuration on all 7 lists (revised 2026-06-12 from 8; TGGroups removed) + **§7.4 action verb conventions** (added 2026-06-09)
 - §8.1 Live SP REST polling
 - §9 Permissions
 
@@ -555,7 +639,7 @@ Configure via standard SP list-level permissions + view-level filtering. No cust
 - §5.2 Expandable revision history (`?all_revisions=true`)
 - §6 Override Final revision UI
 - §8.2 In-flight status polling for submission assembly progress
-- **TGGroups inline edit link in §3.1** ("Edit TG metadata" — opens the TGGroups list-item form for TPM to override `tg_owner_email`, `email_group_alias`, `corp_id_list`, `default_cc_list` before ODF fires per FR-71)
+- ~~**TGGroups inline edit link in §3.1**~~ — REMOVED 2026-06-12. TGGroups list no longer exists; TG-field editing in SP UI is not modeled anymore. TG schema changes go through YAML + HILDA tracker rewriting all DI rows for the affected TG.
 
 ### Phase 3+ (deferred)
 - Cross-device matrix / Kanban views
@@ -585,17 +669,17 @@ HILDA team owns:
 - All Python services that consume SP data and write back
 
 SP UI team (you) owns:
-- The **8 SharePoint Lists** (column definitions per §2; create the lists with these internal names exactly — including the new TGGroups list per §2.8)
+- The **7 SharePoint Lists** (column definitions per §2; create the lists with these internal names exactly — TGGroups removed 2026-06-12 per `[D-051]` impl note; 9 TG fields denormalized onto DeliveryItems per §2.4)
 - All views per §3 (including TG-group header rendering above each `tg_name` grouping in §3.1, populated by lookup to TGGroups)
 - All buttons per §4 (each writes to a SP field — no direct HILDA HTTP calls for state actions)
-- The SP-side alert configuration per §7 (this is a SP deployment step, not code) — covering all 8 lists
+- The SP-side alert configuration per §7 (this is a SP deployment step, not code) — covering all 7 lists
 - The document section and PM Review section per §5 and §6 (which call HILDA's enumeration API for data + render HILDA-mediated download links)
 
 ### Open items to confirm with HILDA team
 
-1. **Field name** for the `milestone_gating` boolean — your prototype uses `MilestoneGating`; HILDA's canonical schema (post-2026-05-24 review) is to be confirmed. If different, agree on the SP-side name before you build the list.
-2. **Field name mapping** — your prototype may use different column internal names than HILDA's canonical schema (e.g., `ItemNumber` vs `item_no`, `TeamName` vs `tg_name`, `DeliveryType` vs `item_type`). Either align prototype to canonical names OR HILDA's parser adds a name-mapping translation layer. Agree on one approach before list creation.
-3. **`Close All Items` field name** (§4.4) — TBD which field gets written on the click.
+1. ~~**Field name** for the `milestone_gating` boolean~~ — **RESOLVED 2026-06-12: `is_milestone_gating`** per template_schema/MODULE.md Invariant 2026-06-12 (renamed from `milestone_gating`).
+2. **Field name mapping** — your prototype may use different column internal names than HILDA's canonical schema (e.g., `ItemNumber` vs `item_no`, `TeamName` vs `tg_name`, `DeliveryType` vs `item_type`). Either align prototype to canonical names OR HILDA's parser adds a name-mapping translation layer. Agree on one approach before list creation. **2026-06-12 note**: `item_no` is now declared IMMUTABLE per item lifetime (referential integrity for FR-77 + storage.TGFolderRoutingRow); SP UI reorder MUST NOT mutate it (use `sort_order` for visible reorder).
+3. ~~**`Close All Items` field name** (§4.4)~~ — **RESOLVED 2026-06-12: `close_all_items_triggered_at`** on Milestones (SP-side only; no HILDA Postgres mirror) per §2.3.
 4. **Override Final endpoint** (§6 Phase 2) — `POST https://hilda.corp/docs/<delivery_item_id>/set_final` shape TBD.
 5. **Status endpoint** (§8.2) — `GET https://hilda.corp/status/milestone/<id>/submission` shape TBD.
 6. **Upload endpoint** (§4.7 Phase 2) — `POST https://hilda.corp/upload/<delivery_item_id>` shape TBD.
@@ -610,7 +694,7 @@ SP UI team (you) owns:
 
 | What you build | Where it lives | What it writes / calls |
 |---|---|---|
-| 8 SharePoint Lists (incl. TGGroups per §2.8) | Corp SP site | — (data store) |
+| 7 SharePoint Lists (TGGroups removed 2026-06-12 per `[D-051]` impl note; TG fields denormalized onto DeliveryItems per §2.4) | Corp SP site | — (data store) |
 | 3 views (milestone / device / dashboard) | SP web parts | Reads SP lists |
 | Action buttons | SP web parts | Writes SP list fields (which trigger SP alerts → HILDA) |
 | Document section | SP web parts | Calls `GET https://hilda.corp/docs/<item_id>` |

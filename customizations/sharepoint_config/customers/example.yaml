@@ -1,22 +1,284 @@
-# Example customer SP config — a shape for TPMs to copy and customize.
-# This file is consumed by FileBasedListProvider; runtime modules see only
-# canonical field names and never reference SP column names directly.
-customer_slug: example
-lists:
+# =====================================================================================
+# HILDA SharePoint configuration — example / reference YAML
+# =====================================================================================
+#
+# Status: aligned to 2026-06-12 architecture pass (commits 4da9900 + 48f884c).
+# Comm-channel partner artifact: docs/sp_ui_engineer/HILDA_SP_Schema.xlsx.
+#
+# How this file is used:
+#   - SP UI engineer reads this file (and the xlsx) at customer-deployment time and
+#     HAND-CREATES the SP lists + columns in SP UI directly, including SP-alert
+#     subscriptions and any custom SP-side workflows. HILDA does NOT call REST to
+#     create lists per D-073 — corp SP-2017's SP-alert + custom-task requirement
+#     makes UI-side provisioning structurally necessary.
+#   - Once SP UI engineer creates the lists, HILDA's FileBasedListProvider per [D-020]
+#     reads this YAML at startup to translate canonical field names <-> SP internal
+#     column names for REST writeback per [D-064].
+#
+# Three-tier name model per [D-065]:
+#   HILDA canonical name  ->  SP internal column name  ->  SP display name
+#   (Python code field)      (REST wire protocol)         (TPM-visible browser label)
+#   |--- this file ---|      |---- this file -----|       |-- SP UI engineer owns --|
+#                                                            (NOT in this YAML)
+#
+# SP Choice column allowed values are ALSO owned by SP UI engineer per [D-065];
+# this YAML records column names only, never the Choice value enumeration.
+#
+# Phase notation:
+#   Ph-1 = must be live for the first-customer release
+#   Ph-2 = add later (item-self-close, doc upload, TG-inline-edit, etc.)
+#
+# 7-list framing per [D-051] impl note 2026-06-12 (was 8; TGGroups removed —
+# TG fields denormalized onto DeliveryItems as SP-side READ-ONLY display mirrors
+# per D-DRAFT-Y / [D-051] impl note). TG schema source-of-truth lives in
+# customizations/template_schemas/<customer_slug>/tg_groups.yaml — TPM SP UI
+# MUST NOT allow editing TG columns on DI rows (would diverge from siblings + YAML).
+#
+# =====================================================================================
+
+customer_slug: example                    # MUST match this filename + template_schema customer_slug
+
+lists:                                    # 7 lists per [D-051] impl note 2026-06-12
+
+  # ---------------------------------------------------------------------------------
+  # 1. Customers — one row per (HILDA-deployment, customer-carrier) tuple
+  # ---------------------------------------------------------------------------------
+  customers:
+    name: "Example - Customers"
+    columns:
+      customer_name: "Title"
+      customer_slug: "Customer_Slug"
+      customer_contact_email: "Customer_Contact_Email"
+      customer_jira_url: "Customer_JIRA_URL"        # optional; Ph-2 customer adapter
+      sort_order: "Sort_Order"
+
+  # ---------------------------------------------------------------------------------
+  # 2. Devices — one row per device-codename tracked by HILDA for the customer
+  # ---------------------------------------------------------------------------------
   devices:
-    name: "Example - Device Tracker"
+    name: "Example - Devices"
     columns:
       device_name: "Title"
-      assigned_pm_id: "PM_Owner"
+      device_slug: "Device_Slug"
+      customer_id: "Customer_Id"                    # lookup -> Customers
+      assigned_pm_id: "PM_Owner"                    # lookup -> Users
       target_launch_date: "Target_Launch_Date"
       path_slug: "Path_Slug"
+      sort_order: "Sort_Order"
+
+  # ---------------------------------------------------------------------------------
+  # 3. Milestones — one row per (device, milestone) tuple
+  # ---------------------------------------------------------------------------------
+  milestones:
+    name: "Example - Milestones"
+    columns:
+      milestone_name: "Title"
+      device_id: "Device_Id"                                            # lookup -> Devices
+      sort_order: "Sort_Order"
+      target_date: "Target_Date"                                        # DateTime
+      status: "Status"                                                  # Choice: Not Started / In Progress / Completed / Delayed
+      email_cc_list: "Email_CC_List"                                    # Note (JSON list)
+      milestone_collection_started_at: "Milestone_Collection_Started_At"  # DateTime (FR-8)
+      milestone_submission_triggered_at: "Milestone_Submission_Triggered_At"  # DateTime (FR-18)
+      refresh_requested_at: "Refresh_Requested_At"                      # DateTime (FR-56 soft-poll)
+      close_all_items_triggered_at: "Close_All_Items_Triggered_At"      # DateTime; SP-side ONLY (no HILDA Postgres mirror) per SP UI engineer 2026-06-10
+      # NOTE: `default_work_item_config` is NOT a SP column — lives in
+      # customizations/template_schemas/<customer_slug>/milestones.yaml per FR-78 / [D-053].
+      # Customer-deployment-fixed config; not TPM-editable.
+
+  # ---------------------------------------------------------------------------------
+  # 4. DeliveryItems — primary tracking table; one row per per-milestone work-item
+  #    ~40+ fields; grouped by `tg_name` in the SP milestone view (FR-56)
+  # ---------------------------------------------------------------------------------
   delivery_items:
     name: "Example - Delivery Items"
     columns:
+
+      # ---- Item-identity fields ----
       item_name: "Title"
-      delivery_state: "Status"
-      expected_completion_date: "Expected_Completion"
-      owner_email: "Owner_Email"
-      tracking_modality: "Tracking_Modality"
-      customer_delivery_modality: "Customer_Delivery"
+      item_no: "Item_No"                                                # IMMUTABLE per item lifetime per template_schema/MODULE.md Invariant 2026-06-12 (referential integrity for FR-77 + storage.TGFolderRoutingRow)
+      item_description: "Item_Description"                              # Note (comma-separated tag list per FR-82)
+      milestone_id: "Milestone_Id"                                      # lookup -> Milestones
+      tg_name: "TG_Name"                                                # FK label to TG; grouping discriminator in milestone view
+      sort_order: "Sort_Order"
       path_slug: "Path_Slug"
+
+      # ---- Item-type + state ----
+      item_type: "Item_Type"                                            # Choice; SP UI engineer maintains values per [D-053] / [D-065]
+      delivery_state: "Delivery_State"                                  # Choice (11 values); SP UI engineer maintains values
+      no_customer_upload: "No_Customer_Upload"                          # Boolean per [D-054]; MUST be true when item_type=Confirmation per template_schema/MODULE.md Invariant
+      target_folder: "Target_Folder"                                    # OUTBOUND customer-portal upload path per FR-19 / FR-73
+
+      # ---- Owner identity ----
+      owner_name: "Owner_Name"
+      owner_email: "Owner_Email"
+      owner_corp_id: "Owner_Corp_Id"                                    # NEW 2026-06-12; denormalized from Users.owner_corp_id at DI creation; used by corp messenger Ph-2
+      owner_status_note: "Owner_Status_Note"                            # Note; latest interim owner update, auto-populated from inbound
+
+      # ---- Time tracking ----
+      expected_completion_date: "Expected_Completion_Date"              # DateTime
+      actual_completion_date: "Actual_Completion_Date"                  # DateTime; auto-set on OwnerClosed per FR-15
+      last_owner_contacted: "Last_Owner_Contacted"                      # DateTime
+      last_reminder_triggered_at: "Last_Reminder_Triggered_At"          # DateTime
+      # NOTE: `last_updated` is NOT a custom column — use SP's built-in `Modified` field
+
+      # ---- Communication routing ----
+      email_cc_list: "Email_CC_List"                                    # Note (JSON list)
+      plm_id: "PLM_Id"                                                  # PLM issue ID per [D-035] / FR-8
+      actual_item_info: "Actual_Item_Info"                              # URL to PLM issue per FR-57
+
+      # ---- Tracking modality (per-item; may differ from TG default) ----
+      tracking_modality: "Tracking_Modality"                            # MultiChoice per [D-037]; SP UI engineer maintains values
+      customer_delivery_modality: "Customer_Delivery_Modality"          # Choice; per [D-054] Ph-1/Ph-2 = GoogleDrive
+      customer_delivery_info: "Customer_Delivery_Info"
+
+      # ---- Form-factor flags (static, from template) ----
+      handset: "Handset"
+      tablet: "Tablet"
+      wearable: "Wearable"
+      mr: "MR"
+      hmr_smr: "HMR_SMR"
+
+      # ---- Document-pipeline gating ----
+      doc_count: "Doc_Count"                                            # Number; per FR-7; 0 for Confirmation
+      review_required: "Review_Required"                                # Boolean; gates LLM quality review (FR-53)
+      review_status: "Review_Status"                                    # Choice: pending / complete / not_required
+      item_completion_pct: "Item_Completion_Pct"                        # Number; computed
+
+      # ---- Milestone-closure gating ----
+      is_milestone_gating: "Is_Milestone_Gating"                        # Boolean per SP UI engineer 2026-06-10 review (renamed from milestone_gating 2026-06-12); FR-64 Close All Items enablement
+
+      # ---- PM approval per [D-068] ----
+      pm_approval_at: "PM_Approval_At"                                  # DateTime per [D-068]; FR-28 PMApproval trigger; cleared per [D-067] rewind path
+      pm_approval_pm_id: "PM_Approval_PM_Id"                            # User type per [D-068]; PM/TPM attribution; cleared together with pm_approval_at
+
+      # ---- TPM resolution buttons per FR-87 strict A->B->C ----
+      tpm_reassignment_target_item_id: "TPM_Reassign_Target"            # FR-87 step (A); lookup -> DeliveryItems
+      tpm_resolved_doc_type: "TPM_Resolved_DocType"                     # FR-87 step (B); Choice (test_report / tech_report / waiver / compliance_certification_release_notes per [D-053] 5-value DocType — corrected 2026-06-12 from prior stale "default" value)
+      tpm_revision_resolution: "TPM_Revision_Resolution"                # FR-87 step (C); text
+
+      # ---- Per-item overrides ----
+      force_tracking_enabled: "Force_Tracking_Enabled"                  # Boolean | null; overrides per-TG tracking_enabled when set (Ph-2)
+      per_item_rule_overrides: "Per_Item_Rule_Overrides"                # Note; rule-engine override scope per FR-31
+
+      # ---- Comments ----
+      comment: "Comment"                                                # Note; PM-visible free-form
+
+      # =================================================================
+      # Denormalized TG fields per [D-051] impl note 2026-06-12 (D-DRAFT-Y)
+      # ----------------------------------------------------------------
+      # Write-once-at-DI-creation read-only SP-side MIRRORS of TGGroupBase
+      # YAML values. HILDA writes from YAML at DI creation via [D-064]
+      # writeback; never updated post-creation in Ph-1.
+      # TPM SP UI MUST NOT allow editing these columns on DI rows — would
+      # diverge from siblings in the same TG and from YAML source-of-truth.
+      # YAML at customizations/template_schemas/<customer_slug>/tg_groups.yaml
+      # is the canonical source.
+      # =================================================================
+      ingress_nsd: "Ingress_NSD"                                        # Choice: none / nsd1 / nsd2 per SP UI engineer 2026-06-10
+      tracking_modality_tg: "Tracking_Modality_TG"                      # MultiChoice; TG-level default; distinct from per-item tracking_modality above
+      email_group_alias: "Email_Group_Alias"                            # TG corp email distribution alias
+      tg_owner_name: "TG_Owner_Name"                                    # TG coordinator name
+      tg_owner_email: "TG_Owner_Email"                                  # TG coordinator email
+      default_cc_list: "Default_CC_List"                                # Note (JSON list); per-TG default CC
+      folder_routing_enabled: "Folder_Routing_Enabled"                  # Boolean per FR-77 Type-2
+      tracking_enabled: "Tracking_Enabled"                              # Boolean per FR-81
+
+  # ---------------------------------------------------------------------------------
+  # 5. Users — corp users (PMs, TPMs, Team Leads, Admins)
+  # ---------------------------------------------------------------------------------
+  users:
+    name: "Example - Users"
+    columns:
+      display_name: "Title"
+      email: "Email"
+      owner_corp_id: "Owner_Corp_Id"                                    # NEW 2026-06-12; canonical per-person corp ID; reused by corp messenger Ph-2 (replaces dropped user_corp_messenger_handle)
+      role: "Role"                                                      # Choice: PM / TPM / TeamLead / Admin
+      is_active: "Is_Active"                                            # Boolean
+      # NOTE: SP system columns (`Created` / `Modified` / `Author` / `Editor`)
+      # MUST NOT be duplicated as custom columns — discipline per SP UI engineer 2026-06-10.
+
+  # ---------------------------------------------------------------------------------
+  # 6. PMCredentials — metadata only; actual secrets stored elsewhere by HILDA
+  # ---------------------------------------------------------------------------------
+  pm_credentials:
+    name: "Example - PM Credentials"
+    columns:
+      pm_id: "Title"                                                    # lookup -> Users.email
+      system_type: "System_Type"                                        # Choice incl. LLM_OLLAMA_A4000 / LLM_VLLM_DGX / LLM_CORP_LLM per [D-052] tri-backend
+      credential_key: "Credential_Key"                                  # opaque reference; never the credential material per [D-019] / [D-038]
+      expires_at: "Expires_At"                                          # DateTime; for FR-20 staleness checks
+      is_active: "Is_Active"                                            # Boolean
+
+  # ---------------------------------------------------------------------------------
+  # 7. CommunicationLog — append-only audit per NFR-6
+  # ---------------------------------------------------------------------------------
+  communication_log:
+    name: "Example - Communication Log"
+    columns:
+      item_id: "Item_Id"                                                # lookup -> DeliveryItems (nullable for milestone-level events)
+      device_id: "Device_Id"                                            # lookup -> Devices (nullable)
+      channel: "Channel"                                                # Choice: Email / Messenger / CorporatePLM / NetworkSharedDrive / CustomerJIRA / SharePoint
+      direction: "Direction"                                            # Choice: Inbound / Outbound
+      sender: "Sender"
+      recipients: "Recipients"
+      subject: "Subject"
+      summary: "Summary"                                                # Note; LLM-generated; never raw proprietary content per NFR-2
+      action_type: "Action_Type"                                        # free-string registry per FR-29 revised
+      attachments: "Attachments"                                        # Note (JSON list of {filename, download_url})
+      timestamp: "Timestamp"                                            # DateTime
+      milestone_id: "Milestone_Id"                                      # lookup -> Milestones
+      tg_name: "TG_Name"
+      credential_id: "Credential_Id"                                    # opaque ref to credential_service; never plaintext per [D-019]
+      # NOTE: `source_system` request from STATUS line 263 was DROPPED 2026-06-12 —
+      # the `channel` column already covers the use case.
+
+# =====================================================================================
+# REMOVED LISTS — historical context
+# =====================================================================================
+#
+# tg_groups (Removed 2026-06-12 per [D-051] impl note D-DRAFT-Y):
+#   TGGroups was the 8th SP list in the original [D-051] 8-list framing. SP UI engineer
+#   2026-06-10 review proposed denormalizing TG metadata onto DeliveryItems rows
+#   instead, accepted by architect 2026-06-12. The 9 TG fields (`tg_name`, `ingress_nsd`,
+#   `tracking_modality`, `email_group_alias`, `tg_owner_name`, `tg_owner_email`,
+#   `default_cc_list`, `folder_routing_enabled`, `tracking_enabled`) now live as
+#   columns on DeliveryItems above. TG schema source-of-truth lives in
+#   customizations/template_schemas/<customer_slug>/tg_groups.yaml per
+#   template_schema/TGGroupBase Pydantic model. HILDA reads TG metadata from YAML
+#   at runtime (FileBasedListProvider), NEVER from SP DI rows.
+#
+# =====================================================================================
+# SP Alert configuration (per [D-047] — required deployment step)
+# =====================================================================================
+#
+# For each of the 7 lists above, SP UI engineer configures an alert subscription:
+#   - Destination: HILDA team mailbox (per deployment, configured by ops)
+#   - Trigger: "Send Alerts for These Changes" = "Anything changes"
+#   - Frequency: immediate
+# This is the ONLY SP -> HILDA notification channel per [D-047] (SP-to-HILDA HTTP
+# inbound is firewall-blocked unconditionally). CommunicationLog is append-only in
+# practice and its alert rarely fires, but configure for completeness.
+#
+# =====================================================================================
+# Cross-references to architectural decisions
+# =====================================================================================
+#
+# [D-001] three-tier code organization                docs/compact/DECISIONS.md
+# [D-004] SP integration split                        docs/compact/DECISIONS.md
+# [D-006] SP REST + on-prem AD auth (NTLM/Kerberos)   docs/compact/DECISIONS.md
+# [D-019] credential discipline                       docs/compact/DECISIONS.md
+# [D-020] SharePointListProvider Protocol             docs/compact/DECISIONS.md
+# [D-025] Docker-Compose bind-mount Ph-1/Ph-2         docs/compact/DECISIONS.md
+# [D-046] canonical schema source                     docs/compact/DECISIONS.md
+# [D-047] SP-alert email channel                      docs/compact/DECISIONS.md
+# [D-051] 7-list SP layout (amended by impl note      docs/compact/DECISIONS.md
+#         2026-06-12 — TGGroups removed)
+# [D-053] 4-value ItemType / 5-value DocType          docs/compact/DECISIONS.md
+# [D-064] HILDA->SP REST writeback                    docs/compact/DECISIONS.md
+# [D-065] SP UI engineer owns Choice values           docs/compact/DECISIONS.md
+# [D-067] customer RFI rewind path                    docs/compact/DECISIONS.md
+# [D-068] PM approval via field on DeliveryItem       docs/compact/DECISIONS.md
+# [D-073] SP UI engineer manually provisions lists    docs/compact/DECISIONS.md
+# [D-074] SP<->HILDA integration via Variant A        docs/compact/DECISIONS.md
+#         (HILDA renders pages; SP renders link-out)
