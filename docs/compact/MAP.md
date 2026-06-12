@@ -1,4 +1,4 @@
-_Generated 2026-06-11 by regen-map. Do not hand-edit._
+_Generated 2026-06-12 by regen-map. Do not hand-edit._
 
 # Module map
 
@@ -10,7 +10,7 @@ _Generated 2026-06-11 by regen-map. Do not hand-edit._
 | [email_service](../../core/src/email_service/MODULE.md) | All email-mediated communication for HILDA — inbound owner replies (FR-12), inbound SP-alert notifications (`[D-047]` + FR-84 + FR-87), outbound owner outreach (FR-9), outbound reminders + escalations (FR-10), the FR-52 5-step routing pipeline driver, the FR-85 doc_type classification driver, and the FR-86 storage matrix dispatcher. | [DRAFT] |
 | [issue_tracker (core)](../../core/src/issue_tracker/MODULE.md) | Implements the `IssueTracker` Protocol per `[D-008]` — issue-tracking integration for DeliveryItems whose `tracking_modality` includes `CorporatePLM` or `CustomerJIRA` per `[D-037]` (multi-value enum). | |
 | [issue_tracker (customizations)](../../customizations/issue_tracker/MODULE.md) | Drop-in directory for proprietary IssueTracker adapters. | |
-| [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | [DRAFT] |
+| [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | |
 | [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). | [DRAFT] |
 | [rules (customizations)](../../customizations/rules/MODULE.md) | **Per-deployment drop-zone** for HILDA AutomationRules + polling-schedule rules that `core/src/rule_engine.RuleSet.load` consumes at startup (and on SIGHUP `reload()`) per FR-30. | [DRAFT] |
 | [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
@@ -143,7 +143,24 @@ hilda/
 │   │   │   ├── mock_adapter.py                # MockIssueTracker — in-memory IssueTracker for unit and integration tests.
 │   │   │   └── protocol.py                    # IssueTracker Protocol and all shared data classes. No IO, no network. Anchors [D-008].
 │   │   ├── llm/                               # Single Protocol-mediated surface (LLMProvider) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification ([D-039] Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per [D-053]), document quality review (FR-53), and message classification fallback (FR-12 path c per [D-034]).
-│   │   │   └── MODULE.md
+│   │   │   ├── MODULE.md
+│   │   │   ├── __init__.py                    # llm — single Protocol surface for HILDA runtime LLM calls.
+│   │   │   ├── app.py                         # Thin FastAPI surface for hilda-llm-gateway — POST /invoke + GET /health.
+│   │   │   ├── backends.py                    # Backend client adapters — Ollama + OpenAI-compatible.
+│   │   │   ├── client.py                      # OnPremLLMClient — caller-side thin HTTP client for hilda-api / hilda-worker.
+│   │   │   ├── gateway_server.py              # LLMGatewayServer — egress-side LLMProvider (runs inside hilda-llm-gateway).
+│   │   │   ├── llm_cli.py                     # llm CLI: --diagnostic / --mock / --invoke / --contract per [D-005].
+│   │   │   ├── mock.py                        # MockLLM — in-memory deterministic LLMProvider for tests.
+│   │   │   ├── protocol.py                    # LLMProvider Protocol + request/response types. Anchors [D-007] [D-029] [D-052].
+│   │   │   ├── qc_templates.py                # LLG QC template — registered in the central diagnostics QC registry at import.
+│   │   │   ├── rate_limit.py                  # Per-backend rate limiting per [D-052] — fixed-window counters, NO automatic spillover.
+│   │   │   ├── schemas.py                     # Per-TaskKind input/output Pydantic schemas.
+│   │   │   └── templates/                     # Jinja2 prompt templates, one per TaskKind.
+│   │   │       ├── classify_doc.j2
+│   │   │       ├── classify_doc_type.j2
+│   │   │       ├── classify_message.j2
+│   │   │       ├── review_document.j2
+│   │   │       └── route_attachment.j2
 │   │   ├── rule_engine/                       # Pure evaluator for HILDA's IF/THEN AutomationRules per [D-022] — given a TriggerEvent (one of the 15 Ph-1 triggers per FR-28) plus an EntityRef, returns the ordered set of RuleMatch tuples that should fire — each carrying an intra-rule-ordered list of RuleActions (Ph-1 subset of FR-29).
 │   │   │   ├── MODULE.md
 │   │   │   └── __init__.py
@@ -198,6 +215,7 @@ hilda/
 │       ├── test_credential_service.py         # credential_service tests — protocol, sops service (decrypt patched), mock, CLI, leak checks.
 │       ├── test_diagnostics.py                # Unit tests for core.src.diagnostics.
 │       ├── test_issue_tracker.py              # Unit tests for core.src.issue_tracker — Protocol, data classes, MockIssueTracker, load_adapter.
+│       ├── test_llm.py                        # llm tests — protocol, schemas, MockLLM, gateway init/invoke, rate limiter, client↔gateway round-trip, CLI.
 │       ├── test_mock_server.py                # Unit tests for mock SP server (REST + UI).
 │       ├── test_sharepoint_integration.py     # Unit tests for sharepoint_integration core (no mock server).
 │       ├── test_sharepoint_integration_cli.py # Integration tests for sharepoint_integration_cli.

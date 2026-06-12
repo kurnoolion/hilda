@@ -149,6 +149,49 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "STR-W008": ErrorCode(
         "STR-W008", "TPM resolution idempotent re-call for '{file_hash}'/'{delivery_item_id}' — already at target state", True
     ),
+    # --- llm (LLG) ---
+    "LLG-E001": ErrorCode(
+        "LLG-E001", "LLM call failed for task '{task}' backend '{backend}': {reason}", False
+    ),
+    "LLG-E002": ErrorCode(
+        "LLG-E002", "Unknown TaskKind '{task}' — not in TaskKind enum", False
+    ),
+    "LLG-E003": ErrorCode(
+        "LLG-E003", "Structured output validation failed after {n} retries for task '{task}' backend '{backend}'", False
+    ),
+    "LLG-E004": ErrorCode(
+        "LLG-E004", "Backend endpoint '{url}' is not on-prem — rejected by [D-007] / [D-052] startup check", False
+    ),
+    "LLG-E005": ErrorCode(
+        "LLG-E005", "Prompt template '{task}.j2' not found in template_dir", False
+    ),
+    "LLG-E006": ErrorCode(
+        "LLG-E006", "TaskKind '{task}' has no backend mapping — missing entry in task_backend_map", False
+    ),
+    "LLG-W001": ErrorCode(
+        "LLG-W001", "Rate limit hit for task '{task}' backend '{backend}'; queued for {wait_s}s", True
+    ),
+    "LLG-W002": ErrorCode(
+        "LLG-W002", "LLM confidence {score} below threshold {threshold} for task '{task}'", True
+    ),
+    "LLG-W003": ErrorCode(
+        "LLG-W003", "Retry {n}/{max} after parse failure on task '{task}' backend '{backend}'", True
+    ),
+    "LLG-W004": ErrorCode(
+        "LLG-W004", "Model cold-load triggered for '{backend}/{model}'; expected latency +{n}s", True
+    ),
+    "LLG-W005": ErrorCode(
+        "LLG-W005", "Corp LLM rate limit approaching ({used}/{limit_per_min} per minute); queue depth {n}", True
+    ),
+    "LLG-W006": ErrorCode(
+        "LLG-W006", "Corp LLM rate limit exceeded; task '{task}' deferred {n}s — no automatic spillover per [D-052]", True
+    ),
+    "LLG-W007": ErrorCode(
+        "LLG-W007", "Reserved", True
+    ),
+    "LLG-W008": ErrorCode(
+        "LLG-W008", "ROUTE_ATTACHMENT returned {n} matches with summed confidence {score} exceeding over-routing threshold {threshold} on '{file_hash}'; all committed per FR-79 but flagged", True
+    ),
 }
 
 

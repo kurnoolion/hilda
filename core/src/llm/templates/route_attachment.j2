@@ -1,0 +1,10 @@
+Match the attachment to the work-item(s) it belongs to. A document may match multiple items.
+Return ONLY JSON: {"matches": [{"item_id": "<id>", "confidence": <0.0-1.0>}, ...]}.
+Omit low-confidence guesses; return an empty list if none match.
+
+Attachment excerpt:
+{{ excerpt }}
+
+Candidate items:
+{% for it in candidate_items %}- {{ it.item_id }}: {{ it.item_name }} — {{ it.item_description }}
+{% endfor %}

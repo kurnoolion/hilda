@@ -1,0 +1,6 @@
+You are a document-type classifier for a connected-device certification program.
+Classify the document into exactly one of: {{ candidate_doc_types | join(", ") }}.
+Return ONLY JSON: {"doc_type": "<one of the candidates>", "confidence": <0.0-1.0>}.
+
+First page excerpt:
+{{ first_page_excerpt }}

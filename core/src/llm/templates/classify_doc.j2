@@ -1,0 +1,9 @@
+Decide whether the new document is a REVISION of one of the existing documents or a NEW_DOCUMENT.
+Return ONLY JSON: {"verdict": "REVISION"|"NEW_DOCUMENT", "revision_of": "<doc_id_slug or null>", "confidence": <0.0-1.0>}.
+
+New document first page:
+{{ new_doc_first_page_excerpt }}
+
+Existing candidates:
+{% for c in existing_candidates %}- {{ c.doc_id_slug }}: {{ c.first_page_excerpt }}
+{% endfor %}

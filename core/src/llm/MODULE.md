@@ -3,6 +3,7 @@
 > **Status:** Draft + 2026-06-09 cascade Group 3 of 3 applied (`[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-85 2-step classification ladder + FR-86 storage matrix + FR-87 SP UI A→B→C). **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind count 4 → 5. Earlier rollbacks: 2026-06-07 (tri-backend `[D-052]` + host-topology fix + docstring clarifications + Phase B rollback original `[D-053]` framing). Sections curated; code implementation begins after `/switch-phase development`.
 >
 > **Rollback log:**
+> - **2026-06-12 (llm-v1 dev — client-side credential removed; gateway holds per-authenticated-backend creds)** — reconciles stale `SystemType.LLM_GATEWAY` references (a SystemType that no longer exists in code — `credential_service.protocol` has only `LLM_OLLAMA_A4000` / `LLM_VLLM_DGX` / `LLM_CORP_LLM` per the `[D-052]` tri-backend split 2026-06-09) to the built reality. Per architect ruling 2026-06-12: **two-hop separation** — Hop A (`OnPremLLMClient` → `hilda-llm-gateway`) is an intra-Compose, on-HILDA-PC call inside the Ph-1 trust domain; the gateway authorizes nothing on caller identity (routes on TaskKind), so **no credential** (analogous to the NSD host-mount / `corp_*_gateway` intake). Hop B (`LLMGatewayServer` → model backends) is where per-backend creds belong. **`credential_service` param removed from `OnPremLLMClient.__init__`.** `LLMGatewayServer` retrieves **up to one credential per backend, CONDITIONALLY** — only when `BackendConfig.credential_key is not None` (lab Ollama/vLLM are auth-less; only `corp_llm` reliably needs one — forcing all three would make the gateway un-startable in the common lab config). `pm_id="ops"` → `OPS_TEAM_PM_ID` constant. The `[D-007]` no-short-circuit invariant is unaffected (enforced by not handing callers backend URLs, not by a credential). **Not a new ADR** — same lineage as the SystemType split anchored at `[D-052]` impl note 2026-06-08; captured as a `[D-052]` impl-note addendum in the strand `decisions-draft.md` for land-strand. Soft-flag: signature narrowing (param removed) + Invariant/Depends-on text reconciliation to already-built code.
 > - **2026-06-09 (post-cascade user-review correction, same day)** — applied 2 corrections from user review of Group 3 cascade: (a) **`RouteAttachmentOutput` schema corrected** to return `list[RouteAttachmentMatch]` instead of a single `(item_id, confidence)` pair — user observation that FR-79 multi-item association requires multi-match support; new typed `RouteAttachmentMatch` model added; output schema docstring clarifies LLM-side filtering above threshold (caller does NOT re-filter; empty list → FR-52 step 5 fall-through; non-empty list → one DocumentItemAssociation row per match per `[D-055]` symmetric M:M); new `LLG-W008` warning for potential over-routing (summed-confidence threshold). (b) **`[D-029]` Ph-1 narrow surface Key choices bullet** updated from "4 TaskKinds" to **"5 TaskKinds"** — CLASSIFY_DOC_TYPE was added to the listed TaskKinds + restoration note added (the prior bullet text claiming CLASSIFY_DOC_TYPE was removed per 2026-05-28b was obsolete after the 2026-06-09 cascade restore). (c) Reserved `LLG-W007` as placeholder; LLG-W008 occupied by the over-routing warning.
 > - **2026-06-09 (Phase B Module cascade — Group 3 of 3 against the corrected `[D-053]` model — after `template_schema/MODULE.md` cascade 2026-06-08 + `storage/MODULE.md` cascade 2026-06-09)** — applied the requirements-phase redesign locked 2026-06-08 (`requirements.md` FR-7 + FR-85 + FR-86 + FR-87 + `DECISIONS.md` `[D-053]` impl note 2026-06-08): **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind enum count 4 → 5; **restricted candidate set** `{test_report, tech_report, waiver}` per FR-85 Step 2 — LLM never returns `compliance_certification_release_notes` (regex-only per FR-85 Step 1 because bundled sub-categories visually indistinguishable from test/tech/waiver content) nor `unresolved` (caller-side sentinel on low confidence). **ClassifyDocTypeInput / ClassifyDocTypeOutput schemas restored** with restricted-candidate-set design + below-threshold UNRESOLVED sentinel mapping documented. **NB note + Status header refreshed** to reflect restored TaskKind + withdrawn "1:1 derivation" framing. **Purpose anchors + Ph-1 scope** updated to 5 TaskKinds with FR-85 Step 2 context. **Key choices**: replaced `[D-053]` doc_type derivation bullet entirely with FR-85 2-step ladder + FR-86 alignment invariant + CLASSIFY_DOC_TYPE restoration explanation; REVIEW_DOCUMENT skip bullet updated for 5-value DocType (skip when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false`). **Non-goal "Not a doc_type classifier" REVERTED** → new Non-goal "IS a doc_type classifier (Step 2 of FR-85 2-step ladder)" with explicit scope (LLM only fires when regex Step 1 fails; restricted-candidate-set rationale). **Coexistence matrix per document** updated for 5-value DocType + new special-case row for test_report on Default work-item (parser_result ✓ + llm_review_findings ✗). **Tentative-assignments table** 4 → 5 rows with CLASSIFY_DOC_TYPE restored (priority lower than REVIEW_DOCUMENT). **Test interface RPT line** templates_loaded=4 → 5. **Depends-on** updated to reference 5-value DocType from template_schema. Cascade chain complete (Group 1 template_schema 2026-06-08 + Group 2 storage 2026-06-09 + Group 3 llm 2026-06-09).
 > - **2026-06-07 (host-topology clarification, same day)** — fixed stale "Ollama on the HILDA PC GPU" framing across 4 sites. Clarified that **HILDA PC is a distinct Linux box from the model-serving hosts**: HILDA PC runs the HILDA app containers (hilda-api / hilda-worker / hilda-llm-gateway per `[D-021]`/`[D-026]`) and has NO GPU; `ollama_a4000` runs on a separate **A4000 box** (Linux + RTX A4000) on the lab subnet; `vllm_dgx` runs on a separate **DGX Spark box** (GB10 + 128 GB unified) on the lab subnet; `corp_llm` is corp infrastructure. hilda-llm-gateway proxies LLM calls OUTWARD from the HILDA PC to these three hosts. Updated `[D-007]` On-prem paragraph (now enumerates 3 distinct hosts + HILDA PC); Hardware-topology table (Host column clarifies "separate machine" per backend + footer note "Distinct from HILDA PC"); BackendConfig.endpoint_url example hostnames changed from `hilda-pc:11434` to `a4000-box:11434` for ollama_a4000 + clarifying comment; tentative-assignments footer clarifies env vars live on HILDA PC but resolve to lab-subnet DNS for the model boxes. **`[D-052]` DECISIONS.md body** still contains the older "HILDA PC GPU" wording at lines 638-639 — covered by the existing STATUS.md flag ("`[D-052]` ADR body needs impl note appended") since `[D-002]` ADR-body immutability prevents direct edit; the pending impl note 2026-06-07 will document the 3-host topology.
@@ -202,10 +203,16 @@ class OnPremLLMClient:
     def __init__(
         self,
         gateway_url:        str,                       # e.g. "http://hilda-llm-gateway:9100"
-        credential_service: CredentialService,         # system_type = SystemType.LLM_GATEWAY
         max_retries:        int   = 3,
         retry_backoff_s:    float = 1.0,
-    ) -> None: ...
+    ) -> None:
+        """No credential param — `OnPremLLMClient` → `hilda-llm-gateway` is an intra-Compose,
+        on-HILDA-PC hop inside the Ph-1 trust domain (like the NSD host-mount / corp_*_gateway
+        intake). The gateway authorizes nothing on caller identity — it routes on TaskKind.
+        Per-backend creds live server-side only (see `LLMGatewayServer`). The `[D-007]`
+        no-short-circuit invariant is enforced by not handing callers backend URLs, not by a
+        credential. (Ph-3+ caller↔gateway auth, if ever, is mTLS at the mesh layer — still not a
+        constructor param here.) Per `[D-052]` impl-note addendum 2026-06-12."""
 
     async def invoke(self, request: LLMRequest) -> LLMResponse: ...
     async def health(self) -> dict[str, Any]: ...
@@ -225,7 +232,10 @@ class BackendConfig:
                                        # corp LLM URL (corp_llm — corp infrastructure)
                                        # All three resolve to hosts DISTINCT from the HILDA PC; hilda-llm-gateway on
                                        # the HILDA PC proxies outbound over the lab subnet.
-    credential_key: str | None        # which credential_service key carries auth, if any
+    credential_key: str | None        # the credential_service SystemType value carrying this backend's auth
+                                       # (e.g. "llm_corp_llm"), or None for auth-less lab backends
+                                       # (ollama_a4000 / vllm_dgx). Drives the conditional per-backend
+                                       # credential retrieval in LLMGatewayServer.__init__ ([D-052] addendum 2026-06-12).
     # Rate-limit shape varies by backend:
     # - ollama_a4000: VRAM-bound concurrency (1 model hot, swap on demand); rate_limit_* = None;
     #     concurrency bounded externally by the request semaphore in LLMGatewayServer
@@ -245,8 +255,8 @@ class LLMGatewayServer:
     """The egress-side implementation. Owns prompt-template loading from templates/,
     per-TaskKind backend + model selection per [D-052], output-schema validation,
     per-backend rate-limiting (token-bucket), retry policy, structured-output parsing,
-    and credential handoff (retrieved once at startup from credential_service,
-    system_type=LLM_GATEWAY, never logged). Mounts a single FastAPI route POST /invoke;
+    and credential handoff (retrieved once at startup from credential_service, conditionally
+    per authenticated backend — see __init__; never logged). Mounts a single FastAPI route POST /invoke;
     rejects unknown TaskKind values."""
 
     def __init__(
@@ -262,7 +272,18 @@ class LLMGatewayServer:
         A/B testing on representative fixtures across all three backends. Per-task precedence rule:
         the A/B winner becomes the assigned backend for that TaskKind. No automatic spillover to a
         runner-up backend on rate-limit / outage — silent quality degradation is rejected
-        (surfaces as `LLG-W006` for ops visibility per [D-052])."""
+        (surfaces as `LLG-W006` for ops visibility per [D-052]).
+
+        Credential handoff is per-backend and CONDITIONAL — at most one credential per backend,
+        retrieved only when that backend declares auth (`[D-052]` impl-note addendum 2026-06-12):
+            for name, backend in backends.items():
+                if backend.credential_key is not None:
+                    cred = credential_service.get_credential(OPS_TEAM_PM_ID, backend.credential_key)
+        Lab-subnet Ollama (`ollama_a4000`) and vLLM (`vllm_dgx`) are typically auth-less
+        (`credential_key=None`) — forcing a credential for all three would make the gateway
+        un-startable in the common lab config; only `corp_llm` reliably needs one. Credentials
+        held in process memory, never written to log/disk/report. `OPS_TEAM_PM_ID` is the
+        credential_service constant ("ops-team")."""
 
     async def invoke(self, request: LLMRequest) -> LLMResponse:
         """Pipeline:
@@ -273,6 +294,19 @@ class LLMGatewayServer:
         5. Parse output as structured JSON; validate against task's output schema; retry on fail.
         6. Emit MET record (backend, model, latency, token counts, confidence bucket).
         7. Return LLMResponse."""
+
+    async def start(self) -> int:
+        """Conditional per-backend credential retrieval — get_credential is async, so the
+        async work splits out of __init__ (mirrors credential_service.load()). Returns count
+        retrieved; idempotent. Call after construction. (Added at implementation 2026-06-12.)"""
+
+    def set_http_client(self, client: httpx.AsyncClient) -> None:
+        """Test/seam — inject the backend HTTP client (tests pass an httpx.MockTransport
+        client). (Added 2026-06-12.)"""
+
+    @staticmethod
+    def confidence_bucket(confidence: float | None) -> str:
+        """high (≥0.85) / medium (≥0.6) / low / n/a — for MET + QC. (Added 2026-06-12.)"""
 ```
 
 ### `MockLLM`
@@ -313,7 +347,7 @@ Templates are part of the code release (versioned with HILDA), not customer-depl
 - **Structured output only.** Every task has a Pydantic output schema; non-conforming model responses are retried up to `max_retries` and then raise LLG-E003. The Protocol never returns free-form text to callers.
 - **Async, non-blocking.** Per requirements.md NFR (Async LLM tasks): FR-52 step 4 (ROUTE_ATTACHMENT) + `[D-039]` Step 2 (CLASSIFY_DOC), FR-53 (REVIEW_DOCUMENT), FR-12 path(c) (CLASSIFY_MESSAGE) execute as Celery background tasks; the state-change event (`DocumentReceived`, etc.) propagates within the polling-interval SLA regardless of LLM latency. `LLMProvider.invoke` is `async def`; long-running tasks live in `hilda-worker`, not `hilda-api`.
 - **Idempotency keys honoured.** Same `(task, idempotency_key)` returns the cached `LLMResponse` from the process-lifetime cache without re-issuing the model call. Useful for Celery retry semantics.
-- **LLM API key never stored on instance post-startup.** `LLMGatewayServer` retrieves it once at startup via `credential_service.get_credential(pm_id="ops", system_type=SystemType.LLM_GATEWAY)`, holds it in process memory, never writes it to log/disk/report.
+- **Backend credentials never stored on instance post-startup.** `LLMGatewayServer` retrieves **up to one credential per authenticated backend** at startup via `credential_service.get_credential(OPS_TEAM_PM_ID, backend.credential_key)` — only for backends whose `credential_key is not None` (lab Ollama / vLLM are typically auth-less; `corp_llm` needs one) — holds them in process memory, never writes to log/disk/report. `OnPremLLMClient` holds **no** credential (client→gateway is an internal Ph-1 trust-domain hop). Per `[D-052]` impl-note addendum 2026-06-12.
 
 ---
 
@@ -414,7 +448,7 @@ These placeholders live in env config, not code — production env vars on the H
 ## Depends on
 
 - `diagnostics` — `ErrorCode`, `ReportWriter`, `QCTemplate` (LLG codes registered in `error_codes.py`).
-- `credential_service` — `get_credential(pm_id, SystemType.LLM_GATEWAY)` called once at `LLMGatewayServer` startup for each configured backend (one credential per backend in `BackendConfig.credential_key`).
+- `credential_service` — `get_credential(OPS_TEAM_PM_ID, backend.credential_key)` called once at `LLMGatewayServer` startup, **conditionally per backend** (only when `BackendConfig.credential_key is not None`); `credential_key` holds the per-backend `SystemType` value (`LLM_OLLAMA_A4000` / `LLM_VLLM_DGX` / `LLM_CORP_LLM`). Lab backends are typically auth-less. `OnPremLLMClient` does **not** depend on `credential_service` (client→gateway hop is unauthenticated within the Ph-1 trust domain). Per `[D-052]` impl-note addendum 2026-06-12.
 - `template_schema` — 5-value `DocType` enum (test_report / tech_report / waiver / compliance_certification_release_notes / unresolved per `[D-053]` impl note 2026-06-08) consumed by `CLASSIFY_DOC_TYPE` (FR-85) candidate set + `CLASSIFY_DOC` (`[D-039]` Step 2) family scope + `REVIEW_DOCUMENT` skip rule; `IngestSource` enum consumed by `CLASSIFY_DOC` inputs.
 
 ---
@@ -467,5 +501,38 @@ Fields: task (enum: TaskKind values), schema_valid (bool), latency_ms (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+### `app.py`
+- `make_app(gateway) -> FastAPI` — function — pub (via `__all__`) — thin gateway HTTP surface: `POST /invoke` + `GET /health`; maps PipelineError (LLG-*) to a JSON error body.
+
+### `backends.py`
+- `BackendResult` — frozendataclass — pub (via `__all__`) — (text, tokens_in, tokens_out) from a backend call.
+- `call_backend(client, backend_name, endpoint_url, model, prompt, *, ...) -> BackendResult` — function — pub (via `__all__`) — dispatch to Ollama (`/api/generate`) or OpenAI-compatible (`/chat/completions`); transport error → LLG-E001.
+
+### `client.py`
+- `OnPremLLMClient` — class — pub (via `__all__`) — caller-side LLMProvider; proxies to gateway `/invoke` over HTTP; NO credential param (per [D-052] addendum); retries transport errors; reconstructs structured LLG errors.
+
+### `gateway_server.py`
+- `BackendConfig` — frozendataclass — pub (via `__all__`) — one backend endpoint (name, endpoint_url, credential_key, rate limits, cold_load/batching flags).
+- `LLMGatewayServer` — class — pub (via `__all__`) — egress LLMProvider; sync `__init__` (on-prem/map/template validation) + async `start()` (conditional per-backend creds) + `invoke()` pipeline + `health()`; `set_http_client`, `backend_for`, `model_for`, `confidence_bucket` helpers.
+
+### `llm_cli.py`
+- `main() -> None` — function — pub — CLI: `--diagnostic` / `--mock` / `--contract` / `--invoke` per [D-005].
+
+### `mock.py`
+- `MockLLM` — class — pub (via `__all__`) — deterministic in-memory LLMProvider for tests; `register()` subset-match; unregistered → LLG-E001.
+
+### `protocol.py`
+- `LLMProvider` — Protocol — pub (via `__all__`) — async `invoke` + `health`; runtime_checkable.
+- `LLMRequest` / `LLMResponse` — frozendataclass — pub (via `__all__`) — request (task, inputs, opts) / response (task, output, model, latency, tokens).
+- `TaskKind` — Enum — pub (via `__all__`) — 5 Ph-1 tasks (route_attachment / classify_doc / classify_doc_type / review_document / classify_message).
+
+### `qc_templates.py`
+- `TASK_CONTRACT` — QCTemplate — pub (via `__all__`) — `LLG:task_contract`; registered at import.
+
+### `rate_limit.py`
+- `BackendRateLimiter` — class — pub (via `__all__`) — per-backend fixed-window limiter; LLG-W006 on exhaustion (no spillover), LLG-W005 approaching; unlimited when no rate_limit_* set.
+
+### `schemas.py`
+- `ClassifyDocTypeInput` / `Output`, `ClassifyDocInput` / `Output`, `ExistingDocCandidate`, `RouteAttachmentInput` / `Match` / `Output`, `ReviewDocumentInput` / `Output`, `ClassifyMessageInput` / `Output` — Pydantic BaseModel (ExistingDocCandidate frozendataclass) — pub (via `__all__`) — per-TaskKind structured I/O.
+- `INPUT_SCHEMAS` / `OUTPUT_SCHEMAS` — module constant — pub (via `__all__`) — TaskKind → schema registries.
 <!-- END:STRUCTURE -->

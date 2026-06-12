@@ -1,0 +1,9 @@
+Review the {{ doc_type }} against the acceptance checklist. For each criterion, decide pass/fail/needs_review.
+Return ONLY JSON: {"findings": [{"checklist_item_id": "<id>", "status": "pass"|"fail"|"needs_review", "evidence_span": "<text>"}], "overall_verdict": "pass"|"fail"|"needs_review"}.
+
+Checklist:
+{% for c in checklist %}- {{ c.id }}: {{ c.description }} (severity: {{ c.severity }})
+{% endfor %}
+
+Document excerpt:
+{{ doc_excerpt }}

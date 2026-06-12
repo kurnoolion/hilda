@@ -1,0 +1,5 @@
+Classify the message intent into exactly one of: {{ candidate_intents | join(", ") }}.
+Return ONLY JSON: {"intent": "<one of the candidates>", "confidence": <0.0-1.0>}.
+
+Message:
+{{ body }}
