@@ -34,3 +34,46 @@ Drafts of decision-worthy items surfaced during this strand. Promoted to canonic
 - Storage's `tpm_resolve_doc_type` + `tpm_resolve_revision` + `reassign_document_to_workitem` storage APIs (already landed per `D-071` / `D-072`) are unchanged — the same APIs serve both the old SP-alert model (if revived) and the new HILDA-tab POST model. The strand work for FR-87 is purely in dashboard (new endpoints) + sharepoint_config (column permission discipline).
 
 **Anchors**: `[D-074]` (Variant A SP↔HILDA integration); `[D-053]` impl note 2026-06-08 (FR-87 strict A → B → C); `[D-047]` (SP-alert channel — FR-87 no longer uses it); `[D-064]` (HILDA→SP REST writeback — used for audit-column updates after FR-87 click); `[D-006]` (Kerberos auth — covers HILDA-tab same-origin POST).
+
+---
+
+## D-DRAFT-FR87-ASYNC: FR-87 button POST handler is sync-validate-and-enqueue; async tail runs in workflow_engine; async-tail errors surface via 3 channels
+
+**Date drafted**: 2026-06-12
+
+**Context**: D-DRAFT-FR87 locked that FR-87 buttons move to HILDA-tab same-origin POST. The dashboard endpoint POST handler must decide: (a) block on full FR-87 processing (sync to TPM, including the `[D-039]` Step 2 LLM re-run for Step B which is 10-30s) and return either form-redisplay-error or 303-redirect-with-final-state; OR (b) do only sync work (validation + immediate storage write + workflow_engine task enqueue) and return 303 in <500ms, with the async tail completing in workflow_engine and errors surfacing via separate UX channels after the redirect. The original D-DRAFT-FR87 wording conflated these — "invalid choices rejected at the endpoint" was vague about whether all errors block or only validation errors block.
+
+**Decision**: **Option (b) — sync-validate-and-enqueue.** Dashboard's FR-87 POST handlers do **only** synchronous work:
+- Validate auth, Choice-value membership, FR-86 alignment, target item (Step A), `doc_id_slug` existence (Step C), FR-87 button token freshness
+- Call storage's `reassign_document_to_workitem` / `tpm_resolve_doc_type` / `tpm_resolve_revision` for the immediate DB row update + NSD file move (sub-second)
+- Enqueue workflow_engine task for the async tail
+- Return 303 redirect to `GET /docs/<delivery_item_id>`
+
+Net latency target: **sync POST handler returns 303 in <500ms** (validation + sub-second storage + sub-second enqueue). Async tail in workflow_engine: `[D-039]` Step 2 LLM re-run (Step B only; 10-30s typical); FR-86 storage matrix re-run; final NSD path move if `[D-039]` resolves; FR-77 carrier-upload if doc reaches classified (subject to `no_customer_upload`); `[D-064]` SP writeback for audit columns; review pipeline trigger if `review_required=true`.
+
+**Sync errors surface as form-redisplay**: DSH-E005 (target item invalid Step A), DSH-E006 (FR-86 alignment violation Step B), DSH-E007 (revision picker mismatch Step C), STR-E005 (cross-milestone association), STR-E007 (expired button token).
+
+**Async-tail errors surface to TPM via three channels** (in priority order):
+- **(α) Primary — inline document-row badge on next `/docs/<delivery_item_id>` visit**: dashboard renders the row with a status badge read from CommunicationLog query on `(file_hash, delivery_item_id)` — e.g., "🔴 `[D-039]` re-run failed: LLM gateway timeout. Retry?" with retry button.
+- **(β) Secondary — top-of-page banner on `/docs/<delivery_item_id>`**: for the most recent FR-87 action within N minutes (configurable; default 5 min), show banner: "Last action `tpm_resolve_doc_type` had a downstream error: <message>. [Retry] [Dismiss]". Per-TPM session.
+- **(γ) Escalation — TPM email**: when async failure is unrecoverable AND > N minutes elapsed since submit (configurable; default 10 min), send TPM email with error details + retry link. Reserved for genuinely-stuck cases — too noisy as primary channel.
+
+**Why option (b)**:
+- **(a) sync model**: rejected — 10-30s blocked HTTP response is poor UX (corp reverse proxy may timeout; blocks dashboard worker thread; user perceives "frozen page"; not consistent with HILDA's async-by-default workflow_engine pattern). The cleaner either-or outcome is appealing but the latency cost is too high.
+- **(b) async-with-status (chosen)**: matches HILDA's overall async pattern; sub-500ms HTTP response keeps reverse proxy happy; TPM experience: click → immediate redirect → "processing" badge → eventual completion (via focus refresh OR new tab opens). The three-channel async-error UX (badge / banner / email) gracefully handles real-world async failures including LLM timeouts and SP writeback latency.
+
+**Rejected alternatives**:
+- **(γ) WebSocket/SSE push notifications** for async completion: rejected — adds JS state engine to dashboard's "no SPA, no client-side framework" Invariant; same-origin would work in HILDA tab, but the badge-on-next-render approach is simpler and matches server-render-only discipline.
+- **(δ) Synchronous AJAX polling from HILDA tab to dashboard for async status**: rejected — same reason as γ; introduces client-side JS state.
+- **(ε) Long-polling**: rejected — same.
+
+**Consequences**:
+- Dashboard's FR-87 POST handlers MUST be sub-500ms-budget; LLM calls + FR-77 + SP writeback MUST be in workflow_engine task bodies, not in dashboard's sync path.
+- Dashboard adds inline-badge + top-of-page-banner rendering to `GET /docs/<delivery_item_id>` — reads CommunicationLog for status of recent FR-87 actions on docs in this DeliveryItem; renders the appropriate badge/banner.
+- workflow_engine task body for FR-87 async tail emits CommunicationLog rows on success AND failure (with detailed error code + message); these rows drive the dashboard's badge/banner rendering.
+- New error codes for the async-tail outcomes: `DSH-W003` (FR-87 async tail in progress; informational), `DSH-W004` (FR-87 async tail failed; surfaced as badge); existing `LLG-W006` (LLM rate-limit; surfaced as badge for Step B specifically); existing `STR-W007` (stale-staged-document) might fire if NSD path move fails post-commit.
+- TPM email integration for escalation channel (γ): uses existing `email_service` outbound capability; new email template for FR-87 stuck-resolution notification; rate-limited (one email per (TPM, document) pair per 24h).
+- FR-87 button token freshness check: tokens generated at HTML-render time (per FR-61 download token pattern); 300s TTL; STR-E007 if expired (form-redisplay with "session expired" + auto-redirect to fresh `/docs/<id>`).
+- Async-tail errors that occur DURING the workflow_engine task body retry per workflow_engine's standard Celery retry policy; only after retries exhaust does the error become user-surfaced via channels (α)/(β)/(γ).
+
+**Anchors**: `[D-022]` (Celery + Redis broker — workflow_engine async pattern); `[D-074]` (Variant A SP↔HILDA integration); `[D-039]` (LLM revision determination — Step 2 is the long-haul work in FR-87 Step B); `[D-064]` (HILDA→SP REST writeback for audit columns); D-DRAFT-FR87 (parent decision; this one refines the sync/async boundary).
