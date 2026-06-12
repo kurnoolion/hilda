@@ -474,6 +474,26 @@ class TestLoader:
             RuleSet.load(rules_tree, BrokenStore())
         assert exc.value.code_id == "RUL-E005"
 
+    def test_same_rule_id_across_kinds_warns_w008(self, tmp_path, caplog):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "both.yaml").write_text(
+            "rules:\n"
+            "  - rule_id: dual_use_id\n"
+            "    trigger: StateChange\n"
+            "    actions:\n"
+            "      - kind: NotifyPM\n"
+            "        params: {}\n"
+            "polling_schedules:\n"
+            "  - rule_id: dual_use_id\n"
+            "    tiers:\n"
+            "      - { days_before_deadline: null, interval_minutes: 60 }\n"
+        )
+        with caplog.at_level("WARNING"):
+            rs = RuleSet.load(tmp_path / "rules")  # legal — uniqueness key includes kind
+        assert "dual_use_id" in rs.all_rule_ids()
+        assert any("RUL-W008" in r.message and "dual_use_id" in r.message for r in caplog.records)
+
     def test_reload_picks_up_yaml_change(self, rules_tree):
         rs = RuleSet.load(rules_tree)
         assert len(rs.rules_for_scope(RuleScope.GLOBAL, {})) == 6
@@ -552,6 +572,22 @@ class TestResolver:
         with pytest.raises(PipelineError) as exc:
             resolve_polling_schedule_for_item(rs, ENTITY, rule_id="no_such_schedule")
         assert exc.value.code_id == "RUL-E002"
+
+    def test_unsupported_override_payload_key_warns_w007(self, rules_tree, caplog):
+        typo_override = ItemOverride(
+            delivery_item_id="I-1234",
+            rule_id="default_polling_schedule",
+            override_payload={"teirs": [{"days_before_deadline": None, "interval_minutes": 30}]},  # typo'd key
+            created_by_pm_id="tpm-003",
+            source_tier=RuleScope.GLOBAL,
+            created_at=datetime(2026, 6, 12),
+        )
+        rs = RuleSet.load(rules_tree, InMemoryOverrideStore([typo_override]))
+        with caplog.at_level("WARNING"):
+            rule = resolve_polling_schedule_for_item(rs, ENTITY)
+        # typo'd key is ignored, not a silent no-op: YAML rule unchanged + RUL-W007 logged
+        assert rule.source == "yaml"
+        assert any("RUL-W007" in r.message and "teirs" in r.message for r in caplog.records)
 
 
 class PausedItems:
@@ -643,12 +679,16 @@ class TestEvaluator:
         assert matches == []
         assert any("RUL-W005" in r.message for r in caplog.records)
 
-    def test_missing_condition_field_means_no_match(self, rules_tree):
+    def test_missing_condition_field_fails_closed_with_w006(self, rules_tree, caplog):
         engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
-        matches = engine.evaluate(event_for(TriggerKind.LAST_CONTACT_THRESHOLD,
-                                            entity=EntityRef(customer_slug="carrier-alpha")))
+        with caplog.at_level("WARNING"):
+            matches = engine.evaluate(event_for(TriggerKind.LAST_CONTACT_THRESHOLD,
+                                                entity=EntityRef(customer_slug="carrier-alpha")))
         # conditional rules can't evaluate without the field; unconditional alpha_cc still fires
         assert {m.rule_id for m in matches} == {"alpha_cc_tg_lead"}
+        # fail-closed but visible: RUL-W006 per architect ruling 2026-06-12
+        w006 = [r.message for r in caplog.records if "RUL-W006" in r.message]
+        assert any("reminder_count_unanswered" in m for m in w006)
 
     def test_explain_trace(self, rules_tree):
         engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())

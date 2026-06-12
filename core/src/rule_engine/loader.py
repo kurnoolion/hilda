@@ -22,7 +22,7 @@ from typing import Any, Iterator
 
 import yaml
 
-from core.src.diagnostics import PipelineError
+from core.src.diagnostics import PipelineError, format_code
 from core.src.template_schema import RuleScope
 
 from .collision_audit import CollisionFinding, collision_audit_update_state
@@ -193,14 +193,27 @@ class RuleSet:
                         rules.extend(_parse_file(path, RuleScope.DEVICE, device_keys))
 
         seen: set[tuple[RuleScope, tuple[tuple[str, str], ...], RuleKind, str]] = set()
+        kinds_by_id: dict[tuple[RuleScope, tuple[tuple[str, str], ...], str], set[RuleKind]] = defaultdict(set)
         for rule in rules:
-            bucket = (rule.scope, tuple(sorted(rule.scope_keys.items())), rule.kind, rule.rule_id)
+            keys_t = tuple(sorted(rule.scope_keys.items()))
+            bucket = (rule.scope, keys_t, rule.kind, rule.rule_id)
             if bucket in seen:
                 raise PipelineError(
                     "RUL-E001",
                     {"rule_id": rule.rule_id, "scope": rule.scope.value, "keys": str(rule.scope_keys)},
                 )
             seen.add(bucket)
+            kinds_by_id[(rule.scope, keys_t, rule.rule_id)].add(rule.kind)
+        # RUL-W008 config-smell per architect ruling 2026-06-12: same rule_id under both kinds
+        # in the same scope is legal (the uniqueness key includes kind) but confusing for
+        # orphan-audit and --explain readability.
+        for (scope, keys_t, rule_id), kinds in kinds_by_id.items():
+            if len(kinds) > 1:
+                logger.warning(
+                    "RUL-W008: " + format_code(
+                        "RUL-W008", rule_id=rule_id, scope=scope.value, keys=str(dict(keys_t)),
+                    )
+                )
 
         overrides: dict[tuple[str, str], ItemOverride] = {}
         if override_store is not None:

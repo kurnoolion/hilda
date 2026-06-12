@@ -45,12 +45,16 @@ def _event_field(event: TriggerEvent, name: str) -> Any:
     return _MISSING
 
 
-def _eval_leaf(cond: dict[str, Any], event: TriggerEvent) -> bool:
+def _eval_leaf(cond: dict[str, Any], event: TriggerEvent, rule_id: str) -> bool:
     op = cond.get("op")
     if op not in _LEAF_OPS:
         raise _UnsupportedOperator(str(op))
-    actual = _event_field(event, str(cond.get("field")))
+    field_name = str(cond.get("field"))
+    actual = _event_field(event, field_name)
     if actual is _MISSING:
+        # Fail-closed, but visibly — a typo'd field name must not silently kill a rule
+        # forever (RUL-W006 per architect ruling 2026-06-12).
+        logger.warning("RUL-W006: " + format_code("RUL-W006", rule_id=rule_id, field=field_name))
         return False
     expected = cond.get("value")
     try:
@@ -71,14 +75,14 @@ def _eval_leaf(cond: dict[str, Any], event: TriggerEvent) -> bool:
         return False  # incomparable types never match
 
 
-def _eval_condition(cond: dict[str, Any] | None, event: TriggerEvent) -> bool:
+def _eval_condition(cond: dict[str, Any] | None, event: TriggerEvent, rule_id: str) -> bool:
     if cond is None:
         return True
     if "and" in cond:
-        return all(_eval_condition(sub, event) for sub in cond["and"])
+        return all(_eval_condition(sub, event, rule_id) for sub in cond["and"])
     if "or" in cond:
-        return any(_eval_condition(sub, event) for sub in cond["or"])
-    return _eval_leaf(cond, event)
+        return any(_eval_condition(sub, event, rule_id) for sub in cond["or"])
+    return _eval_leaf(cond, event, rule_id)
 
 
 class RuleEngine:
@@ -92,7 +96,7 @@ class RuleEngine:
 
     def _condition_matches(self, rule: Rule, event: TriggerEvent) -> bool:
         try:
-            return _eval_condition(rule.condition, event)
+            return _eval_condition(rule.condition, event, rule.rule_id)
         except _UnsupportedOperator as exc:
             logger.warning("RUL-W005: " + format_code("RUL-W005", op=exc.op, rule_id=rule.rule_id))
             return False

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from core.src.diagnostics import PipelineError
+from core.src.diagnostics import PipelineError, format_code
 from core.src.template_schema import RuleScope
 
 from .loader import RuleSet
@@ -54,11 +54,13 @@ def _apply_item_override(rule_set: RuleSet, entity_ref: EntityRef, rule: Rule) -
         return rule
 
     payload = override.override_payload
-    unsupported = set(payload) - _PH1_OVERRIDE_KEYS
-    if unsupported:
-        logger.debug(
-            "FR-31 override for (item=%s, rule=%s) carries Ph-2 keys %s — not applied in Ph-1",
-            override.delivery_item_id, rule.rule_id, sorted(unsupported),
+    for key in sorted(set(payload) - _PH1_OVERRIDE_KEYS):
+        # RUL-W007 per architect ruling 2026-06-12: a typo'd payload key must not be a
+        # silent no-op.
+        logger.warning(
+            "RUL-W007: " + format_code(
+                "RUL-W007", key=key, rule_id=rule.rule_id, delivery_item_id=override.delivery_item_id,
+            )
         )
 
     if rule.kind is RuleKind.POLLING_SCHEDULE and "tiers" in payload:

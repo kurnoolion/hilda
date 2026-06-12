@@ -30,6 +30,9 @@ def evaluate_polling_schedule(
 
     Tiers are evaluated in ascending order of days_before_deadline; the most specific tier
     whose breakpoint covers days_to_deadline (days_to_deadline <= days_before_deadline) wins.
+    The boundary is INCLUSIVE: at exactly N days to deadline, the N-day tier applies
+    (architect-confirmed 2026-06-12). Negative days_to_deadline (past deadline) falls into
+    the tightest tier — past deadline polls fastest.
     The baseline tier (days_before_deadline=None) must be present and applies when no
     breakpoint covers; if missing, RUL-W004 is logged and `default_baseline_minutes` is the
     fallback. Example with tiers [{60min baseline}, {3 days, 15min}, {1 day, 5min}]:
