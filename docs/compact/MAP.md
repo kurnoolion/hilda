@@ -6,12 +6,13 @@ _Generated 2026-06-12 by regen-map. Do not hand-edit._
 |---|---|---|
 | [credential_service](../../core/src/credential_service/MODULE.md) | Single read-only interface (`get_credential(pm_id, system_type) -> Credential`) that returns the credential material every outbound adapter needs to authenticate against external systems (corp PLM via gateway, customer JIRA, corp messenger via gateway, customer portals, email mailbox, SharePoint service account). | |
 | [customer_adapter](../../core/src/customer_adapter/MODULE.md) | Single Protocol-mediated surface (`CustomerAdapter`) for HILDA's outbound carrier submission — upload individual document files (per `[D-054]` — individual files only, never zips) to each carrier's submission destination + emit `CommunicationLog` entries per FR-42. | [DRAFT] |
+| [dashboard](../../core/src/dashboard/MODULE.md) | HTTP entry point for HILDA — the FastAPI app that backs `hilda-api`. | [DRAFT] |
 | [diagnostics](../../core/src/diagnostics/MODULE.md) | Central registry and schema library for HILDA's chat-mediated collaboration surface. | |
 | [email_service](../../core/src/email_service/MODULE.md) | All email-mediated communication for HILDA — inbound owner replies (FR-12), inbound SP-alert notifications (`[D-047]` + FR-84 + FR-87), outbound owner outreach (FR-9), outbound reminders + escalations (FR-10), the FR-52 5-step routing pipeline driver, the FR-85 doc_type classification driver, and the FR-86 storage matrix dispatcher. | [DRAFT] |
 | [issue_tracker (core)](../../core/src/issue_tracker/MODULE.md) | Implements the `IssueTracker` Protocol per `[D-008]` — issue-tracking integration for DeliveryItems whose `tracking_modality` includes `CorporatePLM` or `CustomerJIRA` per `[D-037]` (multi-value enum). | |
 | [issue_tracker (customizations)](../../customizations/issue_tracker/MODULE.md) | Drop-in directory for proprietary IssueTracker adapters. | |
 | [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | |
-| [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). | [DRAFT] |
+| [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). | |
 | [rules (customizations)](../../customizations/rules/MODULE.md) | **Per-deployment drop-zone** for HILDA AutomationRules + polling-schedule rules that `core/src/rule_engine.RuleSet.load` consumes at startup (and on SIGHUP `reload()`) per FR-30. | [DRAFT] |
 | [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
 | [sharepoint_integration](../../core/src/sharepoint_integration/MODULE.md) | All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. | |
@@ -26,6 +27,7 @@ _Generated 2026-06-12 by regen-map. Do not hand-edit._
 flowchart LR
     m_credential_service[credential_service]
     m_customer_adapter[customer_adapter]
+    m_dashboard[dashboard]
     m_diagnostics[diagnostics]
     m_email_service[email_service]
     m_issue_tracker[issue_tracker]
@@ -45,6 +47,10 @@ flowchart LR
     m_customer_adapter --> m_credential_service
     m_customer_adapter --> m_storage
     m_customer_adapter --> m_template_schema
+    m_dashboard --> m_diagnostics
+    m_dashboard --> m_storage
+    m_dashboard --> m_template_schema
+    m_dashboard --> m_workflow_engine
     m_email_service --> m_diagnostics
     m_email_service --> m_credential_service
     m_email_service --> m_storage
@@ -126,6 +132,9 @@ hilda/
 │   │   ├── customer_adapter/                  # Single Protocol-mediated surface (CustomerAdapter) for HILDA's outbound carrier submission — uploads individual document files per [D-054] and emits CommunicationLog entries per FR-42.
 │   │   │   ├── MODULE.md
 │   │   │   └── __init__.py
+│   │   ├── dashboard/                         # HTTP entry point for HILDA — the FastAPI app that backs hilda-api.
+│   │   │   ├── MODULE.md
+│   │   │   └── __init__.py
 │   │   ├── diagnostics/                       # Central registry and schema library for HILDA's chat-mediated collaboration surface.
 │   │   │   ├── MODULE.md
 │   │   │   ├── __init__.py                    # diagnostics — central registry + compact report schemas + QC template base.
@@ -163,7 +172,21 @@ hilda/
 │   │   │       └── route_attachment.j2
 │   │   ├── rule_engine/                       # Pure evaluator for HILDA's IF/THEN AutomationRules per [D-022] — given a TriggerEvent (one of the 15 Ph-1 triggers per FR-28) plus an EntityRef, returns the ordered set of RuleMatch tuples that should fire — each carrying an intra-rule-ordered list of RuleActions (Ph-1 subset of FR-29).
 │   │   │   ├── MODULE.md
-│   │   │   └── __init__.py
+│   │   │   ├── __init__.py                    # rule_engine — pure evaluator for HILDA's IF/THEN AutomationRules per [D-022].
+│   │   │   ├── collision_audit.py             # Startup collision audit: RUL-W001 when distinct rule_ids both write UpdateState on the same trigger.
+│   │   │   ├── config.py                      # rule_engine operational config — 3-tier precedence per [D-025] + [D-038].
+│   │   │   ├── diagnostics_cli.py             # rule_engine diagnostic CLI — --diagnostic / --validate / --explain modes per [D-005].
+│   │   │   ├── error_codes.py                 # RUL-prefixed error codes for rule_engine.
+│   │   │   ├── evaluator.py                   # Pure trigger -> list[RuleMatch] evaluator.
+│   │   │   ├── loader.py                      # YAML rule loader.
+│   │   │   ├── models.py                      # Models for rule_engine per MODULE.md Public surface.
+│   │   │   ├── orphan_audit.py                # Startup orphan audit per [D-062].
+│   │   │   ├── override_store.py              # OverrideStore seam — FR-31 item-level runtime overrides.
+│   │   │   ├── pause_state.py                 # FR-31 sub-1 pause/resume read-side.
+│   │   │   ├── polling_schedule.py            # Deadline-tiered polling_schedule breakpoint evaluator per FR-23 / FR-55.
+│   │   │   ├── qc_templates.py                # RUL QC template — registered in the central diagnostics QC registry at import.
+│   │   │   ├── resolver.py                    # Scope-precedence resolver per FR-30 + FR-31.
+│   │   │   └── rule_engine_cli.py             # User-facing CLI wrapper for ops debugging per [D-005].
 │   │   ├── sharepoint_integration/            # All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names.
 │   │   │   ├── MODULE.md
 │   │   │   ├── __init__.py                    # sharepoint_integration — SP REST mechanics + HILDA-entity routing.
@@ -217,6 +240,7 @@ hilda/
 │       ├── test_issue_tracker.py              # Unit tests for core.src.issue_tracker — Protocol, data classes, MockIssueTracker, load_adapter.
 │       ├── test_llm.py                        # llm tests — protocol, schemas, MockLLM, gateway init/invoke, rate limiter, client↔gateway round-trip, CLI.
 │       ├── test_mock_server.py                # Unit tests for mock SP server (REST + UI).
+│       ├── test_rule_engine.py                # Tests for rule_engine models + polling_schedule (Ph-1, rule-engine-v1 strand).
 │       ├── test_sharepoint_integration.py     # Unit tests for sharepoint_integration core (no mock server).
 │       ├── test_sharepoint_integration_cli.py # Integration tests for sharepoint_integration_cli.
 │       ├── test_storage.py                    # storage tests — NSD paths/IO, document index, associations, fan-out, tokens, redis TTL cap, overrides, folder routing, tag catalog, comm-log, CLI smoke.
@@ -233,7 +257,9 @@ hilda/
 │   │       └── test_contract.py               # Contract test suite for IssueTracker adapters (C01-C10).
 │   ├── rules/                                 # Per-deployment drop-zone for HILDA AutomationRules + polling-schedule rules that core/src/rule_engine.RuleSet.load consumes at startup (and on SIGHUP reload()) per FR-30.
 │   │   ├── MODULE.md
-│   │   └── __init__.py
+│   │   ├── __init__.py
+│   │   └── global/
+│   │       └── defaults.yaml                  # Global (tier-1) AutomationRules — seeded from rule_engine/MODULE.md worked examples.
 │   └── sharepoint_config/                     # Per-customer-deployment drop-zone for SP list/column mappings that core/src/sharepoint_integration/FileBasedListProvider consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names.
 │       ├── MODULE.md
 │       ├── __init__.py
@@ -255,20 +281,42 @@ hilda/
 │   │   ├── project-init-interview.md
 │   │   ├── requirements.md
 │   │   ├── strands/
-│   │   │   └── _archive/
-│   │   │       ├── credential-service-v1-implementation/
-│   │   │       │   ├── STRAND.md
-│   │   │       │   ├── decisions-draft.md
-│   │   │       │   └── journal.md
-│   │   │       └── template-schema-v2-rewrite/
-│   │   │           ├── STRAND.md
-│   │   │           ├── decisions-draft.md
-│   │   │           └── journal.md
+│   │   │   ├── _archive/
+│   │   │   │   ├── credential-service-v1-implementation/
+│   │   │   │   │   ├── STRAND.md
+│   │   │   │   │   ├── decisions-draft.md
+│   │   │   │   │   └── journal.md
+│   │   │   │   ├── sharepoint-integration-drift-sweep/
+│   │   │   │   │   ├── STRAND.md
+│   │   │   │   │   ├── decisions-draft.md
+│   │   │   │   │   └── journal.md
+│   │   │   │   ├── storage-v1/
+│   │   │   │   │   ├── STRAND.md
+│   │   │   │   │   ├── decisions-draft.md
+│   │   │   │   │   └── journal.md
+│   │   │   │   └── template-schema-v2-rewrite/
+│   │   │   │       ├── STRAND.md
+│   │   │   │       ├── decisions-draft.md
+│   │   │   │       └── journal.md
+│   │   │   ├── dashboard-v1/
+│   │   │   │   ├── STRAND.md
+│   │   │   │   ├── decisions-draft.md
+│   │   │   │   └── journal.md
+│   │   │   ├── llm-v1/
+│   │   │   │   ├── STRAND.md
+│   │   │   │   ├── decisions-draft.md
+│   │   │   │   └── journal.md
+│   │   │   └── rule-engine-v1/
+│   │   │       ├── STRAND.md
+│   │   │       ├── decisions-draft.md
+│   │   │       └── journal.md
 │   │   └── structure-conventions.md
 │   └── sp_ui_engineer/
+│       ├── DeliveryItem_visibility_review.xlsx
 │       └── HILDA_SP_Schema.xlsx
 ├── pyproject.toml
 ├── requirements.txt
 └── sharepoint/
-    └── REQUIREMENTS.md
+    ├── REQUIREMENTS.md
+    └── SP_UI_summary_requirements.md
 ```
