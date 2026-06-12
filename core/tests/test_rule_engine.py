@@ -273,3 +273,508 @@ class TestEvaluatePollingSchedule:
             PollingScheduleTier(1, 2),
         )
         assert evaluate_polling_schedule(override, 2) == 10
+
+
+# ---------------------------------------------------------------------------
+# Loader / resolver / evaluator / audits / CLI (worked-example tree)
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+from core.src.diagnostics import PipelineError  # noqa: E402
+from core.src.rule_engine import (  # noqa: E402
+    InMemoryOverrideStore,
+    ItemOverride,
+    NoPauseState,
+    RuleEngine,
+    RuleSet,
+    collision_audit_update_state,
+    orphan_audit_postgres_overrides,
+    resolve_polling_schedule_for_item,
+    resolve_rules_for_entity,
+)
+from core.src.rule_engine.rule_engine_cli import main as cli_main  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+GLOBAL_YAML = """
+rules:
+  - rule_id: handle_owner_reassignment
+    trigger: ItemModified
+    sub_trigger: OwnerReassigned
+    condition: null
+    actions:
+      - kind: NotifyNewOwner
+        params: { template: owner_reassignment_notice, channel: email }
+      - kind: StartItemCollection
+        params: {}
+  - rule_id: send_reminder_on_no_contact
+    trigger: LastContactThreshold
+    condition: { field: reminder_count_unanswered, op: lt, value: 3 }
+    actions:
+      - kind: SendReminder
+        params: { template: standard_owner_reminder, channel: email }
+  - rule_id: escalate_after_3_misses
+    trigger: LastContactThreshold
+    condition: { field: reminder_count_unanswered, op: gte, value: 3 }
+    actions:
+      - kind: Escalate
+        params: { channel: corp_messenger }
+      - kind: NotifyPM
+        params: { urgency: medium }
+  - rule_id: advance_state_on_doc_count_reached
+    trigger: AttachmentReceived
+    condition: { field: doc_count_reached, op: eq, value: true }
+    actions:
+      - kind: UpdateState
+        params: { target_state: DocumentReceived }
+      - kind: TriggerAIReview
+        params: {}
+  - rule_id: review_on_supplementary_attachment
+    trigger: AttachmentReceived
+    condition:
+      and:
+        - { field: doc_count_reached, op: eq, value: false }
+        - { field: review_required,   op: eq, value: true  }
+    actions:
+      - kind: TriggerAIReview
+        params: {}
+
+polling_schedules:
+  - rule_id: default_polling_schedule
+    tiers:
+      - { days_before_deadline: null, interval_minutes: 60 }
+      - { days_before_deadline: 3,    interval_minutes: 15 }
+      - { days_before_deadline: 1,    interval_minutes: 5  }
+"""
+
+CUSTOMER_YAML = """
+rules:
+  - rule_id: send_reminder_on_no_contact          # same rule_id as Global -> OVERRIDES
+    trigger: LastContactThreshold
+    condition: { field: reminder_count_unanswered, op: lt, value: 3 }
+    actions:
+      - kind: SendReminder
+        params: { template: alpha_branded_reminder, channel: email }
+  - rule_id: alpha_cc_tg_lead                      # NEW rule_id -> ADDITIVE
+    trigger: LastContactThreshold
+    condition: null
+    actions:
+      - kind: NotifyPM
+        params: { recipient: tg_lead, urgency: low }
+"""
+
+DEVICE_YAML = """
+rules:
+  - rule_id: alpha_cc_tg_lead                      # device tier replaces customer tier
+    trigger: LastContactThreshold
+    condition: null
+    actions:
+      - kind: NotifyPM
+        params: { recipient: device_lead, urgency: high }
+"""
+
+
+@pytest.fixture()
+def rules_tree(tmp_path: Path) -> Path:
+    rules_dir = tmp_path / "rules"
+    (rules_dir / "global").mkdir(parents=True)
+    (rules_dir / "global" / "defaults.yaml").write_text(GLOBAL_YAML)
+    (rules_dir / "carrier-alpha").mkdir()
+    (rules_dir / "carrier-alpha" / "customer_rules.yaml").write_text(CUSTOMER_YAML)
+    (rules_dir / "carrier-alpha" / "smartphone-X").mkdir()
+    (rules_dir / "carrier-alpha" / "smartphone-X" / "device_rules.yaml").write_text(DEVICE_YAML)
+    return rules_dir
+
+
+def event_for(trigger: TriggerKind, *, sub_trigger=None, field_deltas=None, derived_fields=None,
+              entity: EntityRef = ENTITY) -> TriggerEvent:
+    return TriggerEvent(
+        trigger=trigger,
+        sub_trigger=sub_trigger,
+        entity_ref=entity,
+        field_deltas=field_deltas,
+        timestamp=datetime(2026, 6, 12, 14, 30),
+        correlation_id="evt-test",
+        derived_fields=derived_fields,
+    )
+
+
+class TestLoader:
+    def test_loads_all_tiers(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        assert len(rs.rules_for_scope(RuleScope.GLOBAL, {})) == 6  # 5 trigger + 1 polling
+        assert len(rs.rules_for_scope(RuleScope.CUSTOMER, {"customer_slug": "carrier-alpha"})) == 2
+        assert len(rs.rules_for_scope(RuleScope.DEVICE,
+                                      {"customer_slug": "carrier-alpha", "device_slug": "smartphone-X"})) == 1
+        assert "default_polling_schedule" in rs.all_rule_ids()
+
+    def test_repo_sample_global_defaults_loads(self):
+        rs = RuleSet.load(REPO_ROOT / "customizations" / "rules")
+        assert len(rs.all_rules()) == 6
+        assert not rs.collision_findings
+
+    def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):
+        extra = rules_tree / "global" / "zz_dup.yaml"
+        extra.write_text(
+            "rules:\n  - rule_id: send_reminder_on_no_contact\n    trigger: LastContactThreshold\n"
+            "    actions:\n      - kind: SendReminder\n        params: {}\n"
+        )
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(rules_tree)
+        assert exc.value.code_id == "RUL-E001"
+
+    def test_same_rule_id_across_tiers_is_not_duplicate(self, rules_tree):
+        RuleSet.load(rules_tree)  # send_reminder_on_no_contact exists at Global + Customer
+
+    def test_missing_required_field_raises_e002(self, tmp_path):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "bad.yaml").write_text("rules:\n  - rule_id: r1\n    actions:\n      - kind: SendReminder\n")
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(tmp_path / "rules")
+        assert exc.value.code_id == "RUL-E002"
+
+    def test_unknown_trigger_raises_e003(self, tmp_path):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "bad.yaml").write_text(
+            "rules:\n  - rule_id: r1\n    trigger: NotATrigger\n    actions:\n      - kind: SendReminder\n"
+        )
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(tmp_path / "rules")
+        assert exc.value.code_id == "RUL-E003"
+
+    def test_unknown_action_raises_e004(self, tmp_path):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "bad.yaml").write_text(
+            "rules:\n  - rule_id: r1\n    trigger: StateChange\n    actions:\n      - kind: LaunchMissiles\n"
+        )
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(tmp_path / "rules")
+        assert exc.value.code_id == "RUL-E004"
+
+    def test_item_modified_without_sub_trigger_is_shape_error(self, tmp_path):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "bad.yaml").write_text(
+            "rules:\n  - rule_id: r1\n    trigger: ItemModified\n    actions:\n      - kind: SendReminder\n"
+        )
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(tmp_path / "rules")
+        assert exc.value.code_id == "RUL-E002"
+
+    def test_override_store_failure_raises_e005(self, rules_tree):
+        class BrokenStore:
+            def list_active(self):
+                raise ConnectionError("pg down")
+
+        with pytest.raises(PipelineError) as exc:
+            RuleSet.load(rules_tree, BrokenStore())
+        assert exc.value.code_id == "RUL-E005"
+
+    def test_reload_picks_up_yaml_change(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        assert len(rs.rules_for_scope(RuleScope.GLOBAL, {})) == 6
+        (rules_tree / "global" / "extra.yaml").write_text(
+            "rules:\n  - rule_id: extra_rule\n    trigger: StateChange\n"
+            "    actions:\n      - kind: NotifyPM\n        params: {}\n"
+        )
+        rs.reload()
+        assert "extra_rule" in rs.all_rule_ids()
+
+
+OVERRIDE = ItemOverride(
+    delivery_item_id="I-1234",
+    rule_id="default_polling_schedule",
+    override_payload={"tiers": [
+        {"days_before_deadline": None, "interval_minutes": 30},
+        {"days_before_deadline": 3, "interval_minutes": 10},
+        {"days_before_deadline": 1, "interval_minutes": 2},
+    ]},
+    created_by_pm_id="tpm-003",
+    source_tier=RuleScope.GLOBAL,
+    created_at=datetime(2026, 6, 10, 13, 0),
+)
+
+
+class TestResolver:
+    def test_we2_ladder_override_and_additive(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        entity = EntityRef(customer_slug="carrier-alpha")  # no device tier
+        rules = resolve_rules_for_entity(rs, entity, TriggerKind.LAST_CONTACT_THRESHOLD)
+        by_id = {r.rule_id: r for r in rules}
+        assert set(by_id) == {"send_reminder_on_no_contact", "escalate_after_3_misses", "alpha_cc_tg_lead"}
+        # customer tier replaced global per rule_id (branded template)
+        assert by_id["send_reminder_on_no_contact"].scope is RuleScope.CUSTOMER
+        assert by_id["send_reminder_on_no_contact"].actions[0].params["template"] == "alpha_branded_reminder"
+        # no customer override -> global wins
+        assert by_id["escalate_after_3_misses"].scope is RuleScope.GLOBAL
+
+    def test_device_tier_replaces_customer(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        rules = resolve_rules_for_entity(rs, ENTITY, TriggerKind.LAST_CONTACT_THRESHOLD)
+        by_id = {r.rule_id: r for r in rules}
+        assert by_id["alpha_cc_tg_lead"].scope is RuleScope.DEVICE
+        assert by_id["alpha_cc_tg_lead"].actions[0].params["recipient"] == "device_lead"
+
+    def test_sub_trigger_discrimination(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        assert resolve_rules_for_entity(rs, ENTITY, TriggerKind.ITEM_MODIFIED, "OwnerReassigned")
+        assert not resolve_rules_for_entity(rs, ENTITY, TriggerKind.ITEM_MODIFIED, "DeadlineMoved")
+
+    def test_polling_rules_not_returned_for_triggers(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        for trigger in TriggerKind:
+            sub = "OwnerReassigned" if trigger is TriggerKind.ITEM_MODIFIED else None
+            for rule in resolve_rules_for_entity(rs, ENTITY, trigger, sub):
+                assert rule.kind is RuleKind.TRIGGER_ACTION
+
+    def test_polling_schedule_resolution_without_override(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        rule = resolve_polling_schedule_for_item(rs, ENTITY)
+        assert rule.source == "yaml"
+        assert evaluate_polling_schedule(rule.tiers, 2) == 15
+
+    def test_we3_polling_schedule_item_override(self, rules_tree):
+        rs = RuleSet.load(rules_tree, InMemoryOverrideStore([OVERRIDE]))
+        rule = resolve_polling_schedule_for_item(rs, ENTITY)
+        assert rule.source == "postgres_override"
+        assert rule.source_tier is RuleScope.GLOBAL  # "overridden from global default"
+        assert evaluate_polling_schedule(rule.tiers, 2) == 10
+        # other item unaffected
+        other = EntityRef(customer_slug="carrier-alpha", delivery_item_id="I-9999")
+        assert resolve_polling_schedule_for_item(rs, other).source == "yaml"
+
+    def test_unknown_polling_rule_id_raises_e002(self, rules_tree):
+        rs = RuleSet.load(rules_tree)
+        with pytest.raises(PipelineError) as exc:
+            resolve_polling_schedule_for_item(rs, ENTITY, rule_id="no_such_schedule")
+        assert exc.value.code_id == "RUL-E002"
+
+
+class PausedItems:
+    def __init__(self, items=(), milestones=()):
+        self.items, self.milestones = set(items), set(milestones)
+
+    def is_item_paused(self, delivery_item_id: str) -> bool:
+        return delivery_item_id in self.items
+
+    def is_milestone_paused(self, milestone_id: str) -> bool:
+        return milestone_id in self.milestones
+
+
+class TestEvaluator:
+    def test_we1_single_rule_two_ordered_actions(self, rules_tree):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        matches = engine.evaluate(event_for(
+            TriggerKind.ITEM_MODIFIED, sub_trigger="OwnerReassigned",
+            field_deltas={"owner_email": ("old@example.com", "new@example.com")},
+        ))
+        assert len(matches) == 1
+        assert [a.kind for a in matches[0].actions] == [ActionKind.NOTIFY_NEW_OWNER, ActionKind.START_ITEM_COLLECTION]
+        assert matches[0].pause_state == "active"
+        assert matches[0].correlation_id == "evt-test"
+
+    def test_we2_two_matches_with_conditions(self, rules_tree):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        entity = EntityRef(customer_slug="carrier-alpha", delivery_item_id="I-1234")
+        matches = engine.evaluate(event_for(
+            TriggerKind.LAST_CONTACT_THRESHOLD,
+            field_deltas={"reminder_count_unanswered": (1, 2)},  # condition reads new value 2
+            entity=entity,
+        ))
+        assert {m.rule_id for m in matches} == {"send_reminder_on_no_contact", "alpha_cc_tg_lead"}
+        reminder = next(m for m in matches if m.rule_id == "send_reminder_on_no_contact")
+        assert reminder.matched_scope is RuleScope.CUSTOMER
+        assert reminder.actions[0].params["template"] == "alpha_branded_reminder"
+
+    def test_we2_escalation_at_threshold(self, rules_tree):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        matches = engine.evaluate(event_for(
+            TriggerKind.LAST_CONTACT_THRESHOLD,
+            field_deltas={"reminder_count_unanswered": (2, 3)},
+            entity=EntityRef(customer_slug="carrier-alpha"),
+        ))
+        assert {m.rule_id for m in matches} == {"escalate_after_3_misses", "alpha_cc_tg_lead"}
+
+    def test_we3_derived_fields_and_condition(self, rules_tree, caplog):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        matches = engine.evaluate(event_for(
+            TriggerKind.ATTACHMENT_RECEIVED,
+            field_deltas={"doc_count_received": (4, 5)},
+            derived_fields={"doc_count_reached": True, "review_required": True},
+        ))
+        assert [m.rule_id for m in matches] == ["advance_state_on_doc_count_reached"]
+        assert [a.kind for a in matches[0].actions] == [ActionKind.UPDATE_STATE, ActionKind.TRIGGER_AI_REVIEW]
+
+    def test_paused_item_flagged_not_dropped(self, rules_tree, caplog):
+        engine = RuleEngine(RuleSet.load(rules_tree), PausedItems(items={"I-1234"}))
+        with caplog.at_level("WARNING"):
+            matches = engine.evaluate(event_for(
+                TriggerKind.ITEM_MODIFIED, sub_trigger="OwnerReassigned",
+            ))
+        assert len(matches) == 1
+        assert matches[0].pause_state == "paused"
+        assert any("RUL-W003" in r.message for r in caplog.records)
+
+    def test_paused_milestone_flags_match(self, rules_tree):
+        entity = EntityRef(customer_slug="carrier-alpha", milestone_id="M-1001")
+        engine = RuleEngine(RuleSet.load(rules_tree), PausedItems(milestones={"M-1001"}))
+        matches = engine.evaluate(event_for(
+            TriggerKind.LAST_CONTACT_THRESHOLD,
+            field_deltas={"reminder_count_unanswered": (0, 1)},
+            entity=entity,
+        ))
+        assert matches and all(m.pause_state == "paused" for m in matches)
+
+    def test_unsupported_operator_skips_rule_with_w005(self, tmp_path, caplog):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "r.yaml").write_text(
+            "rules:\n  - rule_id: regex_rule\n    trigger: StateChange\n"
+            "    condition: { field: x, op: regex, value: 'a.*' }\n"
+            "    actions:\n      - kind: NotifyPM\n        params: {}\n"
+        )
+        engine = RuleEngine(RuleSet.load(tmp_path / "rules"), NoPauseState())
+        with caplog.at_level("WARNING"):
+            matches = engine.evaluate(event_for(TriggerKind.STATE_CHANGE, derived_fields={"x": "abc"}))
+        assert matches == []
+        assert any("RUL-W005" in r.message for r in caplog.records)
+
+    def test_missing_condition_field_means_no_match(self, rules_tree):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        matches = engine.evaluate(event_for(TriggerKind.LAST_CONTACT_THRESHOLD,
+                                            entity=EntityRef(customer_slug="carrier-alpha")))
+        # conditional rules can't evaluate without the field; unconditional alpha_cc still fires
+        assert {m.rule_id for m in matches} == {"alpha_cc_tg_lead"}
+
+    def test_explain_trace(self, rules_tree):
+        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        trace = engine.explain(event_for(
+            TriggerKind.LAST_CONTACT_THRESHOLD,
+            field_deltas={"reminder_count_unanswered": (1, 2)},
+            entity=EntityRef(customer_slug="carrier-alpha"),
+        ))
+        by_id = {t["rule_id"]: t for t in trace}
+        assert by_id["send_reminder_on_no_contact"]["matched"] is True
+        assert by_id["send_reminder_on_no_contact"]["winning_scope"] == "Customer"
+        assert by_id["escalate_after_3_misses"]["matched"] is False
+        assert by_id["alpha_cc_tg_lead"]["actions"] == ["NotifyPM"]
+
+
+class TestAudits:
+    def test_collision_detected_across_compatible_scopes(self, caplog):
+        r1 = make_trigger_rule(rule_id="state_writer_a", trigger=TriggerKind.ATTACHMENT_RECEIVED,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        r2 = make_trigger_rule(rule_id="state_writer_b", trigger=TriggerKind.ATTACHMENT_RECEIVED,
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "carrier-alpha"},
+                               source_tier=RuleScope.CUSTOMER,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        with caplog.at_level("WARNING"):
+            findings = collision_audit_update_state({TriggerKind.ATTACHMENT_RECEIVED: [r1, r2]})
+        assert len(findings) == 1
+        assert {findings[0].rule_id_a, findings[0].rule_id_b} == {"state_writer_a", "state_writer_b"}
+        assert any("RUL-W001" in r.message for r in caplog.records)
+
+    def test_same_rule_id_across_tiers_is_ladder_not_collision(self):
+        r1 = make_trigger_rule(rule_id="w", trigger=TriggerKind.STATE_CHANGE,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        r2 = make_trigger_rule(rule_id="w", trigger=TriggerKind.STATE_CHANGE,
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c1"},
+                               source_tier=RuleScope.CUSTOMER,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        assert collision_audit_update_state({TriggerKind.STATE_CHANGE: [r1, r2]}) == []
+
+    def test_disjoint_customer_scopes_no_collision(self):
+        r1 = make_trigger_rule(rule_id="a", trigger=TriggerKind.STATE_CHANGE,
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c1"},
+                               source_tier=RuleScope.CUSTOMER,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        r2 = make_trigger_rule(rule_id="b", trigger=TriggerKind.STATE_CHANGE,
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c2"},
+                               source_tier=RuleScope.CUSTOMER,
+                               actions=(make_action(ActionKind.UPDATE_STATE),))
+        assert collision_audit_update_state({TriggerKind.STATE_CHANGE: [r1, r2]}) == []
+
+    def test_orphan_override_flagged_w002(self, caplog):
+        orphan = ItemOverride(
+            delivery_item_id="I-1", rule_id="ghost_rule", override_payload={},
+            created_by_pm_id="tpm-1", source_tier=RuleScope.GLOBAL,
+            created_at=datetime(2026, 6, 12),
+        )
+        with caplog.at_level("WARNING"):
+            findings = orphan_audit_postgres_overrides({"real_rule"}, [orphan])
+        assert findings == [type(findings[0])(rule_id="ghost_rule", delivery_item_id="I-1")]
+        assert any("RUL-W002" in r.message for r in caplog.records)
+
+    def test_known_override_not_flagged(self):
+        ok = ItemOverride(
+            delivery_item_id="I-1", rule_id="real_rule", override_payload={},
+            created_by_pm_id="tpm-1", source_tier=RuleScope.GLOBAL,
+            created_at=datetime(2026, 6, 12),
+        )
+        assert orphan_audit_postgres_overrides({"real_rule"}, [ok]) == []
+
+    def test_loader_runs_audits_and_stores_findings(self, rules_tree):
+        rs = RuleSet.load(rules_tree, InMemoryOverrideStore([ItemOverride(
+            delivery_item_id="I-1", rule_id="ghost_rule", override_payload={},
+            created_by_pm_id="tpm-1", source_tier=RuleScope.GLOBAL,
+            created_at=datetime(2026, 6, 12),
+        )]))
+        assert len(rs.orphan_findings) == 1
+        assert rs.collision_findings == []
+
+
+class TestCLI:
+    def test_validate_ok(self, rules_tree, capsys):
+        assert cli_main(["--validate", "--rules-dir", str(rules_tree), "--run-id", "run-test"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("QC|RUL|run-test|")
+        assert "result=OK" in out
+
+    def test_validate_broken_tree_exits_nonzero(self, tmp_path, capsys):
+        d = tmp_path / "rules" / "global"
+        d.mkdir(parents=True)
+        (d / "bad.yaml").write_text(
+            "rules:\n  - rule_id: r1\n    trigger: StateChange\n    actions:\n      - kind: LaunchMissiles\n"
+        )
+        assert cli_main(["--validate", "--rules-dir", str(tmp_path / "rules"), "--run-id", "run-test"]) == 1
+        captured = capsys.readouterr()
+        assert "RUL-E004" in captured.err
+        assert "result=FAIL" in captured.out
+
+    def test_diagnostic_rpt_line(self, rules_tree, capsys):
+        assert cli_main(["--diagnostic", "--rules-dir", str(rules_tree), "--run-id", "run-test"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("RPT|RUL|run-test|")
+        assert "rules_total=9" in out          # 6 global + 2 customer + 1 device
+        assert "trigger_kinds=15" in out
+        assert "action_kinds=18" in out
+        assert "postgres_overrides=0" in out
+
+    def test_explain_emits_met_and_trace(self, rules_tree, capsys):
+        rc = cli_main([
+            "--explain", "--rules-dir", str(rules_tree), "--run-id", "run-test",
+            "--trigger", "LastContactThreshold",
+            "--entity", '{"customer_slug": "carrier-alpha"}',
+            "--field-deltas", '{"reminder_count_unanswered": [1, 2]}',
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "MET|RUL|run-test|" in out
+        assert "matched_rules=2" in out
+        assert "send_reminder_on_no_contact:customer" in out
+
+    def test_explain_unknown_trigger_errors(self, rules_tree, capsys):
+        rc = cli_main([
+            "--explain", "--rules-dir", str(rules_tree),
+            "--trigger", "NotATrigger", "--entity", '{"customer_slug": "c1"}',
+        ])
+        assert rc == 1
+        assert "RUL-E003" in capsys.readouterr().err
+
+    def test_simulate_is_ph3_stub(self, capsys):
+        assert cli_main(["--simulate", "candidate.yaml"]) == 2
+        assert "Ph-3+" in capsys.readouterr().err

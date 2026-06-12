@@ -169,6 +169,11 @@ class TriggerEvent:
     field_deltas: dict[str, tuple[Any, Any]] | None  # for ItemModified: {field_name: (old, new)}
     timestamp: datetime  # event timestamp; used for time-window evaluations
     correlation_id: str  # threads through to RuleMatch + downstream Celery tasks for tracing
+    # Caller-supplied derived facts conditions reference (e.g. doc_count_reached,
+    # review_required — MODULE.md Worked Example 3 "caller also supplies derived fields").
+    # Additive 2026-06-12 (soft-flag): condition lookup checks here first, then the
+    # new-value side of field_deltas.
+    derived_fields: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

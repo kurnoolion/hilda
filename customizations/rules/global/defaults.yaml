@@ -1,0 +1,70 @@
+# Global (tier-1) AutomationRules — seeded from rule_engine/MODULE.md worked examples.
+# PM-team-lead-authored zone per FR-30 / [D-030]; hot-reload via bind-mount + SIGHUP per [D-025].
+# Two top-level shapes: `rules:` (trigger-action) and `polling_schedules:` (deadline-tiered).
+
+rules:
+  # Worked Example 1 — owner reassignment: notify new owner, then restart collection.
+  - rule_id: handle_owner_reassignment
+    trigger: ItemModified
+    sub_trigger: OwnerReassigned
+    condition: null                              # null = unconditional once sub_trigger matches
+    actions:
+      - kind: NotifyNewOwner                     # action 0 — runs first
+        params:
+          template: owner_reassignment_notice
+          channel: email
+      - kind: StartItemCollection                # action 1 — runs second
+        params: {}
+
+  # Worked Example 2 — reminder under 3 unanswered; escalate at 3+.
+  - rule_id: send_reminder_on_no_contact
+    trigger: LastContactThreshold
+    condition:
+      field: reminder_count_unanswered
+      op: lt
+      value: 3
+    actions:
+      - kind: SendReminder
+        params: { template: standard_owner_reminder, channel: email }
+
+  - rule_id: escalate_after_3_misses
+    trigger: LastContactThreshold
+    condition:
+      field: reminder_count_unanswered
+      op: gte
+      value: 3
+    actions:
+      - kind: Escalate
+        params: { channel: corp_messenger, escalation_template: tg_lead_escalation }
+      - kind: NotifyPM
+        params: { urgency: medium }
+
+  # Worked Example 3 — doc_count reached: advance state first, review second.
+  - rule_id: advance_state_on_doc_count_reached
+    trigger: AttachmentReceived
+    condition:
+      field: doc_count_reached
+      op: eq
+      value: true
+    actions:
+      - kind: UpdateState                        # action 0 — state first
+        params: { target_state: DocumentReceived }
+      - kind: TriggerAIReview                    # action 1 — review second (consumes the updated state)
+        params: {}
+
+  - rule_id: review_on_supplementary_attachment
+    trigger: AttachmentReceived
+    condition:
+      and:                                       # boolean composition: both must hold
+        - { field: doc_count_reached, op: eq, value: false }
+        - { field: review_required,   op: eq, value: true  }
+    actions:
+      - kind: TriggerAIReview
+        params: {}
+
+polling_schedules:                               # SEPARATE top-level shape, NOT a trigger-action rule
+  - rule_id: default_polling_schedule
+    tiers:
+      - { days_before_deadline: null, interval_minutes: 60 }   # baseline (required)
+      - { days_before_deadline: 3,    interval_minutes: 15 }
+      - { days_before_deadline: 1,    interval_minutes: 5  }
