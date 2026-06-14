@@ -82,6 +82,9 @@ lists:                                    # 7 lists per [D-051] impl note 2026-0
       milestone_submission_triggered_at: "Milestone_Submission_Triggered_At"  # DateTime (FR-18)
       refresh_requested_at: "Refresh_Requested_At"                      # DateTime (FR-56 soft-poll)
       close_all_items_triggered_at: "Close_All_Items_Triggered_At"      # DateTime; SP-side ONLY (no HILDA Postgres mirror) per SP UI engineer 2026-06-10
+      # Denormalized fields per D-DRAFT-Z 2026-06-12 — HILDA's runtime SP coupling restricted to Milestones + DeliveryItems lists; customer_slug + device_slug denormalized onto Milestone rows so HILDA can derive (customer, device) context without reading Customers / Devices SP lists at runtime. READ-ONLY mirrors of YAML values; TPM cannot edit.
+      customer_slug: "Customer_Slug"                                    # READ-ONLY mirror per D-DRAFT-Z; sourced from customizations/template_schemas/<customer_slug>/customer.yaml
+      device_slug: "Device_Slug"                                        # READ-ONLY mirror per D-DRAFT-Z; sourced from customer.yaml devices: sub-block
       # NOTE: `default_work_item_config` is NOT a SP column — lives in
       # customizations/template_schemas/<customer_slug>/milestones.yaml per FR-78 / [D-053].
       # Customer-deployment-fixed config; not TPM-editable.
