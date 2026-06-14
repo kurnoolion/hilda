@@ -113,3 +113,119 @@ Net latency target: **sync POST handler returns 303 in <500ms** (validation + su
 - Ops workflow for Customer/Device changes: edit `customer.yaml` → SIGHUP HILDA → `FileBasedListProvider.reload()` picks up changes; SP UI engineer separately updates SP rows for display consistency. Both flows are ops-driven; no HILDA-internal write to SP is needed for these.
 
 **Anchors**: `[D-001]` (three-tier layout — customer + device YAML belongs in `customizations/`), `[D-019]` (credential discipline — PMCredential SP list eliminated because credentials live in credential_service), `[D-020]` (SharePointListProvider Protocol — extends to file-based customer/device data), `[D-025]` (Docker-Compose bind-mount Ph-1/Ph-2 — YAML accessible to HILDA at startup), `[D-051]` impl note 2026-06-12 (TG denormalization pattern — parallel to customer_slug + device_slug denormalization onto Milestone), `[D-064]` (HILDA→SP REST writeback — still required for Milestones + DeliveryItems), `[D-071]` (storage doesn't mirror DeliveryItem — Customer/Device same discipline), `[D-073]` (SP UI engineer provisions lists — extended to "and populates rows for display lists"). Supersedes implicit assumption in FR-2 / FR-13 / FR-77 that HILDA reads Customers + Devices SP lists.
+
+---
+
+## D-DRAFT-FR64-GATING: `is_milestone_gating` semantic activated in FR-64 (was vestigial)
+
+**Date drafted**: 2026-06-12
+
+**Context**: SP UI engineer 2026-06-10 review surfaced that `is_milestone_gating` field on `template_schema.DeliveryItemBase` (renamed from `milestone_gating` per template_schema/MODULE.md Invariant 2026-06-12) carried no functional effect — all items gated milestone closure regardless of flag value per the original FR-64 enablement check ("all items in milestone are in `{SubmittedToCustomer, Closed}` AND at least one in `SubmittedToCustomer`"). User asked: "let us make this field is_milestone_gating for milestone closure."
+
+**Decision**: FR-64 Close All Items enablement check changes to use `is_milestone_gating`: **enabled when all `is_milestone_gating=true` DeliveryItems in the milestone are in `{SubmittedToCustomer, Closed}` AND at least one `is_milestone_gating=true` item is in `SubmittedToCustomer`**. Items with `is_milestone_gating=false` do NOT block enablement and may remain in any non-blocking state when the action fires. On activation, closure scope still includes all `SubmittedToCustomer` items in the milestone regardless of gating flag (flag affects enablement only, not closure action scope). Field is **YAML-only / NOT TPM-editable** — ops/PM team identifies critical-for-closure items at template creation time.
+
+**Why**:
+- All-items-gate model is unnecessarily strict for milestones with optional waivers, advisory items, sustaining test reports, etc. that ops/PM team identifies as non-critical for milestone closure
+- Field already existed (carried over from prior schema; renamed 2026-06-12); needed a functional purpose
+- Matches user intent ("make this field for milestone closure")
+- Closure scope kept unchanged (all SubmittedToCustomer items close regardless) — gating affects enablement, not action — keeps existing TPM Close All Items behavior aligned with NFR-5 PM-approval-gate semantic
+- Rejected alternatives: **(α) keep vestigial** — wasted schema field; **(β) extend closure scope to only-gating items** — leaves non-gating items in SubmittedToCustomer stuck open after Close All; TPM would have to manually close each via FR-14; operational regression.
+
+**Consequences**:
+- FR-64 enablement check changes per Decision above; original wording preserved struck-through per requirements.md ID-stability convention
+- Ops/PM template-authors must consciously identify critical-for-closure items at template creation (`is_milestone_gating: true` for items that MUST be closed before milestone close)
+- `is_milestone_gating` stays YAML-only (NOT TPM-editable per user ratification — locked in FR-56 column model bucket (a))
+- `customizations/sharepoint_config/MODULE.md` example schema + `HILDA_SP_Schema.xlsx` DeliveryItems tab already reflect `is_milestone_gating` rename (committed 2026-06-12)
+- `template_schema/MODULE.md` Invariant (rename) already documents the new functional semantic via cross-reference to FR-64
+- New canonical state for the field: was orphan; now load-bearing for FR-64 Close All Items button enablement
+
+**Anchors**: FR-64 (rewritten 2026-06-12), template_schema/MODULE.md Invariant 2026-06-12 (`is_milestone_gating` rename + immutability), `[D-068]` (PM approval recording — unaffected; gating is closure-time concern, not approval-time).
+
+---
+
+## D-DRAFT-FR62-RFS: ReadyForSubmission added to FR-62 upload allowed states with revert-to-UnderPMReview semantic
+
+**Date drafted**: 2026-06-12
+
+**Context**: FR-62 (Ph-2 dashboard-rendered upload form per `[D-074]`) originally allowed uploads only when `delivery_state ∈ {DocumentReceived, UnderPMReview, SubmittedToCustomer}` plus the `Open` state when `tracking_enabled=False` per FR-81 no-tracking-TG fallback. User 2026-06-12 surfaced real TPM use case: late doc upload needed after PM approval but before FR-63 Submit fires (supplementary test report; customer-induced revision discovered late; doc_count overflow due to ambiguous original spec; miscellaneous artifact TPM realizes is missing).
+
+**Decision**: `ReadyForSubmission` added to FR-62 allowed states. State transition on upload from `ReadyForSubmission` **reverts to `UnderPMReview`** (matches SubmittedToCustomer revert pattern). HILDA clears `pm_approval_at` + `pm_approval_pm_id` per `[D-068]` impl note 2026-06-12 clearing discipline. TPM must re-approve before next FR-63 Submit fires.
+
+**Why**:
+- Real TPM use case: late additional docs needed before submission cycle (waiting until SubmittedToCustomer to upload then revert is operationally annoying — TPM should pre-empt)
+- Revert pattern matches SubmittedToCustomer (already established): stale PM approval becomes invalid when item content changes; PM must re-approve fresh state
+- Clearing pm_approval_at + pm_approval_pm_id maintains audit consistency per `[D-068]` impl note clearing discipline
+- Maintains NFR-5 PM-approval gate (no submission without fresh approval)
+- Rejected alternatives: **(α) don't allow upload in ReadyForSubmission** — forces TPM to wait until SubmittedToCustomer (then upload triggers revert); operationally clunky; **(β) allow upload without revert** — silently invalidates PM approval; defeats NFR-5 PM-approval-gate-before-customer-facing semantic.
+
+**Consequences**:
+- FR-62 enabled state set grows from 3 to 4 states (`DocumentReceived`, `UnderPMReview`, `ReadyForSubmission`, `SubmittedToCustomer`); plus Open state for no-tracking TG per FR-81
+- ReadyForSubmission → UnderPMReview transition added to delivery_state machine
+- HILDA must clear `pm_approval_at` + `pm_approval_pm_id` on the transition (matches `[D-068]` impl note clearing discipline for rewind paths per `[D-067]` + entry to UnderPMReview discipline)
+- TPM must re-approve before next FR-63 Submit fires
+- Tracker MODULE.md state-machine + transitions code must be updated to include this transition (Ph-2 dev — tracker module is currently in design only)
+- FR-87 step (A) reassignment doesn't change semantic (already covered by FR-83); FR-62 upload is distinct from FR-87 reassignment
+
+**Anchors**: FR-62 (Ph-2; rewritten 2026-06-12), `[D-068]` impl note 2026-06-12 (pm_approval clearing discipline on rewind paths), `[D-067]` (customer RFI rewind from SubmittedToCustomer — sets the precedent pattern for revert-on-content-change), NFR-5 (PM-approval gate before customer-facing action — preserved).
+
+---
+
+## D-DRAFT-OWNER-EMAIL-SPLIT: owner_email split into corp_usa_email + corp_email (per-item AND TG-level)
+
+**Date drafted**: 2026-06-12
+
+**Context**: SP UI engineer 2026-06-10 review proposed splitting the single `owner_email` field on `template_schema.DeliveryItemBase` into two distinct email fields to handle corp's USA-vs-non-USA owner population: `owner_corp_usa_email` (SP Person/Group field, AD-resolved against corp-USA AD directory) + `owner_corp_email` (free text, for non-USA owners or AD-unresolved cases). Same split applies to `template_schema.TGGroupBase`: `tg_owner_email` → `tg_owner_corp_usa_email` + `tg_owner_corp_email`.
+
+**Decision**: `template_schema.DeliveryItemBase.owner_email` is removed; replaced by `owner_corp_usa_email: str | None = None` + `owner_corp_email: str | None = None`. Same split on `TGGroupBase` (`tg_owner_email` removed; `tg_owner_corp_usa_email` + `tg_owner_corp_email` added). **HILDA preference rule** (per FR-2 + FR-9 2026-06-12): for outreach/identity, use `corp_usa_email` if set; else fall back to `corp_email`. **Owner-change event semantics**: a write to EITHER `owner_corp_usa_email` OR `owner_corp_email` constitutes an owner change event (fires `OwnerReassigned` rule per rule_engine MODULE.md; HILDA re-resolves canonical identity per preference rule + updates `owner_name` display via SP Person/Group AD lookup + writes CommunicationLog with `action_type=owner_reassigned`). A write to `owner_corp_id` alone is NOT an owner change event (corp_id is identifier metadata; not principal identity for outreach). Same semantics at TG-scope for tg_owner_* triple.
+
+**Why**:
+- Corp AD Person/Group field type auto-resolves only USA-corp emails (xxx@corp-usa.com); non-USA corp employees use different email format (xxx@corp.com) and don't resolve via the same SP AD picker
+- Single owner_email field would force either AD-only constraint (excludes non-USA owners — operational dead-end) or free-text (loses AD validation for USA owners — typo risk, no auto-resolution of owner_name)
+- Splitting provides both: validated AD-resolved identity for USA owners (via Person/Group SP field type) + flexibility for non-USA owners (free-text)
+- Preference rule (corp_usa_email > corp_email) gives unambiguous runtime owner identity for HILDA outreach + PLM assignment
+- Owner-change event semantics define when downstream rules (OwnerReassigned, FR-9 outreach re-fire, FR-71 ODF re-fire) trigger — change to either email = re-evaluate; change to corp_id alone = identifier metadata only
+- Rejected alternatives: **(α) single owner_email Person/Group + free-text fallback marker** — confusing schema (which field is authoritative?); **(β) keep owner_email + add is_non_usa boolean flag** — duplicate fields with shared semantic; redundant; **(γ) separate SP list for non-USA owners** — partitioning overhead + complicates HILDA lookups + breaks model consistency.
+
+**Consequences**:
+- `template_schema/models.py` updates (Order (A) architecture-phase batch queued in STATUS Flag 2026-06-12):
+  - `DeliveryItemBase`: remove `owner_email`; add `owner_corp_usa_email: str | None = None` + `owner_corp_email: str | None = None`
+  - `TGGroupBase`: remove `tg_owner_email`; add `tg_owner_corp_usa_email: str | None = None` + `tg_owner_corp_email: str | None = None`
+- `customizations/sharepoint_config/MODULE.md` example schema updates (delivery_items + denormalized TG columns)
+- `customizations/sharepoint_config/customers/example.yaml` updates
+- `HILDA_SP_Schema.xlsx` DeliveryItems + TGGroups tab updates (already partially reflected in SP UI engineer's revision shared via Google Sheets)
+- `core/tests/test_template_schema.py` updates for new owner field set
+- HILDA outreach code uses preference rule (corp_usa_email if set; else corp_email)
+- `OwnerReassigned` rule fires on either email field change (not on corp_id alone)
+- `owner_name` display auto-resolved by SP from corp_usa_email Person/Group field at SP-side; HILDA reads from DI row at runtime (denormalized read-only mirror)
+- FR-2 (rewritten 2026-06-12) documents the owner identity model; FR-9 (rewritten 2026-06-12) documents the preference rule; FR-71 (rewritten 2026-06-12) uses the specific field names
+- Anchors `[D-051]` impl note 2026-06-12 (TG denormalization pattern; tg_owner_* fields are denormalized read-only mirrors on DI rows)
+
+**Anchors**: FR-2 (owner identity model 2026-06-12), FR-9 (outreach preference rule 2026-06-12), FR-71 (ODF specific field names 2026-06-12), `[D-051]` impl note 2026-06-12 (TG denormalization), `[D-065]` (SP UI engineer owns Person/Group field type + AD lookup mechanism for corp_usa_email).
+
+---
+
+## D-DRAFT-FORM-FACTOR-EXPAND: Form factor flag set expands from 5 to 7 canonical bools (drr + ir_ffw_p1 added)
+
+**Date drafted**: 2026-06-12
+
+**Context**: SP UI engineer 2026-06-10 review surfaced 2 additional form factor flag fields beyond the canonical 5 (`handset`, `tablet`, `wearable`, `mr`, `hmr_smr`): `drr` + `ir_ffw_p1` (Python-friendly rename from SP display name "ir/ffw/p1"). These are customer-specific device classifications increasingly common across customer deployments.
+
+**Decision**: Add `drr: bool = False` + `ir_ffw_p1: bool = False` to `template_schema.DeliveryItemBase` as canonical fields. Rename `ir/ffw/p1` SP display → `ir_ffw_p1` Python identifier (underscores + lowercase required for Python attribute syntax + Pydantic compatibility). Total canonical form factor flags: **7** (was 5). Per FR-56 column model 2026-06-12, all 7 are `may_show` / not TPM-editable (YAML-loaded template-fixed flags).
+
+**Why**:
+- Customer-specific device classifications (`drr`, `ir_ffw_p1`) are now common enough across customer deployments to warrant canonical schema inclusion
+- 7 flags is still small and manageable; no concrete burden to growing the set when new customer classifications emerge
+- Customer-extensible registry alternative was considered but rejected — these are bool flags, not enum values; bool flags don't extend cleanly via a registry pattern (which maps strings → display labels)
+- HILDA's Pydantic model needs awareness of these fields for type-safe runtime access by routing rules (rule_engine conditions reference form factor flags per FR-7)
+- Rejected alternatives: **(α) keep flags in customer-extensible YAML config only** — HILDA's Pydantic DeliveryItemBase wouldn't know about them; loses type safety + IDE support + Pydantic validation; **(β) registry-based extensible flags** — over-engineered for bool flags; complicates rule_engine evaluator + storage layer for marginal gain; **(γ) consolidate flags into a single multi-value enum/list** — breaks back-compat with existing flag-by-name conventions in rule conditions.
+
+**Consequences**:
+- `template_schema/models.py` DeliveryItemBase gains 2 new bool fields with `False` default (Order (A) architecture-phase batch)
+- Customer onboardings populate these from template YAML at tracker creation per FR-2
+- Routing rules in YAML (`customizations/rules/<customer>/`) can reference `drr` / `ir_ffw_p1` in conditions per FR-7 + rule_engine MODULE.md
+- `HILDA_SP_Schema.xlsx` DeliveryItems tab + `example.yaml` + `sharepoint_config/MODULE.md` example schema updated (mostly already documented in STATUS Flag 2026-06-12)
+- `core/tests/test_template_schema.py` adds field-existence + default-value coverage for new fields
+- Future form factor additions follow same canonical-addition pattern (not registry-extensible)
+- FR-7 mentions form factor flags as a set; the 5→7 expansion is captured in FR-56 column model bucket (b) 2026-06-12 ("7 flags total")
+
+**Anchors**: FR-7 (form factor scope; extensible-via-configuration mention), FR-56 column model 2026-06-12 (bucket b lists 7 flags), template_schema/MODULE.md (canonical schema location), `[D-046]` (canonical schema source — Pydantic models in template_schema).
