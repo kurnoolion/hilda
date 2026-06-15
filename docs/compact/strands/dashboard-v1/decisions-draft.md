@@ -33,7 +33,7 @@ Drafts of decision-worthy items surfaced during this strand. Promoted to canonic
 - Dashboard MODULE.md adds 3 new error codes: DSH-E005 (FR-87 step A invalid target item), DSH-E006 (FR-87 step B invalid doc_type for item_type), DSH-E007 (FR-87 step C revision picker mismatch) — to be locked during dashboard architecture review.
 - Storage's `tpm_resolve_doc_type` + `tpm_resolve_revision` + `reassign_document_to_workitem` storage APIs (already landed per `D-071` / `D-072`) are unchanged — the same APIs serve both the old SP-alert model (if revived) and the new HILDA-tab POST model. The strand work for FR-87 is purely in dashboard (new endpoints) + sharepoint_config (column permission discipline).
 
-**Anchors**: `[D-074]` (Variant A SP↔HILDA integration); `[D-053]` impl note 2026-06-08 (FR-87 strict A → B → C); `[D-047]` (SP-alert channel — FR-87 no longer uses it); `[D-064]` (HILDA→SP REST writeback — used for audit-column updates after FR-87 click); `[D-006]` (Kerberos auth — covers HILDA-tab same-origin POST).
+**Anchors**: `[D-074]` (Variant A SP↔HILDA integration); `[D-053]` impl note 2026-06-08 (FR-87 strict A → B → C); `[D-047]` (SP-alert channel — FR-87 no longer uses it); `[D-064]` (HILDA→SP REST writeback — used for audit-column updates after FR-87 click); `[D-006]` (on-prem AD auth — NTLM per 2026-06-14 impl note; covers HILDA-tab same-origin POST authentication via the same Negotiate flow).
 
 ---
 
@@ -80,39 +80,47 @@ Net latency target: **sync POST handler returns 303 in <500ms** (validation + su
 
 ---
 
-## D-DRAFT-Z: HILDA runtime SP coupling restricted to Milestones + DeliveryItems lists only; Customer + Device + User + PMCredential data moves to YAML
+## D-DRAFT-Z: HILDA runtime SP coupling = 4 lists (Customers + Devices + Milestones + DeliveryItems); SP-list-row IDs resolve customer/device slugs at SP-alert receive — no YAML for customer/device data
 
-**Date drafted**: 2026-06-12
+**Date drafted**: 2026-06-12; **REWRITTEN 2026-06-14** (originally proposed 2-list coupling + customer.yaml YAML; reversed after slug-resolution gap analysis showed customer.yaml didn't earn its own file and SP-list reads are the cleaner bridge).
 
-**Context**: SP UI engineer 2026-06-12 review surfaced that HILDA's Linux service layer currently has runtime read/write dependencies on 6 SP lists (Customers, Devices, Users, PMCredentials, Milestones, DeliveryItems, CommunicationLog). Earlier 2026-06-12 ratifications already eliminated User SP-list dependency (owner identity denormalized onto DI rows per FR-2 owner identity model + `[D-051]` impl note TG denormalization) and PMCredential SP-list dependency (credentials in HILDA-local credential_service per `[D-019]` + `[D-038]`). User questioned whether Customer + Device SP-list dependencies could also be eliminated since the only HILDA-needed runtime values are `customer_slug` + `device_slug` + a small handful of deployment-stable identifiers.
+**Context**: SP UI engineer 2026-06-12 review surfaced that HILDA's Linux service layer currently has runtime read/write dependencies on 6 SP lists. Earlier 2026-06-12 ratifications already eliminated User + PMCredential SP-list dependencies. User initially proposed (2026-06-12 D-DRAFT-Z v1) moving Customer + Device data to `customer.yaml` and denormalizing `customer_id` + `device_id` onto Milestone SP rows. **2026-06-13 review** of the SP-alert routing key `(ProjectID, MinorMilestone, ItemNumber)` showed `MinorMilestone` is uniquely scoped to a (customer, device) per FR-5 but neither slug is in the tuple — `sp_alert_parser` cannot map alert → slugs without an extra step. **2026-06-14 review** of pruned customer.yaml showed it carried only 2 leaf values (`customer_jira_url` + `assigned_pm_id`) under a folder name already encoding `customer_id` — the file didn't earn its own existence. User proposed promoting Customers + Devices SP lists from "SP-display-only" to "HILDA-readable" — slug values + the 2 leaf fields all live on existing SP rows.
 
-**Decision**: HILDA's Linux service layer runtime SP coupling is restricted to **Milestones + DeliveryItems SP lists only**. Customer + Device + User + PMCredential SP lists become **SP UI engineer's display / TPM-editable surface only**; HILDA does NOT read from them at runtime. Customer + Device deployment-stable data (slug, code, name, contact_email, launch_date, etc.) moves to `customizations/template_schemas/<customer_slug>/customer.yaml` (extended with a `devices:` sub-block listing per-device fields). HILDA reads this YAML at startup (via FileBasedListProvider per `[D-020]` pattern) and maintains in-memory customer + device metadata. `Milestone` SP list rows gain **denormalized `customer_slug` + `device_slug` columns** (parallel to TG denormalization per `[D-051]` impl note) so HILDA can derive (customer, device) context from `Milestone.X` reads alone without joining Customer/Device lists.
+**Decision**: HILDA's Linux service layer runtime SP coupling is **4 SP lists**: Customers + Devices + Milestones + DeliveryItems (read scope); writeback (per `[D-064]`) is Milestones + DeliveryItems only — HILDA does NOT write Customers or Devices SP rows (ops edits those directly via SP UI). Users + PMCredentials remain SP-display-only (HILDA reads neither at runtime). **No `customer.yaml` file is created**; customer + device data lives entirely on SP. SP-alert resolution flow: (1) `sp_alert_parser` extracts SP row IDs from the alert; (2) does SP REST GET on Customers row by `customer_id` → reads `customer_id` + `customer_jira_url`; (3) does SP REST GET on Devices row by `device_id` → reads `device_id` + `assigned_pm_id`; (4) caches reads for the alert dispatch duration to amortize batched per-item alerts in the same milestone.
+
+**SP-list schema additions** (SP UI engineer adds, ops-editable only):
+- **Customers SP list** (2 new columns): `customer_id` (HILDA-readable identifier; ops sets at customer-onboarding), `customer_jira_url` (FR-25 base URL).
+- **Devices SP list** (2 new columns): `device_id` (HILDA-readable identifier), `assigned_pm_id` (PM identity for FR-19/FR-25/FR-51 credentialed external calls; per FR-25, PM ≡ TPM in this deployment).
+- TPM cannot edit any of these 4 fields (misconfig on `customer_jira_url` would break FR-25 polling; misconfig on slugs would break HILDA's NSD path construction).
 
 **Why**:
-- **(a) Simpler architecture**: HILDA's SP coupling surface drops from 6 lists to 2 lists. Easier to reason about state ownership, easier to test, easier to audit. Boundary semantics become "Milestone + DeliveryItem are HILDA-state-machine inputs/outputs; everything else is SP UI engineer's display domain."
-- **(b) Reduces SP-alert noise**: HILDA only needs to consume SP-alerts from 2 lists (Milestones for button-click timestamps + state changes; DeliveryItems for TPM edits). Customer/Device/User/PMCredential edits don't fire HILDA-bound alerts.
-- **(c) Customer + Device data is deployment-stable**: typically set at customer-onboarding and changes infrequently. Moving to YAML aligns with the existing "ops-edits-YAML-and-SIGHUPs" pattern used for rules (`customizations/rules/`) + credentials (`credential_service`). TPM-runtime edits to Customer/Device data are rare; deployment-time YAML edits are the natural authoring path.
-- **(d) Cleaner SP UI engineer ownership**: SP UI engineer has full control over Customer/Device/User/PMCredential SP UX (display, edit affordances, validations, permissions) without HILDA-side constraints. HILDA contract becomes "we read from + write to Milestones + DeliveryItems; everything else is yours."
-- **(e) Eliminates an open question**: who creates default Customer/Device rows in SP (HILDA writes from YAML vs SP UI engineer fills manually) was a 2026-06-12 open architectural question. Under this decision, Customer/Device SP rows are SP UI engineer's responsibility entirely; HILDA doesn't write them.
+- **(a) Single source of truth**: all customer + device data lives on SP. Ops edits SP rows directly via TPM SP UI's ops-role view — no git commit + bind-mount + SIGHUP cycle for changing `customer_jira_url` or `assigned_pm_id`. TPM, ops, and HILDA all see the same row.
+- **(b) Eliminates customer.yaml**: the file would have carried only 2 leaf values per pruned 2026-06-14 schema; not worth a separate file + loader + reload path.
+- **(c) Solves the slug-resolution gap**: SP-alert tuple doesn't encode slugs; HILDA reads them from SP rows directly. Cost: 2 SP REST GETs per alert (~100ms); amortized via per-dispatch cache.
+- **(d) Cleaner SP UI engineer ownership** for Customer/Device UX (validation, permissions, presentation); HILDA contract becomes "we read 4 lists, write to 2, never touch Users/PMCredentials."
+- **(e) Closes the open question** about who maintains Customer/Device rows: ops via SP UI (with role-based control restricting HILDA-readable fields to ops, not TPM).
 
 **Rejected alternatives**:
-- **(α) Keep current model — HILDA reads from all 6 SP lists**: rejected — operationally HILDA already has YAML-based discovery for everything that matters at runtime; SP reads add a network hop without semantic value for deployment-stable data.
-- **(β) Eliminate ALL SP lists for HILDA, including Milestones + DeliveryItems**: rejected — Milestones + DeliveryItems are the state-machine surface; TPM-driven changes (Approve, Send Reminder, FR-87 resolution, manual state overrides per FR-14) fire SP-alerts that HILDA MUST consume. State writeback to SP per `[D-064]` is also required so TPM sees current state in SP UI. The 2-list scope is the structural minimum.
-- **(γ) Move customer/device data to a single global YAML (not per-customer)**: rejected — would require all customer deployments to share the same file; conflicts with per-customer-deployment model per `[D-001]` three-tier layout + customizations/ drop-zone discipline.
+- **(α) D-DRAFT-Z v1 (customer.yaml + denormalized slugs on Milestone)**: rejected — customer.yaml carries 2 leaves under a folder name that already encodes customer_id (doesn't earn its file); denormalization is ops-coordination overhead with no offsetting HILDA benefit (HILDA can resolve via Customers+Devices SP-list reads under same caching budget).
+- **(β) Encode customer_id + device_id in the SP-alert routing tuple itself (expand 3-key → 5-key)**: viable but requires SP UI engineer to inject 2 extra fields into every SP-alert email template; brittle to SP-alert config drift; loses SP as single point of truth (slugs would live in 2 places: SP row + alert payload).
+- **(γ) HILDA-written Title encoding (write `Title = "<customer_id>__<device_id>__<milestone_name>"` on Milestone rows; parse from alert subject)**: viable; zero new SP columns; but Title becomes HILDA-format-coupled, fragile across SP UI engineer's display changes.
+- **(δ) Keep HILDA reading all 6 SP lists**: rejected — Users + PMCredentials are SP-display-only by `[D-019]` discipline; expanding scope back is unjustified.
 
 **Consequences**:
-- New YAML file: `customizations/template_schemas/<customer_slug>/customer.yaml` extending the per-customer YAML drop-zone with customer + device blocks. Schema: `customer_slug`, `customer_code`, `customer_name`, `customer_contact_email`, `customer_jira_url`, plus `devices:` list with `device_slug`, `device_name`, `target_launch_date`, `path_slug`, `assigned_pm_id` per device.
-- `Milestone` SP list gains 2 denormalized read-only mirror columns: `customer_slug` + `device_slug` (sourced from YAML at milestone creation time per FR-2; never edited by TPM; SP UI engineer marks read-only).
-- HILDA's storage / sharepoint_integration modules drop runtime reads for Customers / Devices / Users / PMCredentials SP lists. `storage` module already doesn't mirror these per `[D-071]`; no Postgres schema changes required.
-- `sharepoint_integration.SpCrud.get_items` calls for Customers / Devices / Users / PMCredentials become **not called at runtime** by HILDA backend. SP UI engineer continues reading them for SP rendering.
-- `FileBasedListProvider` (per `[D-020]`) extends to read customer + device YAML at HILDA startup; maintains in-memory metadata keyed by `customer_slug` + `device_slug`.
-- Multiple FR rewrites: FR-2 (tracker creation reads YAML for customer + device; Milestone gets denormalized slugs), FR-13 (NSD path construction reads slugs from YAML or denormalized Milestone), FR-77 (folder routing similar), FR-31 (override scope_id matches customer_slug/device_slug from YAML).
-- `customizations/sharepoint_config/MODULE.md` documents that HILDA doesn't read Customers/Devices/Users/PMCredentials at runtime; SP UI engineer provisions + populates them for display purposes only.
-- `HILDA_SP_Schema.xlsx` Milestones tab gains 2 columns (`customer_slug`, `device_slug`); Customers/Devices/Users/PMCredentials tabs are clarified as "SP UI engineer display surface only; HILDA does not read at runtime".
-- TPM-runtime edits to Customer/Device/User/PMCredential SP rows do NOT fire HILDA-bound SP-alerts (SP UI engineer either drops alert subscriptions on these lists OR keeps them for non-HILDA reasons).
-- Ops workflow for Customer/Device changes: edit `customer.yaml` → SIGHUP HILDA → `FileBasedListProvider.reload()` picks up changes; SP UI engineer separately updates SP rows for display consistency. Both flows are ops-driven; no HILDA-internal write to SP is needed for these.
+- **No** `customer.yaml` file; **no** `customizations/template_schemas/<customer_id>/customer.yaml` directory pattern for customer data. (The 2-YAML-per-customer model becomes `template.yaml` + `tg_groups.yaml` only per FR-40.)
+- HILDA's runtime SP coupling grows from D-DRAFT-Z v1's 2-list to **4-list** (Customers + Devices added). SP REST GET budget: 2 extra reads per SP-alert dispatch; cached for batch duration.
+- `sharepoint_integration.SpCrud.get_items` for Customers + Devices becomes called at runtime; for Users + PMCredentials remains not called.
+- `Milestone` SP list does NOT gain `customer_id` + `device_id` columns (was the D-DRAFT-Z v1 plan; reversed 2026-06-14). Milestone has `device_id` lookup → Devices row carries slug.
+- `HILDA_SP_Schema.xlsx` Milestones tab: any prior `customer_id` / `device_id` rows are dropped. Customers tab gains `customer_id` row (xlsx row 76); Devices tab gains `device_id` + `assigned_pm_id` rows (xlsx rows 79-80). Confirmed in 2026-06-14 xlsx review.
+- `customizations/sharepoint_config/customers/example.yaml` (SP-side schema mapping): Customers + Devices sections include the new columns; Milestones section drops `customer_id` + `device_id` denormalization. Architecture-phase cascade.
+- SP UI engineer's role-based control (already confirmed per xlsx row 13 owner_corp-usa_email pattern) restricts edit access to the 4 new HILDA-readable fields to ops role only (TPM role sees them read-only).
+- TPM-runtime edits to Customer/Device SP rows DO fire HILDA-bound SP-alerts on these lists (alerts trigger HILDA cache invalidation for the affected row).
+- Ops workflow for Customer/Device changes: ops edits SP row via SP UI → SP-alert fires → HILDA invalidates cache for that customer_id/device_id → next alert refetches. No git/YAML/SIGHUP.
+- Multiple FR rewrites already in place: FR-2 (no customer.yaml; tracker creation resolves via SP reads), FR-13/FR-31/FR-77 (slug source is SP via alert-driven cache, not YAML), FR-40 (2-YAML schema: template + tg_groups), FR-84 (no Milestone denormalization).
 
-**Anchors**: `[D-001]` (three-tier layout — customer + device YAML belongs in `customizations/`), `[D-019]` (credential discipline — PMCredential SP list eliminated because credentials live in credential_service), `[D-020]` (SharePointListProvider Protocol — extends to file-based customer/device data), `[D-025]` (Docker-Compose bind-mount Ph-1/Ph-2 — YAML accessible to HILDA at startup), `[D-051]` impl note 2026-06-12 (TG denormalization pattern — parallel to customer_slug + device_slug denormalization onto Milestone), `[D-064]` (HILDA→SP REST writeback — still required for Milestones + DeliveryItems), `[D-071]` (storage doesn't mirror DeliveryItem — Customer/Device same discipline), `[D-073]` (SP UI engineer provisions lists — extended to "and populates rows for display lists"). Supersedes implicit assumption in FR-2 / FR-13 / FR-77 that HILDA reads Customers + Devices SP lists.
+**Anchors**: `[D-001]`, `[D-004]`, `[D-006]`, `[D-019]` (credential discipline — PMCredential SP list stays HILDA-unread), `[D-020]` (SharePointListProvider — extends to Customers + Devices SP), `[D-047]` (SP-alert channel; resolution-via-SP-read pattern documented in FR-84), `[D-051]` impl note (TG denormalization — unchanged; separate concern from customer/device), `[D-064]` (writeback Milestones + DeliveryItems only — unchanged), `[D-068]` (SP-side audit field write pattern — generalized), `[D-071]` (storage doesn't mirror DI; caller-resolves applies to Customer+Device too), `[D-073]` (SP UI engineer provisions — extended via impl note 2026-06-14 for 4 new columns).
+
+**Supersedes**: D-DRAFT-Z v1 (2026-06-12; 2-list scope + customer.yaml + Milestone denormalization).
 
 ---
 
@@ -229,3 +237,122 @@ Net latency target: **sync POST handler returns 303 in <500ms** (validation + su
 - FR-7 mentions form factor flags as a set; the 5→7 expansion is captured in FR-56 column model bucket (b) 2026-06-12 ("7 flags total")
 
 **Anchors**: FR-7 (form factor scope; extensible-via-configuration mention), FR-56 column model 2026-06-12 (bucket b lists 7 flags), template_schema/MODULE.md (canonical schema location), `[D-046]` (canonical schema source — Pydantic models in template_schema).
+
+
+---
+
+## D-DRAFT-AA: `Milestone.target_date` is sole TPM-editable date; SP-side cascade with sp_alert_parser dedup discipline
+
+**Date drafted**: 2026-06-14
+
+**Context**: 2026-06-14 SP UI engineer xlsx review (row 68) surfaced that TPM-editing per-DeliveryItem `expected_completion_date` independently is operationally regressive — for a milestone with N items (often 40+), TPM would need N edits to shift all items to a new target date. User locked: `Milestone.target_date` is the SOLE TPM-editable date; all items in a milestone share the same target_date. This requires a cascade mechanism + a dedup discipline because SP-alerts fire per-row.
+
+**Decision**: `Milestone.target_date` is the sole TPM-editable date for any milestone. **Cascade flow**: (1) TPM edits `Milestone.target_date` in SP UI → (2) SP UI engineer's web part atomically writes the new value to the Milestone row AND propagates to each child DeliveryItem's `expected_completion_date` field in a multi-row SP-side write → (3) the milestone-level write fires one SP-alert; each per-DI write also fires its own SP-alert (SP-alert engine is per-row); → (4) HILDA's `email_service.sp_alert_parser` processes ONLY the Milestone `target_date` change alert and cascades the new value to its in-memory state for all DIs in the milestone; **per-DI `expected_completion_date` change alerts triggered by the same edit burst are deduplicated and ignored**. Per-item `expected_completion_date` editing is NOT exposed in TPM SP UI; FR-14 amended 2026-06-14 to drop per-item date override.
+
+**Why**:
+- **(a) Operational simplicity for TPM**: one edit shifts all items in a milestone. Matches the natural model "milestone target slips → all items slip together."
+- **(b) Eliminates per-item date divergence**: prevents TPM from accidentally creating items with mismatched target_dates that escape FR-11 escalation in confusing ways.
+- **(c) SP-side cascade keeps SP single-source-of-truth**: SP web part owns the per-DI write fan-out; HILDA learns the new state via the milestone alert without participating in the fan-out.
+- **(d) Dedup discipline avoids HILDA over-processing**: a 40-item milestone's target_date edit fires 1 milestone alert + 40 DI alerts; without dedup, HILDA would process 41 logical changes for 1 user action.
+
+**Rejected alternatives**:
+- **(α) Per-item date editing retained (current FR-14 wording)**: rejected per user 2026-06-14 — operationally regressive; no use case.
+- **(β) HILDA owns the cascade (SP UI engineer writes milestone only; HILDA reads alert + fans out per-DI writes via `[D-064]`)**: rejected — SP UI engineer's web part is already at the point of edit (atomic SP-side write is cheaper than HILDA round-trip); HILDA cascade introduces a window where Milestone.target_date and DI.expected_completion_date are temporarily out of sync.
+- **(γ) No DI mirror of target_date; HILDA computes deadline math from Milestone.target_date at runtime**: viable but loses backward-compat with existing FR-11/FR-26/FR-55/FR-23 `polling_schedule` evaluation which reads `expected_completion_date` per item (deadline-tiered intervals); rewrite scope too large for marginal benefit.
+
+**Consequences**:
+- FR-11 amended 2026-06-14 to document cascade + dedup discipline.
+- FR-14 amended 2026-06-14 to drop per-item `expected_completion_date` override (replaced by milestone-target_date-only edit path).
+- `sp_alert_parser` gains dedup logic: when a Milestone target_date change alert is in the same alert batch as per-DI `expected_completion_date` change alerts for items in that milestone, the per-DI alerts are ignored. Alert-batch grouping mechanism: SP-alerts arrive via IMAP IDLE / short-poll; alerts with the same `Modified` timestamp ±N seconds and shared milestone scope are grouped per architecture-phase detail.
+- SP UI engineer's web part implements the atomic SP-side multi-row write on Milestone.target_date edit; failure to propagate to all DIs leaves the milestone in a partially-cascaded state requiring TPM re-edit (acceptable Ph-1 failure mode).
+- Per-DI `expected_completion_date` field on DeliveryItems SP list becomes HILDA-managed (read by sp_alert_parser cache; written by SP UI engineer's cascade). TPM SP UI MUST NOT expose this field as editable.
+- DEF-N (Ph-3+): if cross-item date divergence is ever needed (e.g., one item slips while others stay), a per-item date override mechanism can be re-introduced via FR-14 — gated on actual operational need.
+
+**Anchors**: FR-2 (target_date set at tracker creation), FR-11 (deadline escalation per `expected_completion_date`), FR-14 (TPM overrides — date dropped from list), `[D-047]` (SP-alert channel — dedup is sp_alert_parser responsibility), `[D-064]` (SP-side cascade write is SP UI engineer's, not HILDA's), `[D-068]` impl note 2026-06-12 (SP-side button-write discipline — same pattern generalized to multi-row cascade).
+
+
+---
+
+## D-DRAFT-D073-IMPL-2026-06-14: D-073 impl note — Customers + Devices SP list gain 4 HILDA-readable columns per D-DRAFT-Z 2026-06-14 rewrite
+
+**Date drafted**: 2026-06-14
+
+**Target**: appended to canonical `[D-073]` as an implementation note at `/land-strand` time (parallel to existing impl notes on `[D-051]`, `[D-068]`, etc.). Not a new D-XXX.
+
+**Context**: D-073 (canonical 2026-06-12) locked SP UI engineer's manual provisioning ceremony for SP lists. D-DRAFT-Z 2026-06-14 rewrite expanded HILDA's runtime SP read coupling from 2 lists to 4 (Customers + Devices added). SP UI engineer's ceremony per `[D-073]` must add the 4 new HILDA-readable columns so HILDA can resolve customer/device data from SP rows at SP-alert receive.
+
+**Decision (impl note text, verbatim for promotion at land-strand)**:
+
+> **Implementation note (2026-06-14 — 4 new HILDA-readable columns added to Customers + Devices SP lists per D-DRAFT-Z 2026-06-14 rewrite)**: SP UI engineer's manual provisioning ceremony per this Decision expands to include 4 new columns supporting HILDA's expanded 4-list runtime SP coupling per D-DRAFT-Z rewrite. **Customers SP list adds**: `customer_id` (HILDA-readable identifier resolved from `customer_id` SP row PK at alert receive; ops sets at customer-onboarding) + the existing `customer_jira_url` (FR-25 base URL). **Devices SP list adds**: `device_id` (HILDA-readable identifier resolved from `device_id`) + `assigned_pm_id` (PM identity per device for FR-19 / FR-25 / FR-51 PM-credentialed external calls; per FR-25 PM ≡ TPM in this deployment). **Edit discipline (load-bearing)**: all 4 fields are **ops-editable only** — TPM SP UI role MUST NOT allow edits. Misconfig on `customer_jira_url` would break FR-25 CustomerJIRA polling; misconfig on `customer_id` / `device_id` would break HILDA's NSD path construction (FR-13) and folder routing (FR-77). Field-level role restriction is the SP web part's responsibility per the SP UI engineer's existing role-based control pattern (confirmed 2026-06-14 — same pattern used for `pm_approval_at` / `last_reminder_triggered_at` SP-managed audit fields). SP-alert subscription on Customers + Devices SP lists is required (alert fires HILDA cache invalidation for the affected row id). Captured in `HILDA_SP_Schema.xlsx` Customers tab row 76 + Devices tab rows 79-80 (2026-06-14 SP UI engineer review). Anchors expanded: `[D-019]`, `[D-020]`, `[D-047]`, `[D-064]` (writeback still M+DI only), `[D-068]` (SP-side audit field write pattern — generalized to ops-only fields), D-DRAFT-Z 2026-06-14 rewrite.
+
+**Why drafted as impl note (not new D-XXX)**: amends existing canonical decision with operational scope extension; the core D-073 framing (SP UI engineer provisions; HILDA does not REST-create) is unchanged.
+
+**Anchors**: `[D-073]` (parent), D-DRAFT-Z 2026-06-14 rewrite (this strand), `[D-019]`, `[D-020]`, `[D-047]`, `[D-064]`, `[D-068]`.
+
+
+---
+
+## D-DRAFT-D006-IMPL-2026-06-14: D-006 impl note — NTLM confirmed as the actual on-prem AD auth protocol (Kerberos option removed)
+
+**Date drafted**: 2026-06-14
+
+**Target**: appended to canonical `[D-006]` as an implementation note at `/land-strand` time (parallel to existing impl-note pattern on `[D-051]`, `[D-068]`, `[D-073]`). Not a new D-XXX.
+
+**Context**: D-006 (canonical 2026-04-30) chose "SharePoint REST API + on-prem AD auth (NTLM / Kerberos) against SharePoint 2017" — the "NTLM / Kerberos" framing was originally an "either-acceptable" placeholder, deferring the exact protocol choice to the deployment environment. 2026-06-14 corp environment confirmation: corp standard is **NTLM across both HILDA→SP REST and HILDA→NSD SMB**. SP UI engineer + ops infra inspection of HILDA Linux PC: NSD mounts use `cifs-utils` with `sec=ntlmssp` + `~/.smbcredentials` (username + password); no Kerberos keytab present; no krb5 ticket cache. SP REST writeback uses the same NTLM credentials via `requests_ntlm` (or equivalent) per `sharepoint_integration.SpCrud` Ph-1 implementation.
+
+**Decision (impl note text, verbatim for promotion at land-strand)**:
+
+> **Implementation note (2026-06-14 — NTLM confirmed; Kerberos option dropped)**: Corp environment standardizes on **NTLM** for both HILDA→SP REST and HILDA→NSD SMB authentication. The "NTLM / Kerberos" placeholder in this Decision's original text is replaced with NTLM-only. HILDA→SP REST uses `requests_ntlm.HttpNtlmAuth` (or equivalent NTLM credential injector) with `hilda-svc` AD service account credentials per `[D-019]` / `[D-038]` sops-encrypted env file discipline. HILDA→NSD SMB uses `cifs-utils` mount option `sec=ntlmssp` with `~/.smbcredentials` (username + password file mode 600, ops-provisioned). No Kerberos keytab + no krb5 ticket cache on HILDA PC — Kerberos infrastructure is not deployed in this environment. Browser→HILDA-proxy auth (per `[D-074]` Windows Integrated Auth) is separate and unaffected — that channel uses corp browser's native Negotiate (which may fall back to NTLM or use Kerberos depending on browser + GPO config; HILDA-side accepts both via the reverse proxy's auth handler). FR-2, FR-13, FR-73, FR-84, NFR-8, NFR-10 updated 2026-06-14 to reflect NTLM-only on HILDA→SP and HILDA→NSD paths. Anchors `[D-019]` (credential service discipline — NTLM credentials are HILDA-local secrets per `[D-038]` sops), `[D-038]` (sops-encrypted env file holds the NTLM username/password), `[D-074]` (browser→HILDA-proxy is separate auth scope; impl note doesn't cover it).
+
+**Why drafted as impl note (not new D-XXX)**: amends existing canonical decision with environment-specific protocol confirmation; the core D-006 framing (SP REST + on-prem AD auth + SP 2017 against `[D-006]` Graph-vs-REST trade-off) is unchanged.
+
+**Anchors**: `[D-006]` (parent), `[D-019]`, `[D-038]`, `[D-074]` (separate auth scope clarification).
+
+
+---
+
+## D-DRAFT-Z-V2-AMEND-2026-06-14b: D-DRAFT-Z v2 amendment — joint `(Model, ProjectID)` Device lookup key + slug→id rename + single template.yaml (folds tg_groups.yaml)
+
+**Date drafted**: 2026-06-14 (late-session amendment to D-DRAFT-Z v2 — accumulates with v2 at land-strand promotion)
+
+**Context**: D-DRAFT-Z v2 was drafted earlier 2026-06-14 with single-key Device lookup (`device_id` only) + 2-file YAML model (template.yaml + tg_groups.yaml) + `*_slug` naming. SP UI engineer's template.yaml proposal + xlsx review later same day surfaced refinements: (a) Devices SP list uses **joint key `(Model, ProjectID)`** because same Model can be tracked under multiple ProjectIDs; (b) SP-alert payload carries 5 fields, not 3 (`MMK`, `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber`); (c) `*_slug` business codes rename to `*_id` to match corp + alert payload naming; (d) tg_groups.yaml folds into template.yaml with TG fields denormalized per-work-item — single YAML per customer.
+
+**Decision (amendment text, verbatim for promotion-as-amendment at land-strand)**:
+
+> **Amendment 2026-06-14 — joint Device key + 5-field routing + slug→id + single template.yaml**:
+> 1. **Devices SP list PK = `ProjectID`** (corp-assigned external value, e.g., `2479`; not auto-Counter). `model` is a field column (= `device_id` in template.yaml, e.g., `SM-S901U`). Device lookup at SP-alert receive is direct PK lookup by ProjectID; `Model` cross-validated against the row's `model` column for integrity (log `EML-W008` on mismatch but don't fail). Supersedes joint-key wording — same Model may appear across multiple ProjectID rows but lookup is single-key by PK.
+> 2. **SP-alert payload routing key** expands from 3-tuple `(ProjectID, MinorMilestone, ItemNumber)` to **5-field set**: `customer_id` (value from subject suffix in `Alert_Tasks_<customer_id>` — example value `MMK` in subject `Alert_Tasks_MMK - NVIOT - AGPS Test Results`; note that `MMK` is a customer_id VALUE, not a field name), plus `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber` (all body fields).
+> 3. **Naming convention**: `customer_slug` → `customer_id`, `device_slug` → `device_id`, `milestone_slug` → `milestone_id`, `item_path_slug` → `item_path_id`, `tg_path_slug` → `tg_path_id` throughout FRs + storage + SP-config. SP-list Counter PKs (auto-generated Integer) referred to as `customer_pk` / `device_pk` / `milestone_pk` / `item_pk` to avoid collision with business-identifier `_id` namespace.
+> 4. **Single template.yaml per customer** at `customizations/template_schemas/<customer_id>/template.yaml` (was 2 files: template.yaml + tg_groups.yaml). Hierarchical structure: `<customer_id> → <device_id> → <milestone_id> → work_items[]`. TG metadata fields denormalized per-work-item with HILDA-validated equality discipline (same `tg_name` group within a milestone must have identical TG-field values across all items; `TSC-W005` warning on divergence). tg_groups.yaml is obsolete.
+> 5. **Customer-onboarding seed flow**: template.yaml is the deployment-time SEED for all SP rows (Customers + Devices + Milestones + DeliveryItems); HILDA reads + writes initial rows via `[D-064]` on ops bootstrap command/SIGHUP. Existing SP rows never overwritten (SP is canonical for in-flight state); template-reload diff writes NEW rows only (for new device launch / new milestone).
+
+**Why drafted as amendment to v2 (not new D-XXX)**: refines v2's specifics (joint key, naming, file count) without changing the v2 core decision (HILDA reads 4 SP lists incl. Customers + Devices; canonical store is SP). Promotes at land-strand as continuation of v2's canonical impl note.
+
+**Cascade SP-list schema (supplements D-DRAFT-D073-IMPL)**: **Customers SP list** carries `customer_id` (= MMK alert tag) + `customer_jira_url`; **Devices SP list** carries `model` + `project_id` (joint key) + `device_id` (HILDA NSD path identifier; may equal `model` or be a derived value — exact rule architecture-phase) + `assigned_pm_id`; **Milestones SP list** carries `milestone_id` (= MinorMilestone alert tag); **DeliveryItems SP list** carries `item_no` (= ItemNumber alert tag) + `item_path_id` (NSD path identifier).
+
+**Anchors**: D-DRAFT-Z v2 (parent), FR-2 customer-onboarding seed flow, FR-40 single-template rewrite, FR-84 5-field routing, D-DRAFT-D073-IMPL (column additions on Customers/Devices SP).
+
+
+---
+
+## D-DRAFT-Z-V2-AMEND-2026-06-14c: D-DRAFT-Z v2 final R&R lock — SP UI engineer setup_milestone is SOLE SP row-creation path; HILDA never creates SP rows; single-template hierarchy with milestones at customer level
+
+**Date drafted**: 2026-06-14 (late-session amendment; supersedes earlier 2026-06-14b on Devices joint-key + template.yaml hierarchy)
+
+**Context**: Earlier in 2026-06-14 session D-DRAFT-Z v2 + AMEND-2026-06-14b proposed HILDA seeds SP rows at first bootstrap and writes new tuples on template.yaml diffs (case B1). SP UI engineer end-of-day clarification rejected this — SP UI engineer setup_milestone task is the SOLE path for SP row creation across all 4 lists. HILDA NEVER creates SP rows. Additionally template.yaml hierarchy revised: milestones at customer level (NOT under device) since work-items per carrier do not change per device. Devices SP PK is project_id (corp-assigned, not auto-Counter), not a joint key.
+
+**Decision (amendment text, verbatim for promotion-as-amendment at land-strand; supersedes 2026-06-14b)**:
+
+> **Final R&R lock 2026-06-14 (supersedes earlier same-day drafts)**:
+> 1. **SP UI engineer = SOLE SP row-creation authority**. setup_milestone TPM task per (customer, device) creates Customer + Device + Milestone + DeliveryItem rows using template.yaml as field/default reference. SP UI engineer assigns project_id (Devices PK) at row create.
+> 2. **HILDA NEVER creates SP rows** — at any time, under any condition. HILDA = state transitions + audit-field writes on existing rows via [D-064]; never SpCrud.create_item.
+> 3. **Template.yaml change semantics**: (a) change has no effect on active milestones; (b) SIGHUP HILDA after template.yaml change has no row-creation effect; (c) no on-demand work-item addition to active milestones — template.yaml edits apply only to FUTURE setup_milestone runs.
+> 4. **Hierarchy**: customer to milestones (with work-items, shared across all devices) + devices (separate, per-device metadata only). NOT customer to device to milestone. Work-items per (customer, milestone) — single source — applied to every (device, milestone) combination at setup_milestone time.
+> 5. **Devices PK = project_id** (not joint key, not auto-Counter). model is a field column carrying the device_id value (e.g., SM-S901U). Same model may appear across multiple ProjectID rows. Device lookup at SP-alert receive: direct PK GET by ProjectID; Model cross-validated against model column (log EML-W008 on mismatch).
+> 6. **Template.yaml does NOT contain project_id** — SP UI engineer assigns at Devices SP row creation.
+>
+> **Why cleaner**: (a) sharp R&R boundary — SP UI engineer owns row creation; HILDA owns state transitions; zero collision risk; (b) HILDA is structurally insulated from template.yaml edits — no diff logic, no bootstrap/diff mode detection, no SIGHUP-driven write path; (c) milestones-at-customer-level eliminates the M*D*W work-item duplication problem when devices share milestones; (d) ProjectID-as-PK matches corp convention.
+
+**Why drafted as additional amendment (not replacement of v2)**: v2 core decision (HILDA reads 4 SP lists; canonical store is SP) is unchanged. Refines + supersedes the row-creation/diff aspects of v2 and AMEND-2026-06-14b. At land-strand, v2 + 2026-06-14b + 2026-06-14c all promote as one canonical D-XXX with three impl notes documenting the iterative refinement.
+
+**Anchors**: D-DRAFT-Z v2 (parent), D-DRAFT-Z-V2-AMEND-2026-06-14b (superseded R&R/hierarchy + joint-key aspects), FR-2 R&R lock 2026-06-14 late session, FR-5 SP-side uniqueness, FR-40 single-template structure (milestones at customer level), FR-84 Devices PK lookup, [D-073] (SP UI engineer manual provisioning + setup_milestone task ownership).
