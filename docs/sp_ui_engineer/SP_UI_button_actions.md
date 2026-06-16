@@ -134,7 +134,7 @@
 | **Where** | Per-row action on each DeliveryItem in Milestone View |
 | **Enabled when** | `item_type ≠ Confirmation` AND `delivery_state ∈ {DocumentReceived, UnderPMReview, ReadyForSubmission, SubmittedToCustomer}` OR (in `Open` state when effective `tracking_enabled = false` per FR-81 — no-tracking TG fallback) |
 | **User prompt** | None (button is a link-out anchor; navigation, not click-action) |
-| **What happens on click** | Browser opens a new tab navigating to `https://hilda-proxy.corp/upload/<item_id>` where `<item_id>` is the SP system `ID` column (auto-Counter PK). Built as: `<uploadUrlPrefix>/<item_id>` where `uploadUrlPrefix` is set as a SP web part property at deployment (e.g., `https://hilda-proxy.corp/upload`). No SP field write. |
+| **What happens on click** | Browser opens a new tab navigating to `https://hilda-proxy.corp/upload/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique). Built as: `<uploadUrlPrefix>/<customer_id>/<item_id>` where `uploadUrlPrefix` is set as a SP web part property at deployment (e.g., `https://hilda-proxy.corp/upload`). HILDA's dashboard resolves the target row via `Tasks_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
 | **What HILDA does next** | *(Background — handled by HILDA's dashboard, not SP)* HILDA's dashboard renders an upload form; TPM submits via same-origin form POST; HILDA writes the file to NSD + document index per FR-62. After successful upload, if `delivery_state ∈ {ReadyForSubmission, SubmittedToCustomer}`, HILDA reverts to `UnderPMReview` and clears `pm_approval_at`/`pm_approval_pm_id` per the revert pattern (see Approve button → Revert path). State updates push back to SP via `[D-064]`; visible on next focus refresh. |
 | **FR refs** | FR-62, `[D-074]` |
 
@@ -145,7 +145,7 @@
 | **Where** | Per-row link on each DeliveryItem in Milestone View |
 | **Enabled when** | `item_type ≠ Confirmation` |
 | **User prompt** | None (navigation link) |
-| **What happens on click** | Browser opens a new tab navigating to `<documentsUrlPrefix>/<item_id>` where `<item_id>` is the SP system `ID` column. Example: `https://hilda-proxy.corp/docs/12345`. Prefix is a SP web part property set at deployment. No SP field write. |
+| **What happens on click** | Browser opens a new tab navigating to `<documentsUrlPrefix>/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique — NOT globally unique across `Tasks_<customer_id>` lists per FR-5). Example: `https://hilda-proxy.corp/docs/MMK/12345`. Prefix is a SP web part property set at deployment. HILDA's dashboard resolves the target row via `Tasks_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
 | **What HILDA does next** | *(Background — HILDA dashboard renders)* HILDA's dashboard renders the document section as server-side HTML per FR-57/FR-59/FR-60. TPM stays in the HILDA tab for FR-87 TPM-resolution buttons (handled in HILDA tab, NOT SP UI). |
 | **FR refs** | FR-57, FR-59, FR-60, FR-61, `[D-074]` |
 
@@ -247,7 +247,7 @@ These buttons are **NOT** in the SP UI engineer's scope:
 
 - **FR-87 TPM document resolution buttons** (Reassign work-item / Resolve doc_type / Resolve revision) — these live in **HILDA's rendered document section** (HILDA tab), not SP UI per `[D-074]` Variant A. They use same-origin form POST to HILDA's dashboard endpoints, bypassing SP-alert entirely.
 - **FR-62 Upload Document FORM** — the *button* is in SP UI (link-out anchor only); the upload *form itself* is rendered by HILDA's dashboard.
-- **Any HILDA dashboard rendering** (`/docs/<item_id>`, `/upload/<item_id>`, `/dl/<scoped_token>`) — owned by HILDA, not SP UI engineer.
+- **Any HILDA dashboard rendering** (`/docs/<customer_id>/<item_id>`, `/upload/<customer_id>/<item_id>`, `/dl/<scoped_token>`) — owned by HILDA, not SP UI engineer.
 
 ---
 
