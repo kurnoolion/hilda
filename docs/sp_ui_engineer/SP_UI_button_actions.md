@@ -10,7 +10,7 @@
 
 **Field-write pattern.** Every button click is a **SP-side field write** on a SP list row. The act of writing the field is what fires the SP-alert that wakes HILDA — no direct HTTP call to HILDA from the SP web part (corp firewall blocks it per FR-84). HILDA learns of every click via the resulting alert email.
 
-**Milestone-scoped writes touch every work-item row in the milestone (Ph-1 flat per-carrier list model).** Milestone-level actions (Start Collection / Submit to Carrier / Close All Items / Refresh / Download Package) write the milestone-level column (e.g., `milestone_collection_started_at`) to **every work-item row** in the milestone — N rows × 1 column write in a single SP transaction. Each per-row write fires an SP-alert; HILDA processes the first alert in the burst and deduplicates the rest by detecting the same `(customer_id, MinorMilestone, column_name)` tuple across the burst (per FR-11 / `[D-082]` cascade-dedup pattern). Per-DeliveryItem actions write to the individual DI row only. **Ph-2** restores the milestone-sentinel-row pattern (1 row write per action) per `[D-077]` v2 normalization.
+**Milestone-scoped writes touch every work-item row in the milestone.** Milestone-level actions (Start Collection / Submit to Carrier / Close All Items / Refresh / Download Package) write the milestone-level column (e.g., `milestone_collection_started_at`) to **every work-item row** in the milestone within `Tasks_<customer_id>` — N rows × 1 column write in a single SP transaction. Each per-row write fires an SP-alert; HILDA processes the first alert in the burst and deduplicates the rest by detecting the same `(customer_id, MinorMilestone, column_name)` tuple across the burst (per FR-11 / `[D-082]` cascade-dedup pattern). Per-DeliveryItem actions write to the individual DI row only.
 
 **Atomic 3-field write for Approve.** The Approve button writes 3 fields (`delivery_state` + `pm_approval_at` + `pm_approval_pm_id`) in a **single SP transaction**. SP web part code must enforce atomicity; partial writes are a defect.
 
@@ -24,7 +24,7 @@
 
 ---
 
-## Milestone View — top-bar buttons (N-row duplicated writes; Ph-1 flat-table model)
+## Milestone View — top-bar buttons
 
 ### Start Collection
 
@@ -33,10 +33,10 @@
 | **Where** | Milestone View top bar |
 | **Enabled when** | `milestone.milestone_collection_started_at` is empty AND `milestone.status` ∈ {Not Started, In Progress} |
 | **User prompt** | "Start collection for milestone `<name>`? This will send initial outreach to all R&D owners." (Yes / Cancel) |
-| **What happens on click** | Set `milestone_collection_started_at = <now>` on **every work-item row** in the milestone (within `Tasks_<customer_id>`, filter `model + minorMilestone`). Single SP transaction batching N row updates (Ph-1 flat-table; Ph-2 collapses to one milestone-sentinel row). |
+| **What happens on click** | Set `milestone_collection_started_at = <now>` on **every work-item row** in the milestone (within `Tasks_<customer_id>`, filter `model + minorMilestone`). Single SP transaction batching N row updates. |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA receives N SP-alerts, deduplicates to one via `(customer_id, minorMilestone, milestone_collection_started_at)` burst detection, transitions each DI from `Not Started` → `Open`, creates PLM issues per (owner × milestone), fires email outreach to all owners, transitions each DI to `OutreachSent`, activates runtime polling channels (Email/NSD/PLM/CustomerJIRA per per-item `tracking_modality`), and sets `Milestone.status = "In Progress"` (writes to every row in the milestone). Item rows update via live polling. |
 | **Idempotency** | Re-click on an already-started milestone is safe — HILDA detects existing `plm_id` and skips duplicate creation; only DIs still in `Open` get re-fired outreach. |
-| **FR refs** | FR-8, FR-56 (e), FR-84 (Ph-1 N-row write pattern), `[D-082]` (cascade dedup) |
+| **FR refs** | FR-8, FR-56 (e), FR-84 (N-row write pattern), `[D-082]` (cascade dedup) |
 
 ### Submit to Carrier
 
@@ -45,7 +45,7 @@
 | **Where** | Milestone View top bar |
 | **Enabled when** | All DIs in milestone are in `{ReadyForSubmission, SubmittedToCustomer}` AND at least one DI is in `ReadyForSubmission` |
 | **User prompt** | **Initial submission**: "Submit `<N>` items to carrier? This dispatches the submission package via the customer adapter." (Yes / Cancel) — `<N>` = count of ReadyForSubmission items. **Re-submission** (any item already SubmittedToCustomer): "Re-submitting `<N>` items with updated documents. `<M>` previously-submitted items are unchanged and excluded from this package. Proceed?" (Yes / Cancel) |
-| **What happens on click** | Set `milestone_submission_triggered_at = <now>` on **every work-item row** in the milestone (Ph-1 flat-table N-row write; HILDA deduplicates per `[D-082]`). |
+| **What happens on click** | Set `milestone_submission_triggered_at = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`). |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA assembles the submission package from `ReadyForSubmission` items only (`SubmittedToCustomer` items are skipped on re-submission), dispatches via the customer adapter (Google Drive browser automation Ph-1/Ph-2 per FR-19), transitions dispatched items to `SubmittedToCustomer`, logs to `CommunicationLog` with `action_type=submission` (initial) or `resubmission` (delta). Item rows update via live polling. |
 | **Idempotency** | If a previous Submit attempt failed mid-dispatch, re-clicking is safe — HILDA's idempotency check on `(milestone_id, dispatch_run_id)` prevents duplicate carrier upload. |
 | **FR refs** | FR-18, FR-19, FR-63, FR-56 (e) |
@@ -57,7 +57,7 @@
 | **Where** | Milestone View top bar |
 | **Enabled when** | All `is_milestone_gating=true` DIs are in `{SubmittedToCustomer, Closed}` AND at least one `is_milestone_gating=true` DI is in `SubmittedToCustomer`. **Non-gating items** (`is_milestone_gating=false`) may remain in any non-blocking state at click time. |
 | **User prompt** | "Close all items in milestone `<name>`? This finalizes the milestone — non-Closed items will be auto-advanced to Closed, and document storage will be permanently cleaned up. **Document download links will return 404 after cleanup — download any needed files first.**" (Yes / Cancel) |
-| **What happens on click** | Set `close_all_items_triggered_at = <now>` on **every work-item row** in the milestone (Ph-1 flat-table N-row write; HILDA deduplicates per `[D-082]`). |
+| **What happens on click** | Set `close_all_items_triggered_at = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`). |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA performs a two-part cascade per FR-64: (1) sets all `SubmittedToCustomer` items to `Closed`; (2) auto-advances any `is_milestone_gating=false` items in non-Closed states to `Closed` (action_type=`bulk_close_non_gating`). When all gating items + default work-item reach `Closed`, FR-76 `MilestoneStorageCleanup` fires — NSD `internal/<milestone>/` subtree is deleted permanently. Item rows update via live polling. |
 | **Idempotency** | Re-click is no-op once all items are `Closed`. |
 | **FR refs** | FR-28 (`MilestoneAllClosed`), FR-64, FR-76, FR-56 (e) |
@@ -69,7 +69,7 @@
 | **Where** | Milestone View top bar |
 | **Enabled when** | Always |
 | **User prompt** | None (immediate action). |
-| **What happens on click** | Set `refresh_requested_at = <now>` on **every work-item row** in the milestone (Ph-1 flat-table N-row write; HILDA deduplicates per `[D-082]`). |
+| **What happens on click** | Set `refresh_requested_at = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`). |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA performs a soft-poll across Email/PLM/NSD ingest channels for the milestone, checking for new documents since the last poll. Rate-limited HILDA-side (default 5 min per milestone). If a soft-poll is already in progress, the alert is acknowledged with no new task. After poll, HILDA writes back SP updates per `[D-064]`. Item rows update via live polling. |
 | **Idempotency** | Rate limit prevents over-firing. |
 | **FR refs** | FR-56 (f) |
@@ -81,7 +81,7 @@
 | **Where** | Milestone View top bar |
 | **Enabled when** | Same as Submit to Carrier: all DIs in `{ReadyForSubmission, SubmittedToCustomer}` AND ≥1 in `ReadyForSubmission` |
 | **User prompt** | "Download submission package for milestone `<name>`? HILDA will prepare the zip and notify when ready (~30 s typical)." (Yes / Cancel) |
-| **What happens on click** | (a) Set `download_package_request_timestamp = <now>` on **every work-item row** in the milestone (Ph-1 flat-table N-row write; HILDA deduplicates per `[D-082]`); (b) immediately update SP UI to show "Package preparing..." indicator (replaces the button); (c) clear `download_package_url`, `download_package_status`, `download_package_generated_at` on every work-item row in the milestone (fresh assembly per click). |
+| **What happens on click** | (a) Set `download_package_request_timestamp = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`); (b) immediately update SP UI to show "Package preparing..." indicator (replaces the button); (c) clear `download_package_url`, `download_package_status`, `download_package_generated_at` on every work-item row in the milestone (fresh assembly per click). |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA assembles the zip in background per FR-73 (individual files only per FR-77 Type-2 routing — no audit zips). On completion, HILDA writes back to **every work-item row in the milestone**: `download_package_url = https://hilda-proxy.corp/dl/<scoped_token>`, `download_package_status = "ready"`, `download_package_generated_at = <now>`. On failure: `download_package_status = "failed"` (on every row) + `HildaOpsAlert` logged. |
 | **Live polling on completion** | SP web part's focus-aware refresh re-reads any work-item row in the milestone (all carry identical milestone-level values); when `download_package_status = "ready"` is observed, the "Preparing..." indicator is replaced with a clickable **Download Now** link (the `download_package_url`). |
 | **Idempotency** | Per-click regeneration — each click triggers fresh assembly; previous cached zip is discarded. |
@@ -210,9 +210,9 @@
 
 ---
 
-## Field summary — milestone-level fields (duplicated across every work-item row in the milestone; Ph-1 flat-table model)
+## Field summary — milestone-level fields (duplicated across every work-item row in the milestone)
 
-These are the SP audit fields written by milestone-level button clicks. **Ph-1 (revised 2026-06-15)**: per `SP_lists_authoritative.xlsx`, all live as **columns on every work-item row** within `Tasks_<customer_id>` — milestone-level button clicks write the column on every row in the milestone (N rows × 1 column). HILDA deduplicates the alert burst via `[D-082]`. **Ph-2** restores the milestone-sentinel-row pattern (1 row per milestone) per `[D-077]` v2.
+These are the SP audit fields written by milestone-level button clicks. Per `SP_lists_authoritative.xlsx`, all live as **columns on every work-item row** within `Tasks_<customer_id>` — milestone-level button clicks write the column on every row in the milestone (N rows × 1 column). HILDA deduplicates the alert burst via `[D-082]`.
 
 | Field | Type | Written by | Cleared/reset by |
 |---|---|---|---|
@@ -255,8 +255,8 @@ These buttons are **NOT** in the SP UI engineer's scope:
 
 For SP-alert email channel to function:
 
-1. **"Send Alerts for These Changes" = "Anything changes"** on every per-customer `Tasks_<customer_id>` list HILDA reads from (Ph-1: 1 flat list per customer). Without this, TPM direct field edits per FR-14 won't fire alerts. **Ph-2** restores per-list alerts on Customers + Devices + Milestones + DeliveryItems.
-2. **Subject line format**: `Alert_Tasks_<customer_id> - <ItemTitle>` per FR-84 Ph-1 convention (e.g., `Alert_Tasks_MMK - NVIOT - AGPS Test Results`). SP UI engineer's alert template MUST emit the 5 routing-key fields in the alert body (`customer_id`, `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber`). The `customer_id` value is encoded in the subject suffix; `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber` in the body select the row within the list.
+1. **"Send Alerts for These Changes" = "Anything changes"** on every per-customer `Tasks_<customer_id>` list HILDA reads from. Without this, TPM direct field edits per FR-14 won't fire alerts.
+2. **Subject line format**: `Alert_Tasks_<customer_id> - <ItemTitle>` per FR-84 (e.g., `Alert_Tasks_MMK - NVIOT - AGPS Test Results`). SP UI engineer's alert template MUST emit the 5 routing-key fields in the alert body (`customer_id`, `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber`). The `customer_id` value is encoded in the subject suffix; `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber` in the body select the row within the list.
 3. **Alert destination**: the HILDA team's dedicated mailbox (configured per deployment).
 4. **Buttons that write fields must NOT bypass alerts** — every field write in this spec MUST fire an alert. If SP UI engineer uses any "silent update" API, HILDA misses the event.
 
