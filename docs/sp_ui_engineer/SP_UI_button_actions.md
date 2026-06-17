@@ -120,12 +120,12 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | Field | Value |
 |---|---|
 | **Where** | Per-row action on each DeliveryItem in Milestone View |
-| **Enabled when** | `delivery_state ∉ {OwnerClosed, ReadyForSubmission, SubmittedToCustomer, Closed}` |
+| **Enabled when** | `delivery_state ∉ {OwnerClosed, ReadyForSubmission, SubmittedToCustomer, Closed}` AND `item_type ≠ Default` (suppress button on the default work-item row per FR-78 — no owner to remind; system-reserved TG `_unrouted`) |
 | **User prompt** | None (immediate action). Optional: "Send reminder to `<owner_name>`?" (Yes / Cancel) — implementation choice. |
-| **What happens on click** | Set `DeliveryItems.last_reminder_triggered_at = <now>` on the DI row. |
-| **What HILDA does next** | *(Background — out of your scope)* HILDA dispatches a reminder to the owner via the item's status-capable modality (Email primary; `tg_email_group_alias` if set; per FR-9 preference rule). On dispatch success, HILDA writes back `last_owner_contacted = <now>` via `[D-064]` REST. On failure, logs to `HildaOpsAlert` per FR-75; `last_owner_contacted` stays unchanged. |
-| **Idempotency** | Re-click re-sends the reminder (intentional — TPM ad-hoc trigger per FR-14 / FR-65). |
-| **FR refs** | FR-9, FR-10, FR-15, FR-65 |
+| **What happens on click** | Set `DeliveryItems.last_reminder_triggered_at = <now>` on the DI row. Editor column captures PM-or-TPM identity (SP-side attribution). **You do NOT write side-effect columns** — `last_owner_contacted`, `reminder_count`, `delivery_state` Open→OutreachSent transition are all HILDA-managed via `[D-064]` REST writeback (parallel to FR-12 / FR-14 / FR-15-extended write-ownership pattern). |
+| **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert per `[D-047]` + FR-84, dispatches reminder to owner **via email only** (PLM is not a messaging platform per FR-65 modality lock 2026-06-17 — HILDA uses PLM for tracking/issue management only, not owner messaging; NSD/SPUI are ingest-only; CorpMessenger reserved for FR-11 escalations). Email recipients per FR-9 preference rule using `owner_corp_usa_email` / `owner_corp_email` (per `[D-080]`) + `tg_email_group_alias` if set. On dispatch success, HILDA writes back via `[D-064]` REST: (a) `last_owner_contacted = <now>`; (b) `reminder_count += 1`; (c) if item was in `Open`, advances `delivery_state` to `OutreachSent` atomically. `last_owner_response_at` + `manual_triage_required` + `prior_delivery_state` unchanged. Cadence-reset: HILDA reschedules next FR-10 automated reminder relative to this manual send timestamp. On dispatch failure, HILDA logs to `HildaOpsAlert` per FR-75; side-effect columns stay unchanged; HILDA may retry per NFR-10 backoff. **Delayed/Blocked**: dispatch fires but item does NOT auto-exit Delayed/Blocked (use Resume from Delayed/Blocked button); `last_owner_contacted` updates but FR-10 cadence stays paused per FR-12. |
+| **Idempotency** | Re-click re-sends the reminder (intentional — TPM ad-hoc trigger per FR-14 / FR-65); each click increments `reminder_count`. |
+| **FR refs** | FR-9, FR-10, FR-12, FR-14, FR-15, FR-15-extended, FR-65, FR-78, `[D-064]`, `[D-080]` |
 
 ### Mark Closed (manual close path)
 
