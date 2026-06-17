@@ -425,8 +425,9 @@ These are HILDA-internal columns — SP UI engineer's web part neither reads nor
 These buttons are **NOT** in the SP UI engineer's scope:
 
 - **FR-87 TPM document resolution buttons** (Reassign work-item / Resolve doc_type / Resolve revision) — these live in **HILDA's rendered document section** (HILDA tab), not SP UI per `[D-074]` Variant A. They use same-origin form POST to HILDA's dashboard endpoints, bypassing SP-alert entirely.
+- **FR-47 resolution-path picker** `[Ph-2]` (PM selects `resolution_path ∈ {fix_pre_launch, tech_report, waiver}` for each failed test case without `waiver_ref` in `interim` reports per FR-46) — lives in **HILDA's rendered document section** at `/docs/<customer_id>/<item_id>` per `[D-074]` + FR-60 + FR-47. Same family as FR-87 — HILDA-rendered, not SP UI; bypasses SP-alert.
 - **FR-62 Upload Document FORM** — the *button* is in SP UI (link-out anchor only); the upload *form itself* is rendered by HILDA's dashboard.
-- **Any HILDA dashboard rendering** (`/docs/<customer_id>/<item_id>`, `/upload/<customer_id>/<item_id>`, `/dl/<scoped_token>`) — owned by HILDA, not SP UI engineer.
+- **Any HILDA dashboard rendering** (`/docs/<customer_id>/<item_id>`, `/upload/<customer_id>/<item_id>`, `/dl/<scoped_token>`) — owned by HILDA, not SP UI engineer. Includes: document section + per-doc review findings display + FR-87 TPM resolution buttons + FR-47 resolution-path picker + FR-62 upload form.
 
 ---
 
