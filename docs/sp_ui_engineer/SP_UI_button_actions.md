@@ -166,11 +166,47 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | Field | Value |
 |---|---|
 | **Where** | Per-row link on each DeliveryItem in Milestone View |
-| **Enabled when** | `actual_item_info` is non-null (set once the first document for the owner × milestone has arrived per FR-57) |
+| **Enabled when** | `actual_item_info` is non-null (set once the first document for the (device, milestone, owner) tuple has arrived per FR-57) |
 | **User prompt** | None (navigation link) |
-| **What happens on click** | Browser opens a new tab navigating to the URL stored in `actual_item_info` (the corp PLM issue URL for the owner × milestone pair). No SP field write. |
+| **What happens on click** | Browser opens a new tab navigating to the URL stored in `actual_item_info` (the corp PLM issue URL for the (device, milestone, owner) tuple). No SP field write. |
 | **What HILDA does next** | *(None — direct PLM navigation)* TPM views the PLM issue in PLM's own UI. HILDA is uninvolved. |
 | **FR refs** | FR-57 |
+
+### Clear Triage Flag
+
+| Field | Value |
+|---|---|
+| **Where** | Per-row action on each DeliveryItem in Milestone View; visible only when `manual_triage_required = true` |
+| **Enabled when** | `manual_triage_required = true` (HILDA-set by FR-12 path (c.2) below-threshold owner-reply LLM classification) |
+| **User prompt** | "Clear triage flag for `<item_name>`? (Confirm you've read the original email + applied the correct `delivery_state` via cell edit or buttons.)" (Yes / Cancel) |
+| **What happens on click** | Set `manual_triage_required = false` on the DI row. Single field write. |
+| **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert, logs to `CommunicationLog` with `action_type = manual_triage_cleared` + TPM AD account; no further state-machine processing (triage resolution is the TPM's manual `delivery_state` write per FR-14 — this button only clears the surfaced flag). |
+| **Idempotency** | Already-cleared items have the button hidden (visibility on `manual_triage_required = true`). |
+| **FR refs** | FR-12 I4, FR-14 |
+
+### Confirm Carrier Acceptance (Mark Carrier-Closed)
+
+| Field | Value |
+|---|---|
+| **Where** | Per-row action on each DeliveryItem in Milestone View; visible only when `delivery_state = SubmittedToCustomer` |
+| **Enabled when** | `delivery_state = SubmittedToCustomer` AND customer-side acceptance has been confirmed out-of-band (email / customer portal status / internal communication — TPM judgment) |
+| **User prompt** | "Mark `<item_name>` as Closed? Carrier has confirmed acceptance of this deliverable. **This action is irrevocable.**" (Yes / Cancel) |
+| **What happens on click** | Set `delivery_state = "Closed"` on the DI row. Single field write. |
+| **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert, applies the state transition per FR-14 contract (FR-7 path (i) Closed); logs to `CommunicationLog` with `action_type = manual_carrier_acceptance` + TPM AD account. If this is the last remaining non-Closed `is_milestone_gating=true` item in the milestone (AND the default work-item is also Closed), fires `MilestoneAllClosed` (FR-28) → `MilestoneStorageCleanup` (FR-76). |
+| **Idempotency** | Already-`Closed` items have the button hidden. |
+| **FR refs** | FR-7 path (i), FR-14, FR-28 (`MilestoneAllClosed`), FR-76 |
+
+### Resume from Delayed / Resume from Blocked
+
+| Field | Value |
+|---|---|
+| **Where** | Per-row action on each DeliveryItem in Milestone View; visible only when `delivery_state ∈ {Delayed, Blocked}` |
+| **Enabled when** | `delivery_state ∈ {Delayed, Blocked}` AND `prior_delivery_state` is non-null (set by HILDA on the original Delayed/Blocked entry per FR-7 I2 prior_delivery_state discipline) |
+| **User prompt** | "Resume `<item_name>` from `<current delivery_state>` back to `<prior_delivery_state value>`?" (Yes / Cancel) |
+| **What happens on click** | Set `delivery_state = <prior_delivery_state value>` on the DI row. Single field write. SP UI reads `prior_delivery_state` to determine the target state and renders the button label accordingly (e.g., "Resume to OutreachSent"). |
+| **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert, applies state transition per FR-14 contract (FR-7 I2 exit path (b)). HILDA atomically clears `prior_delivery_state` (NULL) in the same `[D-064]` REST batch as the `delivery_state` write per FR-12 / FR-14 `prior_delivery_state` discipline. Logs to `CommunicationLog` with `action_type = manual_resume_from_delayed` (or `manual_resume_from_blocked`) + TPM AD account. Re-arms FR-11 `DeadlineProximity` evaluation for the item. |
+| **Idempotency** | Items not in `Delayed`/`Blocked` have the button hidden. |
+| **FR refs** | FR-7 I2 (Delayed/Blocked exit paths), FR-14, FR-11 (DeadlineProximity re-arm), FR-12 (prior_delivery_state discipline parallel) |
 
 ---
 
@@ -222,6 +258,49 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 
 ---
 
+## Direct cell edits (FR-14)
+
+In addition to button clicks above, TPM can directly edit TPM-editable columns on individual rows via SP UI cell-edit (the SharePoint list view's inline edit). Each cell edit fires an SP-alert that wakes HILDA per the same SP-alert channel (`[D-047]` / FR-84). HILDA processes the cell edit per FR-14 contract.
+
+### TPM-editable columns
+
+(Editable in SP UI per xlsx column 4 "Writable in SP UI YES/TPM" + FR-56 column model.)
+
+| Column | Effect on edit | FR refs |
+|---|---|---|
+| `comment` | Advisory; no FR-28 rule-engine trigger fires | FR-14 |
+| `delivery_state` | Fires FR-28 rule-engine triggers per FR-14 Downstream effects. E.g., setting `Closed` on the last gating item fires `MilestoneAllClosed` → `MilestoneStorageCleanup`. **For direct `Closed` transition from `SubmittedToCustomer`, prefer the Confirm Carrier Acceptance button above (consistent action_type logging). For direct `Delayed`/`Blocked` entry or recovery, see prior_delivery_state discipline below.** | FR-14, FR-7 |
+| `review_required` | `false → true` triggers retroactive FR-53 enqueue for existing received docs on the item | FR-14, FR-53 |
+| `manual_triage_required` | TPM clears (`true → false`) after triage resolution. Prefer the Clear Triage Flag button above for consistent UX. | FR-12 I4, FR-14 |
+| `email_cc_list` | Per-item CC list override per FR-9 path (b) | FR-9, FR-14 |
+| `tracking_modality` | Modality enum override (multi-value) per FR-7 | FR-7, FR-14 |
+| **owners `[Ph-2]`** (`owner_corp_usa_email`, `owner_corp_email`, `owner_corp_id`) | Fires `OwnerReassigned` rule + new-owner outreach cascade per FR-88. **Deferred to Ph-2 per FR-3 / DEF-22** — in Ph-1 owner fields are fixed at `setup_milestone` time. | FR-3, FR-88, DEF-22 |
+
+### Exclusions (web part MUST enforce non-editable in SP UI)
+
+- **Ops-editable-only fields per FR-2** (TPM MUST NOT edit): `customer_id`, `customer_jira_url`, `model` (= `device_id`), `project_id`, `assigned_pm_id`
+- **YAML-only fields** (NOT TPM-editable): `is_milestone_gating` per `[D-078]`
+- **HILDA-managed fields** (HILDA writes; TPM read-only or hidden — see Part 2 Excluded list)
+
+### SP-alert routing + TPM attribution
+
+- Each cell edit fires an SP-alert per the standard "Send Alerts for These Changes" = "Anything changes" config (per SP-alert configuration requirements below).
+- HILDA's `sp_alert_parser` routes via the 5-field SP-alert routing key per FR-84 (`customer_id, Model, ProjectID, MinorMilestone, ItemNumber`).
+- TPM identity captured via SP's built-in `Editor` system column on the SP-alert payload — logged to HILDA's `CommunicationLog` with `action_type = manual_field_override` + `field_name` + `old_value` + `new_value` + TPM AD account (per FR-14 NFR-5 / NFR-6 attribution).
+
+### Idempotency
+
+- HILDA reads current SP column value before applying the override; if the value already matches the incoming alert payload, no-op (skip the writeback + skip rule-engine triggers). Read-then-write-if-changed parallels FR-6 no-op suppression. `CommunicationLog` entry written once per actual value change (not per duplicate alert).
+
+### `prior_delivery_state` discipline (for Delayed/Blocked cell edits)
+
+- When TPM cell-edits `delivery_state` to `Delayed` or `Blocked` from another state, HILDA's `sp_alert_parser` sets `prior_delivery_state = <current value>` BEFORE writing the new `delivery_state` — both writes in one `[D-064]` REST batch (idempotent on retry).
+- When TPM cell-edits `delivery_state` recovery from `Delayed`/`Blocked` to a pre-approval state, HILDA clears `prior_delivery_state` (NULL) atomically with the new `delivery_state` write.
+- The Resume from Delayed / Resume from Blocked button above provides one-click UX for the recovery case (uses `prior_delivery_state` as the target).
+- SP UI engineer's web part does NOT write `prior_delivery_state` directly — HILDA manages it via `sp_alert_parser`.
+
+---
+
 ## Field summary — milestone-level fields (duplicated across every work-item row in the milestone)
 
 These are the SP audit fields written by milestone-level button clicks. Per `SP_lists_authoritative.xlsx`, all live as **columns on every work-item row** within `Tasks_<customer_id>` — milestone-level button clicks write the column on every row in the milestone (N rows × 1 column). HILDA deduplicates the alert burst via `[D-082]`.
@@ -250,6 +329,7 @@ These are the SP audit fields written by per-row button clicks.
 | `rules_paused_at` | DateTime | Pause Item Rules button | Cleared by Resume Item Rules button |
 | `manual_action_triggered_at` | DateTime | Trigger Action dropdown | (overwritten on next trigger) |
 | `manual_action_kind` | Choice (FR-29 verbs) | Trigger Action dropdown (atomic with timestamp) | (overwritten with timestamp) |
+| `manual_triage_required` | Boolean | HILDA sets `true` on FR-12 path (c.2) below-threshold; TPM clears via Clear Triage Flag button OR direct cell edit per FR-14 | (cleared by TPM after triage resolution) |
 
 ---
 
