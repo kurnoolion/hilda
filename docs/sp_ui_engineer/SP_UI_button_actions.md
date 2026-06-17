@@ -1,8 +1,14 @@
-# SP UI Button Action Specifications
+# SP UI Specifications — Buttons + Column Reads
 
 **Audience**: SP UI engineer implementing the SharePoint web parts.
-**Purpose**: Per-button spec for every clickable action in the SP UI, with the exact field-write contract HILDA expects on each click.
+**Purpose**: SP UI engineer's two-direction contract with HILDA — Part 1 specifies every clickable WRITE action (buttons + field-write contracts that fire SP-alerts to HILDA); Part 2 specifies every READ path (which columns SP UI engineer's web part reads from `Tasks_<customer_id>` to drive display, button visibility/enablement, and PM dashboard surfaces).
 **Authority**: this file + `SP_lists_authoritative.xlsx` are the two SP UI engineer deliverables of authority.
+
+**File organization**:
+- **Part 1 — Write Actions** (buttons + per-row + rule control panel): every button click is a field write that fires an SP-alert.
+- **Part 2 — Read Paths** (display + UI gating + dashboard surfaces): every column the web part reads from SP and what it drives in the UI.
+- **Out-of-scope clarifications** (FR-87 buttons, FR-62 form, HILDA dashboard rendering — owned by HILDA).
+- **SP-alert configuration requirements** (Alert trigger config that makes Part 1 work).
 
 ---
 
@@ -21,6 +27,12 @@
 **Role-based control.** Field-level role restrictions are SP web part responsibility. Where this spec says "TPM editable" or "ops only", the web part enforces. HILDA does not enforce role permissions — it trusts the SP write.
 
 **Atomicity for SP-side cascades.** Where this spec says SP-side cascade (e.g., Start Collection writes `milestone_collection_started_at` AND no other field; Approve writes 3 fields atomically), the web part executes all writes in one SP transaction OR fires all alerts only after all writes succeed.
+
+---
+
+# PART 1 — WRITE ACTIONS (Buttons + field writes)
+
+All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84. SP UI engineer's web part executes the field writes; HILDA reads the resulting SP-alert and applies downstream effects.
 
 ---
 
@@ -241,6 +253,93 @@ These are the SP audit fields written by per-row button clicks.
 
 ---
 
+# PART 2 — READ PATHS (Column display + UI gating + dashboard surfaces)
+
+This Part documents the columns SP UI engineer's web part **reads** from `Tasks_<customer_id>` to drive UI display, button visibility / enablement, and PM dashboard surfaces. Reads happen continuously via live polling + focus-aware refresh. Each row cites the read context, the column(s), and the authoritative FR.
+
+## Milestone View — Read Paths
+
+### Banner + milestone-level indicators
+
+| What | Column(s) read | Drives | FR refs |
+|---|---|---|---|
+| Milestone banner styling (Not Started / In Progress / Completed / Delayed) | `Milestone.status` (read from any row in milestone — column duplicated across all rows per Ph-1 flat-table per `[D-077]`) | Banner color, label, status badge | FR-6 |
+| Start Collection button visibility | `milestone_collection_started_at` (any row) | Button rendered only when `milestone_collection_started_at IS NULL` | FR-6, FR-8 |
+| Submit to Carrier button enablement | `delivery_state` (all rows in milestone) | Button enabled when all DIs in `{ReadyForSubmission, SubmittedToCustomer}` AND ≥1 `ReadyForSubmission` | FR-63 |
+| Close All Items button enablement | `delivery_state` + `is_milestone_gating` (all rows) | Enabled when all `is_milestone_gating=true` DIs in `{SubmittedToCustomer, Closed}` AND ≥1 `SubmittedToCustomer` | FR-64 |
+| Milestone deadline display | `target_date` (any row) | Banner subtitle / deadline display | FR-11, FR-6 |
+| Download Package status indicator | `download_package_status` + `download_package_url` (any row) | Indicator state (preparing / ready / failed); Download Now link rendered when status = ready | FR-73 |
+
+## Per-Item Row — Display Reads
+
+| Section | Column(s) read | Display purpose | FR refs |
+|---|---|---|---|
+| Identity | `item_no`, `item_name`, `item_path_id` | Row label + ordering | FR-2, FR-5 |
+| State | `delivery_state` | State badge per FR-7 11-value enum | FR-7 |
+| Item type | `item_type` | Type label (4-value enum); affects layout (Confirmation has no document section) | FR-7, FR-58 |
+| Owner identity | `owner_corp_usa_email`, `owner_corp_email`, `owner_corp_id`, `owner_name` | Owner display per FR-88 3-field model + auto-resolved display name | FR-88 |
+| Tracking modality | `tracking_modality` | Modality badges (multi-value enum) | FR-7 |
+| Last contact | `last_owner_contacted` | Display + tooltip showing days since contact | FR-15 |
+| Last reminder | `last_reminder_triggered_at` | Display (when set by FR-65 TPM trigger) | FR-15, FR-65 |
+| Doc count | `doc_count`, `doc_count_received` | "n of N docs received" display | FR-7 |
+| Review required | `review_required` | Toggle display (TPM-editable per FR-14) | FR-7, FR-53 |
+| Approval audit | `pm_approval_at`, `pm_approval_pm_id` | Approval timestamp + PM identity display | FR-56(c), `[D-068]` |
+| Completion | `actual_completion_date` | Display when set | FR-15 |
+| TG identity | `tg_name`, `tg_path_id`, `tg_email_group_alias` | TG header / group display | FR-2, FR-9 |
+| TG-coordinator | `tg_owner_corp_usa_email`, `tg_owner_corp_email`, `tg_owner_corp_id` | TG-coordinator display (NOT for outreach per FR-9 — display only) | FR-71, FR-88 |
+| Form factor | `handset`, `tablet`, `wearable`, `mr`, `hmr_smr`, `drr`, `ir_ffw_p1` | Form factor flags display | `[D-081]` |
+| Comment | `comment` | Comment display (TPM-editable per FR-14) | FR-14 |
+| Triage flag | `manual_triage_required` | "Needs triage" badge surfacing for PM dashboard | FR-12 |
+| Expected completion | `expected_completion_date` | Per-item deadline display (HILDA-written from `target_date`; not TPM-editable) | FR-11 |
+
+## Per-Item Button Visibility / Enablement — Read Paths
+
+| Button | Column(s) read | Enablement condition | FR refs |
+|---|---|---|---|
+| Approve | `delivery_state` | `delivery_state = UnderPMReview` | FR-56(c) |
+| Send Reminder | `delivery_state` | `delivery_state ∉ {OwnerClosed, ReadyForSubmission, SubmittedToCustomer, Closed}` | FR-65 |
+| Mark Closed | `delivery_state` + `no_customer_upload` + (default-work-item check) | (a) FR-78 default work-item: no remaining DocumentItemAssociation; (b) `no_customer_upload = true` per FR-80: standard `OwnerClosed` guards met | FR-78, FR-80 |
+| View Documents | `item_type` | Visible only when `item_type ≠ Confirmation` | FR-58 |
+| View in PLM | `actual_item_info` | Visible only when `actual_item_info` is non-null | FR-57 |
+| Upload Document `[Ph-2]` | `item_type` + `delivery_state` + (effective `tracking_enabled`) | `item_type ≠ Confirmation` AND `delivery_state ∈ {DocumentReceived, UnderPMReview, ReadyForSubmission, SubmittedToCustomer}` OR `Open` when no-tracking TG fallback per FR-81 | FR-62, FR-81 |
+| Pause/Resume Item Rules | `rules_paused_at` | Pause visible when `rules_paused_at IS NULL`; Resume visible when `rules_paused_at` non-null | FR-31 |
+| Trigger Action dropdown | `delivery_state` + (per-action conditions) | Available action options vary by current state (e.g., `TriggerAIReview` shown only when documents exist + `review_required=true`; `QueueSubmission` shown only when `delivery_state = UnderPMReview`) | FR-31 |
+
+## PM Dashboard Surface — Read Paths
+
+PM dashboard is HILDA-rendered per `[D-074]` for document/review surface, but the SP-side milestone/item lists are SP-rendered. SP-side surfaces:
+
+| Dashboard surface | Column(s) read | Surface action | FR refs |
+|---|---|---|---|
+| Manual triage queue | `manual_triage_required = true` (filter) | List items needing triage; one-click clear after resolution | FR-12 |
+| Pending review queue | `review_required = true` (per item; `review_status` is HILDA-internal — see Excluded below) | List items with reviews pending | FR-53 |
+| Issues queue | `delivery_state ∈ {Delayed, Blocked}` | List items reported as Delayed/Blocked by owner | FR-7 |
+| Overdue queue | `expected_completion_date < today` AND `delivery_state ∉ {ReadyForSubmission, SubmittedToCustomer, Closed}` | Items past deadline | FR-11 |
+
+## Columns SP UI Engineer Does NOT Read
+
+These are HILDA-internal columns — SP UI engineer's web part neither reads nor writes them:
+
+| Column | Why HILDA-internal only | FR refs |
+|---|---|---|
+| `review_status` | HILDA-internal review aggregation enum (pending/complete/not_required/failed); not surfaced in SP UI per xlsx Notes | FR-53 |
+| `last_owner_response_at` | HILDA-internal "no response" signal for FR-10 escalation | FR-10 |
+| `reminder_count` | HILDA-internal counter for FR-10 escalation threshold | FR-10 |
+| `prior_delivery_state` | HILDA-managed audit of pre-Delayed/Blocked state | FR-7 |
+| `plm_id` | HILDA-managed PLM issue reference; PM accesses PLM via View in PLM button which uses `actual_item_info` URL (not `plm_id` directly) | FR-8, FR-26 |
+| `project_id` (Devices PK) | Ops-set at row creation; HILDA reads only for FR-84 routing-key cross-validation; SP UI displays it but does not drive UI behavior | FR-2, FR-84 |
+| `customer_jira_url` | Ops-set; HILDA reads for FR-25 CustomerJIRA polling base URL | FR-25 |
+| `assigned_pm_id` | Ops-set at setup_milestone; HILDA reads for FR-9 outreach sender attribution + FR-51 PM credentialed calls; SP UI may display read-only but does not drive UI behavior | FR-2, FR-9 |
+| `tracking_enabled` (effective) | Computed by HILDA from TG-level flag per FR-81 | FR-81 |
+
+## Read cadence + freshness
+
+- **Live polling**: SP UI polls `Tasks_<customer_id>` per `[D-064]` 2026-06-10 SP UI engineer discipline. Recommended interval 5–10 s for active milestone views; configurable per deployment.
+- **Focus-aware refresh**: SP UI re-reads on tab/window focus-gain (per `[D-074]`). PM/TPM returning to SP tab after viewing HILDA dashboard always sees fresh state on next focus event.
+- **HILDA writeback latency**: HILDA's `[D-064]` REST writes are typically <1 s end-to-end. UI lag is bounded by SP UI's poll interval + REST commit latency.
+
+---
+
 ## Out-of-scope clarifications
 
 These buttons are **NOT** in the SP UI engineer's scope:
@@ -264,4 +363,4 @@ For SP-alert email channel to function:
 
 ## Versioning
 
-Last updated: 2026-06-15. Tracks Ph-1 + locked Ph-2 buttons. When new buttons are added or behavior changes, update this file + `SP_lists_authoritative.xlsx` together.
+Last updated: 2026-06-16. **Doc restructured**: split into Part 1 — WRITE actions (existing buttons + field-write contracts) and Part 2 — READ paths (column display + UI gating + dashboard surfaces). When new buttons are added, new read paths surface, or behavior changes, update this file + `SP_lists_authoritative.xlsx` together.
