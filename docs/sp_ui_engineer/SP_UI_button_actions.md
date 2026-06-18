@@ -210,9 +210,11 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 
 ---
 
-## Rule control panel — per-item actions (FR-31)
+## Rule control panel — per-item actions (FR-31) `[Ph-2]`
 
-### Pause Item Rules `[Ph-1]`
+**FR-31 entirely deferred to Ph-2 2026-06-17 per architect lock** — all rule control panel sub-capabilities (Pause/Resume Item Rules, Pause All/Resume All, Trigger Action dropdown, rule param inline edit) are Ph-2; in Ph-1, TPM rule changes go via HILDA ops ticket who edits `customizations/rules/<customer_id>/per_item_overrides.yaml` (YAML drop-zone + SIGHUP reload per FR-30 I1 lock). All sections below are Ph-2 stubs preserved for SP UI engineer Ph-2 implementation reference; **SP UI engineer's Ph-1 deliverable does NOT include any of these sections**.
+
+### Pause Item Rules `[Ph-2]`
 
 | Field | Value |
 |---|---|
@@ -223,7 +225,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert, logs override to Postgres `AutomationRuleOverride` (scope=item, sentinel `rule_id="__all_rules__"`), logs to `CommunicationLog` with PM attribution. `rule_engine` suppresses all rule evaluations for this item until resumed. |
 | **FR refs** | FR-31 sub-1 |
 
-### Resume Item Rules `[Ph-1]`
+### Resume Item Rules `[Ph-2]`
 
 | Field | Value |
 |---|---|
@@ -234,7 +236,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background)* HILDA receives SP-alert, removes the override from Postgres `AutomationRuleOverride`, logs to `CommunicationLog`. `rule_engine` resumes evaluations on next tick. |
 | **FR refs** | FR-31 sub-1 |
 
-### Pause All / Resume All (milestone-level) `[Ph-1]`
+### Pause All / Resume All (milestone-level) `[Ph-2]`
 
 | Field | Value |
 |---|---|
@@ -245,12 +247,12 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background)* HILDA processes the batch alerts; each fires an individual `AutomationRuleOverride` insert/delete. |
 | **FR refs** | FR-31 sub-1 |
 
-### Trigger Action `[Ph-1]`
+### Trigger Action `[Ph-2]`
 
 | Field | Value |
 |---|---|
 | **Where** | Per-row dropdown on each DeliveryItem in Milestone View |
-| **Enabled when** | Dropdown is always visible; available action options vary by current `delivery_state` (e.g., `TriggerAIReview` shown only when documents exist + `review_required=true`; `QueueSubmission` shown only when `delivery_state = UnderPMReview`) |
+| **Enabled when** | Dropdown is always visible (Ph-2); available action options per FR-31 Option (b) Ph-2 lock 2026-06-17: **`TriggerAIReview`** shown only when documents exist + `review_required=true` + (typically) `review_status=failed` per FR-53 I8 (re-trigger LLM review for failed cases); **`TriggerParser`** shown when an unparsed or `parser_failed` `test_report` document exists per FR-16. **`QueueSubmission` is NOT exposed** per FR-29 I6 lock — no-op marker action (delivery_state IS the queue per FR-63 + FR-18 lock; UnderPMReview→ReadyForSubmission advances via FR-56 (c) Approve button, not via HILDA-side trigger). **`ReassignDocumentToWorkItem` is NOT in SP UI** — lives in HILDA-rendered tab per FR-87 + `[D-074]` Variant A. |
 | **User prompt** | Action-specific. Example: "Trigger LLM quality review for `<item_name>`?" (Yes / Cancel) |
 | **What happens on click** | Set `DeliveryItems.manual_action_triggered_at = <now>` AND `DeliveryItems.manual_action_kind = "<action_kind>"` on the DI row (one of FR-29 action verbs). Atomic 2-field write. |
 | **What HILDA does next** | *(Background)* HILDA receives SP-alert, dispatches the specified action via `workflow_engine` (bypasses normal rule evaluation), logs to `CommunicationLog` with `trigger_source=manual` + PM attribution. |
