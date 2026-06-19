@@ -1206,3 +1206,157 @@ Promoted from strand: dashboard-v1 on 2026-06-14
 Promoted from strand: dashboard-v1 on 2026-06-14
 
 ---
+
+## D-083: SP architecture — 2-list per-customer + global Milestone list + existing Project lookup; supersedes `[D-077]` Ph-1 flat-table
+**Status**: Active · **Date**: 2026-06-17
+
+**Context**: 2026-06-17 SP UI engineer surfaced a revised SP design (Google Sheets at `1gqmD9QVLQjuJ08Wc7zc7KI3jKQhr9MjH`) that separates milestone-level concerns from per-DeliveryItem rows. Prior `[D-077]` flat-table model denormalized milestone-level fields (`status`, `target_date`, milestone-level button timestamps, `download_package_*`, etc.) across every DeliveryItem row in `Tasks_<customer_id>`. Operationally this produced N-row write amplification on milestone-level button clicks + required `[D-082]` cascade-dedup logic in HILDA's `sp_alert_parser`. SP UI engineer's revised design eliminates this denormalization by introducing a separate Milestone SP list.
+
+**Decision**: HILDA's runtime SP coupling consists of:
+- **Per-customer Work Items list**: `Deliverables_<customer_id>` (one list per customer; ~60 columns; one row per DeliveryItem). Replaces `Tasks_<customer_id>` naming.
+- **Global Milestone list**: `Milestones` (one list shared across all customers; 15 columns; one row per milestone; scoped by `carrier` column).
+- **Existing global Project list**: `project_id → TPM (assigned_pm_id)` lookup; reused as-is.
+
+**HILDA service-layer config** (NOT in SP):
+- `template.yaml` (per-customer): structural manifest + `customer_jira_url` (moved from SP).
+
+**Lookup chain at runtime**:
+1. `template.yaml` → `(milestone_id, device_id)` maps to `(milestone_name, project_model)`.
+2. `Deliverables_<customer_id>` → query rows where `(milestone_name, project_model)` → returns `project_id` (denormalized column).
+3. `Projects` → query `project_id` → returns `TPM` (assigned_pm_id).
+
+**Why**:
+- **(a) Eliminates write amplification**: milestone-level button writes target a single Milestone row instead of N DeliveryItem rows; obsoletes `[D-082]` cascade-dedup for these cases.
+- **(b) Clean separation of concerns**: milestone-level state lives at milestone level; per-item state at item level. Matches mental model.
+- **(c) Simpler SP-alert routing**: per-list alert dispatching is cleaner than per-row burst deduplication.
+- **(d) Reuses existing Project list**: PM lookup chain is established; no new lookup infrastructure needed.
+
+**Rejected alternatives**:
+- **(α) Retain `[D-077]` flat-table**: rejected — write amplification + `[D-082]` complexity not worth the join-avoidance gain.
+- **(β) Per-customer Milestone list (`Milestones_<customer_id>`)**: rejected — milestone-level operations are cross-customer-portable; global list with `carrier` column scoping simpler.
+
+**Consequences**:
+- `[D-077]` flat-table architecture superseded.
+- `[D-082]` cascade-dedup scope significantly reduced; possibly obsoleted entirely after `expected_completion_date` removal per `[D-085]`.
+- FR-2, FR-5, FR-6, FR-11, FR-25(b), FR-40, FR-56, FR-63, FR-64, FR-73, FR-84 rewritten to reflect 2-list architecture.
+- `Tasks_<customer_id>` → `Deliverables_<customer_id>` global sweep across all FR references + SP_UI_button_actions.md + auto-memory.
+- `SP_lists_authoritative.xlsx` replaced (architecture-phase task).
+- Auto-memory `project_sp_architecture_ph1.md` rewritten.
+
+**Anchors**: FR-2, FR-40, FR-56, FR-84, `[D-064]`, `[D-065]`, `[D-068]`, `[D-077]` (superseded), `[D-082]` (scope reduced), `[D-085]`, `[D-086]`, `[D-087]`.
+
+---
+
+## D-084: Form factor flag set — `handset / tablet / wearable / ir / osmr / rmr / hmr_smr` (7 flags); supersedes `[D-081]`
+**Status**: Active · **Date**: 2026-06-17
+
+**Context**: 2026-06-17 SP UI engineer's revised SP schema (per `[D-083]` Google Sheets) lists the canonical form factor flags as `handset / tablet / wearable / ir / osmr / rmr / hmr_smr`. Prior `[D-081]` lock had `handset / tablet / wearable / drr / ir_ffw_p1 / mr / hmr_smr`. The 3 differing flag names (`drr → ir`, `ir_ffw_p1 → osmr`, `mr → rmr`) reflect SP UI engineer's customer-domain-correct naming.
+
+**Decision**: Canonical 7 form factor flags (Boolean each) on DeliveryItem rows:
+`handset`, `tablet`, `wearable`, `ir`, `osmr`, `rmr`, `hmr_smr`.
+
+**Why**:
+- **(a) SP UI engineer is the customer-domain authority for form factor terminology**.
+- **(b) Names align with carrier-side device-classification vocabulary**.
+
+**Rejected alternatives**:
+- **(α) Retain `[D-081]` names**: rejected — names were placeholder pending SP UI engineer ratification; new names supersede.
+
+**Consequences**:
+- `[D-081]` superseded.
+- `template_schema/models.py` `DeliveryItemBase` Pydantic schema updates: `drr → ir`, `ir_ffw_p1 → osmr`, `mr → rmr` (cascade flagged in STATUS.md for architecture-phase code update).
+- FR-40 template.yaml schema updated.
+- `customizations/sharepoint_config/customers/<customer_id>.yaml` column mappings updated.
+- Auto-memory `project_sp_architecture_ph1.md` updated.
+
+**Anchors**: FR-40, `[D-081]` (superseded), `[D-083]`.
+
+---
+
+## D-085: `Milestone.target_date` is the sole authoritative deadline; per-item `expected_completion_date` removed from Ph-1 schema; obsoletes `[D-082]` cascade-dedup for date propagation
+**Status**: Active · **Date**: 2026-06-17
+
+**Context**: 2026-06-17 architect reviewed the revised SP schema (per `[D-083]`) and questioned whether per-item `expected_completion_date` is unnecessary duplication of `Milestone.target_date`. Per Ph-1 + Ph-2 lock: all items in a milestone share the same target_date (no per-item override exposed per FR-11 / FR-14 lock). The per-item field is a pure denormalized copy. Removing it eliminates both the SP-side cascade write (40-row write on TPM date edit) AND the corresponding `[D-082]` HILDA-side dedup logic.
+
+**Decision**: `Milestone.target_date` is the sole authoritative deadline for all DeliveryItems in that milestone in Ph-1. The `expected_completion_date` column is removed from the `Deliverables_<customer_id>` schema. HILDA reads `Milestone.target_date` directly from the Milestone SP list for deadline-proximity rule evaluation (FR-11 DeadlineProximity, FR-23/FR-25/FR-26/FR-55 polling_schedule). SP UI displays milestone target_date from the Milestone list at row render time (join cost negligible — Milestone list is already read for status banner display).
+
+**Why**:
+- **(a) Eliminates pure duplication**: no per-item variation in Ph-1; the column was always a denormalized copy.
+- **(b) Eliminates N-row cascade writes**: TPM target_date edit no longer triggers SP-side fan-out to N DeliveryItem rows.
+- **(c) Obsoletes `[D-082]` cascade-dedup logic** in `sp_alert_parser` for date propagation: only one Milestone-row alert fires; no per-DI alerts to dedup.
+- **(d) Single source of truth**: removes risk of Milestone.target_date and DI.expected_completion_date drifting out of sync due to partial cascade failure.
+
+**Rejected alternatives**:
+- **(α) Retain `expected_completion_date` per `[D-082]`**: rejected — duplication has no operational benefit in Ph-1; cascade complexity not justified.
+- **(γ) SP calculated column (Milestone.target_date lookup)**: rejected — cross-list calculated columns in SharePoint have constraints; explicit join at render time simpler.
+
+**Consequences**:
+- `[D-082]` cascade-dedup for date propagation obsoleted; `[D-082]` may have zero Ph-1 use cases after `[D-083]` milestone-button single-row writes (verify during architecture phase).
+- FR-11 rewritten: DeadlineProximity rule reads `Milestone.target_date` directly; no per-item denorm.
+- FR-14 simplified: target_date edit goes via milestone view only; no SP cascade to N rows.
+- FR-56 (a) `expected_completion_date` column removed from Mandatory display list.
+- Ph-2 per-item override (if needed): add `expected_completion_date_override` column with NULL semantic (= use milestone.target_date); deferred unless operational need surfaces.
+
+**Anchors**: FR-11, FR-14, FR-56, `[D-082]` (cascade-dedup obsoleted for this case), `[D-083]`.
+
+---
+
+## D-086: All SP email / corp_id / owner_name columns are STR free-form text; no corp AD resolution / Person-Group SP fields / auto-derivation
+**Status**: Active · **Date**: 2026-06-17
+
+**Context**: 2026-06-17 architect clarified during SP architecture lock (per `[D-083]`) that all SP-side email columns (item owner emails, TG owner emails, `email_cc_list`, `tg_email_group_alias`), `owner_corp_id`, and `owner_name` fields are SP **STR free-form text** — NOT SP Person/Group fields. TPM types whatever they want; HILDA does NOT validate against corp AD; HILDA does NOT auto-derive `owner_corp_id` from `owner_corp_usa_email`'s local-part. Prior FR-56 (a) wording locked `owner_corp_usa_email` as SP Person/Group with AD resolution + `owner_corp_id` as auto-derived; this is now stale.
+
+**Decision**: All SP email / identity columns are STR free-form text. Specifically:
+- `owner_name`, `owner_corp_usa_email`, `owner_corp_email`, `owner_corp_id`: free-form text on Deliverables_<customer_id> rows.
+- `tg_owner_name`, `tg_owner_corp_usa_email`, `tg_owner_corp_id`, `tg_email_group_alias`: free-form text (5 free-form text fields total at TG level; no `tg_owner_corp_email` field — never existed in prior version per architect 2026-06-17).
+- `email_cc_list`: free-form text (comma-separated emails).
+
+HILDA's owner-email preference rule SURVIVES (use `owner_corp_usa_email` if set; else `owner_corp_email`) per FR-9 + `[D-080]`; only the AD-validation + auto-derivation aspects are removed.
+
+**Why**:
+- **(a) Real-world support for non-AD-resolvable identities** (non-USA owners, external collaborators, role mailboxes, TG aliases).
+- **(b) Simplifies SP UI engineer's schema** (STR columns instead of Person/Group with AD lookups).
+- **(c) HILDA stays out of corp directory dependency** (no Graph API / AD lookup needed at SP-write time).
+- **(d) TPM autonomy** — TPM types what works; HILDA trusts.
+
+**Rejected alternatives**:
+- **(α) Retain Person/Group SP field for `owner_corp_usa_email`**: rejected — fails for non-USA owners + role mailboxes + TG aliases.
+- **(β) HILDA-side AD validation at SP-write time**: rejected — adds corp directory dependency for marginal validation benefit; TPM mistakes surface naturally as bounce errors per FR-23 `EML-W001`/`EML-E002`.
+
+**Consequences**:
+- FR-2 owner identity section rewritten: remove AD resolution + auto-derivation language.
+- FR-56 (a) Mandatory display owner block rewritten: all STR free-form (no Person/Group distinction).
+- FR-9 owner-email preference rule preserved; AD-validation language removed.
+- FR-88 owner identity model: 3-field preserved; AD-resolution language removed.
+- HILDA's owner-name display in FR-56 / FR-59 / FR-60 reads `owner_name` column directly (no AD lookup at render time).
+- TG owner: 5 free-form text fields ratified (`tg_owner_corp_email` does NOT exist; only `corp_usa_email + corp_id + name + email_group_alias + tg_path_id`).
+
+**Anchors**: FR-2, FR-9, FR-56, FR-88, `[D-080]` (preference rule preserved; AD aspects removed), `[D-083]`.
+
+---
+
+## D-087: `customer_delivery_credential_id` field removed from SP Deliverables_<customer_id> schema; credential lookup is FR-19/FR-51 per-(PM, carrier) sops files
+**Status**: Active · **Date**: 2026-06-17
+
+**Context**: 2026-06-17 architect reviewed `customer_delivery_credential_id` column in SP UI engineer's revised schema (per `[D-083]`). The field appears to be a legacy from older credential-storage models (pre-`[D-038]` v3 + pre-FR-19/FR-51 4-pattern lock). Per current FR-19 + FR-51 lock 2026-06-17: customer adapter credentials live at `customizations/credentials/<pm_id>/<carrier_slug>.env.sops` (per-PM-per-carrier sops files; pattern (b)). HILDA's `credential_service` resolves at adapter instantiation time via `get_credential(PerPerson(pm_id), system_type="google_drive")`. A per-item credential-ID column is redundant and inconsistent with this lookup model.
+
+**Decision**: Remove `customer_delivery_credential_id` column from `Deliverables_<customer_id>` schema. HILDA looks up customer-delivery credentials via the (assigned_pm_id, carrier_slug) tuple at adapter instantiation time per FR-19/FR-51 pattern (b).
+
+**Why**:
+- **(a) Redundant** with FR-19/FR-51 per-(PM, carrier) sops file naming.
+- **(b) Inconsistent** with the 4-pattern identity-model lock (`[D-038]` v3 + FR-51).
+- **(c) Schema noise**: never displayed; no operational use.
+- **(d) Single source of truth**: credentials live in sops env files; SP-side credential references would create dual-source-of-truth risk.
+
+**Rejected alternatives**:
+- **(α) Retain column for backward compatibility**: rejected — no operational consumers; schema bloat.
+- **(β) Repurpose as per-customer credential ref**: rejected — per-customer credentials would conflict with per-(PM, carrier) FR-19/FR-51 lock; no new use case.
+
+**Consequences**:
+- FR-19 / FR-51 / FR-40 schema updated.
+- SP UI engineer's xlsx updated (column removed).
+- No HILDA-side code changes (no consumers of this field).
+
+**Anchors**: FR-19, FR-51, `[D-038]` v3, `[D-083]`.
+
+---

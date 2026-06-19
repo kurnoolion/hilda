@@ -1,7 +1,7 @@
 # SP UI Specifications — Buttons + Column Reads
 
 **Audience**: SP UI engineer implementing the SharePoint web parts.
-**Purpose**: SP UI engineer's two-direction contract with HILDA — Part 1 specifies every clickable WRITE action (buttons + field-write contracts that fire SP-alerts to HILDA); Part 2 specifies every READ path (which columns SP UI engineer's web part reads from `Tasks_<customer_id>` to drive display, button visibility/enablement, and PM dashboard surfaces).
+**Purpose**: SP UI engineer's two-direction contract with HILDA — Part 1 specifies every clickable WRITE action (buttons + field-write contracts that fire SP-alerts to HILDA); Part 2 specifies every READ path (which columns SP UI engineer's web part reads from `Deliverables_<customer_id>` to drive display, button visibility/enablement, and PM dashboard surfaces).
 **Authority**: this file + `SP_lists_authoritative.xlsx` are the two SP UI engineer deliverables of authority.
 
 **File organization**:
@@ -16,7 +16,7 @@
 
 **Field-write pattern.** Every button click is a **SP-side field write** on a SP list row. The act of writing the field is what fires the SP-alert that wakes HILDA — no direct HTTP call to HILDA from the SP web part (corp firewall blocks it per FR-84). HILDA learns of every click via the resulting alert email.
 
-**Milestone-scoped writes touch every work-item row in the milestone.** Milestone-level actions (Start Collection / Submit to Carrier / Close All Items / Refresh / Download Package) write the milestone-level column (e.g., `milestone_collection_started_at`) to **every work-item row** in the milestone within `Tasks_<customer_id>` — N rows × 1 column write in a single SP transaction. Each per-row write fires an SP-alert; HILDA processes the first alert in the burst and deduplicates the rest by detecting the same `(customer_id, MinorMilestone, column_name)` tuple across the burst (per FR-11 / `[D-082]` cascade-dedup pattern). Per-DeliveryItem actions write to the individual DI row only.
+**Milestone-scoped writes touch every work-item row in the milestone.** Milestone-level actions (Start Collection / Submit to Carrier / Close All Items / Refresh / Download Package) write the milestone-level column (e.g., `milestone_collection_started_at`) to **every work-item row** in the milestone within `Deliverables_<customer_id>` — N rows × 1 column write in a single SP transaction. Each per-row write fires an SP-alert; HILDA processes the first alert in the burst and deduplicates the rest by detecting the same `(customer_id, MinorMilestone, column_name)` tuple across the burst (per FR-11 / `[D-082]` cascade-dedup pattern). Per-DeliveryItem actions write to the individual DI row only.
 
 **Atomic 3-field write for Approve.** The Approve button writes 3 fields (`delivery_state` + `pm_approval_at` + `pm_approval_pm_id`) in a **single SP transaction**. SP web part code must enforce atomicity; partial writes are a defect.
 
@@ -38,19 +38,19 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 
 ## Milestone View — top-bar buttons
 
-### Start Collection
+### Start Collection (Need NOW)
 
 | Field | Value |
 |---|---|
 | **Where** | Milestone View top bar |
 | **Enabled when** | `milestone.milestone_collection_started_at` is empty AND `milestone.status` ∈ {Not Started, In Progress} |
 | **User prompt** | "Start collection for milestone `<name>`? This will send initial outreach to all R&D owners." (Yes / Cancel) |
-| **What happens on click** | Set `milestone_collection_started_at = <now>` on **every work-item row** in the milestone (within `Tasks_<customer_id>`, filter `model + minorMilestone`). Single SP transaction batching N row updates. |
+| **What happens on click** | Set `milestone_collection_started_at = <now>` on **every work-item row** in the milestone (within `Deliverables_<customer_id>`, filter `model + minorMilestone`). Single SP transaction batching N row updates. |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA receives N SP-alerts, deduplicates to one via `(customer_id, minorMilestone, milestone_collection_started_at)` burst detection, transitions each DI from `Not Started` → `Open`, creates PLM issues per (owner × milestone), fires email outreach to all owners, transitions each DI to `OutreachSent`, activates runtime polling channels (Email/NSD/PLM/CustomerJIRA per per-item `tracking_modality`), and sets `Milestone.status = "In Progress"` (writes to every row in the milestone). Item rows update via live polling. |
 | **Idempotency** | Re-click on an already-started milestone is safe — HILDA detects existing `plm_id` and skips duplicate creation; only DIs still in `Open` get re-fired outreach. |
 | **FR refs** | FR-8, FR-56 (e), FR-84 (N-row write pattern), `[D-082]` (cascade dedup) |
 
-### Submit to Carrier
+### Submit to Carrier  (Need NOW)
 
 | Field | Value |
 |---|---|
@@ -62,19 +62,19 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | If a previous Submit attempt failed mid-dispatch, re-clicking is safe — HILDA's idempotency check on `(milestone_id, dispatch_run_id)` prevents duplicate carrier upload. |
 | **FR refs** | FR-18, FR-19, FR-63, FR-56 (e) |
 
-### Close All Items
+### Close All Items  (Need NOW)
 
 | Field | Value |
 |---|---|
 | **Where** | Milestone View top bar |
 | **Enabled when** | All `is_milestone_gating=true` DIs are in `{SubmittedToCustomer, Closed}` AND at least one `is_milestone_gating=true` DI is in `SubmittedToCustomer`. **Non-gating items** (`is_milestone_gating=false`) may remain in any non-blocking state at click time. |
 | **User prompt** | "Close All Items will set the milestone state machine to terminal: (a) `<N_part1>` `SubmittedToCustomer` items will be set to `Closed` (gating cascade); (b) `<N_part2>` non-gating items in earlier states will be auto-advanced to `Closed` (state-machine consistency cascade); (c) the default work-item must still be Marked Closed separately per FR-78 to trigger `MilestoneAllClosed`. Closing all items will permanently delete NSD storage for this milestone (per FR-76 cleanup) — download any needed documents before proceeding. Document download links (FR-61) will return `DSH-E003` after cleanup. Only close items after the carrier has confirmed technical acceptance of the milestone submission. This action is irreversible." (Yes / Cancel) |
-| **What happens on click** | Set `close_all_items_triggered_at = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`). |
+| **What happens on click** | Set `closed_all_items_triggered_at = <now>` on **every work-item row** in the milestone (N-row write; HILDA deduplicates per `[D-082]`). |
 | **What HILDA does next** | *(Background — out of your scope)* HILDA performs a two-part cascade per FR-64: (1) sets all `SubmittedToCustomer` items to `Closed`; (2) auto-advances any `is_milestone_gating=false` items in non-Closed states to `Closed` (action_type=`bulk_close_non_gating`). When all gating items + default work-item reach `Closed`, FR-76 `MilestoneStorageCleanup` fires — NSD `internal/<milestone>/` subtree is deleted permanently. Item rows update via live polling. |
 | **Idempotency** | Re-click is no-op once all items are `Closed`. |
 | **FR refs** | FR-28 (`MilestoneAllClosed`), FR-64, FR-76, FR-56 (e) |
 
-### Refresh
+### Refresh (DONT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -86,7 +86,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Rate limit prevents over-firing. |
 | **FR refs** | FR-56 (f) |
 
-### Download Package
+### Download Package (DONT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -103,7 +103,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 
 ## Per-row buttons — DeliveryItem level (DI row writes)
 
-### Approve
+### Approve (NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -115,7 +115,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Revert path** | If TPM uploads a new document via FR-62 [Ph-2] on a `ReadyForSubmission` **OR `SubmittedToCustomer`** item, the web part must atomically revert `delivery_state = "UnderPMReview"` + clear `pm_approval_at` + clear `pm_approval_pm_id` in one SP transaction (per FR-62 revert pattern). Both upload-from-states map to the same `UnderPMReview` revert target — prior PM approval is stale (new doc content changes what was approved) for `ReadyForSubmission`; prior submission is stale (TPM must re-review and re-approve before re-submission) for `SubmittedToCustomer`. |
 | **FR refs** | FR-28 (`PMApproval`), FR-56 (c), FR-7 state machine, `[D-068]` |
 
-### Send Reminder
+### Send Reminder (NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -127,7 +127,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Re-click re-sends the reminder (intentional — TPM ad-hoc trigger per FR-14 / FR-65); each click increments `reminder_count`. |
 | **FR refs** | FR-9, FR-10, FR-12, FR-14, FR-15, FR-15-extended, FR-65, FR-78, `[D-064]`, `[D-080]` |
 
-### Mark Closed (manual close path)
+### Mark Closed (manual close path) (NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -139,29 +139,29 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Already-`Closed` items have the button hidden. |
 | **FR refs** | FR-7, FR-78, FR-80, FR-14 |
 
-### Upload Document `[Ph-2]`
+### Upload Document `[Ph-2]` (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
 | **Where** | Per-row action on each DeliveryItem in Milestone View |
 | **Enabled when** | `item_type ≠ Confirmation` AND `item_type ≠ Default` (default work-item per FR-78 is not a TPM upload target — it absorbs failed-routing docs from natural ingest channels only) AND (`delivery_state ∈ {DocumentReceived, UnderPMReview, ReadyForSubmission, SubmittedToCustomer}` OR `delivery_state = Open` AND (effective `tracking_enabled = false` per FR-81 no-tracking TG fallback OR `tracking_modality` includes `SPUI` per FR-9 silent-outreach rule — SPUI items have no HILDA-initiated outreach; FR-62 is the TPM-side upload path)) |
 | **User prompt** | None (button is a link-out anchor; navigation, not click-action) |
-| **What happens on click** | Browser opens a new tab navigating to `https://hilda-proxy.corp/upload/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique). Built as: `<uploadUrlPrefix>/<customer_id>/<item_id>` where `uploadUrlPrefix` is set as a SP web part property at deployment (e.g., `https://hilda-proxy.corp/upload`). HILDA's dashboard resolves the target row via `Tasks_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
+| **What happens on click** | Browser opens a new tab navigating to `https://hilda-proxy.corp/upload/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique). Built as: `<uploadUrlPrefix>/<customer_id>/<item_id>` where `uploadUrlPrefix` is set as a SP web part property at deployment (e.g., `https://hilda-proxy.corp/upload`). HILDA's dashboard resolves the target row via `Deliverables_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
 | **What HILDA does next** | *(Background — handled by HILDA's dashboard, not SP)* HILDA's dashboard renders an upload form; TPM submits via same-origin form POST; HILDA writes the file to NSD + document index per FR-62. After successful upload, if `delivery_state ∈ {ReadyForSubmission, SubmittedToCustomer}`, HILDA reverts to `UnderPMReview` and clears `pm_approval_at`/`pm_approval_pm_id` per the revert pattern (see Approve button → Revert path). State updates push back to SP via `[D-064]`; visible on next focus refresh. |
 | **FR refs** | FR-62, `[D-074]` |
 
-### View Documents
+### View Documents (NEED THIS NOW)
 
 | Field | Value |
 |---|---|
 | **Where** | Per-row link on each DeliveryItem in Milestone View |
 | **Enabled when** | `item_type ≠ Confirmation` |
 | **User prompt** | None (navigation link) |
-| **What happens on click** | Browser opens a new tab navigating to `<documentsUrlPrefix>/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique — NOT globally unique across `Tasks_<customer_id>` lists per FR-5). Example: `https://hilda-proxy.corp/docs/MMK/12345`. Prefix is a SP web part property set at deployment. HILDA's dashboard resolves the target row via `Tasks_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
+| **What happens on click** | Browser opens a new tab navigating to `<documentsUrlPrefix>/<customer_id>/<item_id>` where `<customer_id>` is the row's `customer_id` column value (selects the SP list) and `<item_id>` is the SP system `ID` column (auto-Counter PK; per-list unique — NOT globally unique across `Deliverables_<customer_id>` lists per FR-5). Example: `https://hilda-proxy.corp/docs/MMK/12345`. Prefix is a SP web part property set at deployment. HILDA's dashboard resolves the target row via `Deliverables_<customer_id>` `GetItemById(<item_id>)` per FR-5. No SP field write. |
 | **What HILDA does next** | *(Background — HILDA dashboard renders)* HILDA's dashboard renders the document section as server-side HTML per FR-57/FR-59/FR-60. TPM stays in the HILDA tab for FR-87 TPM-resolution buttons (handled in HILDA tab, NOT SP UI). |
 | **FR refs** | FR-57, FR-59, FR-60, FR-61, `[D-074]` |
 
-### View in PLM
+### View in PLM (NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -172,7 +172,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(None — direct PLM navigation)* TPM views the PLM issue in PLM's own UI. HILDA is uninvolved. |
 | **FR refs** | FR-57 |
 
-### Clear Triage Flag
+### Clear Triage Flag (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -184,7 +184,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Already-cleared items have the button hidden (visibility on `manual_triage_required = true`). |
 | **FR refs** | FR-12 I4, FR-14 |
 
-### Confirm Carrier Acceptance (Mark Carrier-Closed)
+### Confirm Carrier Acceptance (Mark Carrier-Closed) (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -196,7 +196,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Already-`Closed` items have the button hidden. |
 | **FR refs** | FR-7 path (i), FR-14, FR-28 (`MilestoneAllClosed`), FR-76 |
 
-### Resume from Delayed / Resume from Blocked
+### Resume from Delayed / Resume from Blocked  (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -210,11 +210,11 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 
 ---
 
-## Rule control panel — per-item actions (FR-31) `[Ph-2]`
+## Rule control panel — per-item actions (FR-31) `[Ph-2]`  (DO NOT NEED THIS NOW)
 
 **FR-31 entirely deferred to Ph-2 2026-06-17 per architect lock** — all rule control panel sub-capabilities (Pause/Resume Item Rules, Pause All/Resume All, Trigger Action dropdown, rule param inline edit) are Ph-2; in Ph-1, TPM rule changes go via HILDA ops ticket who edits `customizations/rules/<customer_id>/per_item_overrides.yaml` (YAML drop-zone + SIGHUP reload per FR-30 I1 lock). All sections below are Ph-2 stubs preserved for SP UI engineer Ph-2 implementation reference; **SP UI engineer's Ph-1 deliverable does NOT include any of these sections**.
 
-### Pause Item Rules `[Ph-2]`
+### Pause Item Rules `[Ph-2]`  (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -225,7 +225,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background — out of your scope)* HILDA receives SP-alert, logs override to Postgres `AutomationRuleOverride` (scope=item, sentinel `rule_id="__all_rules__"`), logs to `CommunicationLog` with PM attribution. `rule_engine` suppresses all rule evaluations for this item until resumed. |
 | **FR refs** | FR-31 sub-1 |
 
-### Resume Item Rules `[Ph-2]`
+### Resume Item Rules `[Ph-2]`  (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -236,7 +236,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background)* HILDA receives SP-alert, removes the override from Postgres `AutomationRuleOverride`, logs to `CommunicationLog`. `rule_engine` resumes evaluations on next tick. |
 | **FR refs** | FR-31 sub-1 |
 
-### Pause All / Resume All (milestone-level) `[Ph-2]`
+### Pause All / Resume All (milestone-level) `[Ph-2]`  (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -247,7 +247,7 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **What HILDA does next** | *(Background)* HILDA processes the batch alerts; each fires an individual `AutomationRuleOverride` insert/delete. |
 | **FR refs** | FR-31 sub-1 |
 
-### Trigger Action `[Ph-2]`
+### Trigger Action `[Ph-2]`  (DO NOT NEED THIS NOW)
 
 | Field | Value |
 |---|---|
@@ -305,13 +305,13 @@ In addition to button clicks above, TPM can directly edit TPM-editable columns o
 
 ## Field summary — milestone-level fields (duplicated across every work-item row in the milestone)
 
-These are the SP audit fields written by milestone-level button clicks. Per `SP_lists_authoritative.xlsx`, all live as **columns on every work-item row** within `Tasks_<customer_id>` — milestone-level button clicks write the column on every row in the milestone (N rows × 1 column). HILDA deduplicates the alert burst via `[D-082]`.
+These are the SP audit fields written by milestone-level button clicks. Per `SP_lists_authoritative.xlsx`, all live as **columns on every work-item row** within `Deliverables_<customer_id>` — milestone-level button clicks write the column on every row in the milestone (N rows × 1 column). HILDA deduplicates the alert burst via `[D-082]`.
 
 | Field | Type | Written by | Cleared/reset by |
 |---|---|---|---|
 | `milestone_collection_started_at` | DateTime | Start Collection button | (never; one-shot) |
 | `milestone_submission_triggered_at` | DateTime | Submit to Carrier button | (never; one-shot per dispatch) |
-| `close_all_items_triggered_at` | DateTime | Close All Items button | (never; one-shot) |
+| `closed_all_items_triggered_at` | DateTime | Close All Items button | (never; one-shot) |
 | `refresh_requested_at` | DateTime | Refresh button | (overwritten on next click) |
 | `download_package_request_timestamp` | DateTime | Download Package button | (overwritten on next click) |
 | `download_package_url` | URL | HILDA writeback after assembly | Cleared by next Download Package click |
@@ -337,7 +337,7 @@ These are the SP audit fields written by per-row button clicks.
 
 # PART 2 — READ PATHS (Column display + UI gating + dashboard surfaces)
 
-This Part documents the columns SP UI engineer's web part **reads** from `Tasks_<customer_id>` to drive UI display, button visibility / enablement, and PM dashboard surfaces. Reads happen continuously via live polling + focus-aware refresh. Each row cites the read context, the column(s), and the authoritative FR.
+This Part documents the columns SP UI engineer's web part **reads** from `Deliverables_<customer_id>` to drive UI display, button visibility / enablement, and PM dashboard surfaces. Reads happen continuously via live polling + focus-aware refresh. Each row cites the read context, the column(s), and the authoritative FR.
 
 ## Milestone View — Read Paths
 
@@ -369,7 +369,7 @@ This Part documents the columns SP UI engineer's web part **reads** from `Tasks_
 | Completion | `actual_completion_date` | Display when set | FR-15 |
 | TG identity | `tg_name`, `tg_path_id`, `tg_email_group_alias` | TG header / group display | FR-2, FR-9 |
 | TG-coordinator | `tg_owner_corp_usa_email`, `tg_owner_corp_email`, `tg_owner_corp_id` | TG-coordinator display (NOT for outreach per FR-9 — display only) | FR-71, FR-88 |
-| Form factor | `handset`, `tablet`, `wearable`, `mr`, `hmr_smr`, `drr`, `ir_ffw_p1` | Form factor flags display | `[D-081]` |
+| Form factor | `handset`, `tablet`, `wearable`, `ir`, `osmr`, `rmr`, `hmr_smr` | Form factor flags display | `[D-084]` |
 | Comment | `comment` | Comment display (TPM-editable per FR-14) | FR-14 |
 | Triage flag | `manual_triage_required` | "Needs triage" badge surfacing for PM dashboard | FR-12 |
 | Expected completion | `expected_completion_date` | Per-item deadline display (HILDA-written from `target_date`; not TPM-editable) | FR-11 |
@@ -416,7 +416,7 @@ These are HILDA-internal columns — SP UI engineer's web part neither reads nor
 
 ## Read cadence + freshness
 
-- **Live polling**: SP UI polls `Tasks_<customer_id>` per `[D-064]` 2026-06-10 SP UI engineer discipline. Recommended interval 5–10 s for active milestone views; configurable per deployment.
+- **Live polling**: SP UI polls `Deliverables_<customer_id>` per `[D-064]` 2026-06-10 SP UI engineer discipline. Recommended interval 5–10 s for active milestone views; configurable per deployment.
 - **Focus-aware refresh**: SP UI re-reads on tab/window focus-gain (per `[D-074]`). PM/TPM returning to SP tab after viewing HILDA dashboard always sees fresh state on next focus event.
 - **HILDA writeback latency**: HILDA's `[D-064]` REST writes are typically <1 s end-to-end. UI lag is bounded by SP UI's poll interval + REST commit latency.
 
@@ -437,8 +437,8 @@ These buttons are **NOT** in the SP UI engineer's scope:
 
 For SP-alert email channel to function:
 
-1. **"Send Alerts for These Changes" = "Anything changes"** on every per-customer `Tasks_<customer_id>` list HILDA reads from. Without this, TPM direct field edits per FR-14 won't fire alerts.
-2. **Subject line format**: `Alert_Tasks_<customer_id> - <ItemTitle>` per FR-84 (e.g., `Alert_Tasks_MMK - NVIOT - AGPS Test Results`). SP UI engineer's alert template MUST emit the 5 routing-key fields in the alert body (`customer_id`, `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber`). The `customer_id` value is encoded in the subject suffix; `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber` in the body select the row within the list.
+1. **"Send Alerts for These Changes" = "Anything changes"** on every per-customer `Deliverables_<customer_id>` list HILDA reads from. Without this, TPM direct field edits per FR-14 won't fire alerts.
+2. **Subject line format**: `Alert_Deliverables_<customer_id> - <ItemTitle>` per FR-84 (e.g., `Alert_Tasks_MMK - NVIOT - AGPS Test Results`). SP UI engineer's alert template MUST emit the 5 routing-key fields in the alert body (`customer_id`, `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber`). The `customer_id` value is encoded in the subject suffix; `Model`, `ProjectID`, `MinorMilestone`, `ItemNumber` in the body select the row within the list.
 3. **Alert destination**: the HILDA team's dedicated mailbox (configured per deployment).
 4. **Buttons that write fields must NOT bypass alerts** — every field write in this spec MUST fire an alert. If SP UI engineer uses any "silent update" API, HILDA misses the event.
 
