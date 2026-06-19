@@ -1364,3 +1364,42 @@ HILDA's owner-email preference rule SURVIVES (use `owner_corp_usa_email` if set;
 **Anchors**: FR-19, FR-51, `[D-038]` v3, `[D-083]`.
 
 ---
+
+---
+
+## D-088: `Projects.TPM` is a SharePoint Person/Group column; HILDA extracts `(assigned_pm_id, pm_display_name, pm_email)` 3-tuple from sub-fields
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: Prior text (FR-2 PM identity lookup chain, FR-8 step 2 PM-attribution, FR-9 outreach attribution, FR-19 PM credential storage, FR-25 (b) JIRA self-outreach, FR-65 Send Reminder) treated `TPM` / `assigned_pm_id` as a single scalar string. SP UI engineer's `SP_lists_authoritative.xlsx` clarified 2026-06-19 (Google Sheets refresh + architect screenshot of SP User Information dialog) that the Projects SP list's `TPM` column is a SharePoint Person/Group column (multi-field user record), not a STR. HILDA's lookup-chain wording needs to specify which sub-fields drive which downstream uses to prevent ambiguity at architecture / development phase.
+
+**Decision**: At Projects-SP-list cache time, HILDA resolves the `TPM` Person/Group value to a 3-tuple `(assigned_pm_id, pm_display_name, pm_email)` extracted from these sub-fields:
+
+| Tuple member | Sub-field | Example | Downstream use |
+|---|---|---|---|
+| `assigned_pm_id` | `User name` (preferred); fallback to email-local-part of `Work email` when `User name` is null | `y.vasilyev` | FR-19 credential path slug (`customizations/credentials/<assigned_pm_id>/<carrier_slug>.env.sops`); CommunicationLog attribution; rule-engine PM-routing keys |
+| `pm_display_name` | `Name` (single field; NOT `First name + Last name`) | `Yury Vasilyev` | FR-9 outreach signature; FR-65 Send Reminder display; dashboard rendering |
+| `pm_email` | `Work email` | `y.vasilyev@partner.samsung.com` | FR-25 (b) CustomerJIRA self-outreach recipient; outreach signature reference (HILDA From stays team mailbox per FR-23) |
+
+All other Person/Group sub-fields (`Account` SP-internal claim, `SIP Address`, `Picture`, `Department`, `Title`, `First name`, `Last name`, `Mobile phone`, `Work phone`, `Web site`, `Ask Me About`, `Office`, `About me`, `Picture Timestamp`, `Picture Placeholder State`, `Picture Exchange Sync State`, `OtherMail`) are ignored by HILDA.
+
+**Why**:
+- (a) Single-scalar treatment was an unwitting simplification of the actual SP schema; codifying the 3-tuple now prevents later drift between HILDA's PM-resolution code and SP reality.
+- (b) `User name` as `assigned_pm_id` preferred over email-local-part: PMs may be partner/contractor identities (e.g., `@partner.samsung.com`) whose email-local-part can be ambiguous; `User name` is the SP-supplied corp directory identifier and is the stable key. Email-local-part fallback retained for robustness when `User name` is null (rare).
+- (c) `Name` single field used as `pm_display_name`: avoids first/last-name concatenation logic and locale-specific name-order ambiguity. Matches what SP renders by default.
+- (d) `Work email` as `pm_email`: single canonical email field for the PM identity; partner-domain emails are supported.
+
+**Consequences**:
+- (a) FR-2 PM identity lookup chain rewritten to specify 3-tuple extraction.
+- (b) FR-8 step 2 PM-attribution to CommunicationLog references `assigned_pm_id` per `[D-088]`.
+- (c) FR-9 outreach attribution references `pm_display_name` + `pm_email` (not bare `assigned_pm_id`).
+- (d) FR-19 credential path slug uses `<assigned_pm_id>` per `[D-088]`.
+- (e) FR-25 (b) JIRA self-outreach recipient uses `pm_email`.
+- (f) FR-65 Send Reminder display references `pm_display_name`.
+- (g) HILDA's Projects-list cache structure carries the 3-tuple per `project_id` (architecture phase to confirm cache shape — likely `dict[project_id, tuple[project_model, assigned_pm_id, pm_display_name, pm_email]]`).
+- (h) Sheet row 85 `TPM` Data Type column should be updated from `STR` to `Person/Group` (architect-side correction; tracked as STATUS Flag).
+
+**Anchors**: FR-2, FR-8 step 2, FR-9, FR-19, FR-25 (b), FR-65, `[D-083]` (Projects list reuse), `[D-086]` (owner identity free-form text — TPM is the only SP-side identity column that is intentionally NOT free-form because PMs are corp-AD-bound while owners are free-form).
+
+**Related**: STATUS Flag closure — "Project list column alignment with SP UI engineer" (closed via this decision). STATUS Flag open — "Sheet row 85 TPM Data Type STR→Person/Group" (architect side).
