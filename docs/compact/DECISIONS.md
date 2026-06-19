@@ -1077,6 +1077,8 @@ Promoted from strand: dashboard-v1 on 2026-06-14
 
 Promoted from strand: dashboard-v1 on 2026-06-14
 
+**Impl note 2026-06-19** — field name reverted from `is_milestone_gating` back to `milestone_gating` to align with SP UI engineer's `SP_lists_authoritative.xlsx` Workitems list row 9 column name (no `is_` prefix). Semantic decision per D-078 unchanged — `milestone_gating = true` items gate `MilestoneAllClosed` per FR-64; flag is YAML-only / NOT TPM-editable. Cascade applied to `docs/compact/requirements.md` (12 occurrences) + `docs/sp_ui_engineer/SP_UI_button_actions.md`. `template_schema/MODULE.md` Invariant + downstream code reflect this on next regen-map / development phase sweep. Prior `is_milestone_gating` references in this DECISIONS.md (historical D-077 + D-078 body) left as-is per append-only history discipline; this impl note is the canonical pointer to the current name.
+
 ---
 
 ## D-079: ReadyForSubmission added to FR-62 upload allowed states with revert-to-UnderPMReview semantic
