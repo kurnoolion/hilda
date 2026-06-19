@@ -372,7 +372,7 @@ This Part documents the columns SP UI engineer's web part **reads** from `Delive
 | Form factor | `handset`, `tablet`, `wearable`, `ir`, `osmr`, `rmr`, `hmr_smr` | Form factor flags display | `[D-084]` |
 | Comment | `comment` | Comment display (TPM-editable per FR-14) | FR-14 |
 | Triage flag | `manual_triage_required` | "Needs triage" badge surfacing for PM dashboard | FR-12 |
-| Expected completion | `expected_completion_date` | Per-item deadline display (HILDA-written from `target_date`; not TPM-editable) | FR-11 |
+| Milestone target_date | `Milestone.target_date` (read from Milestones SP list row) | Per-item deadline display sourced from Milestones list at render time; sole authoritative deadline per `[D-085]` (no per-item denorm) | FR-11 |
 
 ## Per-Item Button Visibility / Enablement — Read Paths
 
@@ -396,7 +396,7 @@ PM dashboard is HILDA-rendered per `[D-074]` for document/review surface, but th
 | Manual triage queue | `manual_triage_required = true` (filter) | List items needing triage; one-click clear after resolution | FR-12 |
 | Pending review queue | `review_required = true` (per item; `review_status` is HILDA-internal — see Excluded below) | List items with reviews pending | FR-53 |
 | Issues queue | `delivery_state ∈ {Delayed, Blocked}` | List items reported as Delayed/Blocked by owner | FR-7 |
-| Overdue queue | `expected_completion_date < today` AND `delivery_state ∉ {ReadyForSubmission, SubmittedToCustomer, Closed}` | Items past deadline | FR-11 |
+| Overdue queue | `Milestone.target_date < today` (read from Milestones SP list per `[D-085]`) AND `delivery_state ∉ {ReadyForSubmission, SubmittedToCustomer, Closed}` | Items past deadline | FR-11 |
 
 ## Columns SP UI Engineer Does NOT Read
 
