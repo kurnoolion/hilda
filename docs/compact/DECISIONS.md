@@ -1205,6 +1205,8 @@ Promoted from strand: dashboard-v1 on 2026-06-14
 
 Promoted from strand: dashboard-v1 on 2026-06-14
 
+**Impl note 2026-06-18 — `[D-082]` cascade-dedup effective obsoletion post `[D-083]` + `[D-085]`**: the original `[D-082]` cascade-dedup mechanism in `sp_alert_parser` was designed for the `Tasks_<customer_id>` flat-table architecture where milestone-level button clicks fired N SP-alerts (one per work-item row) that needed to be coalesced to a single milestone-scoped event. Post `[D-083]` 2-list architecture: milestone-level button writes target the single Milestones SP list row (one SP-alert per click; no N-row burst). Post `[D-085]`: `expected_completion_date` removed from Deliverables; target_date edits no longer cascade-write to N rows. `[D-082]` cascade-dedup now has **zero Ph-1 use cases** as a result. Implementation should retain the `sp_alert_parser` dedup hook as a defensive guard against accidental N-row bursts (test coverage preserved) but the operational expectation is single-row writes per FR-84 Source A (Deliverables) + Source B (Milestones) routing. If a future Ph-2 normalization re-introduces N-row writes, `[D-082]` becomes relevant again — flag at that architecture decision point.
+
 ---
 
 ## D-083: SP architecture — 2-list per-customer + global Milestone list + existing Project lookup; supersedes `[D-077]` Ph-1 flat-table
@@ -1298,6 +1300,8 @@ Promoted from strand: dashboard-v1 on 2026-06-14
 - Ph-2 per-item override (if needed): add `expected_completion_date_override` column with NULL semantic (= use milestone.target_date); deferred unless operational need surfaces.
 
 **Anchors**: FR-11, FR-14, FR-56, `[D-082]` (cascade-dedup obsoleted for this case), `[D-083]`.
+
+**Impl note 2026-06-18 — `daily_status_tick` AutomationRule is distinct from `polling_schedule` (FR-6 + FR-23 cross-FR cadence clarification)**: `Milestone.target_date < today` flips at midnight without any DI state change, so a daily evaluation trigger is required to catch the `Delayed` status transition per FR-6 precedence ladder rung (2). This trigger is implemented as a **separate `daily_status_tick` AutomationRule** (default fire time: 00:05 local corp time) — NOT a tier of `polling_schedule`. **Why separate**: `polling_schedule` (per FR-23 cross-FR cadence consistency lock — shared canonical definition across FR-23 Email Tier 3 / FR-25 CustomerJIRA + CorporatePLM / FR-26 PLM / FR-55 NSD) controls polling-channel interval rules — `{days_before_deadline, interval_minutes}` breakpoints determining how often HILDA polls each channel. The daily tick is a different concern entirely — a once-per-day rule-engine fire that triggers `Milestone.status` recompute for all active milestones (those with `milestone_collection_started_at IS NOT NULL AND status ≠ 'Completed'` on the Milestones SP list per FR-2 bootstrap). Conflating the two would muddy `polling_schedule`'s domain (polling cadence) with status recompute scheduling. Implementation lives in `rule_engine` per `[D-066]` rule-evaluation discipline; consumed by `workflow_engine` per `[D-022]`.
 
 ---
 
