@@ -74,7 +74,11 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Re-click is no-op once all items are `Closed`. |
 | **FR refs** | FR-28 (`MilestoneAllClosed`), FR-64, FR-76, FR-56 (e) |
 
-### Refresh (DONT NEED THIS NOW)
+### Refresh `[Ph-2]`
+
+**Deferred to Ph-2 per architect lock 2026-06-19** — TPM on-demand poll trigger is not in Ph-1 scope (FR-23/FR-25/FR-26/FR-55 cadence-driven polling is sufficient). Field write contract + FR-56 (f) handler preserved here for Ph-2 implementation reference.
+
+#### Refresh (Ph-2 stub)
 
 | Field | Value |
 |---|---|
@@ -86,7 +90,11 @@ All write actions in this Part trigger SP-alerts to HILDA per `[D-047]` / FR-84.
 | **Idempotency** | Rate limit prevents over-firing. |
 | **FR refs** | FR-56 (f) |
 
-### Download Package (DONT NEED THIS NOW)
+### Download Package `[Ph-2]`
+
+**Deferred to Ph-2 per architect lock 2026-06-19** — TPM on-demand package download is not in Ph-1 scope; carrier submission via FR-63 Submit + FR-18 dispatch is the Ph-1 delivery path (individual files via FR-19 adapter; no zip uploaded to carrier per `[D-054]`). The 4 `download_package_*` fields are EXCLUSIVELY for this Download Package flow — NOT used by Submit to Carrier (which writes only `milestone_submission_triggered_at` + per-item `delivery_state`). Field write contract + FR-73 handler preserved here for Ph-2 implementation reference.
+
+#### Download Package (Ph-2 stub)
 
 | Field | Value |
 |---|---|
@@ -312,11 +320,11 @@ These are the SP audit fields written by milestone-level button clicks. Per `[D-
 | `milestone_collection_started_at` | DateTime | Start Collection button | (never; one-shot) |
 | `milestone_submission_triggered_at` | DateTime | Submit to Carrier button | (never; one-shot per dispatch) |
 | `closed_all_items_triggered_at` | DateTime | Close All Items button | (never; one-shot) |
-| `refresh_requested_at` | DateTime | Refresh button | (overwritten on next click) |
-| `download_package_request_timestamp` | DateTime | Download Package button | (overwritten on next click) |
-| `download_package_url` | URL | HILDA writeback after assembly | Cleared by next Download Package click |
-| `download_package_status` | Choice {preparing, ready, failed} | SP UI sets `preparing` on click; HILDA writes `ready`/`failed` | Cleared by next Download Package click |
-| `download_package_generated_at` | DateTime | HILDA writeback | Cleared by next Download Package click |
+| `refresh_requested_at` `[Ph-2]` | DateTime | Refresh button `[Ph-2]` | (overwritten on next click) |
+| `download_package_request_timestamp` `[Ph-2]` | DateTime | Download Package button `[Ph-2]` | (overwritten on next click) |
+| `download_package_url` `[Ph-2]` | URL | HILDA writeback after assembly `[Ph-2]` | Cleared by next Download Package click |
+| `download_package_status` `[Ph-2]` | Choice {preparing, ready, failed} | SP UI sets `preparing` on click; HILDA writes `ready`/`failed` `[Ph-2]` | Cleared by next Download Package click |
+| `download_package_generated_at` `[Ph-2]` | DateTime | HILDA writeback `[Ph-2]` | Cleared by next Download Package click |
 
 ## Field summary — per DeliveryItem row
 
@@ -324,13 +332,13 @@ These are the SP audit fields written by per-row button clicks.
 
 | Field | Type | Written by | Cleared/reset by |
 |---|---|---|---|
-| `delivery_state` | Choice (11 values) | Approve (→ ReadyForSubmission); Mark Closed (→ Closed); FR-62 Upload (→ UnderPMReview on revert) | HILDA state-machine transitions |
-| `pm_approval_at` | DateTime | Approve button (atomic with delivery_state) | Cleared on revert (FR-62 upload while ReadyForSubmission/SubmittedToCustomer) |
-| `pm_approval_pm_id` | Person/Group | Approve button (atomic) | Cleared on revert (with `pm_approval_at`) |
+| `delivery_state` | Choice (11 values) | Approve (→ ReadyForSubmission); Mark Closed (→ Closed); FR-62 Upload `[Ph-2]` (→ UnderPMReview on revert) | HILDA state-machine transitions |
+| `pm_approval_at` | DateTime | Approve button (atomic with delivery_state) | Cleared on revert (FR-62 upload `[Ph-2]` while ReadyForSubmission/SubmittedToCustomer) |
+| `pm_approval_pm_id` | Person/Group | Approve button (atomic) | Cleared on revert `[Ph-2]` (with `pm_approval_at`) |
 | `last_reminder_triggered_at` | DateTime | Send Reminder button | (never; new value overwrites) |
-| `rules_paused_at` | DateTime | Pause Item Rules button | Cleared by Resume Item Rules button |
-| `manual_action_triggered_at` | DateTime | Trigger Action dropdown | (overwritten on next trigger) |
-| `manual_action_kind` | Choice (FR-29 verbs) | Trigger Action dropdown (atomic with timestamp) | (overwritten with timestamp) |
+| `rules_paused_at` `[Ph-2]` | DateTime | Pause Item Rules button `[Ph-2]` | Cleared by Resume Item Rules button |
+| `manual_action_triggered_at` `[Ph-2]` | DateTime | Trigger Action dropdown `[Ph-2]` | (overwritten on next trigger) |
+| `manual_action_kind` `[Ph-2]` | Choice (FR-29 verbs) | Trigger Action dropdown (atomic with timestamp) `[Ph-2]` | (overwritten with timestamp) |
 | `manual_triage_required` | Boolean | HILDA sets `true` on FR-12 path (c.2) below-threshold; TPM clears via Clear Triage Flag button OR direct cell edit per FR-14 | (cleared by TPM after triage resolution) |
 
 ---
@@ -447,3 +455,5 @@ For SP-alert email channel to function:
 ## Versioning
 
 Last updated: 2026-06-17 — **SP architecture rewrite per `[D-083]`**: 2 SP lists (`Deliverables_<customer_id>` per-customer Work Items + global `Milestones`) + reused global `Projects` list. Milestone-level button writes target the single Milestones row (no N-row cascade; no `[D-082]` cascade-dedup for milestone-button triggers). `expected_completion_date` removed per `[D-085]`; `Milestone.target_date` is sole authoritative deadline (read from Milestones row). All SP identity columns are free-form text per `[D-086]`. Form factor flags renamed per `[D-084]` (`ir / osmr / rmr` supersede `drr / ir_ffw_p1 / mr`). `closed_all_items_triggered_at` truncated SP-internal name handled via `sharepoint_config` mapping per `[D-065]`. When new buttons are added, new read paths surface, or behavior changes, update this file + `SP_lists_authoritative.xlsx` together.
+
+2026-06-19 — Refresh + Download Package deferred to Ph-2 per architect lock (TPM on-demand poll + zip-for-TPM-download not in Ph-1 scope; Submit to Carrier independent + uses individual files via FR-19 adapter per `[D-054]`). `is_milestone_gating` renamed to `milestone_gating` to align with `SP_lists_authoritative.xlsx` row 9 column name per FR-6 I8 cascade + D-078 impl note. Pending in FR-84 rewrite (next architect pass): alert format precision — subject `Milestones - <Title>` / `Deliverables_<customer_id> - <item_name>` (no `Alert_` prefix); subtitle `<Title> has been added | changed`; routing key Tier 1 `Id` (when SP UI engineer surfaces it; current `IDShadow` field is placeholder — parser ignores) → Tier 2 `(carrier, project_model, Title)` for Milestones / `(customer_id, project_model, milestone_name, item_no)` for Deliverables; actor attribution captured to `CommunicationLog`; self-loop suppression via HILDA SP service account identity match (HILDA-side concern — out of SP UI engineer scope).
