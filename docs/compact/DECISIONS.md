@@ -1405,3 +1405,152 @@ All other Person/Group sub-fields (`Account` SP-internal claim, `SIP Address`, `
 **Anchors**: FR-2, FR-8 step 2, FR-9, FR-19, FR-25 (b), FR-65, `[D-083]` (Projects list reuse), `[D-086]` (owner identity free-form text — TPM is the only SP-side identity column that is intentionally NOT free-form because PMs are corp-AD-bound while owners are free-form).
 
 **Related**: STATUS Flag closure — "Project list column alignment with SP UI engineer" (closed via this decision). STATUS Flag open — "Sheet row 85 TPM Data Type STR→Person/Group" (architect side).
+
+---
+
+## D-089: FR-56 (f) Refresh + FR-73 Download Package deferred to Ph-2
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: During the FR-56 deep-scan + STATUS Flag review session 2026-06-19, the architect observed that the milestone-level Refresh button (FR-56 (f)) and Download Package button (FR-73) introduce significant Ph-1 complexity: 5 milestone-level HILDA-write fields with self-loop feedback potential (`refresh_requested_at` + 4 `download_package_*` columns), a rate-limited soft-poll Celery task chain, and on-demand zip-assembly with `<scoped_token>` URL generation. The architect proposed dropping both buttons from Ph-1 SP UI scope to minimize the SP UI engineer's Ph-1 deliverable + reduce HILDA-side self-loop suppression surface area.
+
+**Decision**: Refresh button (FR-56 (f); writes `refresh_requested_at`) AND Download Package button (FR-73; writes `download_package_request_timestamp` + 3 HILDA-writeback fields `download_package_url` / `_status` / `_generated_at`) are **deferred to Ph-2**. SP UI engineer's Ph-1 milestone-level button set is reduced to 4: Start Collection / Submit to Carrier / Close All Items / target_date inline edit.
+
+**Why**:
+- (a) TPM on-demand poll trigger (Refresh) is cosmetic — FR-23/FR-25/FR-26/FR-55 cadence-driven polling is sufficient for Ph-1 operational needs.
+- (b) Download Package zip is for TPM offline use / audit — NOT used by Submit to Carrier (which dispatches individual files via FR-19 adapter per `[D-054]`); not operationally critical for Ph-1.
+- (c) Removes 5 HILDA-write fields from Ph-1 Milestones-row scope → reduces self-loop suppression surface area + simplifies Ph-1 dispatch table to 4 fields.
+- (d) Ph-1 wants minimum-viable SP UI engineer Ph-1 deliverable; Refresh + Download Package can ship Ph-2 without operational regression.
+
+**Consequences**:
+- (a) `docs/sp_ui_engineer/SP_UI_button_actions.md` sections for Refresh + Download Package marked `[Ph-2]` (2026-06-19 changelog entry).
+- (b) `SP_lists_authoritative.xlsx` column H + field summary marks `refresh_requested_at` + 4 `download_package_*` fields as `[Ph-2]`.
+- (c) FR-56 (f) entire section marked `[Ph-2]` deferred.
+- (d) FR-84 Source B dispatch table shrinks from 6 fields to 4 (Start Collection / Submit to Carrier / Close All Items / target_date).
+- (e) If TPM needs on-demand zip download in Ph-1, falls back to ops-mediated extraction from NSD `internal/` tree (no HILDA-side UI path).
+
+**Anchors**: FR-56 (e/f), FR-73, FR-84 Source B dispatch table, `SP_UI_button_actions.md` changelog 2026-06-19, `SP_lists_authoritative.xlsx` column H `[Ph-2]` markers.
+
+---
+
+## D-090: FR-66 corp messenger inbound locked OUT; replacement mechanism deferred to Ph-2 architecture
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: `[D-090-preceded by FR-50 outbound-only messenger lock]` ratified 2026-06-17 established that HILDA NEVER processes inbound from corp messenger — messenger is outbound-only FR-11 escalation channel. FR-66 Ph-2 multi-revision version-selection workflow was originally specified as "owner selects the final revision via corp messenger" — direct conflict with FR-50. During FR-66 deep-scan 2026-06-19, the architect confirmed: lock OUT messenger inbound; defer the replacement mechanism choice to Ph-2 architecture phase.
+
+**Decision**: FR-66 `TriggerVersionSelection` Ph-2 mechanism **MUST NOT use corp messenger inbound**. Replacement mechanism is deferred to Ph-2 architecture phase. Candidate channels:
+- (a) Email reply with structured selection block parsed per FR-12 (analogous to BATCH-id discipline)
+- (b) SP UI form (requires Ph-2 owner SP write permissions — separate provisioning concern)
+- (c) HILDA-rendered tab per `[D-074]` pattern with token-scoped owner access
+
+Architect picks (a), (b), (c), or alternative at Ph-2 architecture review.
+
+**Why**:
+- (a) FR-50 outbound-only lock is load-bearing per FR-9, FR-10, FR-11, FR-12, FR-65 cascade — an exception for FR-66 would unwind across multiple FRs.
+- (b) Multiple Ph-2 inbound mechanisms exist that don't violate FR-50 (email already proven via FR-12; SP UI form / HILDA-rendered tab parallel existing Ph-2 surfaces).
+- (c) Decision is reversible at Ph-2 architecture review — locking the prohibition + deferring the mechanism choice avoids premature commitment.
+
+**Consequences**:
+- (a) FR-7 / FR-9 / FR-12 / FR-25 / FR-28 / FR-29 / FR-56 / FR-13 cross-references swept to align with the lock 2026-06-19.
+- (b) FR-66 workflow body preserved (revision listing, `is_final` atomic write, timeout handling) — only the inbound mechanism is deferred.
+- (c) STATUS Flag opened: "FR-66 mechanism choice — Ph-2 architecture phase".
+- (d) FR-29 `TriggerVersionSelection` action wording updated to reference the deferred mechanism.
+
+**Anchors**: FR-50 outbound-only lock, FR-66 multi-rev version selection, FR-7 Ph-2 multi-rev fork, FR-9 Ph-2 outreach mechanism, FR-28 `TriggerVersionSelection` action, FR-56 (g) Ph-2 deferred per-item actions.
+
+---
+
+## D-091: FR-40 template.yaml YAML key reshape — `<milestone_id>` → `<milestone_name>`
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: During the FR-40 deep-scan 2026-06-19, multiple findings surfaced about the template.yaml schema's milestone identifier:
+- (a) The YAML key `<milestone_id>` (e.g., `LE-2`) was claimed in the schema to map to SP Milestones row `Id` (SP auto-Counter INTEGER PK) — incorrect; the value actually lands in SP `Title` (STR) on Milestones list + SP `milestone_name` (STR) on Deliverables list per `[D-065]` mapping.
+- (b) A redundant child field `milestone_name:` inside the `<milestone_id>:` YAML block — duplicates the key.
+- (c) Inconsistency with the `<device_id>:` convention (where the YAML key value IS the template canonical name; SP-internal column name `project_model` is different per `[D-065]`).
+
+Architect direction: drop both the `<milestone_id>` YAML key AND the `milestone_name:` field; replace with `<milestone_name>` YAML key as the canonical milestone identifier (aligned with `<device_id>` pattern).
+
+**Decision**: Template.yaml milestone identifier is the **YAML key `<milestone_name>`** (e.g., `LE-2`). The value lands in:
+- SP Milestones `Title` column (STR) per `[D-065]` mapping
+- SP Deliverables `milestone_name` column (STR) per `[D-065]` mapping
+
+SP `Id` (Milestones auto-Counter INTEGER PK) + Deliverables `milestone_id` (INTEGER FK to Milestones.Id) are SP-managed integers — NOT sourced from template.yaml. The redundant `milestone_name:` child field is removed from the YAML schema.
+
+**Why**:
+- (a) Aligns with the `<device_id>` template.yaml convention — YAML key carries the canonical identifier value; SP-internal column may have a different name per `[D-065]` mapping.
+- (b) Eliminates the redundant `milestone_name:` field that duplicated the YAML key.
+- (c) Correctly anchors the canonical → SP-internal mapping: template.yaml `<milestone_name>` → SP `Title` (Milestones) + SP `milestone_name` (Deliverables); SP `milestone_id` is INTEGER FK and NOT a HILDA-internal logical tuple key.
+- (d) Forces all HILDA-internal logical tuples to use STR `milestone_name` consistently — fixes cascade-drift across FR-8 / FR-12 / FR-25 / FR-26 / FR-28 / FR-84 / FR-13 (5+ FRs swept this session).
+
+**Consequences**:
+- (a) Template.yaml schema reshape — drops `<milestone_id>:` YAML key + `milestone_name:` field.
+- (b) Cross-FR sweep: HILDA-internal tuples `(device_id, milestone_id, owner_corp_id)` → `(device_id, milestone_name, owner_corp_id)` across FR-8 / FR-12 / FR-25 / FR-26 / FR-28 / FR-84 / FR-13.
+- (c) `[D-065]` mapping reaffirmed as authoritative for canonical → SP-internal name translation.
+- (d) FR-2 / FR-6 `$filter` examples updated: stale `milestone_id eq 'LE-2'` → `milestone_name eq 'LE-2'` (Deliverables) / `Title eq 'LE-2'` (Milestones).
+- (e) `template_schema/MODULE.md` Pydantic schema + downstream code (`core/src/template_schema/models.py`) require dev-phase cascade to drop `milestone_id` field + rename milestone block key.
+
+**Anchors**: FR-40 template.yaml schema, FR-2 $filter examples, FR-6 cross-list join discipline, FR-25 PLM tuple keys, FR-12 BATCH-id mapping, FR-26 polling target tuples, FR-84 routing key, `[D-065]` canonical → SP-internal mapping.
+
+---
+
+## D-092: CustomerJIRA Ph-1 / Ph-2 boundary — Ph-1 polling internal-only; Ph-2 adds SP write-back
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: During the FR-25 (b) + FR-9 + FR-12 cross-FR cascade 2026-06-19, the SP write-back semantics for CustomerJIRA polling results were ambiguous. Two SP columns (`jira_open_ticket_count` INTEGER + `jira_ticket_summary_json` STR) were added to xlsx Workitems list this session for SP UI engineer's per-row ticket-count badge display; the question was which phase HILDA writes them in.
+
+**Decision**: 
+- **Ph-1**: HILDA polls customer JIRA per cadence per FR-25 (b); polling results stay in **HILDA Postgres + CommunicationLog only** — NO SP write-back. PM checks JIRA portal directly using `<customer_jira_url>` from outreach body.
+- **Ph-2**: HILDA additionally writes `jira_open_ticket_count` + `jira_ticket_summary_json` columns to Deliverables row via `[D-064]` REST writeback for SP UI engineer's per-row ticket-count badge + tooltip display.
+- **Both phases**: End-to-end state machine workflow for JIRA-only items MUST cycle via close-intent reply email path (`Open → OutreachSent → UnderPMReview → ReadyForSubmission → SubmittedToCustomer → Closed`). The SP columns are PURELY informational/UI display for Ph-2 TPM context ("why the work item moved to Closed state") — NOT a gating condition for state advancement.
+
+**Why**:
+- (a) Minimizes Ph-1 SP-column scope + self-loop suppression burden (2 fewer HILDA-write Deliverables columns in Ph-1).
+- (b) State advancement is identical in both phases — the SP write-back is purely UI display, not state-machine relevant.
+- (c) Allows Ph-1 to ship without requiring SP UI engineer ticket-badge rendering (defer Ph-2 work).
+- (d) PM has access to JIRA portal directly in Ph-1 via `<customer_jira_url>` in outreach body — no operational regression.
+
+**Consequences**:
+- (a) FR-25 (b), FR-9 CustomerJIRA-only block, FR-12 sender match all carry explicit Ph-1/Ph-2 split language.
+- (b) `jira_open_ticket_count` + `jira_ticket_summary_json` columns marked `[Ph-2]` in `SP_lists_authoritative.xlsx` Workitems list.
+- (c) FR-25 (b) close-intent path exclusivity lock preserved (state machine cycles via email reply per FR-12 in both phases).
+- (d) STATUS Flag closed: SP_UI_button_actions.md sync for CustomerJIRA ticket-count display — defer Ph-2 architecture.
+- (e) Ph-2 SP write-back fires SP-alerts back to HILDA per FR-84 Source A — suppressed via FR-84 self-loop mechanism (HILDA SP service account actor identity match).
+
+**Anchors**: FR-25 (b), FR-9 CustomerJIRA-only block, FR-12 sender match + path resolution, FR-84 self-loop suppression, `SP_lists_authoritative.xlsx` Workitems list Ph-2 columns.
+
+---
+
+## D-093: `owner_corp_email` (not `owner_corp_usa_email`) matches `TPM.Work_email` for FR-25 (b) CustomerJIRA-only role-collapse template constraint
+
+**Date**: 2026-06-19
+**Status**: Ratified
+
+**Context**: Original FR-25 (b) text (predating this session; preserved through the 2026-06-17 rewrite) stated: "when item_type = Confirmation AND tracking_modality = [CustomerJIRA] only, the `owner_corp_usa_email` field MUST match the milestone's assigned_pm_id resolved email at setup_milestone time — mismatch raises `TSC-W006`". During the FR-25 deep-scan 2026-06-19, the architect corrected this constraint: corp SP TPM Person/Group field carries a corp email (e.g., `@samsung.com`, `@partner.samsung.com`), NOT a USA-domain email. So `owner_corp_email` (not `_usa_`) is the correct field to match `TPM.Work_email`.
+
+**Decision**: For CustomerJIRA-only Confirmation items, the role-collapse template constraint TSC-W006 requires:
+- **`owner_corp_email` MUST match `TPM.Work_email`** (= `pm_email` per `[D-088]` 3-tuple) at `setup_milestone` time
+- `owner_corp_usa_email` is optional (may be empty for non-USA-based PMs); if set, must also resolve to the same PM identity
+
+Preference rule per FR-9 + `[D-080]` + FR-88 unchanged (`owner_corp_usa_email` preferred when set; `owner_corp_email` fallback) — applies to outreach attribution. The CustomerJIRA-only constraint specifies which owner email field MUST equal PM email at template authoring time (distinct from runtime addressing).
+
+**Why**:
+- (a) Corp SP TPM Person/Group field carries corp domain emails (not USA-domain) — the previous `owner_corp_usa_email` constraint was structurally wrong.
+- (b) `owner_corp_email` is the universal corp-email field (any domain, any region); `owner_corp_usa_email` is the USA-specific override.
+- (c) PM identity per `[D-088]` 3-tuple = `TPM.Work_email` is the canonical PM email source; matching `owner_corp_email` to it preserves the role-collapse intent (same person owns the JIRA-only item and approves it).
+- (d) Preserves the FR-9 + `[D-080]` outreach preference rule (`owner_corp_usa_email` preferred when set) — does NOT affect outreach addressing behavior; only the role-collapse template authoring constraint changes.
+
+**Consequences**:
+- (a) FR-25 (b) template constraint TSC-W006 wording updated.
+- (b) `template_schema/MODULE.md` validator semantics updated: when `item_type = Confirmation` AND `tracking_modality = [CustomerJIRA]` only, the `owner_corp_email` field MUST match `pm_email` per `[D-088]` at setup_milestone — mismatch raises TSC-W006.
+- (c) FR-7 + FR-9 + FR-12 cross-references to CustomerJIRA role-collapse use `pm_email = TPM.Work_email` per `[D-088]`; they don't specify which `owner_corp_*_email` matches at template authoring time, so no cross-FR change needed beyond FR-25 (b).
+- (d) Cross-checked: only FR-25 (b) had the explicit "owner_corp_usa_email" claim — no other FR needs updating.
+- (e) `template_schema/MODULE.md` Pydantic validator + downstream code (`core/src/template_schema/models.py` TSC-W006 raise) require dev-phase cascade to update the matched field name.
+
+**Anchors**: FR-25 (b) TSC-W006, FR-9 CustomerJIRA-only block, FR-7 CustomerJIRA-only state machine, `[D-080]` preference rule, FR-88 owner identity model, `[D-088]` PM identity model.
