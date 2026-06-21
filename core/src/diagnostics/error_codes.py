@@ -26,7 +26,7 @@ PREFIX_REGISTRY: dict[str, str] = {
     "EML": "email_service",
     "ITR": "issue_tracker",
     "MSG": "messenger",
-    "CAD": "customer_adapter",
+    "CSA": "customer_adapter",
     "TRK": "tracker",
     "TRC": "test_report",
     "RUL": "rule_engine",
@@ -36,6 +36,12 @@ PREFIX_REGISTRY: dict[str, str] = {
     "TSI": "template_schema_ingestor",
     "TRP": "test_report_profiler",
     "DSH": "dashboard",
+    # Added 2026-06-09 — corp-side gateway modules per SYSTEM.md §2.1 (2026-05-24 expansion):
+    "CMG": "corp_messenger_gateway",
+    "CPG": "corp_plm_gateway",
+    # Added 2026-06-21 — meta-prefix for cross-cutting HildaOpsAlert codes per FR-75 + [D-002];
+    # owned by diagnostics as the chat-mediated collaboration infra anchor (not a runtime module):
+    "STATUS": "diagnostics",
 }
 
 
@@ -54,8 +60,14 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "ITR-E002": ErrorCode(
         "ITR-E002", "Issue not found: '{issue_id}' in '{system}'", False
     ),
+    # ITR-E003 renumbered to ITR-E008 on 2026-06-21 per architect decision (FR-25 (b) cascade lock
+    # 2026-06-19 assigned ITR-E003 = "customer JIRA auth expired"); old idempotency semantic preserved
+    # at ITR-E008 to honor diagnostics Invariant "codes never deleted, semantic stable".
     "ITR-E003": ErrorCode(
-        "ITR-E003", "Conflict: idempotency key '{key}' already resolved to '{existing_id}'", False
+        "ITR-E003", "Customer JIRA auth expired for account '{account_id}' on '{customer_id}'", False
+    ),
+    "ITR-E008": ErrorCode(
+        "ITR-E008", "Conflict: idempotency key '{key}' already resolved to '{existing_id}'", False
     ),
     "ITR-E004": ErrorCode(
         "ITR-E004", "Transition '{transition}' not available from current state on '{issue_id}'", False

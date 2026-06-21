@@ -30,7 +30,7 @@ PREFIX_REGISTRY: dict[str, str] = {
     "EML": "email_service",
     "ITR": "issue_tracker",
     "MSG": "messenger",
-    "CAD": "customer_adapter",
+    "CSA": "customer_adapter",
     "TRK": "tracker",
     "TRC": "test_report",
     "RUL": "rule_engine",
@@ -43,6 +43,9 @@ PREFIX_REGISTRY: dict[str, str] = {
     # Added 2026-06-09 — corp-side gateway modules per SYSTEM.md §2.1 (2026-05-24 expansion):
     "CMG": "corp_messenger_gateway",
     "CPG": "corp_plm_gateway",
+    # Added 2026-06-21 — meta-prefix for cross-cutting HildaOpsAlert codes per FR-75 + [D-002];
+    # owned by diagnostics as the chat-mediated collaboration infra anchor (not a runtime module):
+    "STATUS": "diagnostics",
 }
 
 # Central registry: all error codes across all modules live here.
@@ -143,7 +146,7 @@ QC_REGISTRY: dict[str, QCTemplate] = {}  # key: "{prefix}:{artifact_type}"
 - **No HILDA imports.** `diagnostics` imports only stdlib + third-party (dataclasses, enum, datetime, typing, sys). Any HILDA import creates a cycle and is a hard error.
 - **No free-text in report fields.** `str` fields in `ReportRecord` must contain only bounded enum tokens or registered error codes. `QCTemplate` enforces this at class definition time via `QCField.__post_init__`. `ReportWriter` enforces it at emit time when a `QCTemplate` is registered for the module.
 - **No proprietary content.** Applies to all report output by construction — field types are int / float / bool / enum; no mechanism exists to embed arbitrary strings. Anchors `[D-002]` NFR-17 NFR-2.
-- **All 20 prefixes pre-registered** (revised 2026-06-09 from 18 — added `CMG` / `CPG` for corp-side gateway modules per SYSTEM.md §2.1 2026-05-24 expansion). `PREFIX_REGISTRY` and `ERROR_CODES` are populated as each MODULE.md is drafted. The `--validate` flag fails if a prefix appears in `ERROR_CODES` without a `PREFIX_REGISTRY` entry.
+- **All 21 prefixes pre-registered** (revised 2026-06-21 from 20 — added `STATUS` meta-prefix for cross-cutting `HildaOpsAlert` codes owned by diagnostics per FR-75 + [D-002]; 2026-06-09 revision from 18 added `CMG` / `CPG` for corp-side gateway modules per SYSTEM.md §2.1 2026-05-24 expansion). `PREFIX_REGISTRY` and `ERROR_CODES` are populated as each MODULE.md is drafted. The `--validate` flag fails if a prefix appears in `ERROR_CODES` without a `PREFIX_REGISTRY` entry.
 - **Error codes are stable across deployments.** Once a code is registered with a number, neither the number nor the message template may change. Deprecations add a `deprecated: True` field; codes are never renumbered or deleted.
 
 ---
@@ -197,12 +200,12 @@ No `--mock` or `--dry-run` needed — no side effects, no network, no disk write
 
 **Sample `--diagnostic` output** (pasteable into chat):
 ```
-RPT|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|modules=DGN,TSC,SHP,STO,CRD,EML,ITR,MSG,CAD,TRK,TRC,RUL,LLG,WFL,ASI,TSI,TRP,DSH,CMG,CPG
+RPT|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=21|code_count=3|modules=DGN,TSC,SHP,STO,CRD,EML,ITR,MSG,CSA,TRK,TRC,RUL,LLG,WFL,ASI,TSI,TRP,DSH,CMG,CPG,STATUS
 ```
 
 **Sample `--validate` output**:
 ```
-QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|duplicate_prefixes=false|orphan_codes=false|missing_qc_templates=true|result=WARN
+QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=21|code_count=3|duplicate_prefixes=false|orphan_codes=false|missing_qc_templates=true|result=WARN
 ```
 
 ---
@@ -215,7 +218,7 @@ QC|DGN|run-00001|2026-05-04T10:00:00Z|prefix_count=20|code_count=3|duplicate_pre
 - `ERROR_CODES` — module constant — pub (via `__all__`) — Registered error-code dict; seeded with DGN-/ITR-/CRD- codes.
 - `ErrorCode` — frozendataclass — pub (via `__all__`) — Immutable error definition (code, message, recoverable).
 - `ErrorSeverity` — Enum — pub (via `__all__`) — Severity discriminator (E/W).
-- `PREFIX_REGISTRY` — module constant — pub (via `__all__`) — 18-entry prefix→module map (DGN, TSC, SHP, STO, CRD, EML, ITR, MSG, CAD, TRK, TRC, RUL, LLG, WFL, ASI, TSI, TRP, DSH).
+- `PREFIX_REGISTRY` — module constant — pub (via `__all__`) — 21-entry prefix→module map (DGN, TSC, SHP, STO, CRD, EML, ITR, MSG, CSA, TRK, TRC, RUL, LLG, WFL, ASI, TSI, TRP, DSH, CMG, CPG, STATUS).
 - `PipelineError` — class (Exception) — pub (via `__all__`) — Structured error carrying registered code + context dict + optional cause.
 - `format_code(code, **kwargs) -> str` — function — pub (via `__all__`) — Format a registered code's message with placeholder values.
 - `get_code(code) -> ErrorCode` — function — pub (via `__all__`) — Lookup; raises DGN-E002 if unknown.

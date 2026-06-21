@@ -143,8 +143,10 @@ class DefectTrackAdapter:
                 "ITR-E002", context={"issue_id": issue_id, "system": "defecttrack"}
             )
         if resp.status_code == 409:
+            # Renumbered ITR-E003 -> ITR-E008 on 2026-06-21; ITR-E003 reassigned to
+            # "customer JIRA auth expired" per FR-25 (b) cascade lock 2026-06-19.
             raise PipelineError(
-                "ITR-E003", context={"key": issue_id, "existing_id": issue_id}
+                "ITR-E008", context={"key": issue_id, "existing_id": issue_id}
             )
         if resp.status_code == 429:
             raise PipelineError(

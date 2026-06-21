@@ -406,7 +406,8 @@ class TestLoadAdapter:
 class TestItrErrorCodesRegistered:
     @pytest.mark.parametrize("code", [
         "ITR-E001", "ITR-E002", "ITR-E003", "ITR-E004",
-        "ITR-E005", "ITR-E006", "ITR-W001", "ITR-W002",
+        "ITR-E005", "ITR-E006", "ITR-E007", "ITR-E008",
+        "ITR-W001", "ITR-W002",
     ])
     def test_code_is_registered(self, code: str) -> None:
         from core.src.diagnostics import get_code
@@ -415,7 +416,8 @@ class TestItrErrorCodesRegistered:
 
     def test_itr_errors_are_not_recoverable(self) -> None:
         from core.src.diagnostics import get_code
-        for code in ["ITR-E001", "ITR-E002", "ITR-E003", "ITR-E004", "ITR-E005", "ITR-E006"]:
+        for code in ["ITR-E001", "ITR-E002", "ITR-E003", "ITR-E004",
+                     "ITR-E005", "ITR-E006", "ITR-E007", "ITR-E008"]:
             assert get_code(code).recoverable is False
 
     def test_itr_warnings_are_recoverable(self) -> None:
