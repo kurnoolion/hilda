@@ -109,7 +109,7 @@ lists:                                    # 7 lists per [D-051] impl note 2026-0
       # ---- Item-type + state ----
       item_type: "Item_Type"                                            # Choice; SP UI engineer maintains values per [D-053] / [D-065]
       delivery_state: "Delivery_State"                                  # Choice (11 values); SP UI engineer maintains values
-      no_customer_upload: "No_Customer_Upload"                          # Boolean per [D-054]; MUST be true when item_type=Confirmation per template_schema/MODULE.md Invariant
+      no_customer_upload: "No_Customer_Upload"                          # Boolean; MUST be true when item_type=confirmation per template_schema/MODULE.md Invariant TSC-W004 (per FR-80 lock 2026-06-20: TPM-editable for non-confirmation items only; SP UI suppresses edit affordance when item_type=confirmation); HILDA-canonical lowercase_snake_case per FR-58 lock 2026-06-20
       target_folder: "Target_Folder"                                    # OUTBOUND customer-portal upload path per FR-19 / FR-73
 
       # ---- Owner identity ----
@@ -143,7 +143,7 @@ lists:                                    # 7 lists per [D-051] impl note 2026-0
       hmr_smr: "HMR_SMR"
 
       # ---- Document-pipeline gating ----
-      doc_count: "Doc_Count"                                            # Number; per FR-7; 0 for Confirmation
+      doc_count: "Doc_Count"                                            # Number; per FR-7; 0 for item_type=confirmation per template_schema invariant
       review_required: "Review_Required"                                # Boolean; gates LLM quality review (FR-53)
       review_status: "Review_Status"                                    # Choice: pending / complete / not_required
       item_completion_pct: "Item_Completion_Pct"                        # Number; computed
@@ -157,7 +157,7 @@ lists:                                    # 7 lists per [D-051] impl note 2026-0
 
       # ---- TPM resolution buttons per FR-87 strict A->B->C ----
       tpm_reassignment_target_item_id: "TPM_Reassign_Target"            # FR-87 step (A); lookup -> DeliveryItems
-      tpm_resolved_doc_type: "TPM_Resolved_DocType"                     # FR-87 step (B); Choice (test_report / tech_report / waiver / compliance_certification_release_notes per [D-053] 5-value DocType — corrected 2026-06-12 from prior stale "default" value)
+      tpm_resolved_doc_type: "TPM_Resolved_DocType"                     # FR-87 step (B); Choice 4-value {test_report, tech_report, waiver, compliance_certification_release_notes} per FR-85 actionable doc_types minus 'unresolved' (TPM never picks unresolved as resolution target); column type converted from STR to LIST/Choice 2026-06-20 for defense-in-depth + consistency with other enum-bounded columns; HILDA-written via [D-064] REST after FR-87 step (B) dropdown selection; rendered as read-only audit in HILDA tab (NOT SP UI per [D-074]); SP UI engineer defines Choice values per [D-065] tier-3
       tpm_revision_resolution: "TPM_Revision_Resolution"                # FR-87 step (C); text
 
       # ---- Per-item overrides ----
