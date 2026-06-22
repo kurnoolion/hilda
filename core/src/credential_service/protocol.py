@@ -10,7 +10,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-__all__ = ["AuthType", "Credential", "SystemType", "SYSTEM_ENV_PREFIX"]
+__all__ = [
+    "AuthType",
+    "Credential",
+    "CredentialScope",
+    "SystemType",
+    "SYSTEM_CRED_SCOPE",
+    "SYSTEM_ENV_PREFIX",
+    "SYSTEM_SUBTREE",
+]
 
 AuthType = Literal["api_token", "basic", "ntlm", "kerberos", "oauth2_bearer"]
 
@@ -34,6 +42,63 @@ class SystemType(str, Enum):
     LLM_OLLAMA_A4000 = "llm_ollama_a4000"  # Ollama on RTX A4000 box (lab subnet); single shared
     LLM_VLLM_DGX = "llm_vllm_dgx"          # vLLM on DGX Spark box (lab subnet); single shared
     LLM_CORP_LLM = "llm_corp_llm"          # corp on-prem LLM (off-lab) per [D-007]; single shared
+
+
+class CredentialScope(str, Enum):
+    """Per-system credential lookup scope.
+
+    Added 2026-06-21 per FR-25 (b) cascade lock 2026-06-19 (per-(account, customer)
+    customer JIRA) + FR-19/77 (per-customer Google Drive) + architect lock 2026-06-21
+    (no-HILDA-credential for corp PLM via ISSUE_TRACKER pattern (d) + corp messenger).
+    """
+
+    SHARED = "shared"
+    """Single shared ops-team credential at env_dir/<system>.enc.env."""
+
+    PER_ACCOUNT_PER_CUSTOMER = "per_account_per_customer"
+    """Per-(account_id, customer_id) credential at
+    env_dir/<subtree>/<account_id>/<customer_id>.enc.env. Used for customer JIRA
+    per FR-25 (b) — each carrier requires identifiable individual accounts for
+    audit per carrier governance."""
+
+    PER_CUSTOMER = "per_customer"
+    """Per-customer credential at env_dir/<subtree>/<customer_id>.enc.env. Used
+    for customer adapter (Google Drive per FR-19/77) — Ph-1 single carrier MMK
+    expands trivially when additional carriers onboard."""
+
+    NO_CREDENTIAL = "no_credential"
+    """No HILDA-side credential — auth handled gateway-side via IP-allowlist +
+    fixed-key infrastructure. HILDA passes corp identity as API parameter, not
+    credential. Callers must use the IP-allowlist + identity-assertion pattern
+    instead; get_credential() raises CRD-E001 for these system_types."""
+
+
+# Per-system credential scope — controls how SopsCredentialService scans for
+# credential files in env_dir and how get_credential routes lookups.
+# Anchored in FR-25 (a)/(b) + FR-19/77 + architect lock 2026-06-21.
+SYSTEM_CRED_SCOPE: dict[SystemType, CredentialScope] = {
+    # customer JIRA only in Ph-1; corp PLM uses pattern (d) per FR-25 (a):
+    SystemType.ISSUE_TRACKER: CredentialScope.PER_ACCOUNT_PER_CUSTOMER,
+    # corp messenger gateway uses IP-allowlist + gateway-side auth:
+    SystemType.MESSENGER: CredentialScope.NO_CREDENTIAL,
+    # customer portal upload (Ph-1: Google Drive per FR-19/77):
+    SystemType.CUSTOMER: CredentialScope.PER_CUSTOMER,
+    # Single shared (HILDA-team scope) below:
+    SystemType.EMAIL: CredentialScope.SHARED,
+    SystemType.SHAREPOINT: CredentialScope.SHARED,
+    SystemType.LLM_OLLAMA_A4000: CredentialScope.SHARED,
+    SystemType.LLM_VLLM_DGX: CredentialScope.SHARED,
+    SystemType.LLM_CORP_LLM: CredentialScope.SHARED,
+}
+
+
+# Subtree directory name per per-(account, customer) / per-customer system.
+# When scope == PER_ACCOUNT_PER_CUSTOMER: env_dir/<subtree>/<account_id>/<customer_id>.enc.env
+# When scope == PER_CUSTOMER: env_dir/<subtree>/<customer_id>.enc.env
+SYSTEM_SUBTREE: dict[SystemType, str] = {
+    SystemType.ISSUE_TRACKER: "customer_jira",
+    SystemType.CUSTOMER: "customer",
+}
 
 
 # Env-var prefix per system inside its decrypted .enc.env, e.g. HILDA_ITR_AUTH_TYPE.

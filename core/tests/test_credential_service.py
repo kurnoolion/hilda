@@ -159,19 +159,24 @@ def patched_service(tmp_path: Path, contents: dict[str, str]) -> SopsCredentialS
 
 
 ITR_ENV = f"HILDA_ITR_AUTH_TYPE=api_token\nHILDA_ITR_API_TOKEN={SECRET}\n"
+EMAIL_ENV = f"HILDA_EML_AUTH_TYPE=basic\nHILDA_EML_USERNAME=u\nHILDA_EML_PASSWORD={SECRET}\n"
+CUSTOMER_ENV = f"HILDA_CSA_AUTH_TYPE=api_token\nHILDA_CSA_API_TOKEN={SECRET}\n"
 
 
 class TestSopsCredentialService:
+    # NOTE: As of 2026-06-21 (FR-25 (b) cascade), ISSUE_TRACKER is per-(account,
+    # customer) scope; SHARED-scope tests below use EMAIL instead.
+
     def test_get_credential_exact_match(self, tmp_path):
-        service = patched_service(tmp_path, {"issue_tracker.enc.env": ITR_ENV})
-        cred = asyncio.run(service.get_credential(OPS_TEAM_PM_ID, "issue_tracker"))
-        assert cred.api_token == SECRET
+        service = patched_service(tmp_path, {"email.enc.env": EMAIL_ENV})
+        cred = asyncio.run(service.get_credential(OPS_TEAM_PM_ID, "email"))
+        assert cred.password == SECRET
 
     def test_pm_id_fallback_returns_ops_team_credential(self, tmp_path):
         # Ph-1/Ph-2: same shared credential regardless of pm_id per [D-019].
-        service = patched_service(tmp_path, {"issue_tracker.enc.env": ITR_ENV})
-        cred = asyncio.run(service.get_credential("pm-alice", "issue_tracker"))
-        assert cred.api_token == SECRET
+        service = patched_service(tmp_path, {"email.enc.env": EMAIL_ENV})
+        cred = asyncio.run(service.get_credential("pm-alice", "email"))
+        assert cred.password == SECRET
         assert cred.pm_id == OPS_TEAM_PM_ID  # attribution stays ops-team
 
     def test_unknown_system_type_raises_e003(self, tmp_path):
@@ -187,7 +192,7 @@ class TestSopsCredentialService:
         assert exc.value.code_id == "CRD-E001"
 
     def test_load_is_idempotent_and_counts(self, tmp_path):
-        service = patched_service(tmp_path, {"issue_tracker.enc.env": ITR_ENV})
+        service = patched_service(tmp_path, {"email.enc.env": EMAIL_ENV})
 
         async def run() -> tuple[int, int]:
             return await service.load(), await service.load()
@@ -196,18 +201,18 @@ class TestSopsCredentialService:
         assert first == second == 1
 
     def test_reload_picks_up_rotated_credential(self, tmp_path):
-        contents = {"issue_tracker.enc.env": ITR_ENV}
+        contents = {"email.enc.env": EMAIL_ENV}
         service = patched_service(tmp_path, contents)
 
         async def run() -> tuple[str | None, str | None]:
-            before = (await service.get_credential("x", "issue_tracker")).api_token
-            contents["issue_tracker.enc.env"] = (
-                "HILDA_ITR_AUTH_TYPE=api_token\nHILDA_ITR_API_TOKEN=rotated\n"
+            before = (await service.get_credential("x", "email")).password
+            contents["email.enc.env"] = (
+                "HILDA_EML_AUTH_TYPE=basic\nHILDA_EML_USERNAME=u\nHILDA_EML_PASSWORD=rotated\n"
             )
             # No hot-reload: cache still serves the old value until reload().
-            mid = (await service.get_credential("x", "issue_tracker")).api_token
+            mid = (await service.get_credential("x", "email")).password
             await service.reload()
-            after = (await service.get_credential("x", "issue_tracker")).api_token
+            after = (await service.get_credential("x", "email")).password
             return before == SECRET and mid == SECRET, after
 
         unchanged_until_reload, after = asyncio.run(run())
@@ -242,11 +247,158 @@ class TestSopsCredentialService:
         assert installed is hasattr(signal, "SIGHUP")
 
     def test_no_plaintext_written_to_disk(self, tmp_path):
-        service = patched_service(tmp_path, {"issue_tracker.enc.env": ITR_ENV})
-        asyncio.run(service.get_credential("x", "issue_tracker"))
+        service = patched_service(tmp_path, {"email.enc.env": EMAIL_ENV})
+        asyncio.run(service.get_credential("x", "email"))
         files = list((tmp_path / "credentials").iterdir())
-        assert [f.name for f in files] == ["issue_tracker.enc.env"]
-        assert SECRET not in (tmp_path / "credentials" / "issue_tracker.enc.env").read_text()
+        assert [f.name for f in files] == ["email.enc.env"]
+        assert SECRET not in (tmp_path / "credentials" / "email.enc.env").read_text()
+
+
+# ---------------------------------------------------------------------------
+# SopsCredentialService — scope-aware routing (FR-25 (b) + FR-19/77 + arch lock 2026-06-21)
+# ---------------------------------------------------------------------------
+
+
+def patched_service_with_subtrees(
+    tmp_path: Path,
+    root_files: dict[str, str] | None = None,
+    customer_jira_files: dict[tuple[str, str], str] | None = None,
+    customer_files: dict[str, str] | None = None,
+) -> SopsCredentialService:
+    """Service over tmp env_dir supporting root files + customer_jira/<acct>/<cust>.enc.env
+    + customer/<cust>.enc.env layouts."""
+    env_dir = tmp_path / "credentials"
+    env_dir.mkdir(exist_ok=True)
+
+    all_contents: dict[str, str] = {}
+
+    if root_files:
+        for filename, body in root_files.items():
+            (env_dir / filename).write_text("ENC[AES256_GCM,...]")
+            all_contents[filename] = body
+
+    if customer_jira_files:
+        (env_dir / "customer_jira").mkdir(exist_ok=True)
+        for (account_id, customer_id), body in customer_jira_files.items():
+            account_dir = env_dir / "customer_jira" / account_id
+            account_dir.mkdir(exist_ok=True)
+            cred_file = account_dir / f"{customer_id}.enc.env"
+            cred_file.write_text("ENC[AES256_GCM,...]")
+            all_contents[cred_file.name] = body  # Note: collision possible if customer_id repeats
+
+    if customer_files:
+        (env_dir / "customer").mkdir(exist_ok=True)
+        for customer_id, body in customer_files.items():
+            cred_file = env_dir / "customer" / f"{customer_id}.enc.env"
+            cred_file.write_text("ENC[AES256_GCM,...]")
+            all_contents[cred_file.name] = body
+
+    service = SopsCredentialService(env_dir=env_dir, age_key_path=tmp_path / "age.key")
+
+    # Map decryption by full path (so per-(account,customer) and per-customer collisions are
+    # disambiguated by directory):
+    path_to_body: dict[Path, str] = {}
+    if root_files:
+        for filename, body in root_files.items():
+            path_to_body[env_dir / filename] = body
+    if customer_jira_files:
+        for (account_id, customer_id), body in customer_jira_files.items():
+            path_to_body[env_dir / "customer_jira" / account_id / f"{customer_id}.enc.env"] = body
+    if customer_files:
+        for customer_id, body in customer_files.items():
+            path_to_body[env_dir / "customer" / f"{customer_id}.enc.env"] = body
+
+    async def fake_decrypt(path: Path) -> str:
+        return path_to_body[path]
+
+    service._decrypt_file = fake_decrypt  # type: ignore[method-assign]
+    return service
+
+
+class TestSopsCredentialServiceScopes:
+    """Per-system scope routing per FR-25 (b) + FR-19/77 + architect lock 2026-06-21."""
+
+    def test_per_account_per_customer_exact_lookup(self, tmp_path):
+        # customer JIRA per FR-25 (b): account_id 'y.vasilyev' owns credential for MMK.
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_jira_files={("y.vasilyev", "MMK"): ITR_ENV},
+        )
+        cred = asyncio.run(service.get_credential("y.vasilyev", "issue_tracker", customer_id="MMK"))
+        assert cred.api_token == SECRET
+        # account_id is the authoritative pm_id per FR-25 (b) — overrides any
+        # PM_ID set inside the credential file:
+        assert cred.pm_id == "y.vasilyev"
+
+    def test_per_account_unknown_account_raises_e001(self, tmp_path):
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_jira_files={("y.vasilyev", "MMK"): ITR_ENV},
+        )
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(
+                service.get_credential("unknown.pm", "issue_tracker", customer_id="MMK")
+            )
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_per_account_missing_customer_id_raises_e005(self, tmp_path):
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_jira_files={("y.vasilyev", "MMK"): ITR_ENV},
+        )
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(service.get_credential("y.vasilyev", "issue_tracker"))
+        assert exc.value.code_id == "CRD-E005"
+
+    def test_per_customer_lookup_pm_id_ignored(self, tmp_path):
+        # Google Drive per FR-19/77: per-customer credential, pm_id ignored in Ph-1/Ph-2.
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_files={"MMK": CUSTOMER_ENV},
+        )
+        cred = asyncio.run(service.get_credential("any-pm", "customer", customer_id="MMK"))
+        assert cred.api_token == SECRET
+
+    def test_per_customer_missing_customer_id_raises_e005(self, tmp_path):
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_files={"MMK": CUSTOMER_ENV},
+        )
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(service.get_credential("ops-team", "customer"))
+        assert exc.value.code_id == "CRD-E005"
+
+    def test_per_customer_unknown_customer_raises_e001(self, tmp_path):
+        service = patched_service_with_subtrees(
+            tmp_path,
+            customer_files={"MMK": CUSTOMER_ENV},
+        )
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(service.get_credential("ops-team", "customer", customer_id="VZW"))
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_no_credential_messenger_raises_e001(self, tmp_path):
+        # corp messenger gateway has no HILDA-side credential per architect lock 2026-06-21.
+        service = patched_service_with_subtrees(tmp_path)
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(service.get_credential("ops-team", "messenger"))
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_build_cache_scans_subtrees(self, tmp_path):
+        # Single load() decrypts and caches all 3 scopes simultaneously.
+        service = patched_service_with_subtrees(
+            tmp_path,
+            root_files={"email.enc.env": EMAIL_ENV},
+            customer_jira_files={
+                ("y.vasilyev", "MMK"): ITR_ENV,
+                ("y.vasilyev", "VZW"): ITR_ENV,
+                ("ops.member", "TMO"): ITR_ENV,
+            },
+            customer_files={"MMK": CUSTOMER_ENV, "VZW": CUSTOMER_ENV},
+        )
+        count = asyncio.run(service.load())
+        # 1 email + 3 customer_jira + 2 customer = 6 entries
+        assert count == 6
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +444,7 @@ class TestRegistrations:
             ("CRD-E002", False),
             ("CRD-E003", False),
             ("CRD-E004", False),
+            ("CRD-E005", False),
             ("CRD-W001", True),
             ("CRD-W002", True),
         ]:
@@ -375,21 +528,23 @@ class TestCli:
         assert code == 0
 
     def test_validate_ok_and_qc_record_passes_template(self, tmp_path, capsys, monkeypatch):
+        # SHARED scope path (EMAIL); ISSUE_TRACKER is per-(account, customer) since
+        # FR-25 (b) cascade lock 2026-06-19 — covered in test_validate_per_account_ok.
         from core.src.credential_service import credential_service_cli as cli
 
         env_dir = tmp_path / "credentials"
         env_dir.mkdir()
-        (env_dir / "issue_tracker.enc.env").write_text("ENC[...]")
+        (env_dir / "email.enc.env").write_text("ENC[...]")
 
         async def fake_decrypt(self, path: Path) -> str:
-            return ITR_ENV
+            return EMAIL_ENV
 
         monkeypatch.setattr(SopsCredentialService, "_decrypt_file", fake_decrypt)
-        code = asyncio.run(cli._cmd_validate("run-test", "issue_tracker", env_dir, tmp_path / "age.key"))
+        code = asyncio.run(cli._cmd_validate("run-test", "email", env_dir, tmp_path / "age.key"))
         out = capsys.readouterr().out
         assert "QC|CRD|run-test" in out
         assert "present=true" in out.lower()
-        assert "auth_type=api_token" in out
+        assert "auth_type=basic" in out
         assert "result=OK" in out
         assert SECRET not in out
         assert code == 0
@@ -397,6 +552,65 @@ class TestCli:
         line = next(l for l in out.splitlines() if l.startswith("QC|CRD"))
         record = ReportRecord.from_line(line)
         assert CREDENTIAL_COMPLETENESS.validate_record(record) == []
+
+    def test_validate_per_account_ok(self, tmp_path, capsys, monkeypatch):
+        # PER_ACCOUNT_PER_CUSTOMER scope (customer JIRA per FR-25 (b)):
+        # requires --account-id + --customer-id; resolves to
+        # env_dir/customer_jira/<account_id>/<customer_id>.enc.env
+        from core.src.credential_service import credential_service_cli as cli
+
+        env_dir = tmp_path / "credentials"
+        account_dir = env_dir / "customer_jira" / "y.vasilyev"
+        account_dir.mkdir(parents=True)
+        (account_dir / "MMK.enc.env").write_text("ENC[...]")
+
+        async def fake_decrypt(self, path: Path) -> str:
+            return ITR_ENV
+
+        monkeypatch.setattr(SopsCredentialService, "_decrypt_file", fake_decrypt)
+        code = asyncio.run(
+            cli._cmd_validate(
+                "run-test",
+                "issue_tracker",
+                env_dir,
+                tmp_path / "age.key",
+                account_id="y.vasilyev",
+                customer_id="MMK",
+            )
+        )
+        out = capsys.readouterr().out
+        assert "QC|CRD|run-test" in out
+        assert "present=true" in out.lower()
+        assert "scope=per_account_per_customer" in out
+        assert "result=OK" in out
+        assert SECRET not in out
+        assert code == 0
+
+    def test_validate_per_account_missing_args_fails(self, tmp_path, capsys):
+        # No --account-id / --customer-id -> resolution returns None/FAIL,
+        # no decrypt attempt, QC record marks present=false / result=FAIL.
+        from core.src.credential_service import credential_service_cli as cli
+
+        env_dir = tmp_path / "credentials"
+        env_dir.mkdir()
+        code = asyncio.run(cli._cmd_validate("run-test", "issue_tracker", env_dir, tmp_path / "age.key"))
+        out = capsys.readouterr().out
+        assert "present=false" in out.lower()
+        assert "result=FAIL" in out
+        assert code == 1
+
+    def test_validate_no_credential_messenger_ok_when_empty(self, tmp_path, capsys):
+        # NO_CREDENTIAL scope (messenger): validation succeeds iff no
+        # credential file exists for this system per architect lock 2026-06-21.
+        from core.src.credential_service import credential_service_cli as cli
+
+        env_dir = tmp_path / "credentials"
+        env_dir.mkdir()
+        code = asyncio.run(cli._cmd_validate("run-test", "messenger", env_dir, tmp_path / "age.key"))
+        out = capsys.readouterr().out
+        assert "scope=no_credential" in out
+        assert "result=OK" in out
+        assert code == 0
 
     def test_validate_missing_file_fails_without_free_text(self, tmp_path, capsys):
         from core.src.credential_service import credential_service_cli as cli

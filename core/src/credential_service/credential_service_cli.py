@@ -15,7 +15,12 @@ from pathlib import Path
 from core.src.diagnostics import ReportRecord, ReportType, ReportWriter
 from core.src.diagnostics.error_codes import PipelineError
 from core.src.credential_service.mock_service import MockCredentialService
-from core.src.credential_service.protocol import SystemType
+from core.src.credential_service.protocol import (
+    SYSTEM_CRED_SCOPE,
+    SYSTEM_SUBTREE,
+    CredentialScope,
+    SystemType,
+)
 from core.src.credential_service.service import (
     OPS_TEAM_PM_ID,
     SopsCredentialService,
@@ -101,8 +106,55 @@ async def _cmd_mock(run_id: str) -> int:
     return 0 if lookups_ok == len(SystemType) else 1
 
 
-async def _cmd_validate(run_id: str, system_arg: str, env_dir: Path, age_key: Path) -> int:
-    """Structural completeness check for one system's credential. Value never printed."""
+def _resolve_validate_path(
+    system: SystemType,
+    env_dir: Path,
+    account_id: str | None,
+    customer_id: str | None,
+) -> Path | None:
+    """Resolve the credential file path for the given system + scope.
+
+    Returns None for NO_CREDENTIAL scope (validation is a no-op there).
+    Raises ValueError when required scope args are missing.
+    """
+    scope = SYSTEM_CRED_SCOPE.get(system, CredentialScope.SHARED)
+    if scope == CredentialScope.NO_CREDENTIAL:
+        return None
+    if scope == CredentialScope.SHARED:
+        return env_dir / f"{system.value}.enc.env"
+    subtree = SYSTEM_SUBTREE.get(system)
+    if subtree is None:
+        return None
+    if scope == CredentialScope.PER_CUSTOMER:
+        if customer_id is None:
+            raise ValueError("--customer-id required for per-customer system")
+        return env_dir / subtree / f"{customer_id}.enc.env"
+    if scope == CredentialScope.PER_ACCOUNT_PER_CUSTOMER:
+        if account_id is None or customer_id is None:
+            raise ValueError(
+                "--account-id and --customer-id required for per-(account,customer) system"
+            )
+        return env_dir / subtree / account_id / f"{customer_id}.enc.env"
+    return None
+
+
+async def _cmd_validate(
+    run_id: str,
+    system_arg: str,
+    env_dir: Path,
+    age_key: Path,
+    account_id: str | None = None,
+    customer_id: str | None = None,
+) -> int:
+    """Structural completeness check for one system's credential. Value never printed.
+
+    Scope-aware per FR-25 (b) + FR-19/77 + arch lock 2026-06-21:
+    - SHARED: resolves env_dir/<system>.enc.env
+    - PER_CUSTOMER: requires --customer-id; resolves env_dir/<subtree>/<customer_id>.enc.env
+    - PER_ACCOUNT_PER_CUSTOMER: requires --account-id + --customer-id;
+      resolves env_dir/<subtree>/<account_id>/<customer_id>.enc.env
+    - NO_CREDENTIAL: validates that NO file exists (presence is a config error)
+    """
     writer = ReportWriter("CRD", run_id)
     try:
         system = SystemType(system_arg)
@@ -110,24 +162,41 @@ async def _cmd_validate(run_id: str, system_arg: str, env_dir: Path, age_key: Pa
         raise PipelineError("CRD-E003", context={"system": system_arg})
 
     service = SopsCredentialService(env_dir=env_dir, age_key_path=age_key)
-    path = env_dir / f"{system.value}.enc.env"
+    scope = SYSTEM_CRED_SCOPE.get(system, CredentialScope.SHARED)
 
     present = False
     auth_type = "none"
     consistent = False
     result = "FAIL"
 
-    if path.exists():
+    if scope == CredentialScope.NO_CREDENTIAL:
+        # NO_CREDENTIAL: validation succeeds iff no credential file exists for this system.
+        # Any file present is a config error (would violate FR-25 (a) pattern (d)).
+        subtree = SYSTEM_SUBTREE.get(system)
+        present_files = []
+        if subtree is not None:
+            subtree_root = env_dir / subtree
+            if subtree_root.exists():
+                present_files = list(subtree_root.rglob("*.enc.env"))
+        result = "OK" if not present_files else "FAIL"
+    else:
         try:
-            plaintext = await service._decrypt_file(path)
-            credential = _build_credential(system, _parse_env_lines(plaintext), path.name)
-            if credential is not None:
-                present = True
-                auth_type = credential.auth_type
-                consistent = credential.value_carriers_consistent()
-                result = "OK" if consistent else "WARN"
-        except PipelineError:
+            path = _resolve_validate_path(system, env_dir, account_id, customer_id)
+        except ValueError:
             result = "FAIL"
+            path = None
+
+        if path is not None and path.exists():
+            try:
+                plaintext = await service._decrypt_file(path)
+                credential = _build_credential(system, _parse_env_lines(plaintext), path.name)
+                if credential is not None:
+                    present = True
+                    auth_type = credential.auth_type
+                    consistent = credential.value_carriers_consistent()
+                    result = "OK" if consistent else "WARN"
+            except PipelineError:
+                result = "FAIL"
 
     writer.emit(
         ReportRecord(
@@ -137,6 +206,7 @@ async def _cmd_validate(run_id: str, system_arg: str, env_dir: Path, age_key: Pa
             _now(),
             {
                 "system": system.value,
+                "scope": scope.value,
                 "present": present,
                 "auth_type": auth_type,
                 "value_carriers_consistent": consistent,
@@ -156,6 +226,14 @@ def main() -> None:
     parser.add_argument("--mock", action="store_true", help="MockCredentialService round-trip for every SystemType")
     parser.add_argument("--validate", action="store_true", help="Structural completeness QC for one system")
     parser.add_argument("--system", default=None, help="SystemType value for --validate")
+    parser.add_argument(
+        "--account-id", default=None,
+        help="Account id for per-(account,customer) systems (e.g. customer JIRA); required when --system is per-(account,customer) scope"
+    )
+    parser.add_argument(
+        "--customer-id", default=None,
+        help="Customer id for per-customer systems (e.g. customer Google Drive); required when --system is per-customer or per-(account,customer) scope"
+    )
     parser.add_argument("--env-dir", default="/etc/hilda/credentials", help="Directory of .enc.env files")
     parser.add_argument("--age-key", default="/etc/hilda/age.key", help="Path to age private key")
     parser.add_argument("--run-id", default=None, help="Stable run identifier (default: auto)")
@@ -172,7 +250,16 @@ def main() -> None:
     elif args.validate:
         if not args.system:
             parser.error("--validate requires --system <type>")
-        code = asyncio.run(_cmd_validate(run_id, args.system, env_dir, age_key))
+        code = asyncio.run(
+            _cmd_validate(
+                run_id,
+                args.system,
+                env_dir,
+                age_key,
+                account_id=args.account_id,
+                customer_id=args.customer_id,
+            )
+        )
     else:
         parser.print_help()
         code = 1

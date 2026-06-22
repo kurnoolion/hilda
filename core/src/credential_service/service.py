@@ -8,15 +8,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from core.src.diagnostics.error_codes import PipelineError, format_code
 from core.src.credential_service.protocol import (
+    SYSTEM_CRED_SCOPE,
     SYSTEM_ENV_PREFIX,
+    SYSTEM_SUBTREE,
     AuthType,
     Credential,
+    CredentialScope,
     SystemType,
 )
 
@@ -139,7 +143,10 @@ class SopsCredentialService:
     ) -> None:
         self._env_dir = env_dir
         self._age_key_path = age_key_path
-        self._cache: dict[tuple[str, str], Credential] = {}
+        # 3-tuple cache key: (pm_id, system_type, customer_id). customer_id is None
+        # for SHARED scope (single shared credential); populated for PER_CUSTOMER and
+        # PER_ACCOUNT_PER_CUSTOMER scopes. Extended 2026-06-21 per FR-25 (b) cascade.
+        self._cache: dict[tuple[str, str, str | None], Credential] = {}
         self._loaded = False
         self._lock = asyncio.Lock()
 
@@ -171,16 +178,70 @@ class SopsCredentialService:
             )
         return stdout.decode()
 
-    async def _build_cache(self) -> dict[tuple[str, str], Credential]:
-        cache: dict[tuple[str, str], Credential] = {}
+    async def _build_cache(self) -> dict[tuple[str, str, str | None], Credential]:
+        """Scope-aware scan of env_dir per SYSTEM_CRED_SCOPE.
+
+        SHARED: env_dir/<system>.enc.env -> key (pm_id, system, None)
+        PER_CUSTOMER: env_dir/<subtree>/<customer_id>.enc.env
+                      -> key (pm_id, system, customer_id)
+        PER_ACCOUNT_PER_CUSTOMER: env_dir/<subtree>/<account_id>/<customer_id>.enc.env
+                                  -> key (account_id, system, customer_id)
+                                  (account_id overrides the file's PM_ID per FR-25 (b)
+                                  carrier governance — account_id is the lookup key,
+                                  PM_ID inside the file is informational only)
+        NO_CREDENTIAL: skipped (lookups raise CRD-E001 by design)
+        """
+        cache: dict[tuple[str, str, str | None], Credential] = {}
         for system in SystemType:
-            path = self._env_dir / f"{system.value}.enc.env"
-            if not path.exists():
+            scope = SYSTEM_CRED_SCOPE.get(system, CredentialScope.SHARED)
+            if scope == CredentialScope.NO_CREDENTIAL:
                 continue
-            plaintext = await self._decrypt_file(path)
-            credential = _build_credential(system, _parse_env_lines(plaintext), path.name)
-            if credential is not None:
-                cache[(credential.pm_id, system.value)] = credential
+            if scope == CredentialScope.SHARED:
+                path = self._env_dir / f"{system.value}.enc.env"
+                if not path.exists():
+                    continue
+                plaintext = await self._decrypt_file(path)
+                credential = _build_credential(
+                    system, _parse_env_lines(plaintext), path.name
+                )
+                if credential is not None:
+                    cache[(credential.pm_id, system.value, None)] = credential
+                continue
+            # PER_CUSTOMER or PER_ACCOUNT_PER_CUSTOMER scope:
+            subtree_name = SYSTEM_SUBTREE.get(system)
+            if subtree_name is None:
+                continue
+            subtree_root = self._env_dir / subtree_name
+            if not subtree_root.exists():
+                continue
+            if scope == CredentialScope.PER_CUSTOMER:
+                for cred_file in sorted(subtree_root.glob("*.enc.env")):
+                    # Strip ".enc.env" (Path.stem only strips one extension; we have two):
+                    customer_id = cred_file.name.removesuffix(".enc.env")
+                    plaintext = await self._decrypt_file(cred_file)
+                    credential = _build_credential(
+                        system, _parse_env_lines(plaintext), cred_file.name
+                    )
+                    if credential is not None:
+                        cache[(credential.pm_id, system.value, customer_id)] = credential
+                continue
+            if scope == CredentialScope.PER_ACCOUNT_PER_CUSTOMER:
+                for account_dir in sorted(subtree_root.iterdir()):
+                    if not account_dir.is_dir():
+                        continue
+                    account_id = account_dir.name
+                    for cred_file in sorted(account_dir.glob("*.enc.env")):
+                        customer_id = cred_file.name.removesuffix(".enc.env")
+                        plaintext = await self._decrypt_file(cred_file)
+                        credential = _build_credential(
+                            system, _parse_env_lines(plaintext), cred_file.name
+                        )
+                        if credential is None:
+                            continue
+                        # account_id is the authoritative pm_id per FR-25 (b);
+                        # override any PM_ID set inside the credential file.
+                        credential = replace(credential, pm_id=account_id)
+                        cache[(account_id, system.value, customer_id)] = credential
         return cache
 
     async def load(self) -> int:
@@ -213,11 +274,20 @@ class SopsCredentialService:
         system_type: str,
         customer_id: str | None = None,
     ) -> Credential:
-        # Signature extended 2026-06-21 per FR-25 (b) cascade lock 2026-06-19
-        # (per-(account, customer) customer JIRA) + FR-19/77 (per-customer Google Drive).
-        # NOTE: per-(account, customer) + per-customer routing logic is a development-phase task —
-        # current implementation is shared-credential fallback only. See MODULE.md File layout
-        # for the target resolution semantics; CRD-E005 (customer_id required) check pending.
+        """Resolve a credential per SYSTEM_CRED_SCOPE.
+
+        NO_CREDENTIAL (MESSENGER + ISSUE_TRACKER for corp PLM intent): raises CRD-E001
+            immediately. Callers must use IP-allowlist + identity-assertion pattern
+            per FR-25 (a) + FR-51 pattern (d) instead.
+        PER_ACCOUNT_PER_CUSTOMER (customer JIRA): exact lookup (pm_id=account_id,
+            system, customer_id). Requires customer_id; raises CRD-E005 if None.
+        PER_CUSTOMER (Google Drive): lookup by (system, customer_id) ignoring pm_id
+            (Ph-1/Ph-2 shared ops-team pattern). Requires customer_id; raises CRD-E005
+            if None.
+        SHARED (email, sharepoint, llm_*): exact lookup (pm_id, system, None), then
+            fallback to any cached entry for that system with customer_id=None
+            (CRD-W001, expected in Ph-1/Ph-2 per [D-019] impl note 2026-05-24).
+        """
         try:
             system = SystemType(system_type)
         except ValueError:
@@ -226,24 +296,75 @@ class SopsCredentialService:
         if not self._loaded:
             await self.load()
 
-        exact = self._cache.get((pm_id, system.value))
+        scope = SYSTEM_CRED_SCOPE.get(system, CredentialScope.SHARED)
+
+        if scope == CredentialScope.NO_CREDENTIAL:
+            # By design — corp PLM gateway / corp messenger gateway have no HILDA
+            # credential. Caller is using the wrong pattern; surface CRD-E001 with
+            # a hint that no credential exists for this system in Ph-1/Ph-2.
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id": pm_id,
+                    "system": system.value,
+                    "customer_id": customer_id or "",
+                },
+            )
+
+        if scope == CredentialScope.PER_ACCOUNT_PER_CUSTOMER:
+            if customer_id is None:
+                raise PipelineError(
+                    "CRD-E005", context={"system": system.value}
+                )
+            credential = self._cache.get((pm_id, system.value, customer_id))
+            if credential is not None:
+                return credential
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id": pm_id,
+                    "system": system.value,
+                    "customer_id": customer_id,
+                },
+            )
+
+        if scope == CredentialScope.PER_CUSTOMER:
+            if customer_id is None:
+                raise PipelineError(
+                    "CRD-E005", context={"system": system.value}
+                )
+            # pm_id is ignored in Ph-1/Ph-2 for per-customer scope — match on
+            # (system, customer_id) and return the single cached credential.
+            for (cached_pm_id, cached_system, cached_customer_id), credential in self._cache.items():
+                if cached_system == system.value and cached_customer_id == customer_id:
+                    if pm_id != cached_pm_id:
+                        logger.debug(format_code("CRD-W001", pm_id=pm_id))
+                    return credential
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id": pm_id,
+                    "system": system.value,
+                    "customer_id": customer_id,
+                },
+            )
+
+        # SHARED scope: exact lookup with customer_id=None, then ops-team fallback.
+        exact = self._cache.get((pm_id, system.value, None))
         if exact is not None:
             return exact
-
-        # Ph-1/Ph-2 fallback: shared ops-team credential regardless of pm_id.
-        # TODO(dev-phase): branch on system to route customer_jira -> (pm_id, system, customer_id),
-        #                  customer -> (None, system, customer_id), others -> shared-fallback.
-        for (cached_pm_id, cached_system), credential in self._cache.items():
-            if cached_system == system.value:
+        for (cached_pm_id, cached_system, cached_customer_id), credential in self._cache.items():
+            if cached_system == system.value and cached_customer_id is None:
                 if pm_id != cached_pm_id:
-                    logger.debug(
-                        format_code("CRD-W001", pm_id=pm_id)
-                    )
+                    logger.debug(format_code("CRD-W001", pm_id=pm_id))
                 return credential
-
         raise PipelineError(
             "CRD-E001",
-            context={"pm_id": pm_id, "system": system.value, "customer_id": customer_id or ""},
+            context={
+                "pm_id": pm_id,
+                "system": system.value,
+                "customer_id": customer_id or "",
+            },
         )
 
     def install_sighup_handler(self) -> bool:
