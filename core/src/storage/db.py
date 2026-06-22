@@ -91,6 +91,7 @@ class DocumentItemAssociationTable(Base):
         Index("ix_assoc_item", "delivery_item_id"),
         Index("ix_assoc_milestone", "milestone_id"),
         Index("ix_assoc_path_type", "nsd_path_type"),  # STR-W007 stale-staged queries
+        Index("ix_assoc_owner_corp_id", "owner_corp_id"),  # FR-79 PLM fan-out grouping per FR-5 + [D-035]
     )
 
     file_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -98,7 +99,12 @@ class DocumentItemAssociationTable(Base):
     milestone_id: Mapped[str] = mapped_column(String(64))
     local_nsd_path: Mapped[str] = mapped_column(String(1024))
     nsd_path_type: Mapped[str] = mapped_column(String(32))
-    owner_email: Mapped[str] = mapped_column(String(256))
+    # 4-field owner identity per FR-88 + [D-080] + [D-086] (cascade 2026-06-21);
+    # owner_corp_id is PLM grouping key per FR-5 + [D-035]:
+    owner_corp_id: Mapped[str] = mapped_column(String(128))
+    owner_corp_usa_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    owner_corp_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    owner_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     plm_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     plm_attachment_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     upload_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

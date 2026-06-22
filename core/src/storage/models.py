@@ -134,6 +134,12 @@ class DocumentItemAssociation(BaseModel):
     The same file may occupy 2+ NSD paths simultaneously — one physical copy per
     associated item per [D-055] (symlink alternative rejected: SMB symlink semantics
     are inconsistent across kernels and TPMs expect real files per item folder).
+
+    4-field owner identity per FR-88 + [D-080] + [D-086] (cascade applied 2026-06-21):
+    `owner_corp_id` is the PLM grouping key per FR-5 + FR-8 step 2 + [D-035] — load-bearing
+    for FR-79 fan-out case (a)/(b) discrimination. Email fields are denormalized for fast
+    outreach query (FR-9 preference rule: owner_corp_usa_email preferred per [D-080],
+    owner_corp_email fallback).
     """
 
     file_hash: str                          # PK part 1 — FK → DocumentIndexRow
@@ -141,9 +147,13 @@ class DocumentItemAssociation(BaseModel):
     milestone_id: str                       # denormalized; FR-79 same-milestone invariant
     local_nsd_path: str                     # UNC path of THIS ITEM's copy (any of the 4 FR-86 types)
     nsd_path_type: NSDPathType              # indexed state tracker per FR-86
-    owner_email: str                        # denormalized for PLM fan-out grouping
-    plm_id: str | None = None               # PLM issue for (owner × milestone) per FR-26
-    plm_attachment_id: str | None = None    # per FR-79 fan-out; shared across same (owner, plm) rows
+    # 4-field owner identity per FR-88 + [D-080] + [D-086] (denormalized from DeliveryItemBase):
+    owner_corp_id: str                      # PLM grouping key per FR-5 + [D-035]; engineer-stable; load-bearing for FR-79 fan-out
+    owner_corp_usa_email: str | None = None # preferred outreach recipient per [D-080]
+    owner_corp_email: str | None = None     # fallback outreach recipient
+    owner_name: str | None = None           # display name
+    plm_id: str | None = None               # PLM issue for (device, milestone, owner_corp_id) tuple per FR-26 + FR-5
+    plm_attachment_id: str | None = None    # per FR-79 fan-out; shared across same (owner_corp_id, plm_id) rows
     upload_timestamp: datetime | None = None
     associated_at: datetime
     associated_by: str = "auto"             # "auto" (FR-52 pipeline) or "<pm_id>" (TPM / FR-83)
@@ -151,9 +161,14 @@ class DocumentItemAssociation(BaseModel):
 
 class PLMFanOutTarget(BaseModel):
     """One PLM upload target for a file_hash per FR-79 revised — one per DISTINCT
-    (owner_email, plm_id) pair across the file's associations."""
+    (owner_corp_id, plm_id) pair across the file's associations.
+    Grouping key changed 2026-06-21 from owner_email to owner_corp_id per FR-5 + [D-035]
+    architect lock (PLM issue is one per (device, milestone, owner_corp_id) tuple)."""
 
-    owner_email: str
+    owner_corp_id: str                      # PLM grouping key per FR-5 + [D-035]
+    owner_corp_usa_email: str | None = None # informational (issue_tracker may surface in PLM body)
+    owner_corp_email: str | None = None     # informational
+    owner_name: str | None = None           # informational display name
     plm_id: str | None                      # None → owner has no PLM issue yet (STR-W006)
     item_count: int                         # items sharing this pair — case (a) vs (b) diagnostic
 

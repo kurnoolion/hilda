@@ -121,7 +121,7 @@ async def _run_mock_cycle(writer: ReportWriter) -> int:
     await step(add_document_item_association(DocumentItemAssociation(
         file_hash="a" * 64, delivery_item_id="item-1", milestone_id="ms-1",
         local_nsd_path=path.to_relative(), nsd_path_type=NSDPathType.CLASSIFIED,
-        owner_email="owner@corp", plm_id="PLM-1", associated_at=now,
+        owner_corp_id="y.vasilyev", owner_corp_usa_email="owner@corp", plm_id="PLM-1", associated_at=now,
     )))
     targets = await step(fan_out_plm_associations("a" * 64))
     assert len(targets) == 1 and targets[0].item_count == 1

@@ -951,7 +951,7 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - `list_documents_for_milestone(milestone_id, doc_type=None, is_final_only=False) -> list` — function — pub (via `__all__`) — milestone doc enumeration.
 - `list_revisions(milestone_id, doc_id_slug) -> list` — function — pub (via `__all__`) — resolved revision family (NULL-slug excluded).
 - `make_download_token(file_hash, delivery_item_id, ttl_seconds=300) -> str` — function — pub (via `__all__`) — FR-61 short-lived HMAC token (never persisted).
-- `reassign_document_to_workitem(file_hash, source, target, pm_id, *, target_tg_name, target_owner_email, target_plm_id=None) -> None` — function — pub (via `__all__`) — FR-83 transactional reassign (caller-resolved target attrs).
+- `reassign_document_to_workitem(file_hash, source, target, pm_id, *, target_tg_name, target_owner_corp_id, target_owner_corp_usa_email=None, target_owner_corp_email=None, target_owner_name=None, target_plm_id=None) -> None` — function — pub (via `__all__`) — FR-83 transactional reassign (caller-resolved target attrs; 4-field owner per FR-88 cascade 2026-06-21).
 - `resolve_download_token(token) -> tuple[str, str, NSDPath]` — function — pub (via `__all__`) — verify token; STR-E007 on invalid/expired.
 - `set_is_final(file_hash, is_final) -> None` — function — pub (via `__all__`) — FR-66; auto-clears sibling revisions.
 - `tpm_resolve_doc_type(file_hash, delivery_item_id, new_doc_type, *, doc_id_slug=None, rev_number=None, pm_id) -> None` — function — pub (via `__all__`) — FR-87 step B thin primitive; moves staged_not_classification → classified | staged_not_revision; STR-E009/E010/W008.

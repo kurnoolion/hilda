@@ -87,7 +87,10 @@ def _assoc_to_model(row: DocumentItemAssociationTable) -> DocumentItemAssociatio
         milestone_id=row.milestone_id,
         local_nsd_path=row.local_nsd_path,
         nsd_path_type=NSDPathType(row.nsd_path_type),
-        owner_email=row.owner_email,
+        owner_corp_id=row.owner_corp_id,
+        owner_corp_usa_email=row.owner_corp_usa_email,
+        owner_corp_email=row.owner_corp_email,
+        owner_name=row.owner_name,
         plm_id=row.plm_id,
         plm_attachment_id=row.plm_attachment_id,
         upload_timestamp=row.upload_timestamp,
@@ -278,7 +281,10 @@ async def add_document_item_association(assoc: DocumentItemAssociation) -> None:
                 milestone_id=assoc.milestone_id,
                 local_nsd_path=assoc.local_nsd_path,
                 nsd_path_type=assoc.nsd_path_type.value,
-                owner_email=assoc.owner_email,
+                owner_corp_id=assoc.owner_corp_id,
+                owner_corp_usa_email=assoc.owner_corp_usa_email,
+                owner_corp_email=assoc.owner_corp_email,
+                owner_name=assoc.owner_name,
                 plm_id=assoc.plm_id,
                 plm_attachment_id=assoc.plm_attachment_id,
                 upload_timestamp=assoc.upload_timestamp,
@@ -337,16 +343,28 @@ async def list_associations_for_item(delivery_item_id: str) -> list[DocumentItem
 
 
 async def fan_out_plm_associations(file_hash: str) -> list[PLMFanOutTarget]:
-    """DISTINCT (owner_email, plm_id) pairs across the file's associations — one PLM
-    upload per pair per FR-79. plm_id=None targets are included (STR-W006 signal)."""
+    """DISTINCT (owner_corp_id, plm_id) pairs across the file's associations — one PLM
+    upload per pair per FR-79. plm_id=None targets are included (STR-W006 signal).
+    Grouping key changed 2026-06-21 from owner_email to owner_corp_id per FR-5 +
+    [D-035] (PLM-issue-per-(device, milestone, owner_corp_id) tuple architect lock)."""
     assocs = await list_associations_for_file(file_hash)
-    grouped: dict[tuple[str, str | None], int] = {}
+    # Group by (owner_corp_id, plm_id); preserve representative email/name fields
+    # from the first-seen association in each group for informational pass-through.
+    grouped: dict[tuple[str, str | None], dict] = {}
     for assoc in assocs:
-        key = (assoc.owner_email, assoc.plm_id)
-        grouped[key] = grouped.get(key, 0) + 1
+        key = (assoc.owner_corp_id, assoc.plm_id)
+        entry = grouped.setdefault(key, {
+            "owner_corp_id": assoc.owner_corp_id,
+            "owner_corp_usa_email": assoc.owner_corp_usa_email,
+            "owner_corp_email": assoc.owner_corp_email,
+            "owner_name": assoc.owner_name,
+            "plm_id": assoc.plm_id,
+            "item_count": 0,
+        })
+        entry["item_count"] += 1
     return [
-        PLMFanOutTarget(owner_email=owner, plm_id=plm, item_count=count)
-        for (owner, plm), count in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1] or ""))
+        PLMFanOutTarget(**entry)
+        for (_corp_id, _plm), entry in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1] or ""))
     ]
 
 
@@ -354,7 +372,9 @@ async def update_association_plm_attachment(
     file_hash: str, delivery_item_id: str, plm_attachment_id: str, upload_timestamp: datetime
 ) -> None:
     """Replicates the upload result across all rows sharing the target row's
-    (owner_email, plm_id) within the milestone (FR-79 case (a)) in one transaction."""
+    (owner_corp_id, plm_id) within the milestone (FR-79 case (a)) in one transaction.
+    Grouping key changed 2026-06-21 from owner_email to owner_corp_id per FR-5 +
+    [D-035] architect lock."""
     async with _session() as session:
         target = await session.get(DocumentItemAssociationTable, (file_hash, delivery_item_id))
         if target is None:
@@ -367,7 +387,7 @@ async def update_association_plm_attachment(
             .where(
                 DocumentItemAssociationTable.file_hash == file_hash,
                 DocumentItemAssociationTable.milestone_id == target.milestone_id,
-                DocumentItemAssociationTable.owner_email == target.owner_email,
+                DocumentItemAssociationTable.owner_corp_id == target.owner_corp_id,
                 DocumentItemAssociationTable.plm_id == target.plm_id,
             )
             .values(plm_attachment_id=plm_attachment_id, upload_timestamp=upload_timestamp)
@@ -377,17 +397,24 @@ async def update_association_plm_attachment(
 
 async def reassign_document_to_workitem(
     file_hash: str, source_delivery_item_id: str, target_delivery_item_id: str, pm_id: str,
-    *, target_tg_name: str | None, target_owner_email: str, target_plm_id: str | None = None,
+    *, target_tg_name: str | None,
+    target_owner_corp_id: str,
+    target_owner_corp_usa_email: str | None = None,
+    target_owner_corp_email: str | None = None,
+    target_owner_name: str | None = None,
+    target_plm_id: str | None = None,
 ) -> None:
     """FR-83 TPM-manual reassignment. Adds the target association (classified path for
     the target item), moves the NSD file, removes the source association, updates
     routing_resolution + inferred_tg_name, and writes the audit row — transactionally
     at the index layer; the NSD move is write-before-delete to avoid data loss.
 
-    Target-item attributes (tg_name / owner_email / plm_id) are explicit parameters —
-    the CALLER resolves them from SharePoint before invoking (architect decision
-    2026-06-11: storage holds no DeliveryItem mirror; entity resolution belongs to
-    workflow_engine task bodies via sharepoint_integration)."""
+    Target-item attributes (tg_name / 4-field owner identity / plm_id) are explicit
+    parameters — the CALLER resolves them from SharePoint before invoking (architect
+    decision 2026-06-11: storage holds no DeliveryItem mirror; entity resolution
+    belongs to workflow_engine task bodies via sharepoint_integration).
+    Owner identity is 4-field per FR-88 cascade 2026-06-21; target_owner_corp_id
+    is required (PLM grouping key per FR-5 + [D-035])."""
     from core.src.storage import audit_ops  # local import — avoids cycle at module load
 
     async with _session() as session:
@@ -412,20 +439,20 @@ async def reassign_document_to_workitem(
                 "STR-E004",
                 context={"path": source_unc, "reason": "source association path not in internal tree"},
             )
-        carrier_slug, device_slug, milestone_slug = src_segments[1], src_segments[2], src_segments[3]
+        customer_id, device_id, milestone_name = src_segments[1], src_segments[2], src_segments[3]
 
         # Target NSD path: classified path for the target item using the doc's identity.
         # When doc_id_slug/rev are unresolved (staged/unrouted source), the file lands on
         # the target's staged_classification path pending FR-87 resolution.
         if doc is not None and doc.doc_id_slug is not None and doc.rev_number is not None:
             target_path = NSDPath.internal_classified(
-                carrier_slug, device_slug, milestone_slug, target_tg_name or "_unknown_tg",
+                customer_id, device_id, milestone_name, target_tg_name or "_unknown_tg",
                 target_delivery_item_id, doc.doc_type, doc.doc_id_slug, doc.rev_number,
             )
             target_type = NSDPathType.CLASSIFIED
         else:
             target_path = NSDPath.internal_staged_classification(
-                carrier_slug, device_slug, milestone_slug,
+                customer_id, device_id, milestone_name,
                 target_tg_name or "_unknown_tg", target_delivery_item_id,
                 doc.original_filename if doc else file_hash,
             )
@@ -438,7 +465,10 @@ async def reassign_document_to_workitem(
                 milestone_id=source.milestone_id,
                 local_nsd_path=target_path.to_relative(),
                 nsd_path_type=target_type.value,
-                owner_email=target_owner_email,
+                owner_corp_id=target_owner_corp_id,
+                owner_corp_usa_email=target_owner_corp_usa_email,
+                owner_corp_email=target_owner_corp_email,
+                owner_name=target_owner_name,
                 plm_id=target_plm_id,
                 associated_at=datetime.now(timezone.utc),
                 associated_by=pm_id,

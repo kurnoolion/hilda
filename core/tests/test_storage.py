@@ -107,13 +107,18 @@ def make_doc(file_hash: str = HASH_A, slug: str | None = "report-a", rev: int | 
 
 
 def make_assoc(file_hash: str = HASH_A, item: str = "item-1", milestone: str = "ms-1",
-               owner: str = "owner@corp", plm: str | None = "PLM-1", **kw) -> DocumentItemAssociation:
+               owner_corp_id: str = "y.vasilyev", owner_email: str = "owner@corp",
+               plm: str | None = "PLM-1", **kw) -> DocumentItemAssociation:
+    """Test fixture. owner_corp_id is the PLM grouping key per FR-5 + [D-035];
+    owner_email kept as legacy parameter name for backward-compat with existing tests —
+    routes to owner_corp_usa_email field."""
     path = NSDPath.internal_classified("carrier-a", "device-x", milestone, "tg-hw",
                                        item, "test_report", "report-a", 1)
     defaults = dict(
         file_hash=file_hash, delivery_item_id=item, milestone_id=milestone,
         local_nsd_path=path.to_relative(), nsd_path_type=NSDPathType.CLASSIFIED,
-        owner_email=owner, plm_id=plm, associated_at=NOW,
+        owner_corp_id=owner_corp_id, owner_corp_usa_email=owner_email,
+        plm_id=plm, associated_at=NOW,
     )
     defaults.update(kw)
     return DocumentItemAssociation(**defaults)
@@ -355,7 +360,7 @@ class TestAssociations:
         # Target-item attributes are caller-resolved from SP (architect 2026-06-11).
         await reassign_document_to_workitem(
             HASH_A, "default-item", "item-7", "pm-42",
-            target_tg_name="tg-sw", target_owner_email="o7@corp", target_plm_id="PLM-7")
+            target_tg_name="tg-sw", target_owner_corp_id="ops.member", target_owner_corp_usa_email="o7@corp", target_plm_id="PLM-7")
 
         assocs = await list_associations_for_file(HASH_A)
         assert [a.delivery_item_id for a in assocs] == ["item-7"]

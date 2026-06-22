@@ -49,99 +49,99 @@ class NSDPath:
 
     @classmethod
     def inbound_drop(
-        cls, carrier_slug: str, device_slug: str, milestone_slug: str, item_slug: str
+        cls, customer_id: str, device_id: str, milestone_name: str, item_path_id: str
     ) -> "NSDPath":
         """Owner inbound tree: inbound/<carrier>/<device>/<milestone>/<item>/"""
-        return cls(("inbound", carrier_slug, device_slug, milestone_slug, item_slug))
+        return cls(("inbound", customer_id, device_id, milestone_name, item_path_id))
 
     @classmethod
     def ingress_folder(
-        cls, carrier_slug: str, ingress_nsd: Literal["NSD1", "NSD2"], folder_path: str
+        cls, customer_id: str, ingress_nsd: Literal["NSD1", "NSD2"], folder_path: str
     ) -> "NSDPath":
         """FR-77 Type-2 INBOUND folder under the TG's ingress NSD (never outbound target_folder)."""
         parts = tuple(p for p in folder_path.replace("\\", "/").split("/") if p)
-        return cls(("inbound", ingress_nsd.lower(), carrier_slug, *parts))
+        return cls(("inbound", ingress_nsd.lower(), customer_id, *parts))
 
     # --- HILDA internal tree (FR-86 four path types + zip/outbound zones) ----
 
     @classmethod
     def internal_classified(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
-        doc_type_slug, doc_id_slug, rev_number: int,
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
+        doc_type, doc_id_slug, rev_number: int,
     ) -> "NSDPath":
         """Classified path: internal/<carrier>/<device>/<milestone>/<tg>/<item>/<doc_type>/<doc_id>/revN/"""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
-            item_slug, doc_type_slug, doc_id_slug, f"rev{rev_number}",
+            "internal", customer_id, device_id, milestone_name, tg_path_id,
+            item_path_id, doc_type, doc_id_slug, f"rev{rev_number}",
         ))
 
     @classmethod
     def internal_staged_revision(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
-        doc_type_slug, original_filename: str,
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
+        doc_type, original_filename: str,
     ) -> "NSDPath":
         """FR-86 staged-not-revision-determined — aligned but [D-039] ambiguous;
         awaits FR-87 step (C)."""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
-            item_slug, doc_type_slug, "_staged_revision", original_filename,
+            "internal", customer_id, device_id, milestone_name, tg_path_id,
+            item_path_id, doc_type, "_staged_revision", original_filename,
         ))
 
     @classmethod
     def internal_staged_classification(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
         original_filename: str,
     ) -> "NSDPath":
         """FR-86 staged-not-classified — (item_type, doc_type) misaligned; awaits
         FR-87 step (B). No <doc_type> segment: doc_type is the unresolved dimension."""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
-            item_slug, "_staged_classification", original_filename,
+            "internal", customer_id, device_id, milestone_name, tg_path_id,
+            item_path_id, "_staged_classification", original_filename,
         ))
 
     @classmethod
     def internal_default_workitem(
-        cls, carrier_slug, device_slug, milestone_slug, inferred_tg_name_slug,
+        cls, customer_id, device_id, milestone_name, inferred_tg_path_id,
         original_filename: str,
     ) -> "NSDPath":
         """FR-78 + FR-86 + [D-060] unrouted path:
         internal/<carrier>/<device>/<milestone>/<inferred_tg_name>/_unrouted/<filename>
         Pass "_unknown_tg" when inferred_tg_name is NULL (SP-UI-direct-upload edge)."""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug,
-            inferred_tg_name_slug, "_unrouted", original_filename,
+            "internal", customer_id, device_id, milestone_name,
+            inferred_tg_path_id, "_unrouted", original_filename,
         ))
 
     @classmethod
     def internal_zip_store(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
         original_zip_filename: str,
     ) -> "NSDPath":
         """FR-72 per-item NSD-sourced ZIP storage."""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
-            item_slug, "_zip_store", original_zip_filename,
+            "internal", customer_id, device_id, milestone_name, tg_path_id,
+            item_path_id, "_zip_store", original_zip_filename,
         ))
 
     @classmethod
     def internal_unrouted_zip(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug,
+        cls, customer_id, device_id, milestone_name, tg_path_id,
         original_zip_filename: str,
     ) -> "NSDPath":
         """FR-72 TG-scoped Email/PLM-sourced ZIP storage."""
         return cls((
-            "internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
+            "internal", customer_id, device_id, milestone_name, tg_path_id,
             "_unrouted_zip", original_zip_filename,
         ))
 
     @classmethod
     def internal_outbound(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
         filename: str | None = None,
     ) -> "NSDPath":
         """HILDA-generated artifacts; FR-73 carrier-package zips are transient here."""
-        parts = ("internal", carrier_slug, device_slug, milestone_slug, tg_name_slug,
-                 item_slug, "_outbound")
+        parts = ("internal", customer_id, device_id, milestone_name, tg_path_id,
+                 item_path_id, "_outbound")
         return cls(parts + ((filename,) if filename else ()))
 
     # --- Rendering ------------------------------------------------------------
@@ -249,10 +249,10 @@ async def compute_file_hash(path: NSDPath) -> str:
 
 
 async def list_inbound_drops(
-    carrier_slug: str, device_slug: str, milestone_slug: str, item_slug: str
+    customer_id: str, device_id: str, milestone_name: str, item_path_id: str
 ) -> list[NSDPath]:
     """FR-55 polling support — files currently present in the item's inbound folder."""
-    base = NSDPath.inbound_drop(carrier_slug, device_slug, milestone_slug, item_slug)
+    base = NSDPath.inbound_drop(customer_id, device_id, milestone_name, item_path_id)
     local = base.to_local()
 
     def _scan() -> list[NSDPath]:
