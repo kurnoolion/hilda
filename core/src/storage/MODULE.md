@@ -1,6 +1,6 @@
 # Module: storage
 
-> **Status:** Draft + 2026-06-09 cascade Group 2 of 3 applied (`[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-86 4-path NSD storage matrix; `[D-060]` impl note 2026-06-08 inferred_tg_name in unrouted path; `NSDPath` helpers renamed/added; new `NSDPathType` enum + `local_nsd_path` rename per user-review correction 2026-06-09). Earlier rollbacks: 2026-06-07 (FR-77 / FR-78 / FR-79 revised / FR-82 / FR-83 / FR-84 / `[D-053]` original framing). Initial draft 2026-05-24. Sections curated; pending section-by-section user review before contract is finalized. Code implementation begins after `/switch-phase development`.
+> **Status:** Draft + 2026-06-21 architect cascade applied (D1-D4 drift fixes: 4-field owner identity per FR-88 with `owner_corp_id` as PLM grouping key per FR-5 + [D-035]; NSDPath param slug→id rename per session-wide rename; TGGroupBase references replaced with DeliveryItemBase TG-denormalized fields per [D-051] + architect lock 2026-06-21; "Default" → "default" item_type per lowercase_snake_case rename 2026-06-20). Prior 2026-06-09 cascade Group 2 (`[D-053]` 5-value DocType + FR-86 4-path NSD storage matrix; `[D-060]` inferred_tg_name in unrouted path; `NSDPath` helpers renamed/added; `NSDPathType` enum + `local_nsd_path` rename) preserved. Code implementation cascade in development phase next.
 >
 > **Rollback log:**
 > - **2026-06-12 (architecture re-entry — cross-module Invariant cascade from template_schema 2026-06-12 SP UI engineer review)** — one Invariant added under `## Invariants`: `TGFolderRoutingRow.item_no` referential integrity relies on the new `template_schema.DeliveryItemBase.item_no` immutability Invariant (added 2026-06-12). Cross-references the upstream template_schema invariant + clarifies why `set_folder_routing_for_tg` validation alone isn't sufficient (validates at write time; immutability prevents post-write drift). No Public surface change, no signature change, no Depends-on edge change — pure documentation of an existing implicit assumption now made explicit upstream. Returning to development phase next.
@@ -11,7 +11,7 @@
 > - **2026-06-11 (storage Ph-1 dev — internal contradiction resolved)** — `doc_id_slug` and `rev_number` on `DocumentIndexRow` reclassified from non-null to **nullable** to match FR-86 staged-fill timing already declared in the same file's `DocumentIndexRow` class docstring (lines 41-47: "doc_id_slug + rev_number NULL until TPM resolves per FR-87 step (C)"). Internal contradiction flagged during storage Ph-1 dev: docstring required NULL-while-staged, field declaration required non-null. Resolution: nullability matches FR-86 — the docstring was correct, the field declaration was the bug (carried over from pre-`[D-053]` 2026-05-24 initial draft when staged-fill timing wasn't yet specified). Secondary uniqueness changed from `UNIQUE (milestone_id, doc_id_slug, rev_number)` to a **partial unique index** `... WHERE doc_id_slug IS NOT NULL AND rev_number IS NOT NULL` (SQL NULL doesn't deduplicate; full UNIQUE would either reject legitimate staged-NULL siblings or break under NULL-equality semantics depending on backend). Added staged-fill lifecycle Invariant + NULL-handling contract on `get_document_index_row_by_slug` and `list_revisions`. Storage-only change — does NOT propagate to requirements.md (FR-86 already specified the staged-fill timing) or template_schema/MODULE.md (no template_schema field is affected). Soft-flag classification: relaxes a constraint without breaking callers — non-null callers still receive non-null values post-resolution.
 > - **2026-06-11 (implementation session 1 — architect review correction)** — **no DeliveryItem mirror in storage; caller-resolves discipline.** Implementation had introduced a minimal `DeliveryItemMirrorTable` + `upsert_delivery_item_mirror` to back `get_default_work_item_for_milestone` and `set_folder_routing_for_tg`'s item_no validation. Architect rejected: storage holds no DeliveryItem schema, no bidirectional tracker↔storage dep, no single-writer discipline burden. Resolution: (a) mirror table + upsert REMOVED; (b) `get_default_work_item_for_milestone` REMOVED from storage — a pure entity lookup; callers (workflow_engine task bodies) resolve via `sharepoint_integration` get_items; (c) `reassign_document_to_workitem` gains explicit keyword params `target_tg_name` / `target_owner_email` / `target_plm_id` (caller resolves from SP before invoking); (d) `set_folder_routing_for_tg` gains required `valid_item_nos: set[int]` (caller-supplied; STR-E006 validation stays in storage). STR-W003 (default work-item missing) remains registered as the CALLER's signal. Draft decision in strand `storage-v1` decisions-draft.
 > - **2026-06-09 (post-cascade user-review correction, same day)** — applied 4 corrections from user review of Group 2 cascade: (a) **status header refreshed** to reflect 2026-06-09 cascade Group 2 of 3 + 2026-06-09 user-review correction. (b) **DocumentItemAssociation docstring** gained explicit "same file may occupy 2+ NSD paths simultaneously" rationale per `[D-055]` (rejected-alternative symbolic-link model documented; TPM expectation noted). (c) **`local_classified_path` renamed → `local_nsd_path`** across the file (10 references — 7 active + 3 historical-context preserved in rollback log) — the prior name implied "classified" specifically but the field holds whichever of the 4 FR-86 path types (classified / staged_classification / staged_revision / unrouted) the file is currently at. (d) **New `nsd_path_type: NSDPathType` column** added to DocumentItemAssociation per user observation that path TYPE was only derivable via string-parsing the path string (brittle + non-indexable); new `NSDPathType` enum (4 values mirroring FR-86 path types) added next to `RoutingResolution` enum (peer storage-internal enum); STR-W007 stale-staged-document query updated to use the new indexed column instead of LIKE-pattern on path strings. (e) Storage-only change — does NOT propagate to requirements.md or template_schema/MODULE.md (NSDPathType is a storage-implementation concern; FR-86's 4 path types are the requirements-side spec; template_schema owns cross-tier data contracts not storage-internal enums).
-> - **2026-06-09 (Phase B Module cascade — Group 2 of 3 against the corrected `[D-053]` model — after `template_schema/MODULE.md` cascade 2026-06-08)** — applied the requirements-phase redesign locked 2026-06-08 (FR-7 + FR-85 + FR-86 + FR-87 + `[D-053]` impl note 2026-06-08 + `[D-060]` impl note 2026-06-08): **DocumentIndexRow.doc_type** docstring updated to 5-value enum (test_report / tech_report / waiver / compliance_certification_release_notes / unresolved) — UNRESOLVED is explicit enum sentinel value (NOT Optional[DocType] = None); FR-85 classification + FR-86 alignment + downstream trigger rules documented per the corrected model. **parser_result + llm_review_findings** docstrings updated for 5-value DocType (null on compliance_certification_release_notes / unresolved per FR-86). **DocumentIndexRow class docstring** gained FR-86 storage matrix paragraph documenting the 4 NSD paths the row's file lives in + state transitions via FR-84 SP-alert channel. **`NSDPath.internal_default_workitem()`** signature added `inferred_tg_name_slug` parameter per `[D-060]` impl note 2026-06-08 — path now `internal/<carrier>/<device>/<milestone>/<inferred_tg_name>/_unrouted/<filename>` (was: no TG segment). **`NSDPath.internal_staged` renamed → `NSDPath.internal_staged_revision`** with explicit name + `_staged_revision/` path segment + full 7-arg signature; added explicit ambiguity-class distinction docstring. **New `NSDPath.internal_staged_classification`** helper — path `internal/<carrier>/<device>/<milestone>/<tg>/<item>/_staged_classification/<filename>` (no `<doc_type>` segment); for FR-86 misaligned-pair documents; awaits FR-87 step (B) TPM resolution. **New error code `STR-W007`** — stale staged document warning (age > threshold per `customizations/<customer>/storage_alerts.yaml`; default 7 days) surfaced on `--diagnostic`. Cascade Group 3 of 3 (`llm/MODULE.md`) is next per STATUS.md In-progress 2026-06-08.
+> - **2026-06-09 (Phase B Module cascade — Group 2 of 3 against the corrected `[D-053]` model — after `template_schema/MODULE.md` cascade 2026-06-08)** — applied the requirements-phase redesign locked 2026-06-08 (FR-7 + FR-85 + FR-86 + FR-87 + `[D-053]` impl note 2026-06-08 + `[D-060]` impl note 2026-06-08): **DocumentIndexRow.doc_type** docstring updated to 5-value enum (test_report / tech_report / waiver / compliance_certification_release_notes / unresolved) — UNRESOLVED is explicit enum sentinel value (NOT Optional[DocType] = None); FR-85 classification + FR-86 alignment + downstream trigger rules documented per the corrected model. **parser_result + llm_review_findings** docstrings updated for 5-value DocType (null on compliance_certification_release_notes / unresolved per FR-86). **DocumentIndexRow class docstring** gained FR-86 storage matrix paragraph documenting the 4 NSD paths the row's file lives in + state transitions via FR-84 SP-alert channel. **`NSDPath.internal_default_workitem()`** signature added `inferred_tg_path_id` parameter per `[D-060]` impl note 2026-06-08 — path now `internal/<carrier>/<device>/<milestone>/<inferred_tg_name>/_unrouted/<filename>` (was: no TG segment). **`NSDPath.internal_staged` renamed → `NSDPath.internal_staged_revision`** with explicit name + `_staged_revision/` path segment + full 7-arg signature; added explicit ambiguity-class distinction docstring. **New `NSDPath.internal_staged_classification`** helper — path `internal/<carrier>/<device>/<milestone>/<tg>/<item>/_staged_classification/<filename>` (no `<doc_type>` segment); for FR-86 misaligned-pair documents; awaits FR-87 step (B) TPM resolution. **New error code `STR-W007`** — stale staged document warning (age > threshold per `customizations/<customer>/storage_alerts.yaml`; default 7 days) surfaced on `--diagnostic`. Cascade Group 3 of 3 (`llm/MODULE.md`) is next per STATUS.md In-progress 2026-06-08.
 > - **2026-06-07** — Phase B Module rollback (Group 2 of N, after `template_schema/MODULE.md`): added `DocumentItemAssociation` M:M for FR-79 multi-item + PLM fan-out across distinct (owner × milestone) pairs; new `DocumentIndexRow` fields (`milestone_id`, `inferred_tg_name` per FR-78/FR-83, `routing_resolution`); new `RoutingResolution` enum (6 values mirroring FR-52 5-step pipeline + FR-83 reassignment); new `TGFolderRoutingRow` (FR-77 Type-2 with `ingress_folder` naming per inbound/outbound discipline); new `TagCatalogRow` (FR-82 revised); new NSDPath helpers (`internal_default_workitem` for FR-78 `_unrouted` sentinel; `ingress_folder` for FR-77 NSD1/NSD2 inbound paths); association/fan-out API methods + FR-83 `reassign_document_to_workitem`; expanded `CommunicationLogRow.action_type` example registry per FR-29 revised; new error codes (`STR-E005` / `STR-E006` / `STR-W002` / `STR-W003`); invariants added for ingress/target naming discipline, single-milestone association scope, per-association PLM attachment, channel→TG resolution, registry-based action/trigger validation, soft-deactivate tag catalog; Deferred items added for cross-milestone associations, tag-catalog audit history, default-work-item path namespace evolution.
 > - **2026-06-07 (API surface review, same day)** — 10-item review pass on API surface lines 171-462: removed stale `NSDPath.to_download_token()` (replaced by storage-layer `make_download_token(file_hash, delivery_item_id)`); expanded docstrings on `internal_staged` vs `internal_default_workitem` clarifying distinct ambiguity classes (Tier-2 NEW-vs-REVISION vs FR-78 which-work-item); renamed `internal_un_resolved_zip` → `internal_unrouted_zip` for naming consistency with `_unrouted` sentinel; expanded `query_communications` with file_hash / action_type / pm_id / until / offset filters + pagination cap (max=1000); added `MAX_CACHE_TTL_SECONDS=86_400` constant + `cache_set` TTL guard (raises STR-E008); added 9 convenience helpers (`cache_delete`, `get_documents_for_item`, `list_documents_for_milestone`, `delete_document_item_association`, `list_tag_catalog_entries`, `reactivate_tag`, `list_active_overrides` bulk-load); replaced `fan_out_plm_associations` tuple return with typed `PLMFanOutTarget` model (adds `item_count` diagnostic field for FR-79 case-(a)-vs-(b) signal); expanded `add_document_item_association` docstring covering 3 code paths (first-association / multi-item fan-out / FR-83 target); expanded `reassign_document_to_workitem` to sync `DocumentIndexRow.inferred_tg_name` to target item's tg_name for audit clarity (with old→new note in CommunicationLog); refreshed STR-MET diagnostic line with new table counts (`association_rows`, `folder_routing_rows`, `tag_catalog_rows`, orphan diagnostics); added override audit logging (set_override/clear_override write CommunicationLog with credential_id=pm_id); new error codes `STR-E008` (cache TTL guard), `STR-W005` (orphan DocumentIndexRow), `STR-W006` (PLM fan-out target without plm_id).
 > - **2026-06-07 (post-refactor sweep, same day)** — fixed stale invariant + API signatures missed in the file-centric refactor: replaced "natural key uniqueness `(delivery_item_id, doc_type, doc_id_slug, rev_number)`" with new identity model (PK = `file_hash`; secondary unique constraint `(milestone_id, doc_id_slug, rev_number)`); split `get_document_index_row` → `get_document_index_row_by_hash` (primary) + `get_document_index_row_by_slug` (FR-57 secondary lookup); rekeyed `update_review_findings` + `set_is_final` to `file_hash`; rekeyed `list_revisions` to `(milestone_id, doc_id_slug)` family; added per-method docstrings clarifying JOIN-through-M:M pattern for per-item queries. Cross-channel idempotency invariant added (same file via Email + PLM produces ONE row; first arrival wins on per-ingest fields).
@@ -113,35 +113,44 @@ class DocumentItemAssociation:
     Invariants:
     - All associations for a given file_hash share the same milestone_id (FR-79 same-milestone
       invariant Ph-1/Ph-2; cross-milestone deferred to Ph-3+). Enforced via STR-E005.
-    - File physically exists at each association's local_nsd_path (renamed from local_classified_path
-      2026-06-09 — the field stores whichever of the 4 FR-86 path types the file is at, not just
-      classified). **The same file (one file_hash) may occupy 2+ NSD paths simultaneously** —
-      one physical copy per associated item. This was a deliberate design decision per `[D-055]`:
-      the alternative (one canonical NSD home with symbolic links from other item paths) was
-      rejected because SMB symlink semantics are inconsistent across Linux/Windows kernels, file
-      deletion + reassignment flows get complex, and TPM expectation is that each item folder
-      contains the actual file (not a symlink). Per-item paths are independent — each association
-      row tracks its own `local_nsd_path` + `nsd_path_type`, and the rows may be in different
-      `nsd_path_type` states simultaneously (e.g., file at row A is `classified` while file at
-      row B is `staged_not_classified` after item B was reassigned to a misaligned item_type).
-    - PLM fan-out: documents upload to PLM for EVERY distinct (owner_email, plm_id) pair across
-      the associations. issue_tracker iterates `fan_out_plm_associations(file_hash, milestone_id)`
-      which returns DISTINCT (owner_email, plm_id) sets; each upload writes back its
-      plm_attachment_id + upload_timestamp on the contributing association rows.
-    - Two cases per FR-79:
-        (a) one owner, N items in same TG, same file → N rows, all share (owner_email, plm_id,
-            plm_attachment_id, upload_timestamp) — PLM upload happens once
-        (b) two owners in same TG, N items, same file → N rows, distinct (owner_email, plm_id)
-            pairs → 2 PLM uploads → distinct plm_attachment_id + upload_timestamp per row
+    - File physically exists at each association's local_nsd_path. The same file (one
+      file_hash) may occupy 2+ NSD paths simultaneously — one physical copy per associated item.
+      Per `[D-055]`: SMB symlink alternative was rejected (cross-kernel inconsistency + TPM
+      expectation of actual files in each item folder). Per-item paths are independent — each
+      association row tracks its own `local_nsd_path` + `nsd_path_type`, and the rows may be in
+      different `nsd_path_type` states simultaneously (e.g., file at row A is `classified` while
+      file at row B is `staged_not_classified` after item B was reassigned to a misaligned item_type).
+    - **PLM fan-out grouped by `owner_corp_id` per FR-5 + FR-8 step 2 + [D-035]** (architect lock
+      2026-06-21): PLM issue is one per `(device, milestone, owner_corp_id)` tuple. The grouping
+      key is `owner_corp_id` (corp directory identifier, engineer-stable), NOT email. Email is
+      used for outreach (FR-9 preference rule: owner_corp_usa_email preferred, owner_corp_email
+      fallback) — that's a separate concern. `fan_out_plm_associations(file_hash)` returns
+      DISTINCT `(owner_corp_id, plm_id)` pairs; each upload writes back its plm_attachment_id +
+      upload_timestamp on the contributing association rows.
+    - Two cases per FR-79 (revised 2026-06-21 — owner_corp_id grouping key):
+        (a) one owner_corp_id, N items in same TG, same file → N rows, all share
+            (owner_corp_id, plm_id, plm_attachment_id, upload_timestamp) — PLM upload happens once
+        (b) two distinct owner_corp_ids in same TG, N items, same file → N rows, distinct
+            (owner_corp_id, plm_id) pairs → 2 PLM uploads → distinct plm_attachment_id +
+            upload_timestamp per row
+    - 4-field owner identity per FR-88 + [D-080] + [D-086] (cascade applied 2026-06-21):
+      Denormalized from DeliveryItemBase for fast PLM fan-out + outreach query. `owner_corp_id`
+      is the PLM grouping key (load-bearing per FR-5 + [D-035]). `owner_corp_usa_email` /
+      `owner_corp_email` are denormalized for outreach context; `owner_name` for display.
     """
     file_hash:             str        # PK part 1 — FK → DocumentIndexRow.file_hash
     delivery_item_id:      str        # PK part 2 — FK → DeliveryItemBase
     milestone_id:          str        # denormalized from delivery_item_id → MilestoneBase; FR-79 same-milestone invariant
-    local_nsd_path:        Path       # NSD path FOR THIS ITEM's copy of the file — whichever of the 4 FR-86 path types the file is currently at (classified | staged_revision | staged_classification | unrouted). Renamed from `local_classified_path` 2026-06-09 — the prior name implied "classified" specifically but the field also holds staged + unrouted paths. Per `[D-055]` + `[D-040]` + FR-13: the file physically exists at this exact path; for multi-item associations the same file_hash may be at 2+ NSD paths simultaneously (one per item, one copy each).
-    nsd_path_type:         NSDPathType  # explicit state tracker per FR-86 storage matrix (added 2026-06-09 per user review) — derives the path TYPE without string-parsing local_nsd_path; indexed for STR-W007 stale-staged-document queries + FR-86 state transitions. Each association row's state is independent (a file may be in different nsd_path_type states across different association rows simultaneously). Enum: see NSDPathType definition.
-    owner_email:           str        # denormalized from DeliveryItemBase.owner_email — fast PLM fan-out grouping
-    plm_id:                str | None # PLM issue ID for THIS (owner × milestone) per FR-26 / FR-57 — denormalized from DeliveryItemBase.plm_id for query convenience
-    plm_attachment_id:     str | None # per-association PLM attachment ID per FR-79 fan-out; same value across rows that share (owner_email, plm_id) within milestone (case (a)); distinct per (owner_email, plm_id) pair (case (b))
+    local_nsd_path:        Path       # NSD path FOR THIS ITEM's copy of the file — whichever of the 4 FR-86 path types the file is currently at (classified | staged_revision | staged_classification | unrouted). Renamed from `local_classified_path` 2026-06-09. Per `[D-055]` + `[D-040]` + FR-13: file physically exists at this exact path; same file_hash may be at 2+ NSD paths simultaneously across rows (one per item).
+    nsd_path_type:         NSDPathType  # explicit state tracker per FR-86 storage matrix (added 2026-06-09 per user review) — derives the path TYPE without string-parsing local_nsd_path; indexed for STR-W007 stale-staged-document queries + FR-86 state transitions. Each association row's state is independent.
+    # 4-field owner identity per FR-88 + [D-080] + [D-086] (denormalized from DeliveryItemBase;
+    # cascade applied 2026-06-21):
+    owner_corp_id:         str        # PLM grouping key per FR-5 + [D-035]; engineer-stable corp directory identifier; load-bearing for PLM fan-out (FR-79 case (a)/(b) discrimination); NOT NULL when plm_id is set
+    owner_corp_usa_email:  str | None # preferred outreach recipient per [D-080]; denormalized for fast outreach query
+    owner_corp_email:      str | None # fallback outreach recipient (non-USA corp domains)
+    owner_name:            str | None # display name only
+    plm_id:                str | None # PLM issue ID for THIS (device, milestone, owner_corp_id) tuple per FR-26 / FR-57 — denormalized from DeliveryItemBase.plm_id for query convenience
+    plm_attachment_id:     str | None # per-association PLM attachment ID per FR-79 fan-out; same value across rows that share (owner_corp_id, plm_id) within milestone (case (a)); distinct per (owner_corp_id, plm_id) pair (case (b))
     upload_timestamp:      datetime | None  # when uploaded to THIS owner's PLM; null until issue_tracker confirms upload. Mirrors plm_attachment_id grouping per case (a)/(b)
     associated_at:         datetime  # when this association row was created
     associated_by:         str       # "auto" — FR-52 pipeline; "<pm_id>" — TPM-manual / FR-83 reassignment
@@ -173,9 +182,11 @@ class BatchIdempotencyKey:
 class TGFolderRoutingRow:
     """Per FR-77 Type-2 routing — persisted form of TGFolderRouting/FolderRoutingEntry from
     template_schema. Loaded into routing pipeline cache at tracker creation; refreshed on
-    TGGroupBase update. Replace-all write semantics — a TG's full table is overwritten on update."""
+    DeliveryItemBase TG-denormalized-field update (per [D-051] denormalization + architect
+    lock 2026-06-21 — TGGroupBase Pydantic model was DROPPED; TG fields live on each
+    DeliveryItemBase row). Replace-all write semantics — a TG's full table is overwritten on update."""
     milestone_id:    str       # PK part 1 — FK → MilestoneBase
-    tg_name:         str       # PK part 2 — FK → TGGroupBase (within milestone)
+    tg_name:         str       # PK part 2 — references DeliveryItemBase.tg_name (denormalized TG label per [D-051]; TGGroupBase dropped 2026-06-21)
     ingress_folder:  str       # PK part 3 — INBOUND folder path under TG's ingress_nsd (NOT customer-facing target_folder)
     item_no:         int       # → DeliveryItemBase.item_no within the milestone
     routing_notes:   str | None
@@ -333,40 +344,53 @@ async def list_associations_for_item(delivery_item_id: str) -> list[DocumentItem
     """Used by FR-67 PLM cleanup — when an item is closed, find all documents associated."""
 
 async def fan_out_plm_associations(file_hash: str) -> list[PLMFanOutTarget]
-    """Per FR-79 revised — returns DISTINCT (owner_email, plm_id) pairs across all associations
-    of file_hash, wrapped as PLMFanOutTarget. issue_tracker iterates this list and performs one
-    PLM upload per target (regardless of how many items share that target). Each successful
-    upload then calls `update_association_plm_attachment(...)` which fans the result back across
-    all M:M rows that share the (owner_email, plm_id) pair within the milestone."""
+    """Per FR-79 revised — returns DISTINCT (owner_corp_id, plm_id) pairs across all
+    associations of file_hash, wrapped as PLMFanOutTarget. **Grouping key is owner_corp_id**
+    per FR-5 + FR-8 step 2 + [D-035] PLM-issue-per-(device, milestone, owner_corp_id) tuple
+    (architect lock 2026-06-21). issue_tracker iterates this list and performs one PLM upload
+    per target (regardless of how many items share that target). Each successful upload then
+    calls `update_association_plm_attachment(...)` which fans the result back across all M:M
+    rows that share the (owner_corp_id, plm_id) pair within the milestone."""
 
 # Returned by fan_out_plm_associations — typed for clarity + future extension:
 class PLMFanOutTarget(BaseModel):
-    """One PLM upload target for a file_hash per FR-79 revised. Each distinct (owner_email,
-    plm_id) pair across associations produces exactly one target."""
-    owner_email: str
-    plm_id:      str | None       # None = owner has no PLM issue yet for this milestone (Ph-2 edge case; logged STR-W006)
-    item_count:  int              # how many DeliveryItems share this (owner, plm) pair within the milestone — diagnostic signal; useful for surfacing one-owner-N-items vs distinct-owner cases (FR-79 case (a) vs (b))
+    """One PLM upload target for a file_hash per FR-79 revised. Each distinct (owner_corp_id,
+    plm_id) pair across associations produces exactly one target.
+    Updated 2026-06-21: grouping key is owner_corp_id per FR-5 + [D-035] (was owner_email)."""
+    owner_corp_id:         str        # PLM grouping key per FR-5 + [D-035]; engineer-stable corp directory identifier
+    owner_corp_usa_email:  str | None # preferred outreach recipient per [D-080] (informational; carried for issue_tracker to surface in PLM body if needed)
+    owner_corp_email:      str | None # fallback outreach recipient (informational)
+    owner_name:            str | None # display name (informational)
+    plm_id:                str | None # None = owner has no PLM issue yet for this milestone (Ph-2 edge case; logged STR-W006)
+    item_count:            int        # how many DeliveryItems share this (owner_corp_id, plm_id) pair within the milestone — diagnostic signal; FR-79 case (a) vs (b) discrimination
 
 async def update_association_plm_attachment(
     file_hash: str, delivery_item_id: str,
     plm_attachment_id: str, upload_timestamp: datetime
 ) -> None
     """Called after issue_tracker successfully uploads to an owner's PLM. Updates the target
-    association row + any other association rows sharing the same (owner_email, plm_id) within
-    the milestone (case (a) one-owner-N-items fan-out result is replicated across all rows for
-    that owner in the same transaction)."""
+    association row + any other association rows sharing the same (owner_corp_id, plm_id)
+    within the milestone (case (a) one-owner-N-items fan-out result is replicated across all
+    rows for that owner_corp_id in the same transaction). Grouping key is owner_corp_id per
+    FR-5 + [D-035] (architect lock 2026-06-21)."""
 
 async def reassign_document_to_workitem(
     file_hash: str, source_delivery_item_id: str,
     target_delivery_item_id: str, pm_id: str,
-    *, target_tg_name: str | None, target_owner_email: str,
+    *, target_tg_name: str | None,
+    target_owner_corp_id: str,                       # PLM grouping key; required per FR-5 + [D-035]
+    target_owner_corp_usa_email: str | None = None,  # outreach (informational)
+    target_owner_corp_email: str | None = None,
+    target_owner_name: str | None = None,
     target_plm_id: str | None = None,
 ) -> None
     """FR-83 — TPM-manual reassignment from default work-item (or any item) to a specific
-    work-item. Transactional — all steps succeed or all roll back:
+    work-item. **Caller-resolves owner identity** — 4-field per FR-88 (architect lock
+    2026-06-21); `target_owner_corp_id` is required (PLM grouping key per FR-5 + [D-035]).
+    Transactional — all steps succeed or all roll back:
     1. Adds new DocumentItemAssociation row for (file_hash, target_delivery_item_id) using
-       target item's owner_email + plm_id (NSD path constructed via NSDPath.internal_classified
-       for the target item).
+       target item's 4-field owner identity + plm_id (NSD path constructed via
+       NSDPath.internal_classified for the target item).
     2. Removes the source association row via delete_document_item_association(...,
        delete_file=True) — file is moved on NSD from source path to target path (Step 1's
        NSD write happens before Step 2's delete to avoid data loss on failure).
@@ -430,7 +454,7 @@ async def tpm_resolve_revision(
 
 # Default work-item lookup (FR-78) — REMOVED from storage 2026-06-11 (architect review):
 # a pure entity lookup; the FR-52 caller resolves the milestone's default work-item via
-# sharepoint_integration get_items (item_type = Default) and fires
+# sharepoint_integration get_items (item_type = "default" per lowercase_snake_case rename 2026-06-20) and fires
 # INSTANTIATE_DEFAULT_WORK_ITEM (STR-W003 signal) when absent. Storage holds no
 # DeliveryItem mirror — see rollback log 2026-06-11.
 
@@ -591,18 +615,18 @@ class NSDPath:
     """Encapsulates the two-tree NSD path structure per FR-13."""
 
     @classmethod
-    def inbound_drop(cls, carrier_slug: str, device_slug: str, milestone_slug: str, item_slug: str) -> NSDPath:
+    def inbound_drop(cls, customer_id: str, device_id: str, milestone_name: str, item_path_id: str) -> NSDPath:
         """Owner inbound tree: \\share\hilda\inbound\<carrier>\<device>\<milestone>\<item>\"""
 
     @classmethod
     def internal_classified(
-        cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug,
-        doc_type_slug, doc_id_slug, rev_number
+        cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
+        doc_type, doc_id_slug, rev_number
     ) -> NSDPath:
         """HILDA internal classified path: ...\internal\<carrier>\<device>\<milestone>\<tg>\<item>\<doc_type>\<doc_id>\revN\"""
 
     @classmethod
-    def internal_staged_revision(cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug, doc_type_slug, original_filename) -> NSDPath:
+    def internal_staged_revision(cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id, doc_type, original_filename) -> NSDPath:
         """Renamed 2026-06-09 from `internal_staged` for explicit naming aligned with FR-86
         path nomenclature (`staged-not-revision-determined`). Path:
         ...\internal\<carrier>\<device>\<milestone>\<tg>\<item>\<doc_type>\_staged_revision\<original_filename>
@@ -621,7 +645,7 @@ class NSDPath:
         is known and aligned; only the revision-family membership is unresolved."""
 
     @classmethod
-    def internal_staged_classification(cls, carrier_slug, device_slug, milestone_slug, tg_name_slug, item_slug, original_filename) -> NSDPath:
+    def internal_staged_classification(cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id, original_filename) -> NSDPath:
         """New 2026-06-09 per FR-86 (staged-not-classified path) + `[D-053]` impl note 2026-06-08.
         Path:
         ...\internal\<carrier>\<device>\<milestone>\<tg>\<item>\_staged_classification\<original_filename>
@@ -642,31 +666,31 @@ class NSDPath:
         constraints — TPM disambiguates which way the misalignment resolves."""
 
     @classmethod
-    def internal_zip_store(cls, ..., item_slug, original_zip_filename) -> NSDPath:
+    def internal_zip_store(cls, ..., item_path_id, original_zip_filename) -> NSDPath:
         """FR-72 per-item NSD-sourced ZIP storage."""
 
     @classmethod
-    def internal_unrouted_zip(cls, ..., tg_name_slug, original_zip_filename) -> NSDPath:
+    def internal_unrouted_zip(cls, ..., tg_path_id, original_zip_filename) -> NSDPath:
         """FR-72 TG-scoped Email/PLM-sourced ZIP storage — when a ZIP arrives via Email/PLM
         scoped only to a TG (not a specific item) per FR-72. Renamed from `internal_un_resolved_zip`
         2026-06-07 for naming consistency with the `_unrouted` sentinel used in FR-78 default
         work-item paths."""
 
     @classmethod
-    def internal_outbound(cls, ..., item_slug) -> NSDPath:
+    def internal_outbound(cls, ..., item_path_id) -> NSDPath:
         """HILDA-generated artifacts (QC reports, diagnostics, submission outputs); never owner deliverables.
         Note: FR-73 carrier-package zips are regenerated per-click and deleted on TPM download —
         callers should treat this path as transient for those artifacts."""
 
     @classmethod
     def internal_default_workitem(
-        cls, carrier_slug, device_slug, milestone_slug, inferred_tg_name_slug, original_filename
+        cls, customer_id, device_id, milestone_name, inferred_tg_path_id, original_filename
     ) -> NSDPath:
         """Per FR-78 + FR-86 + `[D-060]` impl note 2026-06-08 — landing path for documents
-        routed to the milestone's default work-item (item_type = ItemType.DEFAULT). Path:
+        routed to the milestone's default work-item (item_type = "default" per lowercase_snake_case rename 2026-06-20; ItemType.DEFAULT enum member). Path:
         ...\internal\<carrier>\<device>\<milestone>\<inferred_tg_name>\_unrouted\<original_filename>
 
-        **Signature change 2026-06-09**: added `inferred_tg_name_slug` parameter per `[D-060]`
+        **Signature change 2026-06-09**: added `inferred_tg_path_id` parameter per `[D-060]`
         impl note 2026-06-08 (was 4 args; now 5). The inferred_tg_name surfaces in the path
         for TPM browsing by TG (organizes unrouted docs grouped by their channel-resolved TG
         instead of one flat folder per milestone). The slug is derived from
@@ -690,7 +714,7 @@ class NSDPath:
 
     @classmethod
     def ingress_folder(
-        cls, carrier_slug, ingress_nsd: Literal["NSD1", "NSD2"], folder_path: str
+        cls, customer_id, ingress_nsd: Literal["NSD1", "NSD2"], folder_path: str
     ) -> NSDPath:
         """Per FR-77 Type-2 routing — INBOUND folder under the TG's ingress_nsd.
         NSD1: \\share\hilda\inbound\nsd1\<carrier>\<folder_path>
@@ -728,7 +752,7 @@ async def compute_file_hash(path: NSDPath) -> str
     """SHA-256 per [D-039] Step 0 (exact-duplicate detection)."""
 
 async def list_inbound_drops(
-    carrier_slug, device_slug, milestone_slug, item_slug
+    customer_id, device_id, milestone_name, item_path_id
 ) -> list[NSDPath]
     """FR-55 polling support — returns files dropped by owners since last poll."""
 
@@ -813,10 +837,10 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - **NSD path-construction is deterministic from entity attributes**: given a fixed set of slugs, `NSDPath.internal_classified(...)` returns the same path on every host (lab, dev, test). No path mutation after entity creation.
 - **Persisted `local_nsd_path` is share-relative POSIX form** (added 2026-06-11 per [D-013] NSD-IO alignment): `DocumentItemAssociation.local_nsd_path` stores `NSDPath.to_relative()` (e.g. `inbound/<carrier>/<device>/<milestone>/<item>/file.pdf`) — **never** a UNC string (`\\share\hilda\...`) or a mount-root-prefixed absolute path. This keeps Postgres rows mount-root-independent: the same row resolves correctly under any `HILDA_NSD_MOUNT_ROOT` (dev `/tmp/test-nsd` vs prod `/nsd`) without a migration when the mount root changes. Runtime prefixing is done by `to_local()` at IO time; `to_unc()`/`from_unc()` exist for diagnostic display only. Persisting a UNC or mount-prefixed string would re-introduce mount-root coupling and is a contract violation.
 - **`ingress_folder` vs `target_folder` — naming discipline** (2026-06-07): `ingress_folder` always refers to INBOUND NSD-side paths (HILDA-PC under `TGGroupBase.ingress_nsd`); `target_folder` is reserved for OUTBOUND customer-portal upload destinations (FR-73 / FR-19). The two namespaces are never conflated in storage APIs, models, or path helpers. `NSDPath.ingress_folder(...)` is inbound-only; outbound customer-portal paths are not NSD paths.
-- **Symmetric M:M, no primary/secondary** (2026-06-07): `DocumentItemAssociation` is a pure M:M; no `is_primary` flag. The same file may exist at multiple NSD paths simultaneously (one per item's `local_nsd_path` per `[D-040]` / FR-13). Per-(file, item) properties (`local_nsd_path`, `nsd_path_type`, `plm_id`, `plm_attachment_id`, `owner_email`, `upload_timestamp`) live exclusively on the M:M row; per-file properties (`parser_result`, `llm_review_findings`, `inferred_tg_name`, `routing_resolution`, etc.) live exclusively on `DocumentIndexRow`. No dual-write hazard across the two tables.
+- **Symmetric M:M, no primary/secondary** (2026-06-07): `DocumentItemAssociation` is a pure M:M; no `is_primary` flag. The same file may exist at multiple NSD paths simultaneously (one per item's `local_nsd_path` per `[D-040]` / FR-13). Per-(file, item) properties (`local_nsd_path`, `nsd_path_type`, `plm_id`, `plm_attachment_id`, `upload_timestamp`, 4-field owner identity per FR-88: `owner_corp_id` / `owner_corp_usa_email` / `owner_corp_email` / `owner_name` — cascade 2026-06-21) live exclusively on the M:M row; per-file properties (`parser_result`, `llm_review_findings`, `inferred_tg_name`, `routing_resolution`, etc.) live exclusively on `DocumentIndexRow`. No dual-write hazard across the two tables.
 - **Single-milestone association scope** per FR-79 (Ph-1/Ph-2): all `DocumentItemAssociation` rows for a given `file_hash` share the same `milestone_id`. Cross-milestone associations deferred to Ph-3+; enforcement raises `STR-E005`.
 - **Composite PK on M:M** (2026-06-07): `(file_hash, delivery_item_id)` is the natural PK; no synthetic `association_id`. CommunicationLog audit entries reference the pair directly.
-- **PLM fan-out is per-(owner × PLM) pair within a milestone** per FR-79 (revised): `fan_out_plm_associations(file_hash)` returns DISTINCT (owner_email, plm_id) pairs. One PLM upload per pair. Result `plm_attachment_id` + `upload_timestamp` are replicated across all M:M rows sharing that pair (case (a) one-owner-N-items) or differ across rows (case (b) two-owners-N-items-two-PLMs).
+- **PLM fan-out is per-(owner_corp_id × PLM) pair within a milestone** per FR-79 (revised 2026-06-21): `fan_out_plm_associations(file_hash)` returns DISTINCT (owner_corp_id, plm_id) pairs. One PLM upload per pair. Result `plm_attachment_id` + `upload_timestamp` are replicated across all M:M rows sharing that pair (case (a) one-owner-N-items) or differ across rows (case (b) two-owners-N-items-two-PLMs). **Grouping key is `owner_corp_id`** (corp directory identifier, engineer-stable) per FR-5 + FR-8 step 2 + [D-035] — NOT email (which is used separately for FR-9 outreach: `owner_corp_usa_email` preferred, `owner_corp_email` fallback per [D-080]).
 - **Document TG-of-origin lives on `DocumentIndexRow.inferred_tg_name`** (2026-06-07): the TG IS knowable from the inbound channel (NSD ingress_nsd / email_group_alias / PLM-id reverse-lookup); recorded per-file (per-ingest), not per-association. Consumed by FR-83 TPM reassignment to shortlist candidate work-items within the TG.
 - **`download_url` is never persisted** (2026-06-07): per FR-61 download tokens are short-lived (TTL ≤ 300s default) and computed at page-render time via `make_download_token(file_hash, delivery_item_id)`. Token resolves server-side to the per-item `local_nsd_path` on the M:M row. Stored URLs would be stale on path migration, ambiguous in multi-item case, and defeat FR-61's short-lived intent. Worker-internal submission assembly (FR-41 / FR-73) reads NSD via SMB directly through `storage.read_file(NSDPath)` — no URL layer involved.
 - **Rule action / trigger references validated against template_schema registries** (2026-06-05): `AutomationRuleOverride.rule_id` resolution and `CommunicationLogRow.action_type` values reference action / trigger registries owned by `template_schema` (`RuleActionRegistry`, `RuleTriggerRegistry`). Storage is opaque to action/trigger semantics but consumers validate at read time. Unknown action/trigger strings are not blocked at write time — registries are customer-extensible per FR-28/FR-29.
@@ -854,7 +878,7 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 ## Depends on
 
 - `core/src/diagnostics/` — `STR-` error codes registered + RPT/MET/QC compact-report schemas
-- `core/src/template_schema/` — canonical entity enums (DocType incl. DEFAULT per `[D-053]`, IngestSource, Channel, Direction, Scope, DeliveryState, ItemType incl. DEFAULT, RuleActionType, RuleTriggerType, RuleSubTriggerType) per `[D-028]`; Pydantic base classes for entity hierarchy; `RuleActionRegistry` + `RuleTriggerRegistry` consumed for read-time validation of `AutomationRuleOverride` and `CommunicationLogRow.action_type`; `TagCatalogEntry` model mirrored by `TagCatalogRow` here; `FolderRoutingEntry` / `TGFolderRouting` mirrored by `TGFolderRoutingRow`; `DefaultWorkItemConfig` lives on `MilestoneBase.default_work_item_config`
+- `core/src/template_schema/` — canonical entity enums (DocType incl. `default` per `[D-053]`, IngestSource, Channel, Direction, Scope, DeliveryState, ItemType incl. `default` per item_type rename 2026-06-20, RuleActionType, RuleTriggerType, RuleSubTriggerType) per `[D-028]`; Pydantic base classes for entity hierarchy; `RuleActionRegistry` + `RuleTriggerRegistry` consumed for read-time validation of `AutomationRuleOverride` and `CommunicationLogRow.action_type`; `TagCatalogEntry` model mirrored by `TagCatalogRow` here; `FolderRoutingEntry` / `TGFolderRouting` mirrored by `TGFolderRoutingRow`; `DefaultWorkItemConfig` lives on `MilestoneBase.default_work_item_config`. **NOTE 2026-06-21**: TGGroupBase Pydantic model was DROPPED in template_schema per [D-051] denormalization + architect lock 2026-06-21; TG fields (tg_email_group_alias, tg_owner_*, corp_id_list, ingress_nsd, folder_routing_enabled, etc.) now live as denormalized columns on `DeliveryItemBase`. Storage consumes these TG values from the caller via explicit method params (e.g., `set_folder_routing_for_tg`'s tg_name + `reassign_document_to_workitem`'s target_tg_name) — never reads a TGGroupBase row.
 
 ## Depended on by
 
