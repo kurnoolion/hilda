@@ -54,7 +54,12 @@ class CredentialService(Protocol):
     Ph-3+ with no caller-side change per [D-019].
     """
 
-    async def get_credential(self, pm_id: str, system_type: str) -> Credential: ...
+    async def get_credential(
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
+    ) -> Credential: ...
 
 
 def _parse_env_lines(text: str) -> dict[str, str]:
@@ -202,7 +207,17 @@ class SopsCredentialService:
             self._loaded = True
         logger.warning(format_code("CRD-W002"))
 
-    async def get_credential(self, pm_id: str, system_type: str) -> Credential:
+    async def get_credential(
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
+    ) -> Credential:
+        # Signature extended 2026-06-21 per FR-25 (b) cascade lock 2026-06-19
+        # (per-(account, customer) customer JIRA) + FR-19/77 (per-customer Google Drive).
+        # NOTE: per-(account, customer) + per-customer routing logic is a development-phase task —
+        # current implementation is shared-credential fallback only. See MODULE.md File layout
+        # for the target resolution semantics; CRD-E005 (customer_id required) check pending.
         try:
             system = SystemType(system_type)
         except ValueError:
@@ -216,6 +231,8 @@ class SopsCredentialService:
             return exact
 
         # Ph-1/Ph-2 fallback: shared ops-team credential regardless of pm_id.
+        # TODO(dev-phase): branch on system to route customer_jira -> (pm_id, system, customer_id),
+        #                  customer -> (None, system, customer_id), others -> shared-fallback.
         for (cached_pm_id, cached_system), credential in self._cache.items():
             if cached_system == system.value:
                 if pm_id != cached_pm_id:
@@ -225,7 +242,8 @@ class SopsCredentialService:
                 return credential
 
         raise PipelineError(
-            "CRD-E001", context={"pm_id": pm_id, "system": system.value}
+            "CRD-E001",
+            context={"pm_id": pm_id, "system": system.value, "customer_id": customer_id or ""},
         )
 
     def install_sighup_handler(self) -> bool:

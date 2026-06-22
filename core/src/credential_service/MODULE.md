@@ -38,13 +38,23 @@ class Credential:
 ```python
 class SystemType(str, Enum):
     """Bounded set of external system kinds credential_service serves credentials for.
-    Tri-backend LLM split per `[D-052]` impl note 2026-06-08 — was single LLM_GATEWAY pre-2026-06-09."""
-    ISSUE_TRACKER     = "issue_tracker"      # corp PLM (via corp_plm_gateway) + customer JIRA
-    MESSENGER         = "messenger"           # corp messenger (via corp_messenger_gateway)
-    CUSTOMER          = "customer"            # customer portal / submission system (Ph-1/Ph-2 Google Drive per `[D-054]`)
-    EMAIL             = "email"               # IMAP/SMTP mailbox per `[D-016]`
-    SHAREPOINT        = "sharepoint"          # SP service account (NTLM/Kerberos)
-    # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single LLM_GATEWAY):
+    Tri-backend LLM split per `[D-052]` impl note 2026-06-08 — was single LLM_GATEWAY pre-2026-06-09.
+
+    **Per-system credential scope** (architect lock 2026-06-21):
+    - Per-(account, customer): ISSUE_TRACKER (customer JIRA only in Ph-1; pm_id=account_id)
+    - Per-customer: CUSTOMER (Google Drive per FR-19/77; customer_id required)
+    - Single shared: EMAIL, SHAREPOINT, LLM_OLLAMA_A4000, LLM_VLLM_DGX, LLM_CORP_LLM
+    - **No HILDA-credential** (forward-compat enum-only; Ph-1/Ph-2 always raises CRD-E001):
+      MESSENGER — corp messenger gateway uses IP-allowlist + gateway-side auth;
+                  HILDA passes corp identity as API parameter, not credential.
+      (ISSUE_TRACKER lookups for corp PLM also raise CRD-E001 — see FR-25 (a)
+      pattern (d); only customer JIRA has a credential under ISSUE_TRACKER.)"""
+    ISSUE_TRACKER     = "issue_tracker"      # customer JIRA in Ph-1; corp PLM is no-credential per FR-25 (a)
+    MESSENGER         = "messenger"           # NO HILDA-credential in Ph-1/Ph-2 — IP-allowlist + gateway-side auth
+    CUSTOMER          = "customer"            # customer portal / submission system (Ph-1: Google Drive per `[D-054]`); per-customer
+    EMAIL             = "email"               # IMAP/SMTP mailbox per `[D-016]`; single shared
+    SHAREPOINT        = "sharepoint"          # SP service account (NTLM/Kerberos); single shared
+    # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single LLM_GATEWAY); single shared per backend:
     LLM_OLLAMA_A4000  = "llm_ollama_a4000"   # Ollama on RTX A4000 box (lab subnet); typically no auth or basic per per-deployment policy
     LLM_VLLM_DGX      = "llm_vllm_dgx"        # vLLM on DGX Spark box (lab subnet); typically no auth or basic per per-deployment policy
     LLM_CORP_LLM      = "llm_corp_llm"        # corp on-prem LLM (off-lab); API token / OAuth2 per `[D-007]` / corp policy
@@ -56,10 +66,19 @@ class SystemType(str, Enum):
 class CredentialService(Protocol):
     """All adapters depend on this Protocol, not on the concrete implementation.
     Enables MockCredentialService in tests and a future Vault-backed swap at Ph-3+
-    with no caller-side change per [D-019]."""
+    with no caller-side change per [D-019].
+
+    Signature extended 2026-06-21 with `customer_id` per FR-25 (b) cascade lock
+    2026-06-19 — customer JIRA carrier governance requires per-(account, customer)
+    credentials; customer adapter (Google Drive) requires per-customer credentials
+    per FR-19/77. Forward-compat default `customer_id=None` preserves all prior
+    call sites for single-credential systems (email, sharepoint, llm_*)."""
 
     async def get_credential(
-        self, pm_id: str, system_type: str
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
     ) -> Credential: ...
 
 class SopsCredentialService:
@@ -74,12 +93,26 @@ class SopsCredentialService:
     ) -> None: ...
 
     async def get_credential(
-        self, pm_id: str, system_type: str
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
     ) -> Credential:
         """Resolution order (Ph-1/Ph-2):
-        1. Lookup (pm_id, system_type) in process cache.
-        2. If absent, fall back to the shared ops-team credential for system_type.
-        3. If still absent, raise CRD-E001."""
+        1. Per-(account, customer) systems (customer_jira; pm_id = account_id):
+           lookup `customer_jira/<pm_id>/<customer_id>.enc.env`. Raise CRD-E005
+           if `customer_id` is None.
+        2. Per-customer systems (customer; pm_id ignored in Ph-1/Ph-2):
+           lookup `customer/<customer_id>.enc.env`. Raise CRD-E002 if `customer_id`
+           is None.
+        3. Single-credential systems (email, sharepoint, llm_*):
+           lookup `<system_type>.enc.env`. `customer_id` parameter is ignored;
+           `pm_id` is ignored in Ph-1/Ph-2 (per [D-019] impl note 2026-05-24
+           — shared ops-team credential).
+        4. corp PLM gateway / corp messenger gateway: raise CRD-E001
+           (no HILDA-side credential per FR-25 (a) + FR-51 pattern (d);
+           callers must use the IP-allowlist + identity-assertion pattern instead).
+        5. If still absent: raise CRD-E001 with (pm_id, system_type, customer_id)."""
 
     async def reload(self) -> None:
         """Re-runs `sops --decrypt` on every file in env_dir and rebuilds the cache.
@@ -104,32 +137,67 @@ class SopsCredentialService:
 ```python
 class MockCredentialService:
     """In-memory credential store for tests. Pre-populated by test fixtures via
-    register(); raises CRD-E001 for unknown (pm_id, system_type)."""
+    register(); raises CRD-E001 for unknown (pm_id, system_type, customer_id).
+    Signature aligned with CredentialService Protocol 2026-06-21."""
 
-    def register(self, cred: Credential) -> None: ...
-    async def get_credential(self, pm_id: str, system_type: str) -> Credential: ...
+    def register(self, cred: Credential, customer_id: str | None = None) -> None: ...
+    async def get_credential(
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
+    ) -> Credential: ...
 ```
 
 ---
 
 ## File layout (Ph-1/Ph-2)
 
+**UPDATED 2026-06-21**: per FR-25 (b) cascade lock 2026-06-19 (per-account/per-customer customer JIRA credentials for carrier governance); per FR-25 (a) + FR-51 pattern (d) corp PLM is **no-HILDA-credential** (IP-allowlist + gateway-side auth); per architect confirmation 2026-06-21 corp messenger is also **no-HILDA-credential** (IP-allowlist + gateway-side auth); per Q2 architect confirmation 2026-06-21 customer adapter (Google Drive per FR-19/77) needs per-customer credentials.
+
+**Two views of the same files** (sops-encrypted; never decrypted to disk):
+
 ```
+# REPO SOURCE-OF-TRUTH (sops-encrypted; checked into git per [D-038]):
+customizations/credentials/
+  age.key.pub                              ← age public key (encryption-side, in git)
+  # Single shared-credential systems:
+  email.env.sops                           ← HILDA mailbox IMAP/SMTP
+  sharepoint.env.sops                      ← SP service account (NTLM/Kerberos)
+  llm_ollama_a4000.env.sops                ← may be empty / no-auth lab deployment
+  llm_vllm_dgx.env.sops                    ← may be empty / no-auth lab deployment
+  llm_corp_llm.env.sops                    ← corp LLM API token / OAuth2 per [D-007]
+  # Per-(account, customer) — FR-25 (b) customer JIRA carrier governance:
+  customer_jira/
+    <account_id>/                          ← assigned_pm_id (=TPM.User_name per [D-088])
+                                              OR HILDA OPS member id (corp dir slug)
+      <customer_id>.env.sops               ← e.g. customer_jira/y.vasilyev/MMK.env.sops
+  # Per-customer — FR-19/77 carrier portal (Ph-1: Google Drive):
+  customer/
+    <customer_id>.env.sops                 ← e.g. customer/MMK.env.sops
+
+# CONTAINER VIEW (bind-mounted from customizations/credentials/ at container start
+# per [D-026] Docker Compose; same encrypted files, runtime path):
 /etc/hilda/
-  age.key                                      ← mode 0400, owned by hilda-svc-local
-  credentials/
-    issue_tracker.enc.env                      ← sops-encrypted; HILDA_ITR_*
-    messenger.enc.env
-    customer.enc.env
+  age.key                                  ← age PRIVATE key (mode 0400, hilda-svc owned;
+                                              ops-provisioned, NOT in git)
+  credentials/                             ← bind-mount target of customizations/credentials/
     email.enc.env
     sharepoint.enc.env
-    # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single llm_gateway.enc.env):
-    llm_ollama_a4000.enc.env                   ← may be empty / no-auth in default lab deployment
-    llm_vllm_dgx.enc.env                       ← may be empty / no-auth in default lab deployment
-    llm_corp_llm.enc.env                       ← API token / OAuth2 per `[D-007]`
+    llm_ollama_a4000.enc.env
+    llm_vllm_dgx.enc.env
+    llm_corp_llm.enc.env
+    customer_jira/<account_id>/<customer_id>.enc.env
+    customer/<customer_id>.enc.env
 ```
 
-Each `.enc.env` declares env-var-style entries for the shared ops-team credential of that system. Ph-3+ Vault path layout is `secret/hilda/<pm_id>/<system_type>` per `[D-019]` (interface-stable migration target; loader swaps, callers don't).
+**NO HILDA-side credential files for** (architect lock 2026-06-21):
+- **corp PLM gateway** — HILDA calls gateway APIs passing the corp human id (from `customizations/issue_tracker/<corp_plm_slug>_adapter_config.yaml`) as an API parameter; gateway authenticates to corp PLM using gateway-side fixed-key infrastructure; HILDA→gateway is lab-subnet IP-allowlist. Per FR-25 (a) + FR-51 pattern (d).
+- **corp messenger gateway** — same pattern as corp PLM gateway; HILDA passes corp identity as API parameter; gateway handles corp messenger auth; HILDA→gateway is lab-subnet IP-allowlist.
+
+These two systems remain in the `SystemType` enum for forward-compatibility (Ph-3+ pattern may shift) but `credential_service` has no `.env.sops` files for them in Ph-1/Ph-2 — lookups via `get_credential` for these system_types raise `CRD-E001` by design (callers should never call for these systems per FR-51).
+
+Each `.env.sops` declares env-var-style entries for the credential. Ph-3+ Vault path layout is `secret/hilda/<pm_id>/<system_type>/[<scope_key>]` per `[D-019]` (interface-stable migration target; loader swaps, callers don't).
 
 **Env-var layout inside each decrypted file** (implementation 2026-06-11; ops-facing contract — see strand draft decision): `HILDA_<PREFIX>_<FIELD>`, where `<PREFIX>` comes from `SYSTEM_ENV_PREFIX` in `protocol.py` (module-prefix abbreviation where one exists — `ITR` / `MSG` / `CAD` / `EML` / `SHP`; LLM backends use the uppercased system_type). Fields: `AUTH_TYPE` (required when any credential is declared) plus the carriers that auth_type requires (`API_TOKEN`; `USERNAME` + `PASSWORD`; `KEYTAB_PATH`; `BEARER`), optional `PM_ID` (default `ops-team`) and `EXPIRES_AT` (ISO-8601). An empty or carrier-free file declares no credential — legal for the no-auth lab LLM backends (lookups raise CRD-E001); a declared-but-incomplete credential raises CRD-E004 naming the missing field. `--validate --system <type>` is the ops-side conformance check.
 
@@ -150,10 +218,11 @@ Each `.enc.env` declares env-var-style entries for the shared ops-team credentia
 ## Error codes (CRD prefix — registered in `diagnostics/error_codes.py`)
 
 ```
-CRD-E001  No credential for pm_id='{pm_id}' system_type='{system}'
+CRD-E001  No credential for pm_id='{pm_id}' system_type='{system}' customer_id='{customer_id}'
 CRD-E002  sops decrypt failed for '{file}': {reason}  (age key missing, corrupt, or not authorized)
 CRD-E003  Unknown system_type '{system}' — not in SystemType enum
 CRD-E004  Credential file '{file}' malformed: missing required field '{field}'
+CRD-E005  Required customer_id missing for per-customer/per-(account,customer) system_type='{system}'  (added 2026-06-21 per FR-25 (b) cascade)
 CRD-W001  Credential cache miss for pm_id='{pm_id}' — falling back to ops-team credential  (Ph-1/Ph-2 expected; absent at Ph-3+)
 CRD-W002  Credential reload triggered by SIGHUP — cache rebuilt
 ```
@@ -241,19 +310,19 @@ Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_be
 - `main() -> None` — function — pub — CLI entrypoint: `--diagnostic` (decrypt + validate every .enc.env, CRD-RPT), `--mock` (MockCredentialService round-trip per SystemType), `--validate --system <type>` (CRD-QC); `--env-dir` / `--age-key` path overrides.
 
 ### `mock_service.py`
-- `MockCredentialService` — class — pub (via `__all__`) — In-memory exact-match credential store for tests; `register()` + `get_credential()`; CRD-E001 on unknown pair, CRD-E003 on unknown system; `with_all_system_types()` fixture factory.
+- `MockCredentialService` — class — pub (via `__all__`) — In-memory exact-match credential store for tests; `register(cred, customer_id=None)` + `get_credential(pm_id, system_type, customer_id=None)` (signature aligned with Protocol 2026-06-21); CRD-E001 on unknown tuple, CRD-E003 on unknown system; `with_all_system_types()` fixture factory.
 
 ### `protocol.py`
 - `AuthType` — type alias — pub (via `__all__`) — Literal of the five auth types (api_token | basic | ntlm | kerberos | oauth2_bearer).
 - `Credential` — frozen dataclass — pub (via `__all__`) — One credential as served to adapters; secret-free `__repr__`/`__str__`; `value_carriers_consistent()` consistency check.
-- `SYSTEM_ENV_PREFIX` — module constant (dict) — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`).
-- `SystemType` — Enum — pub (via `__all__`) — 8-value closed enum of external system kinds (5 systems + 3 LLM backends per [D-052]).
+- `SYSTEM_ENV_PREFIX` — module constant (dict) — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`); CUSTOMER prefix renamed CAD→CSA on 2026-06-21 aligning with diagnostics PREFIX_REGISTRY.
+- `SystemType` — Enum — pub (via `__all__`) — 8-value closed enum of external system kinds (5 systems + 3 LLM backends per [D-052]); ISSUE_TRACKER + MESSENGER kept as forward-compat enum values but have no HILDA-credential in Ph-1/Ph-2 per FR-25 (a) + architect lock 2026-06-21.
 
 ### `qc_templates.py`
 - `CREDENTIAL_COMPLETENESS` — module constant — pub (via `__all__`) — `CRD:credential_completeness` QCTemplate (present / auth_type / value_carriers_consistent / result); registered into the central QC registry at import.
 
 ### `service.py`
-- `CredentialService` — Protocol — pub (via `__all__`) — Async credential-retrieval contract per [D-019]: `get_credential(pm_id, system_type) -> Credential`.
+- `CredentialService` — Protocol — pub (via `__all__`) — Async credential-retrieval contract per [D-019]: `get_credential(pm_id, system_type, customer_id=None) -> Credential` (signature extended 2026-06-21 per FR-25 (b) per-(account, customer) JIRA + FR-19/77 per-customer Google Drive).
 - `OPS_TEAM_PM_ID` — module constant — pub (via `__all__`) — Ph-1/Ph-2 shared ops-team attribution token ("ops-team") per [D-019] impl note 2026-05-24.
-- `SopsCredentialService` — class — pub (via `__all__`) — sops-backed implementation: idempotent decrypt-once `load()`, process-lifetime cache, exact → ops-team fallback → CRD-E001 resolution, ops-triggered `reload()`, Windows-safe `install_sighup_handler() -> bool`.
+- `SopsCredentialService` — class — pub (via `__all__`) — sops-backed implementation: idempotent decrypt-once `load()`, process-lifetime cache, exact → ops-team fallback → CRD-E001 resolution, ops-triggered `reload()`, Windows-safe `install_sighup_handler() -> bool`; per-(account, customer) + per-customer routing logic deferred to development phase (TODO marker in service.py).
 <!-- END:STRUCTURE -->

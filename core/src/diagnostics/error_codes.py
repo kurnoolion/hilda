@@ -89,7 +89,7 @@ ERROR_CODES: dict[str, ErrorCode] = {
     ),
     # --- credential_service (CRD) ---
     "CRD-E001": ErrorCode(
-        "CRD-E001", "No credential for pm_id='{pm_id}' system_type='{system}'", False
+        "CRD-E001", "No credential for pm_id='{pm_id}' system_type='{system}' customer_id='{customer_id}'", False
     ),
     "CRD-E002": ErrorCode(
         "CRD-E002", "sops decrypt failed for '{file}': {reason}", False
@@ -99,6 +99,9 @@ ERROR_CODES: dict[str, ErrorCode] = {
     ),
     "CRD-E004": ErrorCode(
         "CRD-E004", "Credential file '{file}' malformed: missing required field '{field}'", False
+    ),
+    "CRD-E005": ErrorCode(
+        "CRD-E005", "Required customer_id missing for per-customer/per-(account,customer) system_type='{system}'", False
     ),
     "CRD-W001": ErrorCode(
         "CRD-W001", "Credential cache miss for pm_id='{pm_id}' — falling back to ops-team credential", True

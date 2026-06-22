@@ -23,14 +23,17 @@ class SystemType(str, Enum):
     Tri-backend LLM split per [D-052] impl note 2026-06-08.
     """
 
-    ISSUE_TRACKER = "issue_tracker"      # corp PLM (via corp_plm_gateway) + customer JIRA
-    MESSENGER = "messenger"              # corp messenger (via corp_messenger_gateway)
-    CUSTOMER = "customer"                # customer portal / submission system per [D-054]
-    EMAIL = "email"                      # IMAP/SMTP mailbox per [D-016]
-    SHAREPOINT = "sharepoint"            # SP service account (NTLM/Kerberos)
-    LLM_OLLAMA_A4000 = "llm_ollama_a4000"  # Ollama on RTX A4000 box (lab subnet)
-    LLM_VLLM_DGX = "llm_vllm_dgx"          # vLLM on DGX Spark box (lab subnet)
-    LLM_CORP_LLM = "llm_corp_llm"          # corp on-prem LLM (off-lab) per [D-007]
+    # Per-system credential scope (architect lock 2026-06-21):
+    ISSUE_TRACKER = "issue_tracker"      # customer JIRA only in Ph-1 (per-(account,customer) per FR-25 (b));
+                                          # corp PLM is NO-credential pattern (d) per FR-25 (a) — lookups raise CRD-E001
+    MESSENGER = "messenger"              # NO HILDA-credential Ph-1/Ph-2 — IP-allowlist + gateway-side auth;
+                                          # kept in enum for forward-compat; lookups raise CRD-E001
+    CUSTOMER = "customer"                # customer portal / submission system per [D-054]; per-customer (Ph-1: Google Drive per FR-19/77)
+    EMAIL = "email"                      # IMAP/SMTP mailbox per [D-016]; single shared
+    SHAREPOINT = "sharepoint"            # SP service account (NTLM/Kerberos); single shared
+    LLM_OLLAMA_A4000 = "llm_ollama_a4000"  # Ollama on RTX A4000 box (lab subnet); single shared
+    LLM_VLLM_DGX = "llm_vllm_dgx"          # vLLM on DGX Spark box (lab subnet); single shared
+    LLM_CORP_LLM = "llm_corp_llm"          # corp on-prem LLM (off-lab) per [D-007]; single shared
 
 
 # Env-var prefix per system inside its decrypted .enc.env, e.g. HILDA_ITR_AUTH_TYPE.
@@ -39,7 +42,7 @@ class SystemType(str, Enum):
 SYSTEM_ENV_PREFIX: dict[SystemType, str] = {
     SystemType.ISSUE_TRACKER: "ITR",
     SystemType.MESSENGER: "MSG",
-    SystemType.CUSTOMER: "CAD",
+    SystemType.CUSTOMER: "CSA",  # renamed from CAD on 2026-06-21 — align with diagnostics PREFIX_REGISTRY
     SystemType.EMAIL: "EML",
     SystemType.SHAREPOINT: "SHP",
     SystemType.LLM_OLLAMA_A4000: "LLM_OLLAMA_A4000",

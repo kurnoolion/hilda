@@ -21,20 +21,29 @@ class MockCredentialService:
     """
 
     def __init__(self) -> None:
-        self._store: dict[tuple[str, str], Credential] = {}
+        # Key tuple extended 2026-06-21: (pm_id, system_type, customer_id) supports
+        # per-(account, customer) JIRA + per-customer Google Drive routing.
+        # customer_id=None for single-shared-credential systems (current Ph-1/Ph-2 pattern).
+        self._store: dict[tuple[str, str, str | None], Credential] = {}
 
-    def register(self, cred: Credential) -> None:
-        self._store[(cred.pm_id, cred.system_type)] = cred
+    def register(self, cred: Credential, customer_id: str | None = None) -> None:
+        self._store[(cred.pm_id, cred.system_type, customer_id)] = cred
 
-    async def get_credential(self, pm_id: str, system_type: str) -> Credential:
+    async def get_credential(
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
+    ) -> Credential:
         try:
             system = SystemType(system_type)
         except ValueError:
             raise PipelineError("CRD-E003", context={"system": system_type})
-        credential = self._store.get((pm_id, system.value))
+        credential = self._store.get((pm_id, system.value, customer_id))
         if credential is None:
             raise PipelineError(
-                "CRD-E001", context={"pm_id": pm_id, "system": system.value}
+                "CRD-E001",
+                context={"pm_id": pm_id, "system": system.value, "customer_id": customer_id or ""},
             )
         return credential
 
