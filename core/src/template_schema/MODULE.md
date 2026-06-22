@@ -1,6 +1,6 @@
 # Module: template_schema
 
-> **Status:** Draft + 2026-06-08 cascade applied (`[D-053]` impl note 2026-06-08 — ItemType enum collapse 7→4 + DocType enum 4→5 + alignment invariant). Sections curated; pending section-by-section user review before contract is finalized. Code implementation begins after `/switch-phase development`.
+> **Status:** Draft + 2026-06-21 architect cascade applied (FR-77/FR-78/FR-81/FR-82/FR-88 + Ph-1 setup-window owner-editability + per-customer Projects + delivery_path_template + nested tag-set + 4-field owner identity + TGGroupBase dropped per [D-051] denormalization). Prior 2026-06-08 cascade (`[D-053]` ItemType 7→4 + DocType 4→5 + alignment invariant) preserved. Code implementation continues in development phase.
 >
 > **Rollback log:**
 > - **2026-06-12 (architecture re-entry — SP UI engineer 2026-06-10 review absorption)** — three sub-edits absorbing SP UI engineer review items (STATUS line 263 / 280 / 288 / 316 Flags): (a) **field rename** `DeliveryItemBase.milestone_gating: bool` → `DeliveryItemBase.is_milestone_gating: bool` per SP UI engineer naming preference (resolves STATUS line 316 "MilestoneGating schema" item); semantics unchanged — boolean flag indicating whether the item gates milestone closure (FR-64 enablement). (b) **New Invariant** — `DeliveryItemBase.item_no` is immutable per item lifetime: once assigned at template instantiation, never changes for the life of the work-item; reorder operations on SP UI MUST NOT mutate the value. Referential integrity for FR-77 `FolderRoutingEntry.item_no` (line 349) + storage `TGFolderRoutingRow.item_no` + dashboard rendering depends on this; reassignment is via FR-83 (which deletes/creates DocumentItemAssociation rows, not item_no). Resolves STATUS line 316 "ItemNumber-stability schema" item. (c) **Cross-reference** to D-DRAFT-Y (2026-06-12 SP UI engineer denormalization of TGGroups onto DeliveryItems SP list — TG fields are SP-side read-only mirrors; YAML remains source-of-truth for TG values). TGGroupBase Pydantic model UNCHANGED here (still defines the TG schema); SP-list-side denormalization is a `customizations/sharepoint_config/` concern. No code change required in this module — pure docstring + Invariant + field rename. Returning to development phase next.
@@ -21,8 +21,10 @@
 ```python
 class DeliveryState(str, Enum):
     """Extensible via DeliveryStateRegistry — new values added through config, not code.
-    Full 10-state enum per FR-7 (rewritten 2026-05-15)."""
-    OPEN                 = "Open"                 # initial; set at tracker creation
+    Full 11-state enum per FR-7 (NOT_STARTED added 2026-06-21 — initial state at setup_milestone
+    per FR-7 + FR-2 R&R lock; was missing in 2026-05-15 rewrite)."""
+    NOT_STARTED          = "Not Started"          # initial at setup_milestone per FR-7 + FR-2 R&R; hardcoded by SP UI engineer's web part
+    OPEN                 = "Open"                 # transitioned by HILDA at Start Collection per FR-8 step 1
     OUTREACH_SENT        = "OutreachSent"         # initial outreach dispatched per FR-9
     DOCUMENT_RECEIVED    = "DocumentReceived"     # document arrived via any ingest channel
     UNDER_PM_REVIEW      = "UnderPMReview"        # active TPM review gate per FR-56
@@ -220,100 +222,173 @@ def make_slug(human_name: str) -> str:
 
 ```python
 class DeviceBase(BaseModel):
+    """Per-device canonical fields. NOTE: `assigned_pm_id` here is the template-time
+    expected PM identity (informational); at runtime HILDA resolves PM 3-tuple via
+    per-customer Projects_<customer_id> lookup per [D-088] + NFR-21 2026-06-21 amendment.
+    The template-time value may be authoritative for setup_milestone provisioning logic;
+    runtime always defers to the SP Projects list."""
     device_id:          str
     device_name:        str
     customer_id:        str
-    assigned_pm_id:     str
+    assigned_pm_id:     str | None = None    # template-time PM identity; runtime resolves via Projects_<customer_id> per [D-088]
     status:             str   # validated against DeliveryStateRegistry equivalent
-    template_id:        str | None
-    path_slug:          str   # [a-zA-Z0-9_-]+, immutable after creation
-    target_launch_date: date | None
+    template_id:        str | None = None
+    path_id:            str   # [a-zA-Z0-9_-]+, immutable after creation (renamed from path_slug 2026-06-21 per session slug→id rename)
+    target_launch_date: date | None = None
 
 class MilestoneBase(BaseModel):
-    milestone_id:   str
-    device_id:      str
-    milestone_name: str
+    """Per-milestone canonical fields. Milestones SP list is GLOBAL per architect lock
+    2026-06-21 (intentional asymmetry — milestone names like LE-2 reused across carriers;
+    Projects + Deliverables are per-customer). Composite uniqueness enforced by SP UI
+    engineer's setup_milestone via `(carrier, project_id, project_model, Title)`."""
+    milestone_id:   str        # SP intrinsic auto-Counter Id (per architect direction 2026-06-21)
+    carrier:        str        # = customer_id; denormalized per Milestones row for composite-key
+    project_id:     int        # SP intrinsic Id of Projects_<customer_id> row (per [D-088] + NFR-21 2026-06-21 amendment)
+    project_model:  str        # = device_id; denormalized per Milestones row for composite-key
+    milestone_name: str        # = Title (SP intrinsic) per [D-091] YAML key naming
     sort_order:     int
-    target_date:    date | None
+    target_date:    date | None  # sole authoritative deadline per [D-085]; TPM types before Start Collection per FR-88
     status:         MilestoneStatus
     email_cc_list:  list[dict] | None   # [{name, email, role}]; applied to all emails in this milestone
-    path_slug:      str
+    path_id:        str        # canonical path slug per [D-013] (renamed from path_slug 2026-06-21)
     # Per-milestone fields added 2026-06-05 (FR-78 / [D-053]):
-    default_work_item_config: DefaultWorkItemConfig | None = None  # per FR-78 — per-milestone OVERRIDE of the tracker-wide default. Typed as `DefaultWorkItemConfig | None` for type safety (was `dict | None` pre-2026-06-08 — changed for Pydantic round-trip + explicit semantics). None → inherit tracker-wide default from CustomerTemplateBase. Non-None → REPLACES the tracker-wide config for this milestone (full replacement, NOT partial merge — callers must specify all fields explicitly). Configuration is STRUCTURAL (how the default work-item entity is instantiated: name, sort_order, immutability flags); routing/candidate filtering at FR-83 reassignment is a separate query-time concern that runs `SELECT DeliveryItem WHERE milestone_id = doc.milestone_id AND tg_name = doc.DocumentIndexRow.inferred_tg_name AND item_type ∈ actionable types` per `[D-060]` impl note 2026-06-08 — NOT stored in this config. Exactly one default work-item per milestone (NOT per TG).
+    default_work_item_config: DefaultWorkItemConfig | None = None  # per FR-78 — per-milestone OVERRIDE of the tracker-wide default. Typed as `DefaultWorkItemConfig | None` for type safety. None → inherit tracker-wide default from CustomerTemplateBase. Non-None → REPLACES the tracker-wide config (full replacement, NOT partial merge). Configuration is STRUCTURAL (how the default work-item entity is instantiated); routing/candidate filtering at FR-83 reassignment is a separate query-time concern per `[D-060]` impl note 2026-06-08. Exactly one default work-item per milestone (NOT per TG).
+    # HILDA-managed runtime button-trigger timestamps (NOT authored in template.yaml;
+    # written by SP UI engineer's web part on button click; read by HILDA via SP-alert):
+    milestone_collection_started_at:    datetime | None = None  # SP UI engineer writes on Start Collection click; HILDA reads alert and performs FR-8 downstream actions
+    milestone_submission_triggered_at:  datetime | None = None  # SP UI engineer writes on Submit Milestone click; HILDA reads alert + performs submission actions (FR-69/FR-77)
+    closed_all_items_triggered_at:      datetime | None = None  # SP UI engineer writes trigger on Close All Items click per FR-64 Option (b); HILDA dispatches close_all_items Celery task + cascades per-item delivery_state = Closed via [D-064]
+    refresh_requested_at:               datetime | None = None  # Ph-2 per [D-089]
+    # HILDA-managed milestone-level state:
+    milestone_completion_pct:           int = 0     # PERCENTAGE; HILDA-written per FR-70 milestone-level aggregation
+    # Download-package fields (Ph-2 per [D-089]):
+    download_package_request_timestamp: datetime | None = None  # SP-internal 32-char truncation: download_package_request_timesta per FR-40 [D-065]
+    download_package_status:            str | None = None       # Ph-2 STR Choice (pending/in_progress/ready/failed)
+    download_package_url:               str | None = None       # Ph-2 STR (URL)
+    download_package_generated_at:      datetime | None = None  # Ph-2 DateTime
 
 class DeliveryItemBase(BaseModel):
+    """Per-work-item canonical fields. As of 2026-06-21:
+    - Owner identity is 4-field free-form text per FR-88 + [D-080] + [D-086]
+      (owner_corp_usa_email, owner_corp_email, owner_corp_id, owner_name); single
+      `owner_email` removed.
+    - TG fields denormalized onto this model per [D-051] (TGGroups SP list dropped;
+      TGGroupBase Pydantic model removed; TG fields now live on each row).
+    - `item_description` is nested JSON list-of-lists per FR-82 (per-document tag-sets)
+      — supersedes the 2026-06-05 comma-separated string framing; TSC-W007 subset detection
+      + TSC-W008 doc_count consistency enforced.
+    - `force_tracking_enabled` is sole per-item tracking gate (SP BOOL column-default=true)
+      per FR-81 option (a) lock 2026-06-20; per-TG `tracking_enabled` no longer exists.
+    - `target_folder` is template-author-supplied (per-item sub-path under milestone HOME);
+      runtime composes upload destination = customer_delivery_info + delivery_path_template
+      (expanded) + target_folder per FR-77 + NFR-21 §6 amendment 2026-06-21.
+    """
     item_id:                         str
     item_no:                         int        # sequential within milestone; unique on (milestone_id, item_no)
     milestone_id:                    str        # parent milestone — no Deliverable level ([D-028])
-    tg_name:                         str | None # validated against TGNameRegistry; foreign-key-like label to TGGroupBase per [D-049] / [D-051]
     item_name:                       str
-    item_description:                str | None   # per FR-82 (revised 2026-06-05) — comma-separated tag list (catalog-validated); replaces free-form description. Empty/null allowed. Validator raises TSC-W003 on unknown tags (warning, not error — tag catalog is customer-extensible). Tags propagate to active trackers via ItemModified.TagsModified → PropagateTagsToActiveTrackers per FR-82.
+    item_description:                list[list[str]] | None  # per FR-82 nested tag-set lock 2026-06-20 — per-document tag-sets as JSON list-of-lists. Outer list = one entry per expected document (length must equal doc_count per TSC-W008). Inner list = tag-set for that document (e.g. [["Sustainability"], ["SDoc"], ["Qualification", "Product"]] for 3 expected docs). Empty/null only for confirmation items + default WI. Validator raises TSC-W007 on subset-overlap across rows in the same milestone+TG; TSC-W008 on doc_count ≠ len(item_description); TSC-W003 on unknown tags. Tags propagate via ItemModified.TagsModified → PropagateTagsToActiveTrackers per FR-82.
     delivery_state:                  str   # validated against DeliveryStateRegistry
+    prior_delivery_state:            str | None = None  # HILDA-managed per FR-7 Delayed/Blocked exit paths; null in normal flow
     expected_completion_date:        date | None
     actual_completion_date:          date | None  # auto-set when delivery_state → OwnerClosed (per FR-15 update)
     item_type:                       str   # validated against ItemTypeRegistry
-    owner_name:                      str | None
-    owner_email:                     str | None
+    # 4-field owner identity per FR-88 + [D-080] + [D-086] (free-form text, no AD validation;
+    # all 4 null in template per Ph-1 setup-window lock 2026-06-20 — TPM types in SP UI
+    # between setup_milestone and Start Collection):
+    owner_corp_usa_email:            str | None = None   # preferred outreach recipient per [D-080]
+    owner_corp_email:                str | None = None   # fallback outreach recipient (corp non-USA domains)
+    owner_corp_id:                   str | None = None   # corp directory identifier; PLM grouping key per FR-5 + [D-035]; engineer-stable
+    owner_name:                      str | None = None
     tracking_modality:               list[str]  # MULTI-VALUE per [D-037] — list of TrackingModality values; validated against TrackingModalityRegistry
-    actual_item_info:                str | None  # PLM issue URL for (owner × milestone) pair per FR-57, set on first document arrival
-    plm_id:                          str | None  # PLM system ID (e.g. Jira-style); one issue per (owner × milestone) per [D-035] / FR-8
-    handset:                         bool = False  # form factor applicability flags (static, from template)
+    actual_item_info:                str | None  # PLM issue URL for (device, milestone, owner_corp_id) tuple per FR-57; set on first document arrival
+    plm_id:                          str | None  # PLM system ID; one issue per (device, milestone, owner_corp_id) tuple per [D-035] / FR-8
+    handset:                         bool = False  # form factor applicability flags (static, from template) per [D-084]
     tablet:                          bool = False
     wearable:                        bool = False
-    mr:                              bool = False
+    ir:                              bool = False
+    osmr:                            bool = False
+    rmr:                             bool = False
     hmr_smr:                         bool = False
     customer_delivery_modality:      str   # validated against CustomerDeliveryModalityRegistry
-    customer_delivery_info:          str | None
-    customer_delivery_credential_id: str | None
+    customer_delivery_info:          str | None  # base URL (e.g. "drive.google.com") — denormalized per-item from CustomerTemplateBase.customer_delivery_info at setup_milestone
+    customer_delivery_credential_id: str | None  # opaque credential reference (Ph-3+ Vault key); Ph-1/Ph-2 unused
     owner_status_note:               str | None  # latest interim owner update; auto-populated from inbound
     comment:                         str | None
     last_updated:                    datetime
     last_owner_contacted:            datetime | None
+    last_reminder_triggered_at:      datetime | None  # HILDA + SP UI dual-writer per NFR-21 §5 amendment 2026-06-21
+    last_owner_response_at:          datetime | None  # set by FR-12 inbound parsing; feeds FR-10 no-response detection
+    reminder_count:                  int = 0  # incremented per outreach event per FR-9 / FR-10 / FR-65
     sort_order:                      int
-    path_slug:                       str
-    # Per-DeliveryItem fields added 2026-05-15+ (FR-2 / FR-7 / FR-53 / FR-70):
-    doc_count:                       int = 1     # per FR-7; number of test_report docs required before DocumentReceived; 0 for Confirmation items
-    review_required:                 bool = False # per FR-2 / FR-53; gates LLM quality review (FR-53); always False for Confirmation items
-    review_status:                   str   # per FR-53 / FR-60; enum: pending | complete | not_required
+    path_id:                         str        # canonical path slug per [D-013] (renamed from path_slug 2026-06-21 per session slug→id rename)
+    # FR-7 / FR-53 / FR-70 fields:
+    doc_count:                       int = 1     # per FR-7; number of expected documents = len(item_description) per TSC-W008; 0 for Confirmation items + default WI
+    review_required:                 bool = False # per FR-2 / FR-53; gates LLM quality review (FR-53); Ph-1 early-drop lock 2026-06-19 = false for all items
+    review_status:                   str   # per FR-53 / FR-60; 4-value enum: pending | complete | not_required | failed (added 2026-06-19)
     item_completion_pct:             int = 0     # per FR-70; document-review completion percentage; computed field
-    email_cc_list:                   list[dict] | None = None  # per FR-2 (per-item override); pre-populated from per-TG default_cc_list at tracker creation; array of {name, email, role}
-    is_milestone_gating:             bool = False  # per SP UI engineer 2026-06-10 review (resolves STATUS line 316; renamed from `milestone_gating` 2026-06-12); does this item gate milestone closure (FR-64 Close All Items enablement)?
-    # Per-DeliveryItem fields added 2026-06-05 ([D-053] / [D-054] / FR-77 / FR-78):
-    no_customer_upload:              bool = False  # per [D-054] — when True, this item is excluded from customer-portal upload (e.g. internal-only deliverable, owner-confidential)
-    force_tracking_enabled:          bool | None = None  # per Ph-2 — overrides per-TG tracking_enabled when set; None → inherit TGGroupBase.tracking_enabled
-    ingress_folder:                  str | None = None   # per FR-77 Type-2 routing — INBOUND folder path under NSD ingress (HILDA-PC side, scoped by TGGroupBase.ingress_nsd) that maps to this item; consumed by sp_alert_parser / email_service routing pipeline (FR-52 step 3). Distinct from `target_folder` (outbound customer-portal upload destination, FR-73 / FR-19).
-    target_folder:                   str | None = None   # OUTBOUND — customer-portal upload destination path (carrier-facing) per FR-73 / FR-19; consumed by customer_adapter on submission. Distinct from `ingress_folder` (inbound NSD-side path).
-    # Per-DeliveryItem fields added 2026-06-10 ([D-068] PM-approval recording):
-    pm_approval_at:                  datetime | None = None  # per [D-068] — set by workflow_engine PMApproval-trigger UPDATE_STATE task body BEFORE invoking tracker.update_delivery_state(target=ReadyForSubmission); read by tracker.guards.check_transition_guards guard #3 (READY_FOR_SUBMISSION requires non-None). Cleared on entry to UNDER_PM_REVIEW (auto-advance from OWNER_CLOSED) + on rewind transitions from SUBMITTED_TO_CUSTOMER per [D-067] + on DELAYED/BLOCKED return to UNDER_PM_REVIEW. CommunicationLog row (action_type=pm_approval) written in parallel via AuditWriter for audit chain.
-    pm_approval_pm_id:               str | None = None       # PM/TPM attribution for the PMApproval action; opaque pm_id reference (User-typed in SP per [D-064] writeback). Cleared together with pm_approval_at.
+    email_cc_list:                   list[dict] | None = None  # per FR-2 per-item override; pre-populated from TG-denormalized default_cc_list at tracker creation; array of {name, email, role}
+    milestone_gating:                bool = True  # renamed back from is_milestone_gating 2026-06-21 — SP UI engineer xlsx + spec converged on `milestone_gating`; does this item gate milestone closure (FR-64 Close All Items enablement)? Always True for default WI per FR-78 hardcoded invariant.
+    no_customer_upload:              bool = False  # per [D-054]; True for confirmation items (TSC-W004 invariant); False otherwise
+    force_tracking_enabled:          bool = True  # SP BOOL column-default=true per FR-81 option (a) lock 2026-06-20; sole per-item tracking gate (per-TG `tracking_enabled` removed). False for default WI per FR-78 hardcoded invariant.
+    manual_triage_required:          bool = False  # HILDA-set on FR-12 path c.2 below-threshold; TPM-clearable
+    plm_id:                          str | None = None  # HILDA-written at collection kickoff per (device, milestone, owner_corp_id) tuple per FR-8 step 2
+    # FR-77 routing fields:
+    ingress_folder:                  str | None = None   # per FR-77 Type-2 routing — INBOUND folder path under NSD ingress (HILDA-PC side); consumed by sp_alert_parser / email_service routing pipeline (FR-52 step 3). Distinct from `target_folder`.
+    target_folder:                   str | None = None   # OUTBOUND — template-author-supplied sub-path under milestone HOME directory; HILDA composes final upload destination at FR-77 dispatch = customer_delivery_info + delivery_path_template (expanded with project_model + milestone_name) + target_folder per NFR-21 §6 amendment 2026-06-21. Null for confirmation items + default WI.
+    # FR-78 default-WI hardcoded fields (also live on regular WIs):
+    item_path_id:                    str | None = None   # NSD path component (e.g. "mno_cpm_item"); null for confirmation items + default WI per FR-78 lock 2026-06-21
+    tg_path_id:                      str | None = None   # NSD TG path component (e.g. "mno_cpm"); "_unrouted" for default WI per FR-78
+    # TG-denormalized fields per [D-051] (TGGroupBase dropped 2026-06-21; TG-grouping
+    # semantics preserved via shared tg_name + denormalized values across items in same TG):
+    tg_name:                         str | None    # validated against TGNameRegistry; "_unrouted" for default WI per FR-78
+    ingress_nsd:                     str = "none"  # Choice per FR-13: none / nsd1 / nsd2; "none" for Ph-1 early drop per architect lock 2026-06-21
+    folder_routing_enabled:          bool = False  # per FR-77 Type-2 routing opt-in
+    tg_email_group_alias:            str | None = None  # TG corporate email distribution alias; null in Ph-1 template per setup-window lock; TPM types before Start Collection
+    tg_owner_name:                   str | None = None
+    tg_owner_corp_usa_email:         str | None = None
+    tg_owner_corp_email:             str | None = None
+    tg_owner_corp_id:                str | None = None
+    corp_id_list:                    list[str] | None = None  # complete corp-ID list of TG members; semi-colon-separated when serialized to SP STR column per architect direction 2026-06-19; messenger escalation uses this when set
+    # JIRA polling state (Ph-2 SP write-back per FR-25 (b)):
+    jira_open_ticket_count:          int = 0     # Ph-2 only — HILDA-written from JIRA polling
+    jira_ticket_summary_json:        str | None = None  # Ph-2 only — JSON list of top-N tickets
+    # PM-approval recording per [D-068]:
+    pm_approval_at:                  datetime | None = None  # set by workflow_engine PMApproval-trigger UPDATE_STATE task body BEFORE invoking tracker.update_delivery_state(target=ReadyForSubmission); read by tracker.guards.check_transition_guards guard #3. Cleared on entry to UNDER_PM_REVIEW + on rewind from SUBMITTED_TO_CUSTOMER per [D-067] + on DELAYED/BLOCKED return to UNDER_PM_REVIEW.
+    pm_approval_pm_id:               str | None = None       # PM/TPM attribution for the PMApproval action; cleared together with pm_approval_at.
+    # TPM-resolution fields per FR-83 / FR-87:
+    tpm_reassignment_target_item_id: int | None = None  # SP integer Required=No per architect direction 2026-06-21
+    tpm_resolved_doc_type:           str | None = None   # LIST/Choice column per architect direction 2026-06-21: doc_type Choice value or null
+    tpm_revision_resolution:         str | None = None   # Ph-2 — TPM-resolved revision per FR-66
+    # FR-87 audit fields:
+    list_documents_url_prefix:       str | None = None   # SP web part property at deployment per FR-56 (c); not authored in template (SP-side config)
+    per_item_rule_overrides:         str | None = None   # Ph-2 — JSON; FR-31 sub-3 manual trigger overrides (architect-flagged 2026-06-21 — actual storage in HILDA-local Postgres per FR-31 + [D-062]; SP column is Ph-2 future)
 
-class TGGroupBase(BaseModel):
-    """Per-TG-group metadata per `[D-049]` (ODF) + `[D-051]` (TGGroups SP list normalization).
-    One row per `(milestone_id, tg_name)` — applies to all DeliveryItems sharing that tg_name in the milestone.
-    Source data: `customizations/template_schemas/<customer_slug>/tg_groups.yaml` per FR-2 / FR-71.
-    Runtime storage: TGGroups SP list per `sharepoint/REQUIREMENTS.md §2.8`."""
-    tg_group_id:        str
-    milestone_id:       str   # FK → MilestoneBase
-    tg_name:            str   # validated against TGNameRegistry; matches DeliveryItemBase.tg_name
-    tg_owner_name:      str | None  # TG coordinator (delivery-engineer assignment authority); distinct from per-item DeliveryItemBase.owner_name
-    tg_owner_email:     str | None
-    email_group_alias:  str | None  # TG corporate email distribution alias (e.g. "ims.corp@corp.com"); when set, replaces individual owner_email for TG outreach per FR-2 / FR-9
-    corp_id_list:       list[str] | None  # complete corp-ID list of TG members; when set, replaces individual owner corp-ID for messenger escalation per FR-10
-    default_cc_list:    list[dict] | None  # per-TG default CC list; pre-populates per-item DeliveryItemBase.email_cc_list at tracker creation
-    # Per-TG fields added 2026-06-05 (FR-77 / FR-78 / [D-053] / [D-054]):
-    ingress_nsd:               Literal["NSD1", "NSD2"] = "NSD1"  # per [D-013] dual-NSD topology; which ingress NSD this TG's documents arrive on
-    folder_routing_enabled:    bool = False  # per FR-77 Type-2 routing — when True, route by ingress_folder mapping (TGFolderRouting); when False, work-item routing only
-    tracking_enabled:          bool = True   # per Ph-2 — when False, HILDA does not track items in this TG (force_tracking_enabled per-item override)
-    # Unique constraint: (milestone_id, tg_name) — enforced SP-side per [D-051]
-    # Note: default work-item is milestone-scoped (not TG-scoped) — config lives on MilestoneBase.default_work_item_config per FR-78
+# ~~TGGroupBase~~ — DROPPED 2026-06-21. Rationale: per [D-051] (denormalization decision) +
+# architect lock 2026-06-21, all TG-level fields are denormalized per-work-item onto
+# DeliveryItemBase. No separate TGGroups SP list exists; no separate Pydantic model is
+# needed. TG-grouping semantics are preserved via shared tg_name across items in the same
+# milestone; aggregation (e.g. one outreach per TG-batch) is computed at runtime by
+# email_service from the denormalized values. Cf. [D-051] impl note 2026-06-12
+# (D-DRAFT-Y promotion); cf. template.yaml work_items denormalization pattern.
 
 class CustomerTemplateBase(BaseModel):
+    """Top-level customer template per FR-39/FR-40 / [D-091] YAML structure.
+    Authored manually by PM team lead in Ph-1; generated by template_schema_ingestor
+    per [D-010] + [D-018] in Ph-2+.
+    Reads from `customizations/template_schemas/<customer_id>/template.yaml`."""
     template_id:      str
-    customer_id:      str
+    customer_id:      str        # carrier code; HILDA-canonical (YAML top-level key per [D-091])
     template_name:    str
     template_version: int
-    # template_data is the full instantiated hierarchy — typed as nested lists of base models
-    milestones: list[MilestoneBase]
+    # HILDA-config-only fields (NOT in SP per [D-083]):
+    customer_jira_url:        str | None = None    # read from template.yaml at startup per FR-25 (b)
+    # Customer-level carrier-portal delivery config (added 2026-06-21 per FR-77 + NFR-21 §6 amendment):
+    customer_delivery_info:   str        # base URL for carrier upload (e.g. "drive.google.com"); denormalized per-item at setup_milestone
+    delivery_path_template:   str        # template producing milestone HOME directory path; supports literal segments + {placeholders}. Example: "OEM_Folder1/OEM_Folder2/{project_model}/{milestone_name}" → "OEM_Folder1/OEM_Folder2/SM-S901U/P1". Expanded at FR-77 dispatch; combined with customer_delivery_info + per-item target_folder to yield final upload destination.
+    # Devices + milestones:
+    devices:    dict[str, DeviceBase]    # YAML key = device_id per [D-091]; one entry per device launched under this customer
+    milestones: list[MilestoneBase]      # same milestone set instantiated for every device at setup_milestone per FR-40
     # DeliveryItems nested within milestones directly — no Deliverable level ([D-028])
     is_active: bool = True
 
@@ -324,18 +399,38 @@ class DefaultWorkItemConfig(BaseModel):
     from FR-74 collection-phase-closure threshold (would never fire otherwise).
 
     Routing model: when the FR-52 pipeline cannot resolve a specific work-item, the document
-    lands here. The document's TG IS knowable from the inbound channel (NSD ingress folder
-    per TGGroupBase.ingress_nsd; email sender via email_group_alias / owner_email lookup;
-    PLM-id via DeliveryItemBase.plm_id reverse-lookup) and is recorded on the document
-    record as `DocumentIndexRow.inferred_tg_name` (storage module), NOT on the default
-    work-item. FR-83 TPM-manual reassignment uses inferred_tg_name to shortlist candidate
-    work-items within that TG."""
-    tg_name:               Literal["_unrouted"] = "_unrouted"   # sentinel — default work-item has no real TG; TG-of-document lives on DocumentIndexRow.inferred_tg_name
+    lands here. The document's TG IS knowable from the inbound channel and is recorded on
+    the document record as `DocumentIndexRow.inferred_tg_name` (storage module), NOT on the
+    default work-item. FR-83 TPM-manual reassignment uses inferred_tg_name to shortlist
+    candidate work-items within that TG.
+
+    Hardcoded inventory per FR-78 architect lock 2026-06-21 (expanded):
+    """
+    # Identity:
+    tg_name:               Literal["_unrouted"] = "_unrouted"   # system-reserved TG
     item_name:             str = "Unrouted Documents"
-    item_type:             Literal["Default"] = "Default"   # ItemType.DEFAULT per [D-053]
+    item_type:             Literal["default"] = "default"       # lowercase_snake_case per [D-094] candidate; supersedes "Default" (2026-06-21 cascade)
+    # Path components per FR-78 + FR-86 (added 2026-06-21):
+    tg_path_id:            Literal["_unrouted"] = "_unrouted"   # first segment of FR-86 `_unrouted/<inferred_tg_name>/` NSD path
+    item_path_id:          None = None  # null — default WI has no per-WI item subfolder; documents fan out under per-document <inferred_tg_name>
+    # Tracking / outreach gates per FR-78 + FR-81 architect lock 2026-06-21:
+    force_tracking_enabled: Literal[False] = False  # the one explicit exception to FR-81 column-default True; no tracking_modality, no owner_*, no outreach surface
+    tracking_modality:     None = None  # null — no modality; polling/outreach paths short-circuit on this
+    # Owner identity per FR-78 + FR-88 — all 4 fields null (TPM cannot edit per FR-78 invariant):
+    owner_corp_usa_email:  None = None
+    owner_corp_email:      None = None
+    owner_corp_id:         None = None
+    owner_name:            None = None
+    # Workflow gates per FR-78 hardcoded invariants:
+    milestone_gating:      Literal[True] = True   # always True; YAML template's milestone_gating ignored for default WI per FR-78 + MilestoneAllClosed gating-aware semantic
+    no_customer_upload:    Literal[True] = True   # cannot upload to carrier portal per FR-77
+    review_required:       Literal[False] = False # never review
+    review_status:         Literal["not_required"] = "not_required"
+    doc_count:             Literal[0] = 0         # never set; documents fan in via reassignment per FR-83
+    # Structural:
     sort_order_strategy:   Literal["max_plus_1", "fixed"] = "max_plus_1"
     sort_order_fixed:      int | None = None   # used when strategy == "fixed"
-    not_editable:          bool = True   # immutable doc_count=0, review_required=False, item_type=Default
+    not_editable:          bool = True
     not_deletable:         bool = True
 
 class FolderRoutingEntry(BaseModel):
@@ -422,8 +517,12 @@ class CustomerSchema(BaseModel):
 - **No IO.** No file reads, no network calls, no SharePoint access. Pure data model — validators and serialization only. IO belongs to the importing module.
 - **Registry, not closed enum, for extensible fields.** `DeliveryState`, `ItemType`, `TrackingModality`, `CustomerDeliveryModality`, `DocType`, `RuleActionType`, `RuleTriggerType`, and the tag catalog are validated against mutable registries at runtime, not against the closed enum. The enum values seed the registry at import time. Per FR-28 / FR-29 (revised 2026-06-05), new triggers and actions are added via customer config without code change.
 - **Alignment invariant** (per FR-86 + `[D-053]` impl note 2026-06-08): `TEST_TECH_WAIVER_REPORT` items hold doc_type ∈ `{test_report, tech_report, waiver}`; `COMPLIANCE_CERTIFICATION_RELEASE_NOTES` items hold doc_type = `compliance_certification_release_notes`; `DEFAULT` items hold any of the 5 doc_types; `CONFIRMATION` items hold no documents. Misaligned (item_type, doc_type) pairs at ingest land on the `staged-not-classified` NSD path per FR-86 for TPM SP UI resolution per FR-87. **doc_type is NOT derived from item.item_type** — supersedes the withdrawn `[D-053]` impl note 2026-05-28b "1:1 derivation" framing.
-- **`item_description` is a comma-separated tag list per FR-82 (revised 2026-06-05).** Validator splits on comma, strips whitespace, and checks each tag against the customer's tag catalog (TagCatalogEntry registry). Unknown tags raise `TSC-W003` (warning, not error — catalog is customer-extensible). Tag mutations fire `ItemModified.TagsModified` → `PropagateTagsToActiveTrackers` per FR-82 with narrow propagation scope `(customer_id, tg_name, item_no)`.
-- **`path_slug` is immutable after creation.** `make_slug()` is called once at entity-creation; subsequent renames do not recompute it. The stored value is authoritative. Anchors `[D-013]`.
+- **`item_description` is nested JSON list-of-lists per FR-82 architect lock 2026-06-20** (supersedes the 2026-06-05 comma-separated string framing). Outer list = one entry per expected document (length must equal `doc_count`; mismatch raises `TSC-W008`). Inner list = tag-set for that document — validated against customer's tag catalog (`TagCatalogEntry` registry); unknown tags raise `TSC-W003` (warning). **Subset-overlap detection** across rows in the same `(milestone_id, tg_name)`: if any item's tag-set is a subset of another's tag-set in the same TG, raises `TSC-W007` (routing-ambiguity warning). Tag mutations fire `ItemModified.TagsModified` → `PropagateTagsToActiveTrackers` per FR-82 with narrow propagation scope `(customer_id, tg_name, item_no)`.
+- **`path_id` is immutable after creation** (renamed from `path_slug` 2026-06-21 per session slug→id rename). `make_slug()` is called once at entity-creation; subsequent renames do not recompute it. The stored value is authoritative. Anchors `[D-013]`.
+- **`force_tracking_enabled` is sole per-item tracking gate per FR-81 option (a) lock 2026-06-20**. SP BOOL column-default = `true`. No per-TG `tracking_enabled` exists. Default WI is the one explicit exception (force_tracking_enabled = `false` hardcoded per FR-78).
+- **TG fields are denormalized per-work-item per [D-051] + architect lock 2026-06-21**. `TGGroupBase` model dropped; all TG-level fields (`tg_email_group_alias`, `tg_owner_*`, `corp_id_list`, `ingress_nsd`, `folder_routing_enabled`, etc.) live on `DeliveryItemBase` directly. TG-grouping semantics preserved via shared `tg_name` across items in the same milestone.
+- **Owner identity is 4-field free-form text per FR-88 + [D-080] + [D-086]**. Fields: `owner_corp_usa_email` (preferred outreach), `owner_corp_email` (fallback), `owner_corp_id` (corp directory ID; PLM grouping key per FR-5 + [D-035]), `owner_name`. No AD validation; TPM populates in SP UI between setup_milestone and Start Collection per Ph-1 setup-window lock 2026-06-20 (template.yaml all 4 null).
+- **`delivery_path_template` lives at customer level per architect lock 2026-06-21**. Combined with `customer_delivery_info` (base URL, denormalized per-item) + per-item `target_folder` (sub-path under milestone HOME) at FR-77 dispatch time. Composition: `customer_delivery_info + "/" + delivery_path_template (expanded with {project_model} + {milestone_name}) + "/" + target_folder`.
 - **`DeliveryItemBase.item_no` is immutable per item lifetime** (added 2026-06-12 per SP UI engineer review resolution). Once assigned at template instantiation, the value never changes for the life of the work-item — reorder operations in SP UI MUST NOT mutate it; user-visible reordering is a `sort_order` concern, not `item_no`. This invariant is referential-integrity-critical for FR-77 `FolderRoutingEntry.item_no` (line 349; ingress-folder → item routing), `storage.TGFolderRoutingRow.item_no`, dashboard rendering, and SP-side denormalized DI rows per D-DRAFT-Y (2026-06-12). FR-83 work-item reassignment changes `DocumentItemAssociation` rows, not `item_no` on either source or target item. Enforcement: Pydantic model is frozen=True or item_no field is set at construction-only (Ph-1 discipline; runtime enforcement deferred to dev phase). Resolves STATUS line 316 "ItemNumber-stability schema".
 - **`CustomerSchema` is the only cross-module data contract for customer-specific configuration.** No module reads `customizations/` YAML directly except via `CustomerSchema.load()`. This makes the YAML format a versioned API.
 - **No proprietary content.** Base models hold structural metadata only (field names, types, states, dates). No customer test report content, tech report prose, or waiver text ever appears in this module. Anchors NFR-2.
@@ -493,6 +592,10 @@ TSC-W001  Customer schema version mismatch for '{customer}': schema v{schema_ver
 TSC-W002  Optional canonical field '{field}' unmapped in customer schema '{customer}'
 TSC-W003  Unknown tag '{tag}' in item_description for item '{item_id}' — not registered in customer tag catalog (FR-82)
 TSC-W004  Confirmation item '{item_id}' has `no_customer_upload=False` — Confirmation items MUST have no_customer_upload=True per [D-053] + tracker MODULE.md invariant (added 2026-06-10)
+TSC-W005  TG-field divergence — items in milestone '{milestone}' sharing tg_name '{tg_name}' have inconsistent TG-denormalized fields (added 2026-06-21 cascade)
+TSC-W006  CustomerJIRA-only role-collapse violation — item '{item_id}' has owner_corp_email != PM.Work_email (informational; non-blocking per FR-25 (b) lock 2026-06-20)
+TSC-W007  Routing tag-set subset-overlap — item '{item_id}' tag-set is subset of item '{other_id}' tag-set in same (milestone, tg_name); routing is ambiguous per FR-82 architect lock 2026-06-20
+TSC-W008  doc_count consistency violation — item '{item_id}' has doc_count={doc_count} but len(item_description)={tag_set_count} per FR-82 architect lock 2026-06-20
 ```
 
 **QC template** (`TSC:customer_schema` — registered in `diagnostics/qc.py`):
