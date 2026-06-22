@@ -1,6 +1,6 @@
 # Module: llm
 
-> **Status:** Draft + 2026-06-09 cascade Group 3 of 3 applied (`[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-85 2-step classification ladder + FR-86 storage matrix + FR-87 SP UI A→B→C). **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind count 4 → 5. Earlier rollbacks: 2026-06-07 (tri-backend `[D-052]` + host-topology fix + docstring clarifications + Phase B rollback original `[D-053]` framing). Sections curated; code implementation begins after `/switch-phase development`.
+> **Status:** Draft + 2026-06-09 cascade Group 3 of 3 + 2026-06-21 Ph-1 phasing lock applied. **Ph-1 phasing per architect direction 2026-06-21** (added end-of-session): TaskKinds are now phase-scoped into 3 tiers — (a) **Ph-1 first pass** active = `CLASSIFY_DOC_TYPE` + `ROUTE_ATTACHMENT` (full implementations); (b) **Ph-1 next pass** = `CLASSIFY_MESSAGE` + `REVIEW_DOCUMENT` (Protocol declared, dormant implementation, prompt templates + schemas land at Ph-1 next pass); (c) **Ph-2 deferred** = `CLASSIFY_DOC` (per architect direction "document revision resolution targeted Ph-2" + `[D-039]` Tier-2 implementation Ph-2) + `DRAFT_CUSTOMER_REPLY` (DEF-3) + `SUMMARIZE_STATUS` (DEF-4). Protocol declares all 5 active TaskKinds per Guardrail #3 (forward-compat contract tests cover full surface). Prior 2026-06-09 cascade: `[D-053]` impl note 2026-06-08 corrected model: 5-value DocType + alignment invariant + FR-85 2-step classification ladder + FR-86 storage matrix + FR-87 SP UI A→B→C; **CLASSIFY_DOC_TYPE TaskKind RESTORED** (un-revert of the 2026-05-28b removal); TaskKind count 4 → 5. Earlier rollbacks: 2026-06-07 (tri-backend `[D-052]` + host-topology fix + docstring clarifications + Phase B rollback original `[D-053]` framing). Sections curated; first-pass implementation (CLASSIFY_DOC_TYPE + ROUTE_ATTACHMENT) begins after `/switch-phase development`.
 >
 > **Rollback log:**
 > - **2026-06-12 (llm-v1 dev — client-side credential removed; gateway holds per-authenticated-backend creds)** — reconciles stale `SystemType.LLM_GATEWAY` references (a SystemType that no longer exists in code — `credential_service.protocol` has only `LLM_OLLAMA_A4000` / `LLM_VLLM_DGX` / `LLM_CORP_LLM` per the `[D-052]` tri-backend split 2026-06-09) to the built reality. Per architect ruling 2026-06-12: **two-hop separation** — Hop A (`OnPremLLMClient` → `hilda-llm-gateway`) is an intra-Compose, on-HILDA-PC call inside the Ph-1 trust domain; the gateway authorizes nothing on caller identity (routes on TaskKind), so **no credential** (analogous to the NSD host-mount / `corp_*_gateway` intake). Hop B (`LLMGatewayServer` → model backends) is where per-backend creds belong. **`credential_service` param removed from `OnPremLLMClient.__init__`.** `LLMGatewayServer` retrieves **up to one credential per backend, CONDITIONALLY** — only when `BackendConfig.credential_key is not None` (lab Ollama/vLLM are auth-less; only `corp_llm` reliably needs one — forcing all three would make the gateway un-startable in the common lab config). `pm_id="ops"` → `OPS_TEAM_PM_ID` constant. The `[D-007]` no-short-circuit invariant is unaffected (enforced by not handing callers backend URLs, not by a credential). **Not a new ADR** — same lineage as the SystemType split anchored at `[D-052]` impl note 2026-06-08; captured as a `[D-052]` impl-note addendum in the strand `decisions-draft.md` for land-strand. Soft-flag: signature narrowing (param removed) + Invariant/Depends-on text reconciliation to already-built code.
@@ -41,12 +41,22 @@ All four endpoints satisfy `[D-007]` (corporate network boundary). Ph-3+ same Pr
 
 **Workload assignment**: The `hilda-llm-gateway` container per `[D-021]` is the sole HILDA workload that issues outbound LLM calls — `hilda-api` and `hilda-worker` import this module's *client-side* Protocol surface and proxy calls to `hilda-llm-gateway` over HTTP. Concentrating egress in one workload simplifies model-endpoint network policy (one container needs egress to both Ollama and corp LLM endpoints) and contains LLM-side failures from cascading into API request handling.
 
-**Ph-1 scope per `[D-029]` impl note 2026-05-13 + `[D-053]` impl note 2026-06-08** — three runtime functions / **five TaskKinds total** (CLASSIFY_DOC_TYPE restored 2026-06-09 per `[D-053]` impl note 2026-06-08):
-1. FR-52 attachment routing + FR-85 doc_type classification — **three TaskKinds**: `ROUTE_ATTACHMENT` (FR-52 step 4 of 5 — invoked only when steps 1-3 substring/fuzzy/folder-template fail; output `None` falls through to step 5 default work-item per FR-78), `CLASSIFY_DOC` (`[D-039]` Step 2 new-vs-revision), `CLASSIFY_DOC_TYPE` (FR-85 Step 2 — invoked only when FR-85 Step 1 filename regex fails or multi-matches; restricted candidate set `{test_report, tech_report, waiver}` — LLM never returns `compliance_certification_release_notes` (regex-only per Step 1) nor `unresolved` (caller-side sentinel on low-confidence).
-2. FR-53 document quality review (document content + checklist → findings list) — `REVIEW_DOCUMENT`. Skipped by caller when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false` per FR-86 alignment + FR-7 (`review_required = true` only on `TEST_TECH_WAIVER_REPORT` items).
-3. FR-12 path (c) message classification fallback (message body → intent label) — `CLASSIFY_MESSAGE`.
+**Ph-1 scope per `[D-029]` impl note 2026-05-13 + `[D-053]` impl note 2026-06-08 + architect direction 2026-06-21 Ph-1 phasing lock** — five Protocol-declared TaskKinds split into 3 implementation phases:
 
-**Ph-2 surface (deferred)**: DEF-3 (LLM-drafted customer responses — `DRAFT_CUSTOMER_REPLY`), DEF-4 (status summarization — `SUMMARIZE_STATUS`). Not on this module's Ph-1 Protocol surface. Adding a Ph-2 task requires four changes: a new `TaskKind` enum value, a prompt template under `templates/`, input/output Pydantic schemas in `schemas.py`, and a `task_backend_map` + `task_model_map` entry in env-config — no Protocol-surface change.
+**Ph-1 FIRST PASS (active implementations 2026-06-21+)** — 2 TaskKinds:
+1. **`CLASSIFY_DOC_TYPE`** (FR-85 Step 2) — invoked only when FR-85 Step 1 filename regex fails or multi-matches; restricted candidate set `{test_report, tech_report, waiver}` — LLM never returns `compliance_certification_release_notes` (regex-only per Step 1) nor `unresolved` (caller-side sentinel on low-confidence).
+2. **`ROUTE_ATTACHMENT`** (FR-52 step 4 of 5) — invoked only when steps 1-3 substring/fuzzy/folder-template fail; output `None` falls through to step 5 default work-item per FR-78. Implementation pairs with the FR-52 5-step pipeline driver in `email_service` (Module #12); LLM owns only step 4.
+
+**Ph-1 NEXT PASS (Protocol declared; dormant implementation)** — 2 TaskKinds:
+3. **`REVIEW_DOCUMENT`** (FR-53 — document content + checklist → findings list). Skipped by caller when `doc_type ∈ {compliance_certification_release_notes, unresolved}` OR `review_required = false` per FR-86 alignment + FR-7 (`review_required = true` only on `TEST_TECH_WAIVER_REPORT` items). In Ph-1 early drop, `review_required = false` on all items per architect lock 2026-06-19 — TaskKind is dormant at runtime even after next-pass implementation lands.
+4. **`CLASSIFY_MESSAGE`** (FR-12 path (c) — message-intent fallback for owner-reply classification when rule-based path c.1 doesn't match).
+
+**Ph-2 DEFERRED (Protocol declared but not implemented)** — 3 TaskKinds:
+5. **`CLASSIFY_DOC`** (`[D-039]` Step 2 — new document vs revision-of-existing) — Ph-2 per architect direction 2026-06-21 ("document revision resolution targeted Ph-2"). `[D-039]` Tier-2 LLM call deferred; Ph-1 falls back to `[D-039]` Step 0/1 (hash-dedup + slug-match) + staged-not-revision NSD path per FR-86 for TPM resolution via FR-87 step (C).
+6. **`DRAFT_CUSTOMER_REPLY`** (DEF-3) — Ph-2.
+7. **`SUMMARIZE_STATUS`** (DEF-4) — Ph-2.
+
+Adding a Ph-2 task requires four changes: a new `TaskKind` enum value (already declared for #5), a prompt template under `templates/` (already present for #5 per Guardrail #3 forward-compat), input/output Pydantic schemas in `schemas.py` (already present for #5), and a `task_backend_map` + `task_model_map` entry in env-config — no Protocol-surface change. The Protocol declares all 5 active TaskKinds across the 3 phases; contract tests cover the full surface per Guardrail #3.
 
 ---
 
@@ -58,13 +68,17 @@ All four endpoints satisfy `[D-007]` (corporate network boundary). Ph-3+ same Pr
 class TaskKind(str, Enum):
     """Bounded set of runtime LLM tasks. Each value maps 1:1 to a prompt template
     in templates/ and a structured output schema in schemas.py.
-    Five Ph-1 TaskKinds (CLASSIFY_DOC_TYPE restored 2026-06-09 per `[D-053]` impl note 2026-06-08
-    — un-revert of 2026-05-28b removal; the "1:1 derivation" framing was withdrawn)."""
-    ROUTE_ATTACHMENT      = "route_attachment"      # FR-52 step 4 of 5 per [D-053] (was [D-033] Tier-2, framing superseded) — attachment → DeliveryItem match
-    CLASSIFY_DOC          = "classify_doc"          # [D-039] Step 2 — new document vs revision-of-existing
-    CLASSIFY_DOC_TYPE     = "classify_doc_type"     # FR-85 Step 2 — restored 2026-06-09 per [D-053] impl note 2026-06-08; restricted candidate set {test_report, tech_report, waiver} (never returns compliance_certification_release_notes — regex-only per FR-85 Step 1)
-    REVIEW_DOCUMENT       = "review_document"       # FR-53 — quality review against checklist; skipped by caller when doc_type ∈ {compliance_certification_release_notes, unresolved} OR review_required = false per FR-86 alignment + FR-7 (review_required = true only on TEST_TECH_WAIVER_REPORT items)
-    CLASSIFY_MESSAGE      = "classify_message"      # FR-12 path (c) — message-intent fallback
+    Five active TaskKinds (CLASSIFY_DOC_TYPE restored 2026-06-09 per `[D-053]` impl note 2026-06-08
+    — un-revert of 2026-05-28b removal; the "1:1 derivation" framing was withdrawn).
+    Phase-scoped per architect direction 2026-06-21 — see Ph-1 scope narrative above:
+    Ph-1 first pass active = CLASSIFY_DOC_TYPE + ROUTE_ATTACHMENT;
+    Ph-1 next pass = CLASSIFY_MESSAGE + REVIEW_DOCUMENT (Protocol declared, dormant impl);
+    Ph-2 = CLASSIFY_DOC (revision resolution deferred)."""
+    ROUTE_ATTACHMENT      = "route_attachment"      # [Ph-1 FIRST PASS] FR-52 step 4 of 5 per [D-053] (was [D-033] Tier-2, framing superseded) — attachment → DeliveryItem match
+    CLASSIFY_DOC          = "classify_doc"          # [Ph-2 DEFERRED] [D-039] Step 2 — new document vs revision-of-existing; architect direction 2026-06-21: document revision resolution targeted Ph-2
+    CLASSIFY_DOC_TYPE     = "classify_doc_type"     # [Ph-1 FIRST PASS] FR-85 Step 2 — restored 2026-06-09 per [D-053] impl note 2026-06-08; restricted candidate set {test_report, tech_report, waiver}
+    REVIEW_DOCUMENT       = "review_document"       # [Ph-1 NEXT PASS] FR-53 — quality review against checklist; skipped by caller when doc_type ∈ {compliance_certification_release_notes, unresolved} OR review_required = false per FR-86 alignment + FR-7; in Ph-1 early drop review_required=false on all items so dormant at runtime even after impl lands
+    CLASSIFY_MESSAGE      = "classify_message"      # [Ph-1 NEXT PASS] FR-12 path (c) — message-intent fallback
     # Ph-2 (deferred per [D-029] / DEF-3 / DEF-4):
     # DRAFT_CUSTOMER_REPLY = "draft_customer_reply"
     # SUMMARIZE_STATUS     = "summarize_status"
