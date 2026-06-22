@@ -40,10 +40,12 @@ class ItemType(str, Enum):
     if backward compatibility is needed.
     """
 
-    CONFIRMATION                           = "Confirmation"
-    TEST_TECH_WAIVER_REPORT                = "TestTechWaiverReport"
-    COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "ComplianceCertificationReleaseNotes"
-    DEFAULT                                = "Default"
+    # Lowercase_snake_case per architect lock 2026-06-20 (item_type enum rename cascade —
+    # ~190 spec sites updated). Aligns with template.yaml authoring conventions.
+    CONFIRMATION                           = "confirmation"
+    TEST_TECH_WAIVER_REPORT                = "test_tech_waiver_report"
+    COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"
+    DEFAULT                                = "default"
 
 
 class TrackingModality(str, Enum):

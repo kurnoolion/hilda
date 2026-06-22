@@ -172,7 +172,7 @@ def _make_delivery_item(**overrides: object) -> DeliveryItemBase:
         customer_delivery_modality="None",
         last_updated=datetime.now(timezone.utc),
         sort_order=1,
-        path_slug="i1-slug",
+        path_id="i1-slug",
         # Confirmation items MUST have no_customer_upload=True per [D-053] (Phase 5 invariant)
         no_customer_upload=True,
     )
@@ -190,7 +190,7 @@ class TestEntityModels:
                 customer_id="c1",
                 assigned_pm_id="pm1",
                 status=DeliveryState.OPEN.value,
-                path_slug="has spaces",
+                path_id="has spaces",
             )
 
     def test_device_base_rejects_unknown_state(self) -> None:
@@ -201,7 +201,7 @@ class TestEntityModels:
                 customer_id="c1",
                 assigned_pm_id="pm1",
                 status="Imaginary",
-                path_slug="device-1",
+                path_id="device-1",
             )
 
     def test_device_base_accepts_valid(self) -> None:
@@ -211,26 +211,28 @@ class TestEntityModels:
             customer_id="c1",
             assigned_pm_id="pm1",
             status=DeliveryState.OPEN.value,
-            path_slug="device-1",
+            path_id="device-1",
             target_launch_date=date(2026, 12, 1),
         )
-        assert d.path_slug == "device-1"
+        assert d.path_id == "device-1"
 
     def test_milestone_base_status_enum(self) -> None:
         m = MilestoneBase(
             milestone_id="m1",
-            device_id="d1",
+            carrier="MMK",                          # added 2026-06-21
+            project_id=2479,                        # added 2026-06-21 per [D-088]
+            project_model="SM-S901U",               # added 2026-06-21
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
-            path_slug="m-1",
+            path_id="m-1",
         )
         assert m.status == MilestoneStatus.NOT_STARTED
 
     def test_delivery_item_validates_all_registries(self) -> None:
         di = _make_delivery_item()
         assert di.delivery_state == "Open"
-        assert di.item_type == "Confirmation"   # updated 2026-06-10 Phase 1 — was "Binary"; ItemType.BINARY removed per [D-053]
+        assert di.item_type == "confirmation"   # lowercase_snake_case per item_type rename 2026-06-20
         assert di.tracking_modality == ["Email"]   # MULTI-VALUE per [D-037] Phase 5
         assert di.customer_delivery_modality == "None"
 
@@ -256,14 +258,29 @@ class TestPhase5Models:
     """Phase 5 tests — 5 new helper models + DeliveryItemBase reparent + new validators."""
 
     def test_default_work_item_config_defaults(self) -> None:
+        """Per FR-78 hardcoded inventory architect lock 2026-06-21."""
         from core.src.template_schema import DefaultWorkItemConfig
         cfg = DefaultWorkItemConfig()
         assert cfg.tg_name == "_unrouted"
-        assert cfg.item_type == "Default"
+        assert cfg.item_type == "default"   # lowercase_snake_case per item_type rename 2026-06-20
         assert cfg.item_name == "Unrouted Documents"
         assert cfg.sort_order_strategy == "max_plus_1"
         assert cfg.not_editable is True
         assert cfg.not_deletable is True
+        # FR-78 hardcoded inventory expansion 2026-06-21:
+        assert cfg.tg_path_id == "_unrouted"
+        assert cfg.item_path_id is None
+        assert cfg.force_tracking_enabled is False   # the one explicit exception to FR-81 column-default True
+        assert cfg.tracking_modality is None
+        assert cfg.owner_corp_usa_email is None
+        assert cfg.owner_corp_email is None
+        assert cfg.owner_corp_id is None
+        assert cfg.owner_name is None
+        assert cfg.milestone_gating is True
+        assert cfg.no_customer_upload is True
+        assert cfg.review_required is False
+        assert cfg.review_status == "not_required"
+        assert cfg.doc_count == 0
 
     def test_folder_routing_entry_validates(self) -> None:
         from core.src.template_schema import FolderRoutingEntry
@@ -292,35 +309,56 @@ class TestPhase5Models:
         assert e.description is None
         assert e.color is None
 
-    def test_tg_group_base_required_fields(self) -> None:
-        from core.src.template_schema import TGGroupBase
-        tg = TGGroupBase(tg_group_id="tg1", milestone_id="m1", tg_name="Hardware")
-        # Defaults per Phase 5:
-        assert tg.ingress_nsd == "NSD1"
-        assert tg.folder_routing_enabled is False
-        assert tg.tracking_enabled is True
+    def test_tg_group_base_dropped(self) -> None:
+        """TGGroupBase DROPPED 2026-06-21 per [D-051] denormalization + architect lock.
+        TG fields are now denormalized onto DeliveryItemBase directly."""
+        import core.src.template_schema as ts
+        # TGGroupBase must no longer be importable from the package:
+        assert not hasattr(ts, "TGGroupBase"), (
+            "TGGroupBase was dropped 2026-06-21 per [D-051] denormalization + architect lock"
+        )
+        # Replacement: TG fields live on DeliveryItemBase. Verify default values:
+        di = _make_delivery_item()
+        assert di.tg_name is None        # validated against TGNameRegistry
+        assert di.ingress_nsd == "none"  # Ph-1 lock; Choice values: none/nsd1/nsd2
+        assert di.folder_routing_enabled is False
+        assert di.tg_email_group_alias is None
+        assert di.tg_owner_name is None
+        assert di.tg_owner_corp_usa_email is None
+        assert di.tg_owner_corp_email is None
+        assert di.tg_owner_corp_id is None
+        assert di.corp_id_list is None
 
     def test_milestone_base_default_work_item_config_optional(self) -> None:
         m = MilestoneBase(
             milestone_id="m1",
-            device_id="d1",
+            carrier="MMK",
+            project_id=2479,
+            project_model="SM-S901U",
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
-            path_slug="m-1",
+            path_id="m-1",
         )
         assert m.default_work_item_config is None
         assert m.email_cc_list is None
+        # Button-trigger timestamps default None (HILDA-managed/SP-written at runtime):
+        assert m.milestone_collection_started_at is None
+        assert m.milestone_submission_triggered_at is None
+        assert m.closed_all_items_triggered_at is None
+        assert m.milestone_completion_pct == 0
 
     def test_milestone_base_with_default_work_item_config(self) -> None:
         from core.src.template_schema import DefaultWorkItemConfig
         m = MilestoneBase(
             milestone_id="m1",
-            device_id="d1",
+            carrier="MMK",
+            project_id=2479,
+            project_model="SM-S901U",
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
-            path_slug="m-1",
+            path_id="m-1",
             default_work_item_config=DefaultWorkItemConfig(),
         )
         assert m.default_work_item_config is not None
@@ -349,7 +387,7 @@ class TestPhase5Models:
             item_type=ItemType.CONFIRMATION.value,
             no_customer_upload=True,
         )
-        assert di.item_type == "Confirmation"
+        assert di.item_type == "confirmation"   # lowercase_snake_case 2026-06-20
         assert di.no_customer_upload is True
 
     def test_delivery_item_confirmation_with_no_customer_upload_false_warns(self, caplog) -> None:
@@ -372,16 +410,16 @@ class TestPhase5Models:
         )
 
     def test_delivery_item_new_fields_have_defaults(self) -> None:
-        """All Phase 2-5 additions have sensible defaults — _make_delivery_item works
-        without passing them."""
+        """All Phase 2-5 additions + 2026-06-21 cascade fields have sensible defaults."""
         di = _make_delivery_item()
         assert di.doc_count == 1
         assert di.review_required is False
         assert di.review_status == "not_required"
         assert di.item_completion_pct == 0
-        assert di.is_milestone_gating is False
-        assert di.no_customer_upload is True   # set in helper per Confirmation invariant
-        assert di.force_tracking_enabled is None
+        # 2026-06-21 cascade fixes:
+        assert di.milestone_gating is True            # renamed from is_milestone_gating; default True per FR-78 + spec convergence
+        assert di.no_customer_upload is True          # set in helper per Confirmation invariant
+        assert di.force_tracking_enabled is True      # SP BOOL column-default=True per FR-81 option (a) lock 2026-06-20
         assert di.ingress_folder is None
         assert di.target_folder is None
         assert di.pm_approval_at is None
@@ -390,6 +428,11 @@ class TestPhase5Models:
         assert di.tg_name is None
         assert di.item_description is None
         assert di.plm_id is None
+        # 4-field owner identity (added 2026-06-21):
+        assert di.owner_corp_usa_email is None
+        assert di.owner_corp_email is None
+        assert di.owner_corp_id is None
+        assert di.owner_name is None
 
     def test_automation_rule_trigger_sub_event_optional(self) -> None:
         from core.src.template_schema import AutomationRuleBase, RuleScope, RuleActionType
@@ -611,13 +654,14 @@ class TestEnums:
         }
 
     def test_item_type_4_values_per_d053(self) -> None:
-        """Per [D-053] impl note 2026-06-08 — 4-value collapsed enum."""
+        """Per [D-053] impl note 2026-06-08 + lowercase_snake_case rename
+        2026-06-20 — 4-value collapsed enum."""
         assert len(ItemType) == 4
         assert {s.value for s in ItemType} == {
-            "Confirmation",
-            "TestTechWaiverReport",
-            "ComplianceCertificationReleaseNotes",
-            "Default",
+            "confirmation",
+            "test_tech_waiver_report",
+            "compliance_certification_release_notes",
+            "default",
         }
 
     def test_tracking_modality_5_values_per_d037(self) -> None:

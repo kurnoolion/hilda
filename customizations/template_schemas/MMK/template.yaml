@@ -53,7 +53,7 @@ milestones:
         item_description: null
         item_path_id: null                        # confirmation — no NSD path
         tg_path_id: null
-        customer_delivery_modality: none
+        customer_delivery_modality: None
         target_folder: null                       # confirmation — no upload
         # Form-factor flags (handset/tablet/wearable/ir/osmr/rmr/hmr_smr):
         handset: true
@@ -87,7 +87,7 @@ milestones:
         item_description: [["Sustainability"]]
         item_path_id: mno_cpm_item
         tg_path_id: mno_cpm
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Sustainability"
         handset: true
         tablet: true
@@ -119,7 +119,7 @@ milestones:
         item_description: [["SDoc"], ["Qualification", "Product"]]
         item_path_id: sw_pl_bluetooth
         tg_path_id: sw_pl
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Bluetooth_SIG"
         handset: true
         tablet: true
@@ -151,7 +151,7 @@ milestones:
         item_description: [["HWCertReport"]]
         item_path_id: sw_pl_whql
         tg_path_id: sw_pl
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/WHQL"
         handset: true
         tablet: true
@@ -183,7 +183,7 @@ milestones:
         item_description: [["Power"]]
         item_path_id: mno_etm_item
         tg_path_id: mno_etm
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Power"
         handset: true
         tablet: true
@@ -215,7 +215,7 @@ milestones:
         item_description: [["5G", "LC"]]
         item_path_id: mno_cp_item
         tg_path_id: mno_cp
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/5G_WEA"
         handset: true
         tablet: true
@@ -247,7 +247,7 @@ milestones:
         item_description: [["Cloud"]]
         item_path_id: apps_item
         tg_path_id: apps
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Verizon_Cloud"
         handset: true
         tablet: true
@@ -279,7 +279,7 @@ milestones:
         item_description: [["Motive"]]
         item_path_id: mno_omadm_item
         tg_path_id: mno_omadm
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Motive_IOT"
         handset: true
         tablet: true
@@ -311,7 +311,7 @@ milestones:
         item_description: [["MMS"]]
         item_path_id: mno_mql_mms
         tg_path_id: mno_mql
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/MMS"
         handset: true
         tablet: true
@@ -343,7 +343,7 @@ milestones:
         item_description: [["LTE", "OMADM"]]
         item_path_id: mno_mql_lteotadm
         tg_path_id: mno_mql
-        customer_delivery_modality: Google Drive
+        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/LTEOTADM"
         handset: true
         tablet: true

@@ -32,8 +32,9 @@ from core.src.template_schema.models import (
     MilestoneBase,
     TagCatalogEntry,
     TGFolderRouting,
-    TGGroupBase,
 )
+# TGGroupBase DROPPED 2026-06-21 per [D-051] denormalization + architect lock
+# (TG fields denormalized onto DeliveryItemBase).
 from core.src.template_schema.registry import (
     CustomerDeliveryModalityRegistry,
     DeliveryStateRegistry,
@@ -78,7 +79,6 @@ __all__ = [
     "SLUG_PATTERN",
     "TagCatalogEntry",
     "TGFolderRouting",
-    "TGGroupBase",
     "TGNameRegistry",
     "TestReportClassification",
     "TestReportItemStatus",

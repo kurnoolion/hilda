@@ -24,10 +24,16 @@ from core.src.diagnostics.error_codes import ErrorCode
 
 
 class TestErrorCodes:
-    def test_all_18_prefixes_registered(self) -> None:
-        assert len(PREFIX_REGISTRY) == 18
+    def test_all_21_prefixes_registered(self) -> None:
+        # 21 prefixes per 2026-06-21 expansion: 18 + CMG/CPG (corp-side gateways)
+        # + STATUS (meta-prefix for cross-cutting HildaOpsAlert codes per FR-75 + [D-002]).
+        assert len(PREFIX_REGISTRY) == 21
         assert PREFIX_REGISTRY["DGN"] == "diagnostics"
         assert PREFIX_REGISTRY["SHP"] == "sharepoint_integration"
+        assert PREFIX_REGISTRY["CSA"] == "customer_adapter"   # renamed from CAD 2026-06-21
+        assert PREFIX_REGISTRY["STATUS"] == "diagnostics"     # meta-prefix added 2026-06-21
+        assert PREFIX_REGISTRY["CMG"] == "corp_messenger_gateway"
+        assert PREFIX_REGISTRY["CPG"] == "corp_plm_gateway"
 
     def test_get_code_returns_definition(self) -> None:
         c = get_code("DGN-E001")
