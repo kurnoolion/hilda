@@ -17,11 +17,17 @@
 class Credential:
     pm_id:       str                # PM attribution token (Ph-1/Ph-2: ops-team identifier)
     system_type: str                # bounded enum — see SystemType below
-    auth_type:   Literal["api_token", "basic", "ntlm", "kerberos", "oauth2_bearer"]
-    # Exactly one of the value carriers below is set per credential, by auth_type:
+    auth_type:   Literal["api_token", "basic", "basic_totp", "ntlm", "kerberos", "oauth2_bearer"]
+    # Value carriers below are set per credential, by auth_type. For basic_totp (per `[D-116]`
+    # D15 cascade 2026-06-25 -- HILDA shared ops-team Google identity for customer_adapter):
+    # username + password + totp_seed are all required; HILDA generates the ephemeral 6-digit
+    # TOTP code at upload time via pyotp.TOTP(totp_seed).now().
     api_token:   str | None = None  # api_token
-    username:    str | None = None  # basic, ntlm
-    password:    str | None = None  # basic, ntlm — never logged, never __repr__'d
+    username:    str | None = None  # basic, basic_totp, ntlm
+    password:    str | None = None  # basic, basic_totp, ntlm — never logged, never __repr__'d
+    totp_seed:   str | None = None  # basic_totp (added per `[D-116]` D15 2026-06-25) -- long-lived
+                                    # ~20-char base32 string from Google MFA setup; sops-encrypted
+                                    # at rest per `[D-038]`; NEVER logged, never __repr__'d
     keytab_path: Path | None = None # kerberos
     bearer:      str | None = None  # oauth2_bearer
     expires_at:  datetime | None = None  # Ph-3+ Vault populates; Ph-1/Ph-2 always None
@@ -51,7 +57,7 @@ class SystemType(str, Enum):
       pattern (d); only customer JIRA has a credential under ISSUE_TRACKER.)"""
     ISSUE_TRACKER     = "issue_tracker"      # customer JIRA in Ph-1; corp PLM is no-credential per FR-25 (a)
     MESSENGER         = "messenger"           # NO HILDA-credential in Ph-1/Ph-2 — IP-allowlist + gateway-side auth
-    CUSTOMER          = "customer"            # customer portal / submission system (Ph-1: Google Drive per `[D-054]`); per-customer
+    CUSTOMER          = "customer"            # customer portal / submission system (Ph-1: Google Drive per `[D-054]` + thin-wrapper per `[D-116]`); per-customer; auth_type=basic_totp 3-tuple (username + password + totp_seed) per D15 cascade 2026-06-25
     EMAIL             = "email"               # IMAP/SMTP mailbox per `[D-016]`; single shared
     SHAREPOINT        = "sharepoint"          # SP service account (NTLM/Kerberos); single shared
     # LLM tri-backend per `[D-052]` impl note 2026-06-08 (split 2026-06-09 from single LLM_GATEWAY); single shared per backend:

@@ -2187,3 +2187,56 @@ Filesystem layout examples:
 
 **Anchors**: FR-31 sub-1, `[D-108]` (`rules_paused` SP column origin), `[D-113]` (TriggerDispatcher item_snapshot flow; sibling decision), `rule_engine/MODULE.md` D5, commits `20aa181` / `b6c13a6` / `11f5e5d`.
 
+
+---
+
+## D-116: customer_adapter thin-wrapper strategy — HILDA Protocol contract wraps user's pre-existing self-contained Google Drive binding
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: Original `[D-054]` 2026-06-05 implementation note positioned HILDA as owner of the full Google Drive selenium / playwright headless Chromium stack for FR-19 customer-delivery upload — selenium amendment + `GoogleDriveBaseAdapter` base class + selector versioning + Chromium operational dependency + PM session pool + capability flags all in HILDA scope. During the 2026-06-24 customer_adapter arch revisit (commit `a833b85`), the architect surfaced a pre-existing Google Drive binding (developed independently on Work PC, self-contained, selenium-backed) that can serve as the actual upload mechanism. The 2026-06-25 Q&A loop locked the final binding contract.
+
+**Decision**: HILDA's `GoogleDriveBaseAdapter` is a **Protocol-conformant thin wrapper** around the user's pre-existing Google Drive binding. The binding's final API:
+
+```
+uploadAttachment(Model_No, milestone_name, source_dir, target_dir,
+                 filename, pm_id, pm_password, totp_code) -> bool
+```
+
+8 args. Bool return (`True` = uploaded successfully; `False` = upload completed but post-verify failed). Raises on infrastructure failure (network / selenium timeout / auth rejected / MFA failed / file not found at `source_dir/filename`). Binding auto-creates `target_dir` under `<customer-baked-root>/<Model_No>/<milestone_name>/` if missing.
+
+Ownership split:
+- **HILDA owns**: `CustomerAdapter` Protocol contract + `CarrierUploadResult` shape + `CommunicationLog` per FR-42 + per-call credential composition (3-tuple resolution + pyotp TOTP code generation) + clock-skew diagnostic warning (CAD-W005).
+- **Binding owns**: the actual selenium-backed Google Drive automation (session login, MFA, UI selectors, target-folder creation, post-upload verification) — self-contained per architect direction 2026-06-25.
+
+Path composition boundary (per (B-α) lock 2026-06-25):
+- HILDA passes identifier **components** (`Model_No`, `milestone_name`, `target_dir`) — NOT a fully-resolved Drive path; binding composes the Drive path internally. Customer-specific Drive folder naming conventions stay in Cline's domain (per `[D-027]` Teacher/Student split).
+- HILDA passes fully-resolved local SOURCE path (`source_dir`); binding reads `<source_dir>/<filename>` to get file bytes.
+
+Customer identity: NO `customer_id` arg on the binding. Per-customer subclass at `customizations/customer_adapter/<customer_id>_adapter.py` carries the customer's Drive root path baked in; one binding instance per customer.
+
+Credential model: `credential_service.get_credential(pm_id, SystemType.CUSTOMER, customer_id=...)` returns `CustomerCredential(user_id, password, totp_seed)` — a 3-tuple. HILDA generates the current 6-digit TOTP code at upload time via `pyotp.TOTP(totp_seed).now()`; passes (`user_id`, `password`, `totp_code`) to the binding per call. No session-cookie blob; no HILDA-side session pool. Long-lived secret (seed) stays in credential_service vault per `[D-038]`; short-lived TOTP code is ephemeral in memory per upload.
+
+Per `[D-027]` Teacher/Student: HILDA-side Protocol scaffold + thin wrapper authored Personal PC (Claude); concrete binding call body wired by Cline on Work PC. No proprietary API details land on public GitHub per NFR-2.
+
+**Why**:
+- (a) **Avoids duplication** — user's binding already works; rewriting it in HILDA is redundant + slower delivery.
+- (b) **Air-gap discipline preserved** — proprietary Google Drive selectors + binding internals stay on Work PC; HILDA's public scaffold carries only the abstract Protocol contract.
+- (c) **Self-contained binding simplifies HILDA scope dramatically** — `session_manager.py`, `selector_loader.py`, `capability_flags.py` become Ph-2 forward-looking only; Ph-1 module is just thin protocol + credential composition + binding call. Net ~400 lines vs original ~600-800 estimate.
+- (d) **Per-call credentials work for the shared HILDA ops-team Google identity** per `[D-019]` — ops provisions one shared PM account; sops blob stores `(user_id, password, totp_seed)`; all uploads run as this identity Ph-1/Ph-2.
+- (e) **Component-pass (B-α) over fully-resolved path (B-β)** — customer-specific Drive folder naming conventions (model identifier format, depth, customer-OEM prefix) stay in Cline's domain (binding-internal); HILDA's FR-77 composition burden simplifies; abstracts away differences between customers without forcing HILDA to know each customer's quirks.
+- (f) **Bool return + raises Ph-1; carrier_file_id / carrier_file_url deferred Ph-2** — extracting Google Drive file URLs via selenium is fragmented (drive.google.com vs docs.google.com depending on file type) and selector-fragile; not worth Ph-1 cost. Dashboard FR-57 degrades gracefully to "Uploaded — verify in Google Drive".
+- (g) **Reverses `[D-054]` 2026-06-05 impl note** — the HILDA-owns-selenium-stack claim is no longer Ph-1 scope; thin-wrapper pattern replaces it.
+
+**Consequences**:
+- (a) `customer_adapter/MODULE.md` 2026-06-25 cascade revisits commit `a833b85`'s D5 (FR-77 target-side path composition reverts to component-pass per (B-α)) + drops `session_manager.py` / `selector_loader.py` / `capability_flags.py` from Ph-1 Sub-modules (mark Ph-2 forward-looking) + updates `CustomerAdapter` Protocol signature + Ph-1 `CarrierUploadResult` shape.
+- (b) `credential_service/MODULE.md` adds `CustomerCredential` 3-tuple shape (`user_id` + `password` + `totp_seed`); sops blob format note for `SystemType.CUSTOMER`.
+- (c) New 3rd-party dependency: `pyotp` (pure-Python MIT-licensed; ~200 lines; HILDA host installation).
+- (d) New CAD-W005 error code — NTP clock-skew warning if `abs(time.time() - ntp_server_time) > 25s`; surfaced by `--diagnostic` mode + emitted at upload time if detected. TOTP windows are typically ±30s so 25s threshold leaves margin.
+- (e) `dashboard/MODULE.md` FR-57 rendering: Ph-1 fallback for null `carrier_file_url` shows "Uploaded — verify in Google Drive" text instead of clickable link; revisit Ph-2 when file-URL extraction strategy locks.
+- (f) `workflow_engine.tasks.submission.QUEUE_SUBMISSION` task body remains stub-pending until customer_adapter Ph-1 dev lands; once ready, task body composes the 3-tuple credential + TOTP code + identifier components + invokes binding via Protocol.
+- (g) `[D-054]` selenium / headless-Chromium / Chromium-operational-dependency claims SUPERSEDED for Ph-1 (binding's responsibility); Ph-2+ may revisit if a non-binding-backed customer modality (e.g., web portal scraping for a non-Google-Drive carrier) is needed — `WebPortalBaseAdapter` peer per `[D-054]`.
+- (h) Operational documentation: HILDA host requires NTP-synced clock + binding's Google account requires MFA via TOTP authenticator app (seed captured during MFA setup + stored in sops vault).
+
+**Anchors**: FR-19, FR-42, FR-57, FR-77, NFR-2, `[D-019]` (shared ops-team identity Ph-1/Ph-2), `[D-027]` (Teacher/Student LLM scaffold split — load-bearing for ownership boundary), `[D-038]` (sops-encrypted credential vault), `[D-054]` (selenium amendment; this ADR supersedes the 2026-06-05 impl note for Ph-1), `[D-107]` (credential_service scope-aware routing), `customer_adapter/MODULE.md` (D5 + 2026-06-25 revisit), commit `a833b85`.
