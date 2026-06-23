@@ -1,16 +1,17 @@
 # Module: rule_engine
 
-> **Status:** Initial draft 2026-06-10 (Ph-1-first scope per discipline locked 2026-06-09). Pure evaluator surface per `[D-022]` — no Celery, no SP write, no HTTP, no DB writes. Sections curated; code implementation begins after `/switch-phase development rule_engine`.
+> **Status:** Initial draft 2026-06-10 + 2026-06-12 rule-engine-v1 strand + **2026-06-23 architect cascade revisit applied (D1-D14 against locks since 2026-06-13)**. Pure evaluator surface per `[D-022]` — no Celery, no SP write, no HTTP, no DB writes. **Ph-1 scope NARROWED 2026-06-23 per architect direction**: (a) AutomationRuleOverride Postgres-override consumption **deferred to Ph-2** (schema exists Ph-1 forward-looking in `storage`; no rule_engine reads in Ph-1); (b) Per-customer + per-device YAML directories **deferred to Ph-2** (Ph-1 reads only `customizations/rules/global/*.yaml`); (c) SIGHUP YAML hot-reload **deferred to Ph-2** (Ph-1 = load at startup only; service restart required for any YAML change); (d) **FR-31 sub-1 per-item pause** mechanism resolved: `rules_paused: bool` SP column on `Deliverables_<customer_id>` (replaces D-DRAFT-2 PauseStateLookup Protocol — rule_engine reads `item.rules_paused` directly at evaluation time); (e) FR-31 sub-3 per-item manual trigger **already covered Ph-1** via existing per-action button + HILDA-managed timestamp column pattern (Send Reminder = canonical example); no new mechanism. Sections re-curated; code implementation continues in development phase.
 >
 > **Rollback log:**
-> - **2026-06-12 (Ph-1 development start — rule-engine-v1 strand; architect rulings 2026-06-12)** — (a) **OverrideStore seam** per D-DRAFT-1: FR-31 overrides are *item-level* (FR-30/FR-31 text); the landed `storage.AutomationRuleOverride` is scope-level drift being reconciled by the architect — rule_engine therefore owns `override_store.py` (`ItemOverride` + injected `OverrideStore` Protocol + `InMemoryOverrideStore` fixture) and `RuleSet.load()` takes `override_store: OverrideStore | None` instead of a `storage` instance. (b) `PauseStateLookup` "backed by storage" softened to injected-provider-home-TBD per D-DRAFT-2; null impl `NoPauseState` added for CLI/explain. (c) `RuleScope` local lowercase enum dropped — canonical `template_schema.RuleScope` imported (soft-flag). (d) `TriggerEvent.derived_fields: dict | None = None` added (additive) — realizes Worked Example 3's "caller also supplies derived fields" comment; condition lookup reads derived_fields first, then field_deltas new-values. (e) `Rule.actions` / `Rule.tiers` are tuples (immutability — frozen dataclass with mutable lists would be hollow). (f) `[D-031]` anchors corrected to `[D-062]`. (g) loader validates against rule_engine's own `Rule` model per D-DRAFT-3 interim (no `AutomationRuleBase` import). (h) `config.py` (`RuleEngineConfig.from_sources`, storage-config pattern), `error_codes.py`, `qc_templates.py` added; tests live at `core/tests/test_rule_engine.py` per repo convention (not module-local tests/).
-> - **2026-06-10 (initial draft)** — first MODULE.md for `rule_engine`. Scope locked to **Ph-1 only**: 15 Ph-1 triggers + 18 Ph-1 actions (Ph-2 triggers/actions → `## Deferred`). Per-trigger ordered action lists (no priority / no first-match / no score per architect decision 2026-06-10). Cross-rule firing independent (each `RuleMatch` schedules as its own Celery task chain via `workflow_engine`). `AutomationRuleOverride` orphan-audit owned by this module per architect decision 2026-06-10 (`[D-062]` soft-FK). Anchors FR-28, FR-29, FR-30, FR-31, FR-23, FR-55, `[D-022]` (pure evaluator), `[D-030]` (config-as-code rules), `[D-031]` (config-as-code Postgres overrides via FR-31), `[D-062]` (override soft-FK + orphan audit), `[D-025]` (YAML bind-mount), `[D-005]` (test interface), `[D-002]` (compact reports + RUL-* error codes). New error code prefix `RUL` already in `diagnostics.PREFIX_REGISTRY`.
+> - **2026-06-23 (architect cascade revisit — 14 drift items applied against recent locks since 2026-06-13)** — strict-order module-by-module sweep Module #7 of 13 (per architect direction 2026-06-21). **D1 — slug → id rename per `[D-091]`**: `EntityRef.customer_slug → customer_id`; `EntityRef.device_slug → device_id`; `scope_keys` dict keys updated. Worked Examples cascade — all 3 examples re-keyed. **D2 — `owner_email` → 4-field owner identity per `[D-080]` + `[D-086]`**: Worked Example 1 `field_deltas` rewritten — OwnerReassigned sub-trigger now detects any of 4-field set (`owner_corp_usa_email` / `owner_corp_email` / `owner_corp_id` / `owner_name`) changing on Deliverables row. **D3 — `expected_completion_date` removed per `[D-085]`**: DeadlineProximity rule + DeadlineMoved sub-trigger source from `Milestone.target_date` on the Milestones SP list row (cascades to ALL items in the milestone per FR-11 re-arm semantics; sp_alert_parser scopes the trigger to the milestone, not the row). **D4 (BIG) — AutomationRuleOverride Postgres-override consumption deferred to Ph-2** per architect direction 2026-06-23 (early drop has single mock customer; no per-customer/device tuning needed; YAML edit + restart sufficient for early drop): `override_store.py` + `OverrideStore` Protocol + `ItemOverride` type **moved to Ph-2 deferred surface**; `RuleSet.load()` Ph-1 signature drops `override_store` param; resolver scope ladder Ph-1 reduces to YAML-only (no Postgres override layer); `Rule.source` Ph-1 = always "yaml"; `RuleMatch.override_source` Ph-1 = always "yaml"; `orphan_audit.py` **moved to Ph-2 deferred** (no orphans without override consumption); `RUL-E005` (Postgres connection failure) reserved for Ph-2 use. **D5 (NEW Ph-1 mechanism) — FR-31 sub-1 per-item pause via `rules_paused` SP column**: `pause_state.py` PauseStateLookup Protocol **dropped** — replaced with direct read of `item.rules_paused: bool` field on `template_schema.DeliveryItemBase` (SP-side `rules_paused: bool` Choice(Yes/No) column on `Deliverables_<customer_id>` per SP UI engineer convention; TPM-writable via SP UI; HILDA-readable at rule eval time). D-DRAFT-2 (live-flag home TBD) RESOLVED. `RuleMatch.pause_state` derives from `item.rules_paused` at evaluation time. New Invariant: rule_engine MUST check `item.rules_paused` BEFORE evaluating ANY rule against an item; paused items skip ALL rule actions (reminder cadence, deadline proximity, AI review, polling reschedule, etc.). **D6 — SIGHUP YAML hot-reload deferred to Ph-2**: `RuleSet.reload()` method kept as Ph-2 forward-looking; Ph-1 `load()` runs at startup only; YAML edit requires service restart. **D7 — Per-customer / per-device YAML directories deferred to Ph-2**: Ph-1 rules layout = `customizations/rules/global/*.yaml` only; scope ladder Ph-1 reduces to Global-only resolution (no Customer/Device tiers consulted); Worked Example 2 customer-tier rules section reframed Ph-2 forward-looking. **D8 — `TGGroupBase` reference in Depends on dropped** per `[D-051]` denormalization architect lock 2026-06-21 (TG fields denormalized onto `DeliveryItemBase`; no TGGroupBase model). **D9 — Status header refresh (this entry)**. **D10 — Anchors update**: Purpose adds `[D-080]`, `[D-083]`, `[D-085]`, `[D-086]`, `[D-088]`, `[D-091]`; D-DRAFT candidates D-094 (item_type mixed-case per SP UI engineer lock 2026-06-23), D-100 (FR-64 Option (b)). **D11 — `Confirmation` / `Default` PascalCase per SP UI engineer lock 2026-06-23**: condition expressions that reference `item_type` use mixed-case values (Confirmation/Default PascalCase; test_tech_waiver_report/compliance_certification_release_notes snake_case). **D12 — FR-64 Option (b) HILDA-owned per-item cascade for Close All Items**: milestone-level "Close All Items" button writes `closed_all_items_triggered_at` on Milestones row; workflow_engine task body iterates per-item via `tracker.update_delivery_state(target=CLOSED, trigger_source="tpm_button")`; rule_engine evaluates `MilestoneAllClosed` trigger downstream (only after ALL items are Closed). **D13 — `REARM_DEADLINE_PROXIMITY`** action retained in ActionKind enum; narrative tightened — DeadlineMoved sub-trigger now sources from Milestone.target_date edit (per D3 `[D-085]` cascade). **D14 — `RUL-W002` orphan-audit warning code reserved** (active in Ph-2 only).
+> - **2026-06-12 (Ph-1 development start — rule-engine-v1 strand; architect rulings 2026-06-12)** — (a) **OverrideStore seam** per D-DRAFT-1 (now Ph-2 deferred per D4 cascade 2026-06-23). (b) `PauseStateLookup` "backed by storage" softened to injected-provider-home-TBD per D-DRAFT-2 (now RESOLVED per D5 cascade 2026-06-23 — home is `Deliverables_<customer_id>.rules_paused` SP column). (c) `RuleScope` local lowercase enum dropped — canonical `template_schema.RuleScope` imported (soft-flag). (d) `TriggerEvent.derived_fields: dict | None = None` added (additive) — realizes Worked Example 3's "caller also supplies derived fields" comment; condition lookup reads derived_fields first, then field_deltas new-values. (e) `Rule.actions` / `Rule.tiers` are tuples (immutability — frozen dataclass with mutable lists would be hollow). (f) `[D-031]` anchors corrected to `[D-062]`. (g) loader validates against rule_engine's own `Rule` model per D-DRAFT-3 interim (no `AutomationRuleBase` import). (h) `config.py` (`RuleEngineConfig.from_sources`, storage-config pattern), `error_codes.py`, `qc_templates.py` added; tests live at `core/tests/test_rule_engine.py` per repo convention (not module-local tests/).
+> - **2026-06-10 (initial draft)** — first MODULE.md for `rule_engine`. Scope locked to **Ph-1 only**: 15 Ph-1 triggers + 18 Ph-1 actions (Ph-2 triggers/actions → `## Deferred`). Per-trigger ordered action lists (no priority / no first-match / no score per architect decision 2026-06-10). Cross-rule firing independent (each `RuleMatch` schedules as its own Celery task chain via `workflow_engine`). `AutomationRuleOverride` orphan-audit owned by this module per architect decision 2026-06-10 (`[D-062]` soft-FK; now Ph-2 deferred per D4 cascade 2026-06-23). Anchors FR-28, FR-29, FR-30, FR-31, FR-23, FR-55, `[D-022]` (pure evaluator), `[D-030]` (config-as-code rules), `[D-031]` (config-as-code Postgres overrides via FR-31; now Ph-2 deferred per D4 2026-06-23), `[D-062]` (override soft-FK + orphan audit; now Ph-2 deferred per D4 2026-06-23), `[D-025]` (YAML bind-mount), `[D-005]` (test interface), `[D-002]` (compact reports + RUL-* error codes). New error code prefix `RUL` already in `diagnostics.PREFIX_REGISTRY`.
 
-**Purpose**: Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). Resolves scope precedence per FR-30 (Device → Customer → Global, most-specific wins per `rule_id`) with FR-31 Postgres overrides taking precedence over all YAML tiers for the specific item. **No side effects** — this module never writes to SP, NSD, Postgres, Redis, or any external system; it never enqueues Celery tasks; it never makes network calls. `workflow_engine` consumes the `evaluate()` output per `[D-022]` and schedules each `RuleMatch`'s action chain as an independent Celery task. Serves FR-28, FR-29 (Ph-1 subset), FR-30 (scope ladder + YAML layout), FR-31 (sub-1 pause/resume read-side; sub-2 Postgres override consumption; sub-3 manual triggers bypass this module entirely), FR-23 + FR-55 (`polling_schedule` deadline-tiered evaluator). Anchors `[D-022]` (rule_engine = pure evaluator boundary), `[D-030]` (config-as-code rules), `[D-062]` (FR-31 Postgres overrides + override soft-FK to YAML + orphan-audit ownership; re-anchored 2026-06-12 — `[D-031]` is the TSI Ph-2 deferral, not the override decision), `[D-025]` (YAML bind-mount: hot-reload at startup + SIGHUP), `[D-005]` (`--diagnostic` + `--validate` CLI), `[D-002]` (RUL-* error codes + RPT/MET/QC compact reports + no-proprietary-content invariant).
+**Purpose**: Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` (one of the 15 Ph-1 triggers per FR-28) plus an `EntityRef` (which Customer/Device/Milestone/DeliveryItem the event is about), returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s (Ph-1 subset of FR-29). **Ph-1 scope simplification 2026-06-23**: Ph-1 reads only `customizations/rules/global/*.yaml` (per-customer + per-device YAML tiers deferred to Ph-2 per D7 cascade); no Postgres-override consumption (deferred to Ph-2 per D4 cascade — early drop has single mock customer; no per-customer/device runtime tuning needed; YAML edit + service restart sufficient). FR-31 sub-1 per-item pause is implemented via direct read of `item.rules_paused: bool` (SP-side `rules_paused` Choice(Yes/No) column on `Deliverables_<customer_id>`; TPM-writable via SP UI; HILDA-readable at rule eval time) — D5 cascade resolves the D-DRAFT-2 pause-state-home question. FR-31 sub-3 per-item manual triggers are covered Ph-1 by the existing per-action button + HILDA-managed timestamp column pattern (Send Reminder is the canonical example) — bypass this module entirely; no new mechanism. **No side effects** — this module never writes to SP, NSD, Postgres, Redis, or any external system; it never enqueues Celery tasks; it never makes network calls. `workflow_engine` consumes the `evaluate()` output per `[D-022]` and schedules each `RuleMatch`'s action chain as an independent Celery task. Serves FR-28, FR-29 (Ph-1 subset), FR-30 (scope ladder; Ph-1 = Global tier only), FR-31 (sub-1 pause/resume read-side via `item.rules_paused`; sub-2 Postgres override consumption **Ph-2**; sub-3 manual triggers bypass this module entirely via existing per-action button pattern), FR-23 + FR-55 (`polling_schedule` deadline-tiered evaluator). Anchors `[D-022]` (rule_engine = pure evaluator boundary), `[D-030]` (config-as-code rules), `[D-062]` (FR-31 Postgres overrides + override soft-FK to YAML + orphan-audit ownership; **Ph-2 per architect direction 2026-06-23**), `[D-025]` (YAML bind-mount; Ph-1 = startup-only load, no SIGHUP), `[D-005]` (`--diagnostic` + `--validate` CLI), `[D-002]` (RUL-* error codes + RPT/MET/QC compact reports + no-proprietary-content invariant), `[D-080]` (4-field owner identity preference rule for outreach actions), `[D-083]` (Projects-per-customer architecture; PM identity resolution downstream of rule_engine), `[D-085]` (Milestone.target_date sole authoritative deadline; per-item `expected_completion_date` removed — DeadlineMoved sub-trigger sources from Milestone.target_date edit on Milestones SP list row), `[D-086]` (free-form text owner identity discipline), `[D-088]` (3-tuple PM resolution from Projects-list `TPM` Person/Group column), `[D-091]` (slug → id rename throughout: `customer_slug`→`customer_id`, `device_slug`→`device_id`). D-DRAFT candidates `D-094` (item_type mixed-case per SP UI engineer lock 2026-06-23), `D-100` (FR-64 Option (b) HILDA-owned per-item cascade for Close All Items) — pending ADR ratification.
 
-**Workload assignment**: In-process library consumed by `workflow_engine` (`hilda-worker` Celery pool) on every trigger event. **No standalone Deployment** — rule_engine has no `hilda-rule-engine` pod; it lives as a Python package imported by workflow_engine's task functions and by the `--diagnostic` CLI. Per-evaluation cost is small (in-memory rule lookup + Postgres SELECT on `AutomationRuleOverride` for the item — cached per item-id with TTL).
+**Workload assignment**: In-process library consumed by `workflow_engine` (`hilda-worker` Celery pool) on every trigger event. **No standalone Deployment** — rule_engine has no `hilda-rule-engine` pod; it lives as a Python package imported by workflow_engine's task functions and by the `--diagnostic` CLI. Per-evaluation cost is small (in-memory rule lookup; Ph-1 has no Postgres override consumption per D4 — cached rule set loaded once at startup).
 
-**Per-evaluation latency target**: <50 ms for typical rule sets (Global ~30 rules + Customer ~10 rules + Device ~5 rules + per-item override lookup with Postgres connection pool); evaluation runs synchronously on the Celery worker; no background tasks of its own.
+**Per-evaluation latency target**: <50 ms for typical rule sets (Ph-1: Global tier only, ~30 rules; Ph-2 will add Customer ~10 rules + Device ~5 rules + per-item override lookup); evaluation runs synchronously on the Celery worker; no background tasks of its own.
 
 ---
 
@@ -20,29 +21,30 @@
 core/src/rule_engine/
   __init__.py
   models.py                         ← Pydantic + dataclass models: Rule, RuleAction, TriggerEvent, RuleMatch, RuleScope, EntityRef, TriggerKind enum, ActionKind enum, PollingScheduleTier
-  loader.py                         ← YAML loader: walks customizations/rules/{global,<customer>/...}/ tree; validates shape against the Rule model; emits RUL-E* on parse errors; loads FR-31 item-level overrides via the OverrideStore seam at startup (D-DRAFT-1)
-  override_store.py                 ← FR-31 seam per D-DRAFT-1: ItemOverride type + injected OverrideStore Protocol + InMemoryOverrideStore fixture (reconciled storage implements the Protocol later)
+  loader.py                         ← YAML loader: walks customizations/rules/global/ tree (Ph-1 = global only per D7 cascade 2026-06-23; per-customer + per-device tiers Ph-2); validates shape against the Rule model; emits RUL-E* on parse errors
+  override_store.py                 ← [Ph-2] FR-31 sub-2 Postgres override seam (ItemOverride + OverrideStore Protocol + InMemoryOverrideStore fixture); deferred to Ph-2 per D4 cascade 2026-06-23 (early drop has single mock customer; no per-item parameter override needed)
   config.py                         ← RuleEngineConfig.from_sources — 3-tier CLI > env > config/rule_engine.json per [D-025]/[D-038]
-  error_codes.py                    ← registers RUL-E001..E005 / RUL-W001..W005 in the central diagnostics registry
+  error_codes.py                    ← registers RUL-E001..E005 / RUL-W001..W008 in the central diagnostics registry (RUL-E005 + RUL-W002 reserved for Ph-2 override consumption)
   qc_templates.py                   ← registers RUL:rule_evaluation QC template
-  resolver.py                       ← Scope-precedence resolver: per (entity_ref, rule_id), returns the effective rule per FR-30 ladder (Device → Customer → Global) with FR-31 Postgres override layer
-  evaluator.py                      ← Pure trigger → list[RuleMatch] evaluator; intra-rule action order preserved (YAML declaration order)
-  polling_schedule.py               ← Deadline-tiered breakpoint evaluator per FR-23 / FR-55 (days_to_deadline → interval_minutes); baseline tier required (RUL-W004 if missing)
-  orphan_audit.py                   ← Startup audit per [D-062]: emits RUL-W002 for Postgres AutomationRuleOverride.rule_id entries not present in any YAML tier
+  resolver.py                       ← Ph-1: Global-tier rule resolution only (no scope ladder Ph-1 per D7; Ph-2 adds Customer/Device tiers + Postgres override layer)
+  evaluator.py                      ← Pure trigger → list[RuleMatch] evaluator; intra-rule action order preserved (YAML declaration order); reads `item.rules_paused` directly per D5 cascade
+  polling_schedule.py               ← Deadline-tiered breakpoint evaluator per FR-23 / FR-55 (days_to_deadline → interval_minutes); baseline tier required (RUL-W004 if missing); deadline sources from Milestone.target_date per [D-085]
+  orphan_audit.py                   ← [Ph-2] Startup audit emitting RUL-W002 for Postgres AutomationRuleOverride.rule_id entries not present in any YAML tier; deferred to Ph-2 per D4 cascade 2026-06-23 (no Postgres override consumption Ph-1; nothing to audit)
   collision_audit.py                ← Startup audit: emits RUL-W001 when distinct rule_ids both write UpdateState on the same trigger (config smell)
-  pause_state.py                    ← FR-31 sub-1 pause/resume read-side: PauseStateLookup Protocol (injected provider; live-flag home TBD per D-DRAFT-2; this module doesn't write) + NoPauseState null impl
+  pause_state.py                    ← [DROPPED 2026-06-23 per D5 cascade] FR-31 sub-1 pause now read directly from `item.rules_paused: bool` on `template_schema.DeliveryItemBase`; no Protocol seam needed Ph-1. Module file kept as empty placeholder for Ph-2 multi-level pause extension (per-rule pause; was sub-rule-pause Ph-2 deferred).
   diagnostics_cli.py                ← --diagnostic / --validate / --explain modes
   rule_engine_cli.py                ← user-facing wrapper for ops debugging
   MODULE.md                         ← this file
   (tests at core/tests/test_rule_engine.py per repo convention)
 
-customizations/rules/                ← rule YAML files (bind-mounted at runtime per [D-025])
+customizations/rules/                ← rule YAML files (bind-mounted at runtime per [D-025]; Ph-1 = startup-only load per D6 cascade)
   global/
     defaults.yaml                   ← Global rules (Ph-1)
-  <customer_slug>/
-    customer_rules.yaml             ← Customer-scoped overrides (Ph-1)
-    <device_slug>/
-      device_rules.yaml             ← Device-scoped overrides (optional, Ph-1)
+  # [Ph-2 — deferred per D7 cascade 2026-06-23]:
+  # <customer_id>/
+  #   customer_rules.yaml           ← Customer-scoped overrides (Ph-2)
+  #   <device_id>/
+  #     device_rules.yaml           ← Device-scoped overrides (Ph-2, optional)
 ```
 
 ---
@@ -112,9 +114,10 @@ class PollingScheduleTier:
 
 @dataclass(frozen=True)
 class EntityRef:
-    """Identifies the entity a TriggerEvent or rule applies to. Not all fields required for all triggers."""
-    customer_slug:     str
-    device_slug:       str | None = None
+    """Identifies the entity a TriggerEvent or rule applies to. Not all fields required for all triggers.
+    Renamed 2026-06-23 per [D-091]: customer_slug -> customer_id; device_slug -> device_id."""
+    customer_id:       str                            # was customer_slug per [D-091] slug->id rename
+    device_id:         str | None = None              # was device_slug per [D-091]
     milestone_id:      str | None = None
     delivery_item_id:  str | None = None
 
@@ -136,11 +139,11 @@ class Rule:
     if kind == POLLING_SCHEDULE then tiers non-empty + trigger/sub_trigger/condition/actions are None/empty."""
     rule_id:         str                     # globally unique within {scope, scope_keys, kind} bucket
     kind:            RuleKind                # discriminator — TRIGGER_ACTION or POLLING_SCHEDULE
-    scope:           RuleScope
-    scope_keys:      dict[str, str]          # {} for global; {"customer_slug": ...} for customer; {"customer_slug": ..., "device_slug": ...} for device
-    source:          Literal["yaml", "postgres_override"]
-    source_file:     str | None              # YAML file path for "yaml"; None for "postgres_override"
-    source_tier:     RuleScope | Literal["postgres_override"]  # for FR-31 sub-2 "overridden from X" UI surfacing
+    scope:           RuleScope                # Ph-1 = always RuleScope.GLOBAL per D7 cascade; Ph-2 adds Customer/Device tiers
+    scope_keys:      dict[str, str]          # Ph-1: {} (Global only); Ph-2: {"customer_id": ...} for Customer; {"customer_id": ..., "device_id": ...} for Device (per [D-091] slug->id rename)
+    source:          Literal["yaml"]          # Ph-1: "yaml" only (postgres_override deferred to Ph-2 per D4 cascade)
+    source_file:     str | None              # YAML file path for "yaml"; None for Ph-2 "postgres_override"
+    source_tier:     RuleScope                # Ph-1: always GLOBAL; Ph-2: includes "postgres_override" Literal for FR-31 sub-2 "overridden from X" UI surfacing
     # Trigger-action fields (populated when kind == TRIGGER_ACTION; None/empty when kind == POLLING_SCHEDULE):
     trigger:         TriggerKind | None      = None
     sub_trigger:     str | None              = None   # required when trigger == ITEM_MODIFIED; else None
@@ -165,10 +168,10 @@ class RuleMatch:
     """One matched rule + its action list. Multiple RuleMatch instances per TriggerEvent are common
     (different rule_ids matching the same trigger); workflow_engine schedules each as an independent Celery task chain."""
     rule_id:         str
-    matched_scope:   RuleScope                           # the winning scope after FR-30 ladder + FR-31 override
+    matched_scope:   RuleScope                           # Ph-1: always GLOBAL per D7 cascade; Ph-2: winning scope after FR-30 ladder + FR-31 override
     actions:         list[RuleAction]                    # ordered; from rule.actions verbatim
-    pause_state:     Literal["active", "paused"]         # FR-31 sub-1; paused matches are returned but flagged — caller decides whether to skip
-    override_source: Literal["yaml", "postgres_override"]
+    pause_state:     Literal["active", "paused"]         # FR-31 sub-1; derived from item.rules_paused (D5 cascade); paused matches returned but flagged — caller decides whether to skip
+    override_source: Literal["yaml"]                     # Ph-1: "yaml" only; Ph-2 adds "postgres_override" per FR-31 sub-2
     correlation_id:  str                                 # passed through from TriggerEvent
 ```
 
@@ -182,21 +185,23 @@ class RuleSet:
     def load(
         cls,
         rules_dir: Path = Path("/etc/hilda/customizations/rules"),
-        override_store: OverrideStore | None = None,     # FR-31 item-level override seam per D-DRAFT-1 (NOT storage.AutomationRuleOverride)
     ) -> "RuleSet":
-        """Load all YAML files under rules_dir + active item-level overrides via OverrideStore.
-        Each YAML file may carry two top-level keys: `rules:` (TRIGGER_ACTION shape; trigger +
-        actions) and `polling_schedules:` (POLLING_SCHEDULE shape; tiers). Both shapes
-        Pydantic-validated against the Rule discriminated model (Rule.kind set per top-level
-        key). Runs orphan_audit + collision_audit (collision-audit is TRIGGER_ACTION-only —
-        polling_schedule rules can't UpdateState); emits RUL-W001/W002 as warnings (does NOT
-        abort). Raises RUL-E001 on duplicate rule_id within same scope+kind bucket; RUL-E002
+        """Load all YAML files under rules_dir/global/ (Ph-1: global tier only per D7 cascade
+        2026-06-23). Each YAML file may carry two top-level keys: `rules:` (TRIGGER_ACTION
+        shape; trigger + actions) and `polling_schedules:` (POLLING_SCHEDULE shape; tiers).
+        Both shapes Pydantic-validated against the Rule discriminated model (Rule.kind set
+        per top-level key). Runs collision_audit (TRIGGER_ACTION-only; polling_schedule rules
+        can't UpdateState); emits RUL-W001 as warning (does NOT abort). Ph-2 will add
+        per-customer + per-device YAML directory walking + Postgres override loading +
+        orphan_audit. Raises RUL-E001 on duplicate rule_id within scope+kind bucket; RUL-E002
         on shape mismatch or missing required field; RUL-E003 on unknown trigger; RUL-E004
-        on unknown action; RUL-E005 on Postgres connection failure."""
+        on unknown action. (RUL-E005 reserved for Ph-2 Postgres connection failure.)"""
 
     def reload(self) -> None:
-        """Re-runs load(); used on SIGHUP + on FR-31 sub-2 Postgres override change events.
-        Idempotent."""
+        """[Ph-2 forward-looking] Re-runs load() for SIGHUP hot-reload or Postgres override
+        change events. **Ph-1: NOT CALLED** — Ph-1 load is startup-only per D6 cascade
+        2026-06-23 (any YAML change requires service restart for early drop). Idempotent
+        when called Ph-2."""
 
     def rules_for_scope(
         self, scope: RuleScope, scope_keys: dict[str, str]
@@ -207,14 +212,19 @@ class RuleSet:
         """Returns the union of all rule_ids across all tiers + Postgres overrides."""
 ```
 
-### `override_store.py` *(added 2026-06-12 per D-DRAFT-1)*
+### `override_store.py` *(Ph-2 — deferred per D4 cascade 2026-06-23)*
+
+**Ph-1**: No Postgres-override consumption. `RuleSet.load()` Ph-1 signature drops the
+`override_store` parameter; resolver scope ladder Ph-1 reduces to Global-tier only.
+Schema below kept as Ph-2 forward-looking design — actual Ph-2 implementation may
+revise the payload shape per real per-customer override use cases.
 
 ```python
+# [Ph-2 forward-looking design — NOT implemented Ph-1]
 @dataclass(frozen=True)
 class ItemOverride:
-    """One FR-31 runtime override: per (delivery_item_id, rule_id), beats all YAML tiers for
-    that item. Ph-1 override_payload supports only {"tiers": [...]} (polling breakpoint
-    replacement); Ph-2 expands to arbitrary rule parameters (## Deferred)."""
+    """[Ph-2] One FR-31 runtime override: per (delivery_item_id, rule_id), beats all YAML
+    tiers for that item. Ph-2 override_payload supports arbitrary rule parameters."""
     delivery_item_id: str
     rule_id:          str
     override_payload: dict[str, Any]
@@ -223,9 +233,9 @@ class ItemOverride:
     created_at:       datetime
 
 class OverrideStore(Protocol):
-    """Injected provider of active item-level overrides. Consulted at load()/reload() only
-    (pure-evaluator IO discipline). The reconciled storage module implements this Protocol;
-    InMemoryOverrideStore is the test/fixture implementation."""
+    """[Ph-2] Injected provider of active item-level overrides. Consulted at load() only
+    (pure-evaluator IO discipline). The `storage.AutomationRuleOverride` table implements
+    this Protocol; InMemoryOverrideStore is the test/fixture implementation."""
     def list_active(self) -> Sequence[ItemOverride]: ...
 ```
 
@@ -238,13 +248,19 @@ def resolve_rules_for_entity(
     trigger:     TriggerKind,
     sub_trigger: str | None = None,
 ) -> list[Rule]:
-    """Returns the effective TRIGGER_ACTION rule set for the entity at the trigger per FR-30:
-    1. Collect Global rules (kind=TRIGGER_ACTION, matching trigger + sub_trigger).
-    2. Overlay Customer rules (per rule_id, customer-tier replaces global).
-    3. Overlay Device rules (per rule_id, device-tier replaces customer/global).
-    4. Overlay FR-31 Postgres overrides (per rule_id × delivery_item_id, postgres replaces everything).
-    Returns the resolved rules. Each rule.source / source_tier is set per the winning tier.
-    POLLING_SCHEDULE rules are NOT returned by this function — use resolve_polling_schedule_for_item."""
+    """Returns the effective TRIGGER_ACTION rule set for the entity at the trigger.
+
+    **Ph-1 per D4 + D7 cascade 2026-06-23**: Collect Global rules only (kind=TRIGGER_ACTION,
+    matching trigger + sub_trigger). No Customer-tier overlay, no Device-tier overlay, no
+    FR-31 Postgres override layer. Each rule.source = "yaml"; source_tier = GLOBAL.
+
+    **Ph-2 expansion** (deferred):
+    1. Overlay Customer rules (per rule_id, customer-tier replaces global).
+    2. Overlay Device rules (per rule_id, device-tier replaces customer/global).
+    3. Overlay FR-31 Postgres overrides (per rule_id x delivery_item_id, postgres replaces everything).
+
+    POLLING_SCHEDULE rules are NOT returned by this function -- use
+    resolve_polling_schedule_for_item."""
 
 def resolve_polling_schedule_for_item(
     rule_set:    RuleSet,
@@ -264,19 +280,28 @@ def resolve_polling_schedule_for_item(
 class RuleEngine:
     """The Public Protocol surface — workflow_engine and ingest pipelines consume this."""
 
-    def __init__(self, rule_set: RuleSet, pause_lookup: "PauseStateLookup") -> None: ...
+    def __init__(self, rule_set: RuleSet) -> None:
+        """Ph-1: only RuleSet. PauseStateLookup Protocol dropped per D5 cascade
+        2026-06-23 -- pause state read directly from item.rules_paused at evaluation
+        time (Ph-1 caller threads the item snapshot via TriggerEvent.derived_fields or
+        the workflow_engine task body reads item before calling evaluate)."""
 
-    def evaluate(self, event: TriggerEvent) -> list[RuleMatch]:
-        """Pure function. Returns ALL matching rules for the trigger, with intra-rule action order
-        preserved. Across-RuleMatch ordering is NOT guaranteed — workflow_engine treats each
-        RuleMatch as an independent Celery task chain. If a matched rule's delivery_item_id is
-        paused per FR-31 sub-1, the RuleMatch is returned with pause_state="paused" — caller
-        decides whether to skip the chain (default: skip)."""
+    def evaluate(self, event: TriggerEvent, item_snapshot: DeliveryItemBase | None = None) -> list[RuleMatch]:
+        """Pure function. Returns ALL matching rules for the trigger, with intra-rule
+        action order preserved. Across-RuleMatch ordering is NOT guaranteed --
+        workflow_engine treats each RuleMatch as an independent Celery task chain.
 
-    def explain(self, event: TriggerEvent) -> list[dict[str, Any]]:
-        """Returns the same matches as evaluate() PLUS the resolution trace for each match:
-        which scope tier won, which rules were overridden by which tier, any FR-31 override
-        applied. Used by --explain CLI mode for ops debugging. Pure."""
+        `item_snapshot` (Ph-1, NEW per D5 cascade 2026-06-23): when the event carries a
+        delivery_item_id, caller passes the item snapshot so evaluator can read
+        `item.rules_paused` for pause check. If item.rules_paused is True, ALL RuleMatch
+        results are returned with pause_state="paused" -- workflow_engine skips the
+        chain by default policy. Item-less events (e.g., MilestoneAllClosed) skip the
+        pause check entirely."""
+
+    def explain(self, event: TriggerEvent, item_snapshot: DeliveryItemBase | None = None) -> list[dict[str, Any]]:
+        """Returns the same matches as evaluate() PLUS the resolution trace for each
+        match: which scope tier won (Ph-1: always Global). Used by --explain CLI mode
+        for ops debugging. Pure."""
 ```
 
 ### `polling_schedule.py`
@@ -294,9 +319,10 @@ def evaluate_polling_schedule(
     PollingScheduleConfig.default_baseline_minutes). For days_to_deadline ≤ first non-baseline
     tier's days_before_deadline, that tier's interval applies; example with tiers
     [{60min baseline}, {3 days, 15min}, {1 day, 5min}]: days_to_deadline=4 → 60min;
-    days_to_deadline=2 → 15min; days_to_deadline=0 → 5min. When expected_completion_date has
-    been overridden per-item by TPM (FR-14), that override date drives tier evaluation —
-    caller passes the override-resolved days_to_deadline."""
+    days_to_deadline=2 → 15min; days_to_deadline=0 → 5min. `days_to_deadline` is computed
+    by the caller from `Milestone.target_date` on the Milestones SP list row per [D-085]
+    (was per-item expected_completion_date pre-[D-085]; removed per cascade 2026-06-23).
+    Ph-2 may add per-item override of the deadline source via FR-14 manual override path."""
 ```
 
 ### `orphan_audit.py` + `collision_audit.py`
@@ -319,19 +345,27 @@ def collision_audit_update_state(
     set state). Emit RUL-W001 per collision pair; ops resolves YAML."""
 ```
 
-### `pause_state.py`
+### `pause_state.py` *(DROPPED 2026-06-23 per D5 cascade)*
 
-```python
-class PauseStateLookup(Protocol):
-    """Injected dependency; backed by an injected provider — physical home TBD (SP DeliveryItem
-    column vs event-carried on TriggerEvent/EntityRef; architect decision pending per
-    rule-engine-v1 D-DRAFT-2, 2026-06-12 — storage holds only the CommunicationLog audit events,
-    not the live flag). rule_engine NEVER writes pause state — that's FR-31's
-    SP UI write path through sharepoint_integration."""
+**Ph-1 mechanism**: FR-31 sub-1 per-item pause is read directly from
+`item.rules_paused: bool` on `template_schema.DeliveryItemBase` (SP-side
+`rules_paused` Choice(Yes/No) column on `Deliverables_<customer_id>`; TPM-writable
+via SP UI). No Protocol seam Ph-1; the evaluator receives the item snapshot
+from the caller (workflow_engine task body or ingest pipeline) and reads
+`item.rules_paused` directly. D-DRAFT-2 (live-flag home TBD) RESOLVED:
+home is the SP Deliverables row column.
 
-    def is_item_paused(self, delivery_item_id: str) -> bool: ...
-    def is_milestone_paused(self, milestone_id: str) -> bool: ...   # FR-31 sub-1 Pause All
-```
+**rule_engine NEVER writes pause state** — that remains FR-31's SP UI write path
+through sharepoint_integration. rule_engine reads only.
+
+**Pause All milestone-level scope** (FR-31 sub-1 milestone-pause): Ph-1 implementation
+is per-item-only — if a milestone-level pause UX is needed, ops sets `rules_paused=True`
+on every item in the milestone (bulk write via SP UI). Ph-2 may add a separate
+`Milestone.rules_paused: bool` column for milestone-level pause; cascading enforcement
+in the evaluator would then check both flags.
+
+The `pause_state.py` file is kept as an EMPTY placeholder for the Ph-2 per-rule-type
+pause extension (`is_rule_paused(item_id, rule_id)` — currently in `## Deferred`).
 
 ### Configuration
 
@@ -350,17 +384,19 @@ class RuleEngineConfig(BaseModel):
 ## Invariants
 
 - **Rule shape discriminator** (`Rule.kind`) — every Rule is either `TRIGGER_ACTION` (event-fired; carries trigger + actions; consumed by `evaluate()`) or `POLLING_SCHEDULE` (on-demand; carries `tiers`; consumed by `workflow_engine`'s polling scheduler via `evaluate_polling_schedule`). Pydantic-validated shape conformance at load (RUL-E002 on shape mismatch). The two shapes share `rule_id`, `scope`, `scope_keys`, `source*` fields so FR-30 scope ladder + FR-31 Postgres override layer + orphan-audit apply uniformly to both. `evaluate()` returns NO `POLLING_SCHEDULE` rules (they're never event-fired); the polling scheduler calls a separate `resolve_polling_schedule_for_item(item_id)` method.
-- **Pure evaluator per `[D-022]`** — `rule_engine` makes no network calls, writes no DB rows, enqueues no Celery tasks, sends no emails or messages. Side-effect-free given a fixed rule set + Postgres override snapshot. The only IO is rule_set load (YAML read + Postgres `AutomationRuleOverride` SELECT) at `load()` / `reload()` time, which is bounded to startup + SIGHUP + on-demand reload (not per-evaluate).
+- **Pure evaluator per `[D-022]`** — `rule_engine` makes no network calls, writes no DB rows, enqueues no Celery tasks, sends no emails or messages. Side-effect-free given a fixed rule set. The only IO is rule_set load (YAML read; Ph-1 = global tier only) at `load()` time, which is bounded to startup (Ph-1: load-once-at-startup per D6 cascade; Ph-2 adds Postgres override SELECT + SIGHUP reload).
 - **Intra-rule action order = YAML declaration order** — actions in a rule's `actions:` list execute sequentially in the order written. Workflow_engine consumes `RuleMatch.actions` verbatim. This is the **only ordering guarantee**.
 - **Cross-rule firing is independent** — when multiple rules match the same trigger, each `RuleMatch` is an independent Celery task chain. No cross-rule ordering is guaranteed (no priority, no first-match-wins, no score). If two rules at the same trigger need a specific cross-rule order, the design smell is "they should be one rule" — ops merges them.
-- **Scope precedence per FR-30** — Device overrides Customer overrides Global, **per `rule_id`** (most-specific scope's version of that rule wins). FR-31 Postgres overrides take precedence over all three YAML tiers for the specific item.
+- **Scope precedence per FR-30** — Ph-1: Global tier only per D7 cascade 2026-06-23 (single tier, no precedence ladder consulted). Ph-2 expansion: Device overrides Customer overrides Global, **per `rule_id`** (most-specific scope's version of that rule wins); FR-31 Postgres overrides take precedence over all three YAML tiers for the specific item.
+
+- **Per-item pause check is mandatory and FIRST** (NEW Invariant 2026-06-23 per D5 cascade) — when the TriggerEvent carries a `delivery_item_id`, the evaluator MUST read `item.rules_paused: bool` (passed via `item_snapshot` argument by caller) BEFORE evaluating any rule against the item. Paused items skip ALL rule actions (reminder cadence, deadline proximity, AI review, polling reschedule, etc.) — all matched RuleMatch results are returned with `pause_state="paused"` and workflow_engine skips the action chain by default policy. Item-less triggers (e.g., `MilestoneAllClosed`, `CredentialExpired`) skip the per-item pause check entirely. **rule_engine NEVER writes pause state** — that's owned by the SP UI write path through sharepoint_integration.
 - **`UpdateState` collisions surface as `RUL-W001`** at load time — when two distinct rule_ids both write `UPDATE_STATE` on the same trigger, that's a configuration smell (likely an ops error). rule_engine does NOT block load; emits warning for ops triage. **Scope-compatibility predicate (architect-confirmed 2026-06-12, cross-ref `[D-066]`)**: a pair is flagged only when the two rules can co-fire on one entity — one rule's `scope_keys` is a subset of the other's (e.g. Global + carrier-alpha Customer). Disjoint scopes (different customers) never co-fire and are not collisions; the same `rule_id` across tiers is the FR-30 ladder, not a collision. This narrowed net introduces no false negatives.
-- **Postgres override orphan-audit owned here per `[D-062]`** — at `load()`, this module compares Postgres `AutomationRuleOverride.rule_id` values against YAML rule_ids; emits `RUL-W002` for any Postgres rule_id absent in YAML. ops decides whether to delete the orphan or restore the YAML rule.
+- **Postgres override orphan-audit owned here per `[D-062]`** *(Ph-2 — deferred per D4 cascade 2026-06-23; Ph-1 does not consume Postgres overrides, so no orphans to audit)* — at Ph-2 `load()`, this module will compare Postgres `AutomationRuleOverride.rule_id` values against YAML rule_ids; emit `RUL-W002` for any Postgres rule_id absent in YAML. Ops decides whether to delete the orphan or restore the YAML rule.
 - **Condition expressions are declarative, NOT arbitrary code** — `Rule.condition` is a Pydantic-validated dict shape (e.g., `{"field": "doc_type", "op": "eq", "value": "test_report"}`) restricted to a small set of operators (`eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte`, `and`, `or`). No `eval()`, no Python lambdas, no Jinja, no jq-style filters. Adding a new operator is a `core/` code change. Anchors NFR-2 (no proprietary content leak via condition expressions).
 - **FR-31 manual triggers bypass this module entirely** — sub-3 "Trigger Action" dropdown enqueues a Celery task directly via `workflow_engine`; rule_engine is NOT consulted. The decision-source for the action's params is the SP UI; the rule_engine evaluation pipeline plays no role.
 - **No proprietary content in compact reports** per NFR-2 / `[D-002]`. `RUL-RPT` / `-MET` / `-QC` emit rule_ids, scope tiers, trigger kinds, action kinds, latency buckets, match counts, override source — never customer-data values, never the contents of `Rule.condition.value` fields when those might carry customer-specific tokens.
-- **YAML hot-reload via `[D-025]` bind-mount + SIGHUP** — `customizations/rules/` is bind-mounted into the container; ops edits a YAML file and sends SIGHUP to the worker pool; `reload()` re-runs `load()` without redeploy. Pre-`reload()` evaluations use the prior rule set (no torn-state risk).
-- **`PauseStateLookup` injected, never imported as a global** — testable in isolation; mock pause state at unit-test time.
+- **YAML hot-reload via `[D-025]` bind-mount + SIGHUP** *(Ph-2 — deferred per D6 cascade 2026-06-23; Ph-1 = load-at-startup-only)* — Ph-2: `customizations/rules/` is bind-mounted into the container; ops edits a YAML file and sends SIGHUP to the worker pool; `reload()` re-runs `load()` without redeploy. Pre-`reload()` evaluations use the prior rule set (no torn-state risk). Ph-1: YAML edit requires service restart (early drop scale acceptable per architect direction 2026-06-23).
+- **Per-item pause via item snapshot, not via Protocol seam** (revised 2026-06-23 per D5 cascade) — Ph-1: caller passes `item_snapshot: DeliveryItemBase` to `evaluate()`; evaluator reads `item.rules_paused: bool` directly. No `PauseStateLookup` Protocol to mock — tests pass a `SimpleNamespace(rules_paused=False)` or similar fixture. `PauseStateLookup` Protocol was dropped in this revision; the Ph-2 per-rule-pause extension (`is_rule_paused(item_id, rule_id)`) may re-introduce a Protocol seam when implemented.
 
 ---
 
@@ -388,11 +424,11 @@ RUL-W008  rule_id '{rule_id}' appears as both trigger_action and polling_schedul
 
 - **`[D-022]`** — `rule_engine` is a **pure evaluator**; Celery dispatch lives in `workflow_engine`. This boundary is the load-bearing decision; reversing it would re-fold dispatch into rule_engine and make this module stateful (Celery client, retry policy, task queue selection). Keeping the boundary lets workflow_engine pick task queues, retry strategies, and time-budgets per action kind without rule_engine knowing.
 - **Per-trigger ordered action lists, no priority / no first-match / no score** (architect decision 2026-06-10 — captured here, no separate ADR per Q4 decision triage 2026-06-10). Intra-rule order = YAML declaration order; cross-rule independence (each `RuleMatch` is its own Celery chain). Rationale: priority / score systems make rule files harder to read and harder to reason about; explicit declaration order in YAML is the single source of truth. Cross-rule independence avoids "rule A blocks rule B" surprises.
-- **`[D-030]` + `[D-062]`** *(re-anchored 2026-06-12; was `[D-031]`, which is the TSI Ph-2 deferral — override decision is `[D-062]` + `[D-066]` ordering)* — rules are config-as-code (YAML); FR-31 Postgres overrides are config-as-code at runtime (item-level). Both layers are bind-mounted / loaded without code release per `[D-025]`. Adding a new customer / device / rule = YAML edit + SIGHUP; no Python change.
-- **`[D-062]` orphan-audit ownership** — `AutomationRuleOverride.rule_id` is a soft-FK to YAML (no DB constraint since YAML is the source of truth). Per architect decision 2026-06-10, `rule_engine.orphan_audit` runs at startup + on `reload()`; emits `RUL-W002`; does NOT delete orphans (ops decision). Alternative considered: orphan-audit in `storage` module — rejected because storage doesn't know YAML state; rule_engine is the only module that sees both sides.
+- **`[D-030]` + `[D-062]`** *(re-anchored 2026-06-12; revised 2026-06-23 per D4 cascade)* — rules are config-as-code (YAML; Ph-1 = Global tier only); FR-31 Postgres overrides are config-as-code at runtime (item-level; **Ph-2 deferred per architect direction 2026-06-23** — early drop has single mock customer; YAML edit + service restart sufficient). **Ph-1**: adding a new rule = YAML edit + service restart. **Ph-2**: adding a new customer / device / rule = YAML edit + SIGHUP (no Python change).
+- **`[D-062]` orphan-audit ownership** *(Ph-2 — deferred per D4 cascade 2026-06-23)* — `AutomationRuleOverride.rule_id` is a soft-FK to YAML (no DB constraint since YAML is the source of truth). At Ph-2, `rule_engine.orphan_audit` will run at startup + on `reload()`; emit `RUL-W002`; not delete orphans (ops decision). Alternative considered: orphan-audit in `storage` module — rejected because storage doesn't know YAML state; rule_engine is the only module that sees both sides. **Ph-1**: no Postgres override consumption → no orphans → no audit needed.
 - **Declarative condition DSL (small fixed operator set), NOT Turing-complete** — condition expressions are a Pydantic-validated dict shape with a closed operator set (`eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte`, `and`, `or`). Rejected alternatives: (α) Jinja templates (`{{ item.doc_type == "test_report" }}`) — opens code-injection surface, leaks customer-data through error messages; (β) embedded Python (`condition: "item.doc_type == 'test_report'"` evaluated via `eval()`) — same risk + harder ops review; (γ) jq-style filters — ops-team learning curve for an external tool. The closed-DSL choice trades flexibility (some complex conditions require multiple chained rules) for auditability + NFR-2 + ops-team accessibility.
 - **`workflow_engine` schedules; rule_engine returns** — `RuleMatch.actions` is consumed verbatim by workflow_engine, which has its own logic for action-kind → Celery task mapping (e.g., `SEND_REMINDER` → `email_service.send_owner_reminder` Celery task; `UPDATE_STATE` → `tracker.update_delivery_state` Celery task). The action-kind → task mapping is **workflow_engine's responsibility**, not rule_engine's; rule_engine just produces the (kind, params) tuples.
-- **`PauseStateLookup` Protocol-injected** — FR-31 sub-1 pause flag lives on the DeliveryItem row (authoritative home TBD per D-DRAFT-2 2026-06-12: SP column vs event-carried; `CommunicationLog` records the pause/resume audit events only). Pause-check ordering in the evaluator (item-pause first; milestone-pause only when the event carries no item id) assumes "Pause All" fans out to per-item flags — if the home decision ever makes Pause All a milestone-only flag, item events must also consult milestone-pause (architect note 2026-06-12). rule_engine reads via injected Protocol so unit tests can mock pause state without standing up Postgres. Same pattern as `credential_service` injection in `customer_adapter`.
+- **Per-item pause via `item.rules_paused` SP column** (revised 2026-06-23 per D5 cascade — RESOLVES D-DRAFT-2 pause-state-home question) — FR-31 sub-1 pause flag lives on the **`Deliverables_<customer_id>.rules_paused`** SP Choice(Yes/No) column (denormalized per-row; mirrored on `template_schema.DeliveryItemBase.rules_paused: bool` for HILDA-side type safety). TPM toggles via SP UI; HILDA reads at evaluation time. `PauseStateLookup` Protocol from earlier draft DROPPED — the evaluator receives `item_snapshot: DeliveryItemBase` from the caller (workflow_engine task body reads item from storage before invoking evaluator) and reads `item.rules_paused` directly. Tests pass a `SimpleNamespace(rules_paused=False)` fixture; no Protocol mock needed. Rejected alternatives: (α) Postgres pause_state table — extra DB roundtrip per evaluation; cache invalidation complexity; (β) event-carried pause flag on TriggerEvent/EntityRef — caller would need to read the SP column anyway to populate the field, so just pass the snapshot; (γ) `CommunicationLog`-only pause history — losses live state; rejected (CommunicationLog still records pause/resume audit events for compliance trail).
 - **`polling_schedule` is one rule among many** — not a special-cased evaluator stream. polling_schedule rules are normal AutomationRules whose `trigger` is the scheduler-tick + whose evaluation calls `evaluate_polling_schedule(tiers, days_to_deadline)` to pick the active interval. workflow_engine consumes the interval to reschedule the per-item polling task.
 
 ---
@@ -403,7 +439,7 @@ Three concrete walk-throughs grounding the abstract Public surface. Each shows Y
 
 ### Example 1 — `OwnerReassigned`: single rule, two ordered actions
 
-**Use case**: Owner of `delivery_item_id=I-1234` (customer `carrier-alpha`, device `smartphone-X`, milestone `M-1001`) is reassigned from `old.owner@example.com` to `new.owner@example.com`. HILDA must (a) notify the new owner, then (b) start collection for the new (owner × milestone) pair if collection is active.
+**Use case**: Owner of `delivery_item_id=I-1234` (customer `carrier-alpha`, device `smartphone-X`, milestone `M-1001`) is reassigned — TPM edited `owner_corp_usa_email` on the Deliverables row from `old.owner@example.com` to `new.owner@example.com` (per [D-080] + [D-086] 4-field owner identity; OwnerReassigned sub-trigger detects changes on any of the 4 owner fields). HILDA must (a) notify the new owner, then (b) start collection for the new (owner × milestone) pair if collection is active.
 
 **YAML (Global only — no customer or device override)**:
 ```yaml
@@ -427,9 +463,9 @@ rules:
 TriggerEvent(
     trigger        = TriggerKind.ITEM_MODIFIED,
     sub_trigger    = "OwnerReassigned",
-    entity_ref     = EntityRef(customer_slug="carrier-alpha", device_slug="smartphone-X",
+    entity_ref     = EntityRef(customer_id="carrier-alpha", device_id="smartphone-X",
                                milestone_id="M-1001", delivery_item_id="I-1234"),
-    field_deltas   = {"owner_email": ("old.owner@example.com", "new.owner@example.com")},
+    field_deltas   = {"owner_corp_usa_email": ("old.owner@example.com", "new.owner@example.com")},   # any of the 4-field owner identity set per [D-080] + [D-086] cascade — OwnerReassigned sub-trigger detects changes on owner_corp_usa_email / owner_corp_email / owner_corp_id / owner_name
     timestamp      = datetime(2026, 6, 10, 14, 30),
     correlation_id = "evt-abc123",
 )
@@ -457,9 +493,17 @@ Returns `[RuleMatch]` (1 element). `workflow_engine` consumes and builds **one C
 
 ---
 
-### Example 2 — `LastContactThreshold`: multi-rule additive composition with scope-tier overrides
+### Example 2 — `LastContactThreshold`: multi-rule additive composition
 
-**Use case**: Owner hasn't responded to outreach. Global ships a 2-tier rule set (reminder under 3 unanswered; escalate at 3+). Customer `carrier-alpha` (a) wants a branded reminder template (override) and (b) wants the TG lead CC'd on every reminder (additive new rule).
+**Ph-1 scope note (2026-06-23)**: Per D7 cascade, Ph-1 reads only `customizations/rules/global/*.yaml`.
+Customer-tier overrides (the original Example 2 illustration) are Ph-2 deferred. The Ph-1 variant
+below uses Global rules only; Ph-2 expansion would add the customer-tier YAML shown later as
+forward-looking design.
+
+**Use case**: Owner hasn't responded to outreach. Global ships a 2-tier rule set (reminder under
+3 unanswered; escalate at 3+). [Ph-2 forward-looking: customer `carrier-alpha` would (a) override
+with a branded reminder template and (b) add a TG-lead CC additive rule — deferred to Ph-2 per
+D7 cascade.]
 
 **YAML — Global tier**:
 ```yaml
@@ -488,11 +532,11 @@ rules:
         params: { urgency: medium }
 ```
 
-**YAML — Customer (carrier-alpha) tier**:
+**YAML — Customer (carrier-alpha) tier** *(Ph-2 forward-looking; not loaded in Ph-1 per D7 cascade)*:
 ```yaml
-# customizations/rules/carrier-alpha/customer_rules.yaml
+# [Ph-2] customizations/rules/<customer_id>/customer_rules.yaml — NOT loaded Ph-1
 rules:
-  - rule_id: send_reminder_on_no_contact           # same rule_id as Global → OVERRIDES
+  - rule_id: send_reminder_on_no_contact           # same rule_id as Global → would OVERRIDE
     trigger: LastContactThreshold
     condition:
       field: reminder_count_unanswered
@@ -514,7 +558,7 @@ rules:
 ```python
 TriggerEvent(
     trigger      = TriggerKind.LAST_CONTACT_THRESHOLD,
-    entity_ref   = EntityRef(customer_slug="carrier-alpha", ..., delivery_item_id="I-1234"),
+    entity_ref   = EntityRef(customer_id="carrier-alpha", ..., delivery_item_id="I-1234"),
     field_deltas = {"reminder_count_unanswered": (1, 2)},   # second reminder elapsed
     correlation_id = "evt-def456",
     ...
@@ -586,8 +630,9 @@ polling_schedules:                                  # SEPARATE top-level shape, 
       - { days_before_deadline: 1,    interval_minutes: 5  }
 ```
 
-**Postgres `AutomationRuleOverride` (TPM's FR-31 sub-2 override for I-1234)**:
+**Postgres `AutomationRuleOverride` (TPM's FR-31 sub-2 override for I-1234)** *(Ph-2 — deferred per D4 cascade 2026-06-23; Ph-1 has no per-item Postgres override consumption)*:
 ```python
+# [Ph-2 forward-looking — NOT consumed Ph-1]
 AutomationRuleOverride(
     delivery_item_id = "I-1234",
     rule_id          = "default_polling_schedule",
@@ -608,7 +653,7 @@ AutomationRuleOverride(
 ```python
 TriggerEvent(
     trigger        = TriggerKind.ATTACHMENT_RECEIVED,
-    entity_ref     = EntityRef(customer_slug="carrier-alpha", device_slug="smartphone-X",
+    entity_ref     = EntityRef(customer_id="carrier-alpha", device_id="smartphone-X",
                                milestone_id="M-1001", delivery_item_id="I-1234"),
     field_deltas   = {"doc_count_received": (4, 5)},
     timestamp      = datetime(2026, 6, 10, 14, 30),
@@ -666,8 +711,8 @@ Returns `[RuleMatch(advance_state_on_doc_count_reached, actions=[UpdateState@seq
 ## Depends on
 
 - `diagnostics` — `ErrorCode`, `ReportWriter`, `QCTemplate`, `register_code` (RUL-* codes registered).
-- `template_schema` — `DeliveryItemBase`, `AutomationRuleBase`, `AutomationRule` Pydantic model (loader validates rule YAML against this), `DeliveryState` enum (for `UPDATE_STATE` target_state validation), `TGGroupBase` (rules may scope to TG via condition expressions).
-- `storage` — via injected seams only in Ph-1 dev (no direct import; close-session audit 2026-06-12 per D-DRAFT-1/2): FR-31 item-level overrides arrive through the `OverrideStore` Protocol (storage implements it at the storage-v2 reshape; snapshot loaded at `load()`/`reload()` per architect Q1 ruling 2026-06-12); pause-state read via the `PauseStateLookup` Protocol (live-flag home TBD per D-DRAFT-2).
+- `template_schema` — `DeliveryItemBase` (Ph-1 reads `rules_paused: bool` per D5 cascade + `item_type` + `delivery_state`), `AutomationRuleBase`, `AutomationRule` Pydantic model (loader validates rule YAML against this), `DeliveryState` enum (for `UPDATE_STATE` target_state validation). TG-level rule scoping reads denormalized TG fields directly on `DeliveryItemBase` per `[D-051]` denormalization (TGGroupBase model dropped 2026-06-21).
+- `storage` — Ph-1: no direct import (rule_engine receives item snapshots via the workflow_engine task-body layer; pure-evaluator boundary preserved). Ph-2: will import `AutomationRuleOverride` table consumption (per D4 deferral — `OverrideStore` Protocol seam will reconnect at Ph-2).
 - `PyYAML` (3rd party) — YAML file parsing.
 
 *(Conspicuous absences: no `sharepoint_integration` — rule YAML lives in `customizations/`, not in SP. No `email_service` / `messenger` / `issue_tracker` / `customer_adapter` — actions are emitted as data, not executed. No `llm` — evaluation is deterministic. No `workflow_engine` — workflow_engine depends on rule_engine, not the other way around.)*
@@ -688,6 +733,10 @@ Returns `[RuleMatch(advance_state_on_doc_count_reached, actions=[UpdateState@seq
 
 ## Deferred (Ph-2 / Ph-3+)
 
+- **Ph-2 — AutomationRuleOverride Postgres-override consumption per D4 cascade 2026-06-23** (per `[D-062]`): adds Postgres `AutomationRuleOverride` SELECT at `load()` time; resolver scope ladder adds step 4 (Postgres tier beats all 3 YAML tiers per item × rule_id); `Rule.source` adds `"postgres_override"` Literal value; `RuleMatch.override_source` adds `"postgres_override"`; `OverrideStore` Protocol + `ItemOverride` type re-introduced; `orphan_audit.py` activates; `RUL-E005` (Postgres connection failure) + `RUL-W002` (orphan override) + `RUL-W007` (unsupported override payload key) become live.
+- **Ph-2 — SIGHUP YAML hot-reload per D6 cascade 2026-06-23**: `RuleSet.reload()` becomes callable; ops can edit YAML and SIGHUP the worker pool without redeploy. Ph-1 (current) requires service restart for any YAML change.
+- **Ph-2 — Per-customer + per-device YAML directories per D7 cascade 2026-06-23**: `customizations/rules/<customer_id>/customer_rules.yaml` + `customizations/rules/<customer_id>/<device_id>/device_rules.yaml` directories become loaded; resolver scope ladder activates Customer + Device tiers. Ph-1 reads only `customizations/rules/global/*.yaml`.
+- **Ph-2 — Milestone-level `Milestone.rules_paused: bool` column** (per D5 cascade extension): cascading enforcement (item pause OR milestone pause → skip rules) — Ph-1 implements per-item pause only; milestone-pause UX in Ph-1 = bulk write to all item rows.
 - **Ph-2 triggers** (not in Ph-1 `TriggerKind` enum; added when Ph-2 lands):
   - `ItemDeleted` — fires when PM removes item via FR-3 → `CancelOutstanding`
   - `UnroutedDocumentAccumulated` — per FR-78 default-work-item Ph-2 escalation path
@@ -725,7 +774,7 @@ python -m core.src.rule_engine.rule_engine_cli --validate
 Pydantic-validates all YAML files; emits RUL-E* codes for shape errors; safe in CI. Returns non-zero exit on RUL-E*.
 
 ```
-python -m core.src.rule_engine.rule_engine_cli --explain --trigger <kind> --entity '{"customer_slug":"c1","device_slug":"d1"}' [--sub-trigger <s>] [--field-deltas '{...}']
+python -m core.src.rule_engine.rule_engine_cli --explain --trigger <kind> --entity '{"customer_id":"c1","device_id":"d1"}' [--sub-trigger <s>] [--field-deltas '{...}']
 ```
 Synthesizes a TriggerEvent + runs `evaluate()` + `explain()`; emits resolution trace (which scope tier won; which rules matched; what actions in what order). For ops debugging "why did rule X fire?" — no side effects. Sample:
 ```
