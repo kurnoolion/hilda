@@ -1554,3 +1554,608 @@ Preference rule per FR-9 + `[D-080]` + FR-88 unchanged (`owner_corp_usa_email` p
 - (e) `template_schema/MODULE.md` Pydantic validator + downstream code (`core/src/template_schema/models.py` TSC-W006 raise) require dev-phase cascade to update the matched field name.
 
 **Anchors**: FR-25 (b) TSC-W006, FR-9 CustomerJIRA-only block, FR-7 CustomerJIRA-only state machine, `[D-080]` preference rule, FR-88 owner identity model, `[D-088]` PM identity model.
+
+---
+
+## D-094: `item_type` enum lowercase_snake_case rename — SUPERSEDED 2026-06-23 by SP UI engineer mixed-case lock
+
+**Date**: 2026-06-20
+**Status**: Superseded (by SP UI engineer enum lock 2026-06-23 — captured here for audit; the SUPERSEDING decision is documented in Consequences)
+
+**Context**: During the 2026-06-20 28-FR deep-scan sweep, the architect locked `item_type` enum values from PascalCase/mixed-case to `lowercase_snake_case` across ~190 spec sites (`Confirmation` → `confirmation`, `Default` → `default`, plus the long-named categories `test_tech_waiver_report` and `compliance_certification_release_notes`). Motivation was cross-cascade consistency with the slug→id rename `[D-091]` and Python enum-style alignment. Cascade landed in `template_schema/MODULE.md` (commit `9c39a0e`) + Pydantic models (commit `e3b0cb5`) + rule_engine condition expressions + requirements.md inline.
+
+**Decision**: `ItemType` enum values rendered as `lowercase_snake_case` across requirements.md, MODULE.md cascade, Pydantic models, SP-side configuration, rule-engine condition expressions, and template.yaml authoring: `confirmation`, `test_tech_waiver_report`, `compliance_certification_release_notes`, `default`.
+
+**Why**:
+- (a) Consistency with the `[D-091]` slug→id global rename direction (snake_case throughout HILDA-canonical surface).
+- (b) Python-native enum style; reduces translation friction between Pydantic + JSON-serialized event payloads + rule-engine condition strings.
+- (c) Eliminates per-spec-site case ambiguity surfaced during the 28-FR deep-scan.
+
+**Consequences**:
+- (a) ~190 requirements.md sites rewritten 2026-06-20 (commit `fc41eb0`).
+- (b) `template_schema/enums.py` ItemType values lowercased (commit `e3b0cb5`).
+- (c) Rule-engine condition expressions reference lowercase values; MODULE.md cascade applied (commit `20aa181`).
+- (d) **SUPERSEDED 2026-06-23** by SP UI engineer enum lock (commit `649f64a`): short-label categories `Confirmation` + `Default` reverted to **PascalCase** at SP UI engineer's request (SP-column Choice values render better as short PascalCase labels); long-named categories `test_tech_waiver_report` + `compliance_certification_release_notes` remain `snake_case`. Resulting mixed-case canonical enum: `Confirmation` / `test_tech_waiver_report` / `compliance_certification_release_notes` / `Default`. Cascade applied to `template_schema` (commit `649f64a`) + dashboard (commit `7dee1ed` D2) + rule_engine (commit `20aa181` D11). Future ADR may formalize the mixed-case lock if it diverges further; for now the supersession is captured here.
+
+**Anchors**: FR-7, FR-58, requirements.md item_type enum, `[D-091]` (slug→id alignment direction), `template_schema/MODULE.md`, commits `fc41eb0` / `e3b0cb5` / `649f64a` / `7dee1ed` / `20aa181`.
+
+---
+
+## D-095: Ph-1 setup-window owner-editability + FR-40 owner_corp_email exclusion + TSC-W006 runtime-at-Start-Collection + FR-71 ODF write policy
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: Multiple FRs touched owner identity authoring boundaries during the 2026-06-20 28-FR sweep (FR-88 owner identity model + FR-2 owner-field SP-write surface + FR-25 (b) CustomerJIRA role-collapse + FR-71 Owner Discovery Function + FR-84 SP-alert routing + FR-40 template.yaml owner fields). The architect locked a unified "Ph-1 setup-window owner-editability" rule to resolve when owners are author-supplied vs runtime-discovered vs operator-edited.
+
+**Decision**: Ph-1 owner-editability window: TPM may edit owner identity fields (4-field set per FR-88 + `[D-080]`) on the SP UI BEFORE clicking **Start Collection** (FR-8 trigger). Once Start Collection fires, owner fields become read-only for the duration of the collection cycle (FR-3 / DEF-22 lock; Ph-2 introduces owner-change capability). Concrete sub-locks:
+- **FR-40 owner_corp_email exclusion**: `owner_corp_email` is NOT carried in `template.yaml` — owners are author-supplied by TPM in SP UI before Start Collection, not template-time-authored.
+- **TSC-W006 timing**: runtime validator fires at Start Collection time (not template-load time) per FR-25 (b) CustomerJIRA-only role-collapse `owner_corp_email = TPM.Work_email` check per `[D-093]`.
+- **FR-71 ODF write policy**: Ph-2 Owner Discovery Function results write back to the same 4-field set; Ph-1 has no ODF (owners are TPM-supplied).
+
+**Why**:
+- (a) Resolves the cross-FR cascade conflict between "owners come from template.yaml" (FR-40 implied) vs "owners come from SP-UI TPM authoring" (FR-2 + FR-88 lock) — locks the latter.
+- (b) `owner_corp_email` exclusion from template.yaml prevents author-time identity-binding for fields that are inherently TPM-authored on real-world rosters.
+- (c) Timing TSC-W006 at Start Collection (not template-load) lets TPM author owners freely without template-load false-positives.
+- (d) Ph-1 deferral of ODF + owner change matches the "minimal viable Ph-1" reduction theme of the cascade (see `[D-089]`, `[D-092]`, `[D-103]`).
+
+**Consequences**:
+- (a) `template_schema/MODULE.md` + Pydantic `DeliveryItemBase`: 4-field owner identity with all fields nullable + author-time-nullable allowed (commit `9c39a0e` D2, `e3b0cb5`).
+- (b) `template_schema` Pydantic validator TSC-W006 fires from a runtime hook (called by `tracker.start_collection` / FR-8) rather than at YAML load.
+- (c) `customizations/template_schemas/MMK/template.yaml` example: all owner fields null (commit `9c39a0e`).
+- (d) Ph-1 TPM SP UI capability inventory (STATUS line 319) explicitly excludes owner field edits after Start Collection per FR-3 / DEF-22.
+- (e) FR-71 ODF write policy: Ph-2 only.
+
+**Anchors**: FR-2, FR-3 (DEF-22), FR-8, FR-25 (b), FR-40, FR-71, FR-84, FR-88, `[D-080]` (owner email split), `[D-086]` (free-form text owner identity), `[D-093]` (FR-25 (b) role-collapse), `template_schema/MODULE.md`, commits `fc41eb0` / `9c39a0e`.
+
+---
+
+## D-096: FR-82 nested tag-set model — JSON list-of-lists + TSC-W007 subset validator + TSC-W008 doc_count derivation
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: During the 2026-06-20 28-FR sweep, FR-82 `item_description` field semantic was locked. Prior model treated `item_description` as a flat semicolon-separated tag list (used by FR-52 strict-substring + fuzzy-match routing pipeline steps 1 and 2). The architect refined this to a **nested tag-set model** (JSON `list[list[str]]`) representing per-document expected-tag-set groups — needed for items where a single work-item covers multiple expected document deliveries with distinct tag sets.
+
+**Decision**: `DeliveryItemBase.item_description` field is typed `list[list[str]]` (JSON-serialized for SP storage). Each inner list represents one expected document's tag set; the outer list enumerates all expected documents under the work-item. Two derived Pydantic validators:
+- **TSC-W007** — subset detection: any inner tag-set that is a strict subset of another inner tag-set in the same item is a likely template-authoring error (one document strictly subsumes another's tag set); warn at template load.
+- **TSC-W008** — `doc_count` consistency: `doc_count` (per-row field on Deliverables_<customer_id>) MUST equal `len(item_description)` (number of expected documents). Emit warning when mismatch (TPM authored 2 tag-sets but doc_count = 3, etc.).
+
+**Why**:
+- (a) Real-world need: a work-item like "Compliance docs" may legitimately expect multiple deliverables, each with its own tag-set (`[["Sustainability"], ["Bluetooth_SIG"], ["WHQL"]]`).
+- (b) The previous flat semicolon-separated tag model conflated per-document tag groups (couldn't represent a work-item expecting both `[A, B]` AND `[C, D]` as separate documents).
+- (c) Subset detection (W007) flags a common authoring mistake where one inner tag-set is a superset of another.
+- (d) `doc_count` consistency (W008) lets the SP UI engineer correctly populate doc_count per row from template-authored data without manual count drift.
+
+**Consequences**:
+- (a) Pydantic `DeliveryItemBase.item_description: list[list[str]]` (commit `e3b0cb5`).
+- (b) New error codes TSC-W007 + TSC-W008 registered in `template_schema/error_codes.py` + diagnostics catalog (commits `9c39a0e` D13, `e3b0cb5`).
+- (c) `milestones_workitems_fields_values.xlsx` Deliverables tab updated to JSON-serialized format (`[["Sustainability"]]` not `'Sustainability'`); STATUS flag 2026-06-20 enumerates row-by-row corrections.
+- (d) FR-52 routing pipeline updated: strict-substring + fuzzy-match steps consume the flattened union of all inner tag-sets per item.
+- (e) `customizations/template_schemas/MMK/template.yaml` items use nested form (commit `9c39a0e`).
+
+**Anchors**: FR-52, FR-82, TSC-W007, TSC-W008, `template_schema/MODULE.md`, commits `fc41eb0` / `9c39a0e` / `e3b0cb5`.
+
+---
+
+## D-097: `customer_delivery_info` base-URL + `delivery_path_template` per-customer folder expansion (FR-69)
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: During the 2026-06-20 FR-69 sweep, the architect locked the customer-side carrier-delivery path composition model. Prior FR-69 framed carrier folder structure as a per-customer `portal_structure.yaml`. The lock simplified to: (a) `customer_delivery_info` = base URL (e.g., `drive.google.com`) authored at customer template level; (b) `delivery_path_template` = per-customer Jinja-style path template authored at customer level; (c) per-item `target_folder` = template-author-supplied sub-path; (d) `customer_adapter` consumes the fully-resolved path string composed by the `workflow_engine.tasks/submission` task body.
+
+**Decision**: Path composition contract for FR-19/FR-77 customer delivery upload:
+
+```
+final_path = customer_delivery_info
+           + delivery_path_template_expanded({project_model, milestone_name})
+           + target_folder
+```
+
+`customer_delivery_info` + `delivery_path_template` are author-time fields on `CustomerTemplateBase`. `target_folder` is per-item on `DeliveryItemBase` (template-author-supplied). `workflow_engine` composes the final path string; `customer_adapter.upload_attachment(target_folder=<resolved>)` receives a fully-resolved string and does NOT itself compose paths.
+
+Concrete example: `drive.google.com/OEM_Folder1/OEM_Folder2/SM-S901U/P1/Compliance/Sustainability`.
+
+**Why**:
+- (a) Three-level composition cleanly separates customer-level constants (base URL + folder skeleton) from per-item leaf paths.
+- (b) Pushes path composition to `workflow_engine` (single integrator point) rather than `customer_adapter` (per-customer subclass); reduces per-adapter duplication.
+- (c) `delivery_path_template` Jinja-style supports `{project_model}` + `{milestone_name}` substitution for path patterns shared across milestones.
+- (d) Per-item `target_folder` lets the template author assign each work-item to a specific carrier sub-folder (e.g., compliance docs to `Compliance/`; reports to `TestReports/Power`).
+
+**Consequences**:
+- (a) `CustomerTemplateBase` gains `customer_delivery_info: str` + `delivery_path_template: str` (commit `9c39a0e` D10, `e3b0cb5`).
+- (b) `DeliveryItemBase.target_folder` redefined as template-author-supplied (NOT HILDA-resolved) per NFR-21 §6 amendment 2026-06-21 (commit `9c39a0e`).
+- (c) `workflow_engine.tasks/submission.QUEUE_SUBMISSION` composes the final path (per customer_adapter D5 cascade, commit `a833b85`).
+- (d) `customer_adapter.upload_attachment` signature: `target_folder: str` (fully-resolved); does not compose.
+- (e) MMK example: `delivery_path_template="OEM_Folder1/OEM_Folder2/{project_model}/{milestone_name}"`, `customer_delivery_info="drive.google.com"`.
+
+**Anchors**: FR-19, FR-69, FR-77, NFR-21 §6 (amendment 2026-06-21), `customer_adapter/MODULE.md`, `workflow_engine/MODULE.md`, commits `fc41eb0` / `9c39a0e` / `a833b85`.
+
+---
+
+## D-098: FR-68 hash-match logic DROPPED — uploadAttachment return + UI file-exists check sufficient
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: FR-68 (PLM-NSD sync verification post-dispatch) historically specified byte-level hash-matching between PLM-uploaded artifacts and NSD-stored artifacts to confirm carrier-side delivery integrity. During the 2026-06-20 sweep, the architect directed that byte-level hash-match logic is out of scope for Ph-1; verification is sufficient via two simpler signals.
+
+**Decision**: FR-68 Ph-1 verification = upload-success markers only:
+- **(i) PLM side**: `IssueTracker.uploadAttachment` return result (issue_tracker domain) — adapter-reported success confirms PLM-side store.
+- **(ii) Carrier side**: per-folder list-files check (customer_adapter domain) via the Google Drive API binding — confirms file presence on carrier portal.
+
+Byte-level hash-match (originally FR-68) is dropped from Ph-1 scope. New `customer_adapter.CarrierCapabilityFlags.supports_upload_success_verification` field (Ph-1 Google Drive = True) gates the per-folder list-files check. `supports_hash_verification` retained as Ph-2 forward-looking flag but is not required for FR-68 Ph-1 verification.
+
+**Why**:
+- (a) Byte-level hash-match required reading files back from both PLM + carrier post-upload — significant operational complexity for marginal verification benefit.
+- (b) Adapter-reported `uploadAttachment` success + carrier-side list-files presence already cover the failure modes operations cares about (upload didn't happen / file didn't land on carrier).
+- (c) Hash mismatch as a distinct failure mode (file uploaded but corrupted in transit) is exceedingly rare on enterprise networks; HILDA's compact-report discipline and ops re-upload path can handle it post-hoc if it surfaces.
+- (d) Drops one cross-system verification dependency that would have required bidirectional file-read from corp_plm_gateway + customer_adapter.
+
+**Consequences**:
+- (a) `[D-054]` PLM-Carrier hash-sync anchor narrowed to "individual files only, never zips" semantic (customer_adapter D4 cascade, commit `a833b85`).
+- (b) `customer_adapter/MODULE.md` `CarrierCapabilityFlags` adds `supports_upload_success_verification: bool` (Ph-1 Google Drive = True); `supports_hash_verification` reserved Ph-2 (commit `a833b85` D3).
+- (c) FR-68 prose retains the carrier-delivery-confirmation intent; specific mechanism = uploadAttachment return + list-files only.
+- (d) No `corp_plm_gateway` ↔ `customer_adapter` cross-system file-read coordination required.
+
+**Anchors**: FR-19, FR-68, `[D-054]` (carrier-package semantic; impl note 2026-06-20), `customer_adapter/MODULE.md`, `issue_tracker/MODULE.md`, commit `a833b85`.
+
+---
+
+## D-099: FR-81 option (a) — `force_tracking_enabled` sole per-item field + SP BOOL binary semantic with column-default = true
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: FR-81 originally proposed two competing per-item tracking-control models: (a) single per-item `force_tracking_enabled: bool` SP column with column-default = `true`; (b) per-TG `tracking_enabled: bool` + per-item override. During the 2026-06-20 sweep, the architect locked option (a). All items default to tracking-enabled at the SP-column level; the explicit per-item exception is the default work-item (force_tracking_enabled = false per FR-78 inventory).
+
+**Decision**: `DeliveryItemBase.force_tracking_enabled: bool` is the sole per-item tracking-control field. SP-side semantics: BOOL column with column-default = `true` (TPM does NOT have to set it explicitly on every row). The per-TG `tracking_enabled` flag is REMOVED from the template schema; the default work-item is the one explicit exception with `force_tracking_enabled = false` per FR-78 hardcoded inventory.
+
+**Why**:
+- (a) Single per-item field removes the per-TG/per-item priority resolution ambiguity that option (b) introduced.
+- (b) Column-default = true preserves the operational invariant "tracking is on unless explicitly disabled" — no TPM authoring burden on the common path.
+- (c) Default work-item exemption is the one operational pattern that needs `force_tracking_enabled = false` (it exists as a holding bucket for routed-but-unclaimed documents per FR-78; cannot enter the tracking state machine itself).
+- (d) Removes the per-TG flag, which collided with the `[D-051]` denormalization architect lock (TG fields denormalized onto DeliveryItemBase).
+
+**Consequences**:
+- (a) `template_schema` Pydantic field `force_tracking_enabled: bool = True` on `DeliveryItemBase` (commit `9c39a0e` D5+D6, `e3b0cb5`).
+- (b) Per-TG `tracking_enabled` field REMOVED from schema.
+- (c) `DefaultWorkItemConfig.force_tracking_enabled = False` per FR-78 hardcoded inventory (commit `9c39a0e` D9, STATUS line 289).
+- (d) SP column provisioning: `force_tracking_enabled` BOOL with column-default = true (SP UI engineer xlsx).
+- (e) `milestones_workitems_fields_values.xlsx` default WI revert: `force_tracking_enabled = false` (commit `d0aede1`).
+
+**Anchors**: FR-78, FR-81, `[D-051]` (TG denormalization), `template_schema/MODULE.md`, commits `fc41eb0` / `9c39a0e` / `e3b0cb5` / `d0aede1`.
+
+---
+
+## D-100: FR-64 Option (b) — HILDA-owned per-item cascade for Close All Items
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: FR-64 (Close All Items milestone-level button) had two competing implementation options surfaced in prior reviews: (a) SP UI engineer's button writes a single `closed_all_items_triggered_at` timestamp on Milestones row; HILDA reads the alert and treats it as a milestone-scoped close signal. (b) HILDA enumerates all CLOSE-eligible items in the milestone and issues per-item `update_delivery_state(target=CLOSED)` calls. The 2026-06-20 architect lock chose option (b) — HILDA owns the per-item cascade explicitly.
+
+**Decision**: FR-64 Close All Items implementation = Option (b): SP UI engineer's button writes the single timestamp on Milestones row → fires SP-alert → HILDA's `workflow_engine.tasks/milestone.close_all_items` task body iterates CLOSE-eligible items in the milestone and calls `tracker.update_delivery_state(target=CLOSED, trigger_source="tpm_button")` per item.
+
+**Why**:
+- (a) Per-item cascade preserves the state-machine integrity: every CLOSE transition flows through `tracker.update_delivery_state` with the same guards, audit, and `CommunicationLog` discipline as any other transition.
+- (b) Milestone-scoped close as a separate state-machine event would require introducing a milestone-state-machine concept that HILDA doesn't otherwise have.
+- (c) Per-item cascade lets each item's CLOSE eligibility be evaluated independently (some items may already be CLOSED; some may be in a guard-rejecting state).
+- (d) Audit clarity: each per-item CLOSE shows up as a discrete CommunicationLog row attributable to the milestone-level button press.
+
+**Consequences**:
+- (a) `workflow_engine/tasks/milestone.py` `close_all_items` task body iterates CLOSE-eligible items per FR-64 Option (b) (commit `96a498f`).
+- (b) `tracker/MODULE.md` D12 cascade documents the per-item iteration contract (commit `e5f186e` — tracker arch revisit D12).
+- (c) `rule_engine` evaluates `MilestoneAllClosed` downstream as a separate trigger (commit `20aa181` D12); not coupled to FR-64 directly.
+- (d) SP-side Milestones row still carries `closed_all_items_triggered_at` (HILDA-read, SP UI engineer-written per button click).
+
+**Anchors**: FR-64, `tracker/MODULE.md`, `workflow_engine/MODULE.md`, `rule_engine/MODULE.md`, commits `fc41eb0` / `e5f186e` / `20aa181` / `96a498f` / `1e7e8a0`.
+
+---
+
+## D-101: `tpm_resolved_doc_type` STR → LIST Choice conversion (defense-in-depth)
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: During the 2026-06-20 sweep, the SP-column data type for `tpm_resolved_doc_type` (per-item TPM-supplied doc_type when FR-87 step (B) re-classification fires) was changed from STR free-form to LIST Choice. Motivation: defense-in-depth — restrict TPM-authored doc_type values to the canonical 5-value `DocType` enum surface (`test_report`, `tech_report`, `waiver`, `compliance_certification_release_notes`, `unresolved`), preventing typo-class TPM input that would silently fail FR-86 alignment-invariant checks downstream.
+
+**Decision**: SP column `tpm_resolved_doc_type` data type = LIST Choice over the 5-value DocType enum (matching the canonical `DocType` Pydantic enum surface). TPM SP UI selects from a dropdown rather than typing free-form text.
+
+**Why**:
+- (a) Defense-in-depth: STR free-form would let TPM type `'TestReport'` or `'test report'` or any variant; alignment-invariant validation would fail silently or surface confusing downstream errors.
+- (b) SP Choice column natively renders a constrained dropdown for the SP UI — better UX for TPM authoring.
+- (c) Mirrors the canonical 5-value DocType enum surface already defined in `template_schema`.
+- (d) Reduces error-code surface area: no need for a "doc_type-resolution-invalid" warning code if SP-side input is constrained.
+
+**Consequences**:
+- (a) SP UI engineer's `SP_lists_authoritative.xlsx` Deliverables tab `tpm_resolved_doc_type` data type = LIST (Choice over 5 canonical DocType values).
+- (b) `template_schema` Pydantic `DeliveryItemBase.tpm_resolved_doc_type: DocType | None` (constrained enum; commit `e3b0cb5`).
+- (c) FR-87 step (B) doc_type re-classification consumes the constrained value; no normalization layer needed.
+- (d) Cross-FR cascade swept this session per commit `fc41eb0` (`tpm_resolved_doc_type STR->LIST Choice`).
+
+**Anchors**: FR-86, FR-87 step (B), `template_schema/MODULE.md`, `SP_lists_authoritative.xlsx`, commits `fc41eb0` / `e3b0cb5`.
+
+---
+
+## D-102: `corp_id_list` + `email_cc_list` semi-colon separator convention
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: Two SP-side STR free-form fields carrying delimited multi-value lists: `corp_id_list` (TG-level corp IDs for messenger escalation per FR-71) and `email_cc_list` (per-item CC distribution per FR-9 outreach). Prior implicit convention was comma-separated. The 2026-06-20 sweep locked the delimiter to **semi-colon** to align with corp messenger / corp Outlook conventions where comma is often part of the displayed identity field (e.g., "Last, First" in display names) and semi-colon is the standard recipient separator.
+
+**Decision**: `corp_id_list` and `email_cc_list` SP STR free-form columns use **semi-colon (`;`)** as the value separator. HILDA parsers split on `;` (trimming whitespace) when consuming these fields.
+
+**Why**:
+- (a) Aligns with corp Outlook / corp messenger conventions (semi-colon is the standard recipient separator in corp email tooling).
+- (b) Comma can appear within an individual value (e.g., display-name conventions); semi-colon does not.
+- (c) Operational consistency: TPMs already type recipient lists with semi-colons in their daily email workflow.
+
+**Consequences**:
+- (a) `email_service` outbound composers split `email_cc_list` on `;` (when implemented — pending email_service Module #12 revisit).
+- (b) Messenger escalation per FR-71 splits `corp_id_list` on `;`.
+- (c) SP UI engineer documents `;` as the canonical separator in column-help-text on the SP column.
+- (d) Cross-FR sweep applied per commit `fc41eb0` (`corp_id_list + email_cc_list semi-colon separator`).
+
+**Anchors**: FR-9, FR-71, `[D-086]` (free-form text identity discipline), `template_schema/MODULE.md`, commit `fc41eb0`.
+
+---
+
+## D-103: SP_UI Start Collection enablement narrowed (In Progress removed) + Close All Items single trigger + HILDA cascade
+
+**Date**: 2026-06-20
+**Status**: Ratified
+
+**Context**: During the 2026-06-20 sweep, the SP UI engineer's button-enablement rules were refined for two milestone-level buttons:
+- **Start Collection** (FR-8 trigger): enablement narrowed — the "In Progress" milestone-state intermediate-enablement was removed; button is enabled only in the well-defined pre-Start-Collection window.
+- **Close All Items** (FR-64): reframed as a single milestone-level trigger that fires the HILDA-owned per-item cascade per `[D-100]`, rather than the SP UI engineer pre-enumerating per-item buttons.
+
+**Decision**: Refined SP_UI button enablement and trigger model:
+- **Start Collection** is enabled only in the explicit pre-Start-Collection state window (milestone status NOT in {InProgress, Completed}); "In Progress" enablement removed (was previously allowed mid-collection for re-triggering — superseded by the FR-8 idempotent re-trigger pattern).
+- **Close All Items** is a single milestone-level trigger; SP UI engineer writes one `closed_all_items_triggered_at` timestamp; HILDA cascades per-item CLOSE via `[D-100]` Option (b).
+
+**Why**:
+- (a) Eliminates the "In Progress" intermediate-enablement window for Start Collection — removes a state-machine corner case where the button could fire mid-collection.
+- (b) FR-8 idempotent re-trigger discipline (per FR-2 R&R lock) means re-triggering Start Collection mid-collection is operationally redundant; SP-side enablement enforcement is the cleaner mechanism.
+- (c) Close All Items single-trigger pattern aligns with `[D-100]` Option (b) HILDA-owned cascade — SP UI engineer ships one button + one timestamp; HILDA owns the per-item iteration.
+- (d) Reduces SP UI engineer's Ph-1 deliverable surface area; consolidates with the `[D-089]` Refresh + Download Package Ph-2 deferral theme.
+
+**Consequences**:
+- (a) `docs/sp_ui_engineer/SP_UI_button_actions.md` Start Collection enablement rules updated to remove In Progress (commit `fc41eb0`).
+- (b) Close All Items section reframes as Option (b) HILDA-owned cascade (commit `fc41eb0`).
+- (c) FR-8 + FR-64 spec text updated.
+- (d) Downstream `workflow_engine.tasks/milestone.close_all_items` implements the cascade (commit `96a498f`).
+- (e) `tracker` Ph-1 dev consumes the per-item cascade (commit `2377f28`).
+
+**Anchors**: FR-8, FR-64, `[D-089]` (Refresh + Download Package Ph-2 deferral; sibling SP UI engineer Ph-1 scope reduction), `[D-100]` (Option (b) cascade), `SP_UI_button_actions.md`, commits `fc41eb0` / `96a498f` / `2377f28`.
+
+---
+
+## D-104: Projects per-customer SP list (supersedes `[D-083]` global Projects + `[D-088]` global Projects.TPM lookup)
+
+**Date**: 2026-06-21
+**Status**: Ratified
+
+**Context**: `[D-083]` (2026-06-17) established the Ph-1 SP architecture lock with two per-customer lists (`Deliverables_<customer_id>` + global `Milestones`) plus a **global** `Projects` list reused for `project_id → TPM` lookup. `[D-088]` (2026-06-19) ratified the global Projects.TPM 3-tuple resolution pattern. During the 2026-06-21 NFR-21 deep-scan + Module-by-module revisit session, the architect identified the global Projects framing as load-bearingly wrong: `project_id` is a corp-PLM-assigned key whose namespace is per-customer; reusing a single global Projects list across customers would produce cross-customer key collisions. Lock: Projects becomes per-customer (`Projects_<customer_id>`), preserving Milestones global asymmetry (milestone names like `LE-2` legitimately repeat across carriers; composite uniqueness is what matters there).
+
+**Decision**: `Projects_<customer_id>` SP list per customer (not global Projects). Schema unchanged: each row carries `(Id=project_id, project_model, TPM)` 3-tuple. HILDA caches one entry per customer at bootstrap. `Deliverables_<customer_id>.project_id` is a FK into `Projects_<customer_id>.Id`. Milestones list remains global per intentional asymmetry (composite uniqueness `(carrier, project_id, project_model, Title)` enforced by SP UI engineer).
+
+**Why**:
+- (a) `project_id` namespace is per-customer (corp-PLM-assigned per customer relationship); global Projects would produce cross-customer collisions.
+- (b) Per-customer Projects mirrors per-customer Deliverables_<customer_id> + per-customer credential / template / config scoping convention established across `[D-077]` / `[D-083]` / `[D-038]` v3.
+- (c) Milestones global asymmetry is intentional: milestone names (`LE-2`, `P1`) are shared vocabulary across carriers — global list + composite uniqueness is the cleaner model.
+- (d) Resolves cross-FR cascade staleness (~11 load-bearing FRs swept across requirements.md commits `0301bcd` + `17a8e54`).
+
+**Consequences**:
+- (a) `NFR-21` amendment §(1)-(6) 2026-06-21 locks 3-list-per-customer scoping (commit `d0aede1`).
+- (b) FR-2, FR-9, FR-11, FR-14, FR-25 (b), FR-77, FR-84 rewritten to reference `Projects_<customer_id>` (commits `0301bcd` + `17a8e54`).
+- (c) `[D-088]` Projects.TPM 3-tuple lookup pattern PRESERVED but scoped per-customer (`Projects_<customer_id>` query for `project_id → (assigned_pm_id, pm_display_name, pm_email)`).
+- (d) HILDA Projects cache: one entry per customer (`dict[customer_id, dict[project_id, 3-tuple]]`), not single global cache.
+- (e) Multiple MODULE.md anchor updates: rule_engine D10, workflow_engine D11, dashboard D6 add `[D-083]` for per-customer scope (commits `20aa181` / `1e7e8a0` / `7dee1ed`).
+
+**Anchors**: FR-2, FR-9, FR-11, FR-14, FR-25 (b), FR-77, FR-84, NFR-21 amendment §(1)-(6), `[D-077]` (4-list runtime SP coupling), `[D-083]` (3-list architecture; supersession), `[D-088]` (Projects.TPM 3-tuple lookup; preserved but per-customer scoped), commits `d0aede1` / `0301bcd` / `17a8e54`.
+
+---
+
+## D-105: 4-field owner identity model — `owner_corp_id` as PLM grouping key (supersedes single `owner_email` field)
+
+**Date**: 2026-06-21
+**Status**: Ratified
+
+**Context**: Prior owner identity model carried a single `owner_email` field on `DeliveryItemBase` + `DocumentItemAssociation` + `PLMFanOutTarget`. `[D-080]` (2026-06-13/14/15) split `owner_email` into `owner_corp_usa_email` + `owner_corp_email` (per FR-88) to support non-USA-domain owners. During the 2026-06-21 storage MODULE.md revisit (`[D-106]` follow-on), the architect locked the **full 4-field owner identity** (`owner_corp_id`, `owner_corp_usa_email`, `owner_corp_email`, `owner_name`) with **`owner_corp_id` as the PLM grouping key** per FR-5 + FR-8 step 2 + `[D-035]`. Email fields are informational/outreach; `owner_corp_id` is the stable corp-directory identifier that FR-79 PLM fan-out aggregates on.
+
+**Decision**: Owner identity model = 4 fields on `DeliveryItemBase` + `DocumentItemAssociation` + `PLMFanOutTarget`:
+- `owner_corp_id: str` — corp directory identifier; **load-bearing PLM grouping key** for FR-79 fan-out (replaces email-based grouping).
+- `owner_corp_usa_email: str | None` — preferred outreach (FR-9 + `[D-080]`).
+- `owner_corp_email: str | None` — fallback outreach.
+- `owner_name: str | None` — display.
+
+FR-79 PLM fan-out groups by `(owner_corp_id, plm_id)` (not `(owner_email, plm_id)`). Storage helpers (`fan_out_plm_associations`, `update_association_plm_attachment`) filter on `owner_corp_id`.
+
+**Why**:
+- (a) Email-based PLM grouping breaks when an owner's email changes mid-collection (uncommon but possible; corp directory updates).
+- (b) `owner_corp_id` is the stable corp-directory identifier — uniqueness preserved across email updates.
+- (c) Email fields per `[D-080]` cover the outreach addressing concern; `owner_corp_id` covers the identity-uniqueness concern.
+- (d) `owner_name` for display preserves the human-readable surface.
+- (e) Anchors FR-5 ("owner identity is the corp-directory identifier") + FR-8 step 2 (PLM issue creation per owner × milestone uses corp_id as the key) + `[D-035]` (PLM source-of-truth).
+
+**Consequences**:
+- (a) `DeliveryItemBase` 4-field owner (commit `9c39a0e` D2, `e3b0cb5`).
+- (b) `DocumentItemAssociation` 4-field owner — column added + index on `owner_corp_id` for FR-79 grouping (commit `4029102`).
+- (c) `PLMFanOutTarget` grouping key `owner_corp_id` (commit `4029102`).
+- (d) `fan_out_plm_associations()` returns DISTINCT `(owner_corp_id, plm_id)` pairs (commit `4029102`).
+- (e) `reassign_document_to_workitem` signature: target_owner_corp_id required (PLM key); other 3 fields optional informational (commit `4029102`).
+- (f) Storage Invariants updated: "PLM fan-out per-(owner_corp_id, PLM) pair" (commit `d9f108b` D1).
+- (g) `rule_engine` `OwnerReassigned` sub-trigger detects any of the 4-field set changing (commit `20aa181` D2).
+
+**Anchors**: FR-5, FR-8 step 2, FR-79, FR-88, `[D-035]` (PLM source-of-truth + grouping key origin), `[D-080]` (owner email split; preserved as subset of this 4-field set), `[D-086]` (free-form text identity discipline), `storage/MODULE.md`, `template_schema/MODULE.md`, commits `9c39a0e` / `e3b0cb5` / `d9f108b` / `4029102`.
+
+---
+
+## D-106: `TGGroupBase` Pydantic model DROPPED — TG fields denormalized onto `DeliveryItemBase`
+
+**Date**: 2026-06-21
+**Status**: Ratified
+
+**Context**: `[D-051]` (2026-05-26) originally normalized TG-group fields into a separate `TGGroupBase` Pydantic model + (briefly) a separate `TGGroups` SP list. The 2026-06-12 session impl-noted on `[D-051]` that the SP list was dropped in favor of denormalization onto DeliveryItems columns (per `[D-073]` direction). During the 2026-06-21 Module-by-module revisit session, the architect extended the lock end-to-end: the `TGGroupBase` Pydantic model itself is **DROPPED**; TG fields live denormalized on `DeliveryItemBase`. Storage no longer reads `TGGroupBase` rows; storage consumes TG values via caller-supplied params or via the denormalized DeliveryItemBase fields.
+
+**Decision**: `TGGroupBase` Pydantic model is **DROPPED** from `template_schema`. All TG-level fields are denormalized onto `DeliveryItemBase`:
+- `tg_email_group_alias`
+- `tg_owner_corp_usa_email`, `tg_owner_corp_email`, `tg_owner_corp_id`, `tg_owner_name`
+- `corp_id_list`
+- `ingress_nsd`, `folder_routing_enabled`
+- `tg_path_id`
+
+Storage's `TGFolderRoutingRow` cache refresh trigger = `DeliveryItemBase` TG-denormalized field update (not TGGroupBase row update). `tg_name` FK comment references `DeliveryItemBase.tg_name` (denormalized) not `TGGroupBase`.
+
+**Why**:
+- (a) Architect-stated denormalization preference for SP-side simplicity — fewer SP lists, fewer cross-list joins.
+- (b) `[D-051]` + 2026-06-12 impl note already removed the SP-side TGGroups list; keeping the Pydantic model produced a phantom layer with no SP-side authority.
+- (c) Denormalization invariant (TSC-W005 TG-equality validator across siblings sharing `tg_name`) enforces consistency at template-load time without requiring a separate model.
+- (d) Simplifies storage: no separate `TGGroupBase` row reads; caller supplies TG params or reads from DeliveryItemBase.
+
+**Consequences**:
+- (a) `template_schema/MODULE.md` Pydantic `TGGroupBase` REMOVED (commit `9c39a0e` D3+D14).
+- (b) `template_schema/__init__.py` exports cleaned (commit `e3b0cb5`).
+- (c) `template_schema/tests` adds `test_tg_group_base_dropped` (asserts not importable) (commit `e3b0cb5`).
+- (d) `storage/MODULE.md` Depends-on line: explicit note "TGGroupBase DROPPED" + caller-supplied TG params discipline (commit `d9f108b` D3).
+- (e) `rule_engine/MODULE.md` Depends-on: TGGroupBase removed (commit `20aa181` D8).
+- (f) `TSC-W005` TG-equality validator continues to enforce consistency across siblings sharing `tg_name` per FR-40 denormalization discipline.
+
+**Anchors**: FR-40, FR-71, `[D-051]` (TGGroups normalization; superseded by this end-to-end denormalization lock), `[D-073]` (SP UI engineer hand-off direction; TG columns denormalized onto DeliveryItems), `template_schema/MODULE.md`, `storage/MODULE.md`, commits `9c39a0e` / `e3b0cb5` / `d9f108b` / `20aa181`.
+
+---
+
+## D-107: `credential_service` scope-aware routing — `CredentialScope` enum + `SYSTEM_CRED_SCOPE` map + `SYSTEM_SUBTREE` map
+
+**Date**: 2026-06-21
+**Status**: Ratified
+
+**Context**: Prior credential layout was a flat sops directory keyed by `(pm_id, system_type)`. Multiple FR locks during the 2026-06-19 to 2026-06-21 cascade revealed credential-scope heterogeneity: customer JIRA per FR-25 (b) needs per-(account, customer) scoping (carrier governs the account identity); customer Google Drive per FR-19 needs per-customer scoping (Ph-1/Ph-2 shared HILDA ops-team identity per customer); corp PLM gateway + corp messenger gateway use IP-allowlist + identity-assertion per FR-25 (a) + FR-51 pattern (d), so no credential lookup applies (`NO_CREDENTIAL`); email + sharepoint + LLM systems use a single shared HILDA service credential (`SHARED`). The flat sops layout could not express these distinctions. Architect direction 2026-06-21 introduced a scope-aware routing layer.
+
+**Decision**: `credential_service` introduces:
+- **`CredentialScope` enum**: `SHARED` | `PER_CUSTOMER` | `PER_ACCOUNT_PER_CUSTOMER` | `NO_CREDENTIAL`.
+- **`SYSTEM_CRED_SCOPE` map** (authoritative per-system scope routing):
+  - `ISSUE_TRACKER` → `PER_ACCOUNT_PER_CUSTOMER` (customer JIRA per FR-25 (b))
+  - `CUSTOMER` → `PER_CUSTOMER` (Google Drive per FR-19/77)
+  - `MESSENGER` → `NO_CREDENTIAL` (corp messenger gateway IP-allowlist)
+  - `EMAIL` / `SHAREPOINT` / `LLM_*` → `SHARED`
+- **`SYSTEM_SUBTREE` map**: filesystem subtree names per scope (e.g., `customer_jira` for PER_ACCOUNT_PER_CUSTOMER; `customer` for PER_CUSTOMER).
+- **`get_credential(pm_id, system_type, customer_id=None)`** signature: routes based on `SYSTEM_CRED_SCOPE[system_type]`; raises `CRD-E005` if `customer_id` required-but-missing.
+
+Filesystem layout examples:
+- `env_dir/email.enc.env` (SHARED)
+- `env_dir/customer/<customer_id>.enc.env` (PER_CUSTOMER)
+- `env_dir/customer_jira/<account_id>/<customer_id>.enc.env` (PER_ACCOUNT_PER_CUSTOMER)
+
+**Why**:
+- (a) Resolves the 4 distinct credential-scope patterns surfaced across FR-19 / FR-25 (a)+(b) / FR-51 patterns (a)-(d) into a single uniform routing layer.
+- (b) `NO_CREDENTIAL` explicit handling: corp PLM / corp messenger callers receive a clear `CRD-E001` instead of silently looking up missing files; documents the IP-allowlist + identity-assertion mechanism per FR-25 (a) + FR-51 pattern (d).
+- (c) `PER_ACCOUNT_PER_CUSTOMER` cleanly captures customer JIRA's carrier-governed account identity (account_id overrides pm_id in the file).
+- (d) Preserves backward-compat default (`customer_id=None`) for the SHARED systems already in use.
+
+**Consequences**:
+- (a) `credential_service/protocol.py` defines `CredentialScope` + `SYSTEM_CRED_SCOPE` + `SYSTEM_SUBTREE` (commit `fd61ec7`).
+- (b) `customizations/credentials/MODULE.md` documents the layout (commit `77020ed`).
+- (c) `corp_plm_gateway.env.sops` + `corp_messenger_gateway.env.sops` removed from layout; SystemType enum values kept for forward-compat (commit `77020ed`).
+- (d) `CRD-E005` new error code added; `CRD-E001` message extended to include `customer_id` (commit `77020ed`).
+- (e) Diagnostics PREFIX_REGISTRY: `CAD` → `CSA` rename (customer_adapter prefix alignment; commit `864041e`).
+- (f) Downstream cascade: customer_adapter D7 cascade reads `get_credential(pm_id, system_type, customer_id=...)` per `SystemType.CUSTOMER` (commit `a833b85` D7).
+
+**Anchors**: FR-19, FR-25 (a)+(b), FR-51 patterns (a)-(d), FR-77, `[D-019]` (credential service Protocol; preserved interface contract), `[D-038]` (sops-encrypted env file discipline; layout extended), `credential_service/MODULE.md`, `customizations/credentials/MODULE.md`, commits `77020ed` / `fd61ec7` / `864041e` / `a833b85`.
+
+---
+
+## D-108: `rules_paused` SP column on Deliverables for FR-31 sub-1 per-item pause mechanism
+
+**Date**: 2026-06-23
+**Status**: Ratified
+
+**Context**: FR-31 sub-1 (per-item pause/resume of automation rules) lacked a concrete SP-side mechanism. The 2026-06-21 storage D5 flag enumerated 3 candidate resolutions: (a) extend AutomationRuleOverride Scope enum to include `Item`; (b) new per-item table `AutomationRuleItemOverride`; (c) separate pause-flag column on Deliverables_<customer_id>. The 2026-06-23 rule_engine arch revisit chose option (c) — simplest mechanism + cleanest separation from per-item parameter override.
+
+**Decision**: New SP BOOL column `rules_paused: bool` on `Deliverables_<customer_id>` (default = false). Per-item pause = direct SP-column read via item snapshot; no Protocol + no separate table. `tracker.DeliveryItemBase` exposes `rules_paused: bool`. `rule_engine.RuleEngine.evaluate(event, item_snapshot=...)` reads `item_snapshot.rules_paused` and short-circuits when true (paused matches flagged via `WFL-W001` then skipped).
+
+**Why**:
+- (a) Per-item pause is fundamentally different from per-item parameter override (binary on/off vs structured parameter mutation); overloading AutomationRuleOverride.Scope = Item would muddy the override semantic.
+- (b) Direct SP-column read eliminates the need for a Protocol abstraction (`PauseStateLookup`) — the item snapshot already flows through the dispatcher.
+- (c) Simplest possible mechanism: TPM toggles the column in SP UI; HILDA reads it on the next event evaluation.
+- (d) Cross-module cascade lockstep with `[D-112]` (PauseStateLookup Protocol DROPPED) and `[D-113]` (TriggerDispatcher item_snapshot flow).
+
+**Consequences**:
+- (a) `template_schema.DeliveryItemBase.rules_paused: bool = False` (pre-req mini-cascade per rule_engine commit `b6c13a6`).
+- (b) SP UI engineer adds `rules_paused` BOOL column to `Deliverables_<customer_id>` schema; SP-side toggle UI (Ph-2 per architect lock per Flag STATUS line 319).
+- (c) `rule_engine` reads via `item_snapshot.rules_paused`; PauseStateLookup Protocol dropped (commit `20aa181` D5; `b6c13a6`).
+- (d) `workflow_engine.TriggerDispatcher` threads item snapshot before `evaluate()`; pause check fires upstream (commit `1e7e8a0` D2; `11f5e5d`).
+- (e) Resolves storage D5 flag (STATUS line 291).
+
+**Anchors**: FR-31 sub-1, `[D-066]` (rule-evaluation discipline), `[D-112]` (PauseStateLookup Protocol DROPPED), `[D-113]` (TriggerDispatcher item_snapshot flow), `rule_engine/MODULE.md` D5, `workflow_engine/MODULE.md` D2, commits `20aa181` / `b6c13a6` / `11f5e5d` / `1e7e8a0`.
+
+---
+
+## D-109: AutomationRuleOverride Postgres-override consumption DEFERRED to Ph-2
+
+**Date**: 2026-06-23
+**Status**: Ratified
+
+**Context**: `AutomationRuleOverride` Postgres table + consumption layer was specified for FR-31 sub-2 (per-customer / per-device runtime parameter overrides on top of YAML rules). During the 2026-06-23 rule_engine arch revisit, the architect directed Ph-1 Postgres-override consumption is deferred. Ph-1 early-drop has a single mock customer; per-customer / per-device runtime tuning is not needed; YAML edit + service restart is sufficient for Ph-1 operational profile.
+
+**Decision**: `AutomationRuleOverride` Postgres consumption is DEFERRED to Ph-2. Ph-1 reads polling intervals + rule parameters exclusively from Global YAML rules (`customizations/rules/global/*.yaml`). The Postgres `automation_rule_overrides` table + `OverrideStore` + `ItemOverride` + `InMemoryOverrideStore` Pydantic surface remains in the code (Ph-2 forward-looking) but is dropped from Ph-1 public `__init__.py` surface.
+
+**Why**:
+- (a) Ph-1 early drop = single mock customer; per-customer / per-device runtime parameter tuning is YAGNI.
+- (b) YAML edit + service restart is the operational profile for Ph-1; no need for hot-tuning mid-run.
+- (c) Removes a Ph-1 surface (Postgres table provisioning + storage helper + orphan-audit semantic) without losing the Ph-2 path.
+- (d) Aligns with the broader 2026-06-23 Ph-1 narrowing theme (`[D-110]` SIGHUP deferral, `[D-111]` per-customer YAML deferral).
+
+**Consequences**:
+- (a) `rule_engine/MODULE.md` D4 cascade (commit `20aa181`).
+- (b) `rule_engine/__init__.py` drops Ph-2 forward-looking surface from `__all__` (commit `b6c13a6`); still importable from sub-modules for tests + Ph-2 dev.
+- (c) `workflow_engine` D4 cascade: Ph-1 polling intervals come from Global YAML only (commit `1e7e8a0`).
+- (d) `dashboard` D1 cascade: `/admin/overrides` endpoint stays in code but renders empty table Ph-1 with "No active overrides (Ph-1)" message (commits `7dee1ed` D1, `dc31949`).
+- (e) Existing storage Postgres tables + helpers preserved Ph-2 forward-looking; `list_active_overrides` returns empty in Ph-1.
+
+**Anchors**: FR-31 sub-2, `rule_engine/MODULE.md` D4, `workflow_engine/MODULE.md` D4, `dashboard/MODULE.md` D1, commits `20aa181` / `b6c13a6` / `1e7e8a0` / `7dee1ed` / `dc31949`.
+
+---
+
+## D-110: SIGHUP YAML hot-reload DEFERRED to Ph-2
+
+**Date**: 2026-06-23
+**Status**: Ratified
+
+**Context**: Earlier spec text (FR-30 I1; STATUS Flag line 311) referenced HILDA-side `SIGHUP` signal handling for ops-triggered YAML rule + template hot-reload. During the 2026-06-23 rule_engine arch revisit, the architect deferred SIGHUP YAML hot-reload to Ph-2; Ph-1 loads rules at startup only.
+
+**Decision**: SIGHUP YAML hot-reload is DEFERRED to Ph-2. Ph-1 `rule_engine` loads `customizations/rules/global/*.yaml` at startup ONLY. YAML or rule changes require Celery worker + hilda-beat restart. `workflow_engine.beat_schedule` likewise builds at startup only Ph-1.
+
+**Why**:
+- (a) Ph-1 operational profile = early drop with infrequent rule changes; service restart is acceptable.
+- (b) SIGHUP handler implementation surface (signal handler + thread-safe atomic rule swap + active-evaluation race handling) is non-trivial; YAGNI for Ph-1.
+- (c) Resolves STATUS Flag line 311 (SIGHUP implementation confirmation pending) by deferring the requirement.
+- (d) Aligns with Ph-1 narrowing theme (`[D-109]`, `[D-111]`).
+
+**Consequences**:
+- (a) `rule_engine/MODULE.md` D6 cascade (commit `20aa181`).
+- (b) `workflow_engine/MODULE.md` D3 cascade: Ph-1 build_beat_schedule runs at hilda-beat startup only (commit `1e7e8a0`).
+- (c) FR-30 I1 SIGHUP reference effectively deferred Ph-2 (spec text update pending; STATUS Flag line 311 closed by this ADR).
+- (d) Ops runbook: rule/template change → restart `hilda-worker` + `hilda-beat` containers.
+
+**Anchors**: FR-30 I1, `rule_engine/MODULE.md` D6, `workflow_engine/MODULE.md` D3, STATUS Flag line 311, commits `20aa181` / `1e7e8a0`.
+
+---
+
+## D-111: Per-customer + per-device YAML rule directories DEFERRED to Ph-2
+
+**Date**: 2026-06-23
+**Status**: Ratified
+
+**Context**: FR-30 rule storage layout originally specified a 3-tier YAML resolution: Global / Customer / Device. The 2026-06-23 rule_engine arch revisit deferred Customer + Device tiers to Ph-2; Ph-1 reads only `customizations/rules/global/*.yaml`.
+
+**Decision**: Ph-1 rule loading reads ONLY `customizations/rules/global/*.yaml`. Customer-tier (`customizations/rules/<customer_id>/*.yaml`) and Device-tier (`customizations/rules/<customer_id>/<device_id>/*.yaml`) directories are DEFERRED to Ph-2. The 3-tier ladder code in `rule_engine.resolver` is preserved (fires only if non-global subdirs are populated, which Ph-1 ops contract avoids) but documented as Ph-2 forward-looking.
+
+**Why**:
+- (a) Ph-1 early drop = single mock customer; per-customer / per-device rule customization is not yet operationally needed.
+- (b) Ph-1 ops contract: populate only `customizations/rules/global/` directory.
+- (c) Preserves the ladder code (no architectural rollback) — Ph-2 activation is "populate the subdirs" with no code changes.
+- (d) Aligns with Ph-1 narrowing theme (`[D-109]`, `[D-110]`).
+
+**Consequences**:
+- (a) `rule_engine/MODULE.md` D7 cascade (commit `20aa181`).
+- (b) `rule_engine.loader` module docstring: Ph-1 = Global-only directory walk; Customer/Device tier walking forward-looking (commit `b6c13a6`).
+- (c) `rule_engine.resolver._ladder()` Ph-1 = Global-only resolution; Customer + Device tiers remain forward-looking (commit `b6c13a6`).
+- (d) Ops runbook: rule changes → edit `customizations/rules/global/*.yaml` + restart workers (per `[D-110]`).
+
+**Anchors**: FR-30, `rule_engine/MODULE.md` D7, commits `20aa181` / `b6c13a6`.
+
+---
+## D-113: `TriggerDispatcher` `item_snapshot` flow — rule_engine receives snapshot from caller (D12 cascade)
+
+**Date**: 2026-06-23
+**Status**: Ratified
+
+**Context**: Prior `rule_engine` evaluator design assumed `RuleEngine` would either look up item state internally or accept a per-rule pause-lookup callback. The 2026-06-23 rule_engine + workflow_engine cascade (with `[D-108]` `rules_paused` SP column + `[D-112]` PauseStateLookup drop) introduced a cleaner pattern: `TriggerDispatcher` fetches the item snapshot from storage BEFORE calling `rule_engine.evaluate(event, item_snapshot=item)`. Storage round-trip happens once at the dispatcher level; rule_engine becomes purely functional.
+
+**Decision**: `TriggerDispatcher.dispatch(event)` flow:
+1. Construct `EntityRef` from `event_context`.
+2. Fetch item snapshot from storage Protocol (`storage.get_delivery_item(...)`) BEFORE rule evaluation. Item-less events (milestone-scoped) skip this step.
+3. Call `rule_engine.evaluate(event, item_snapshot=item)` with the snapshot threaded through.
+4. Pass snapshot into Celery event_context so downstream task bodies don't re-read from storage.
+
+`rule_engine.RuleEngine` is purely functional in evaluation — does not touch storage. Pause check + rule conditions all read from `item_snapshot`.
+
+**Why**:
+- (a) Single storage round-trip per event vs N round-trips inside rule conditions — performance win.
+- (b) `rule_engine` becomes purely functional in evaluation; trivially testable with `SimpleNamespace(rules_paused=...)` fixtures.
+- (c) Item-less events (milestone-scoped triggers like `MilestoneAllClosed`) cleanly skip the storage fetch.
+- (d) Snapshot threaded into Celery event_context lets downstream task bodies avoid re-fetching the same item state.
+- (e) Aligns with `[D-108]` + `[D-112]` cascade.
+
+**Consequences**:
+- (a) `workflow_engine.dispatcher.TriggerDispatcher` flow per spec above (commit `11f5e5d`, `1e7e8a0` D12).
+- (b) `rule_engine.RuleEngine.evaluate(event, item_snapshot=...)` signature change (commit `b6c13a6`).
+- (c) Tests verify: item-snapshot threading + paused-skip + item-less-event skip-fetch (commit `11f5e5d` TestDispatcher).
+- (d) Event payloads passed to Celery task bodies carry item_snapshot reference (avoid re-fetch).
+- (e) Storage Protocol on `TriggerDispatcher.__init__`: optional `storage` Protocol param (commit `11f5e5d`).
+
+**Anchors**: FR-31 sub-1, `[D-108]` (`rules_paused` SP column), `[D-112]` (PauseStateLookup drop), `workflow_engine/MODULE.md` D2 + D12, `rule_engine/MODULE.md` D5, commits `1e7e8a0` / `b6c13a6` / `11f5e5d`.
+
+---
+
+## D-114: Dashboard Ph-1 auth — reverse-proxy header-trust (decision 2 option (b)); production source-IP allowlist required
+
+**Date**: 2026-06-24
+**Status**: Ratified
+
+**Context**: `dashboard/MODULE.md` "Architectural decisions to lock" enumerated 6 open decisions during 2026-06-12 design. Decision 2 (reverse-proxy identity-forwarding mechanism) had two candidates: (a) Kerberos re-forward via Negotiate to dashboard backend; (b) corp reverse proxy validates Kerberos at the proxy edge + sets `X-Authenticated-User` trusted header that dashboard reads. During Ph-1 dashboard dev 2026-06-24, the architect locked option (b).
+
+**Decision**: Dashboard Ph-1 auth model = **reverse-proxy header-trust**:
+- Corp reverse proxy validates user Kerberos / SPNEGO at the proxy edge.
+- Proxy sets `X-Authenticated-User` (+ optional `X-User-Email`) header on the forwarded request.
+- Dashboard reads the trusted header; does NOT re-validate Kerberos.
+- Dashboard `auth.py` middleware rejects client-supplied `X-Authenticated-User` headers (must come from proxy only).
+- **Production deployment MUST enforce source-IP allowlist at proxy + network layer** — the trust relationship is "this request came from the corp reverse proxy, not from a direct client".
+- `mock_auth=True` config bypasses auth for tests + `--serve --mock` developer flow.
+
+**Why**:
+- (a) Kerberos re-forward (option (a)) requires dashboard backend to participate in the SPNEGO handshake — significant complexity (Python Kerberos library + krb5 keytab on HILDA PC).
+- (b) Header-trust pattern is standard for corp reverse-proxy + backend service deployments; corp infra already supports Kerberos validation at proxy edge.
+- (c) Source-IP allowlist at proxy + network layer is the standard mitigation for header-trust spoofing.
+- (d) Defers Kerberos infrastructure deployment on HILDA PC (no krb5 keytab + no ticket cache needed; matches the broader NTLM-only stance per `[D-006]` impl note 2026-06-14).
+
+**Consequences**:
+- (a) `dashboard.auth` middleware reads `X-Authenticated-User` + `X-User-Email` from request headers; rejects client-supplied variants (commit `dc31949`).
+- (b) `DashboardConfig.mock_auth` field gates the bypass for tests (commit `dc31949`).
+- (c) Production deployment runbook: source-IP allowlist at proxy + network layer (operational invariant).
+- (d) STATUS Flag line 329 dashboard architecture deferred items (b) (reverse-proxy identity-forwarding) RESOLVED by this ADR.
+- (e) Test coverage: 401 unauth in production mode + proxy-forwarded identity accepted (commit `dc31949` TestGetDocumentSection).
+
+**Anchors**: FR-57, FR-59, FR-60, FR-61, `[D-006]` (NTLM auth posture; sibling discipline), `[D-074]` (browser → hilda-proxy auth scope), `dashboard/MODULE.md` "Architectural decisions to lock" decision 2, commits `dc31949` / `7dee1ed` / `97e8b37`.
+
+---
+
+## D-115: Dashboard-local auth middleware — defer cross-cutting `core/src/auth/` module split until FR-62 Ph-2
+
+**Date**: 2026-06-24
+**Status**: Ratified
+
+**Context**: `dashboard/MODULE.md` decision 3 enumerated a candidate `core/src/auth/` cross-cutting module for Kerberos / SPNEGO middleware shared by dashboard + future HTTP endpoints (including FR-62 PM/TPM upload surface in Ph-2). The Ph-1 dashboard dev session 2026-06-24 chose to defer the module split until FR-62 forces the question.
+
+**Decision**: Auth middleware lives dashboard-local (`core/src/dashboard/auth.py`) for Ph-1. The cross-cutting `core/src/auth/` module split is DEFERRED until FR-62 (Ph-2 PM/TPM upload endpoint) forces the question.
+
+**Why**:
+- (a) Ph-1 has only one HTTP-facing module (dashboard); cross-cutting auth module would be over-engineered.
+- (b) Header-trust pattern (per `[D-114]`) is simple enough that duplication when FR-62 lands is acceptable; refactor-to-shared-module is straightforward.
+- (c) FR-62 Ph-2 introduces upload endpoint with stricter validation requirements (may differ from dashboard read-only model); premature shared-module abstraction could constrain Ph-2 design.
+- (d) Minimizes Ph-1 surface; aligns with the broader Ph-1 narrowing theme.
+
+**Consequences**:
+- (a) `core/src/dashboard/auth.py` implements header-trust middleware (commit `dc31949`).
+- (b) No `core/src/auth/` module created in Ph-1.
+- (c) Ph-2 trigger: when FR-62 upload endpoint design begins, evaluate auth-module extraction (target modules: dashboard + FR-62 upload + any other Ph-2 HTTP endpoints).
+- (d) STATUS Flag line 329 dashboard architecture deferred item (e) (cross-cutting `core/src/auth/` MODULE.md candidate) RESOLVED as Ph-2 deferral by this ADR.
+
+**Anchors**: FR-57, FR-62 (Ph-2 trigger), `[D-114]` (header-trust auth pattern), `dashboard/MODULE.md` "Architectural decisions to lock" decision 3, commits `dc31949` / `7dee1ed`.
+
+---
+
