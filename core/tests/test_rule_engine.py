@@ -27,8 +27,8 @@ from core.src.template_schema import RuleScope as CanonicalRuleScope
 # ---------------------------------------------------------------------------
 
 ENTITY = EntityRef(
-    customer_slug="carrier-alpha",
-    device_slug="smartphone-X",
+    customer_id="carrier-alpha",
+    device_id="smartphone-X",
     milestone_id="M-1001",
     delivery_item_id="I-1234",
 )
@@ -282,14 +282,17 @@ class TestEvaluatePollingSchedule:
 from pathlib import Path  # noqa: E402
 
 from core.src.diagnostics import PipelineError  # noqa: E402
-from core.src.rule_engine import (  # noqa: E402
+# Ph-2 forward-looking imports (per D4 cascade 2026-06-23 -- not in Ph-1 __all__ but
+# still importable from sub-modules for tests):
+from core.src.rule_engine.orphan_audit import orphan_audit_postgres_overrides  # noqa: E402
+from core.src.rule_engine.override_store import (  # noqa: E402
     InMemoryOverrideStore,
     ItemOverride,
-    NoPauseState,
+)
+from core.src.rule_engine import (  # noqa: E402
     RuleEngine,
     RuleSet,
     collision_audit_update_state,
-    orphan_audit_postgres_overrides,
     resolve_polling_schedule_for_item,
     resolve_rules_for_entity,
 )
@@ -404,9 +407,9 @@ class TestLoader:
     def test_loads_all_tiers(self, rules_tree):
         rs = RuleSet.load(rules_tree)
         assert len(rs.rules_for_scope(RuleScope.GLOBAL, {})) == 6  # 5 trigger + 1 polling
-        assert len(rs.rules_for_scope(RuleScope.CUSTOMER, {"customer_slug": "carrier-alpha"})) == 2
+        assert len(rs.rules_for_scope(RuleScope.CUSTOMER, {"customer_id": "carrier-alpha"})) == 2
         assert len(rs.rules_for_scope(RuleScope.DEVICE,
-                                      {"customer_slug": "carrier-alpha", "device_slug": "smartphone-X"})) == 1
+                                      {"customer_id": "carrier-alpha", "device_id": "smartphone-X"})) == 1
         assert "default_polling_schedule" in rs.all_rule_ids()
 
     def test_repo_sample_global_defaults_loads(self):
@@ -522,7 +525,7 @@ OVERRIDE = ItemOverride(
 class TestResolver:
     def test_we2_ladder_override_and_additive(self, rules_tree):
         rs = RuleSet.load(rules_tree)
-        entity = EntityRef(customer_slug="carrier-alpha")  # no device tier
+        entity = EntityRef(customer_id="carrier-alpha")  # no device tier
         rules = resolve_rules_for_entity(rs, entity, TriggerKind.LAST_CONTACT_THRESHOLD)
         by_id = {r.rule_id: r for r in rules}
         assert set(by_id) == {"send_reminder_on_no_contact", "escalate_after_3_misses", "alpha_cc_tg_lead"}
@@ -564,7 +567,7 @@ class TestResolver:
         assert rule.source_tier is RuleScope.GLOBAL  # "overridden from global default"
         assert evaluate_polling_schedule(rule.tiers, 2) == 10
         # other item unaffected
-        other = EntityRef(customer_slug="carrier-alpha", delivery_item_id="I-9999")
+        other = EntityRef(customer_id="carrier-alpha", delivery_item_id="I-9999")
         assert resolve_polling_schedule_for_item(rs, other).source == "yaml"
 
     def test_unknown_polling_rule_id_raises_e002(self, rules_tree):
@@ -603,7 +606,7 @@ class PausedItems:
 
 class TestEvaluator:
     def test_we1_single_rule_two_ordered_actions(self, rules_tree):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        engine = RuleEngine(RuleSet.load(rules_tree))
         matches = engine.evaluate(event_for(
             TriggerKind.ITEM_MODIFIED, sub_trigger="OwnerReassigned",
             field_deltas={"owner_email": ("old@example.com", "new@example.com")},
@@ -614,8 +617,8 @@ class TestEvaluator:
         assert matches[0].correlation_id == "evt-test"
 
     def test_we2_two_matches_with_conditions(self, rules_tree):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
-        entity = EntityRef(customer_slug="carrier-alpha", delivery_item_id="I-1234")
+        engine = RuleEngine(RuleSet.load(rules_tree))
+        entity = EntityRef(customer_id="carrier-alpha", delivery_item_id="I-1234")
         matches = engine.evaluate(event_for(
             TriggerKind.LAST_CONTACT_THRESHOLD,
             field_deltas={"reminder_count_unanswered": (1, 2)},  # condition reads new value 2
@@ -627,16 +630,16 @@ class TestEvaluator:
         assert reminder.actions[0].params["template"] == "alpha_branded_reminder"
 
     def test_we2_escalation_at_threshold(self, rules_tree):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        engine = RuleEngine(RuleSet.load(rules_tree))
         matches = engine.evaluate(event_for(
             TriggerKind.LAST_CONTACT_THRESHOLD,
             field_deltas={"reminder_count_unanswered": (2, 3)},
-            entity=EntityRef(customer_slug="carrier-alpha"),
+            entity=EntityRef(customer_id="carrier-alpha"),
         ))
         assert {m.rule_id for m in matches} == {"escalate_after_3_misses", "alpha_cc_tg_lead"}
 
     def test_we3_derived_fields_and_condition(self, rules_tree, caplog):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        engine = RuleEngine(RuleSet.load(rules_tree))
         matches = engine.evaluate(event_for(
             TriggerKind.ATTACHMENT_RECEIVED,
             field_deltas={"doc_count_received": (4, 5)},
@@ -646,24 +649,34 @@ class TestEvaluator:
         assert [a.kind for a in matches[0].actions] == [ActionKind.UPDATE_STATE, ActionKind.TRIGGER_AI_REVIEW]
 
     def test_paused_item_flagged_not_dropped(self, rules_tree, caplog):
-        engine = RuleEngine(RuleSet.load(rules_tree), PausedItems(items={"I-1234"}))
+        """Per D5 cascade 2026-06-23: pause check reads item_snapshot.rules_paused
+        directly; no PauseStateLookup Protocol."""
+        from types import SimpleNamespace
+        engine = RuleEngine(RuleSet.load(rules_tree))
+        paused_item = SimpleNamespace(rules_paused=True)
         with caplog.at_level("WARNING"):
-            matches = engine.evaluate(event_for(
-                TriggerKind.ITEM_MODIFIED, sub_trigger="OwnerReassigned",
-            ))
+            matches = engine.evaluate(
+                event_for(TriggerKind.ITEM_MODIFIED, sub_trigger="OwnerReassigned"),
+                item_snapshot=paused_item,
+            )
         assert len(matches) == 1
         assert matches[0].pause_state == "paused"
         assert any("RUL-W003" in r.message for r in caplog.records)
 
-    def test_paused_milestone_flags_match(self, rules_tree):
-        entity = EntityRef(customer_slug="carrier-alpha", milestone_id="M-1001")
-        engine = RuleEngine(RuleSet.load(rules_tree), PausedItems(milestones={"M-1001"}))
+    def test_milestone_pause_is_ph2_deferred(self, rules_tree):
+        """Per D5 cascade 2026-06-23: milestone-level rules_paused column is Ph-2
+        deferred. Ph-1 milestone-pause UX requires bulk write to all per-item
+        rules_paused fields. Test verifies Ph-1 behavior: item-less events skip the
+        pause check entirely."""
+        entity = EntityRef(customer_id="carrier-alpha", milestone_id="M-1001")
+        engine = RuleEngine(RuleSet.load(rules_tree))
         matches = engine.evaluate(event_for(
             TriggerKind.LAST_CONTACT_THRESHOLD,
             field_deltas={"reminder_count_unanswered": (0, 1)},
             entity=entity,
         ))
-        assert matches and all(m.pause_state == "paused" for m in matches)
+        # Item-less event (no delivery_item_id on EntityRef) -> pause check skipped
+        assert matches and all(m.pause_state == "active" for m in matches)
 
     def test_unsupported_operator_skips_rule_with_w005(self, tmp_path, caplog):
         d = tmp_path / "rules" / "global"
@@ -673,17 +686,17 @@ class TestEvaluator:
             "    condition: { field: x, op: regex, value: 'a.*' }\n"
             "    actions:\n      - kind: NotifyPM\n        params: {}\n"
         )
-        engine = RuleEngine(RuleSet.load(tmp_path / "rules"), NoPauseState())
+        engine = RuleEngine(RuleSet.load(tmp_path / "rules"))
         with caplog.at_level("WARNING"):
             matches = engine.evaluate(event_for(TriggerKind.STATE_CHANGE, derived_fields={"x": "abc"}))
         assert matches == []
         assert any("RUL-W005" in r.message for r in caplog.records)
 
     def test_missing_condition_field_fails_closed_with_w006(self, rules_tree, caplog):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        engine = RuleEngine(RuleSet.load(rules_tree))
         with caplog.at_level("WARNING"):
             matches = engine.evaluate(event_for(TriggerKind.LAST_CONTACT_THRESHOLD,
-                                                entity=EntityRef(customer_slug="carrier-alpha")))
+                                                entity=EntityRef(customer_id="carrier-alpha")))
         # conditional rules can't evaluate without the field; unconditional alpha_cc still fires
         assert {m.rule_id for m in matches} == {"alpha_cc_tg_lead"}
         # fail-closed but visible: RUL-W006 per architect ruling 2026-06-12
@@ -691,11 +704,11 @@ class TestEvaluator:
         assert any("reminder_count_unanswered" in m for m in w006)
 
     def test_explain_trace(self, rules_tree):
-        engine = RuleEngine(RuleSet.load(rules_tree), NoPauseState())
+        engine = RuleEngine(RuleSet.load(rules_tree))
         trace = engine.explain(event_for(
             TriggerKind.LAST_CONTACT_THRESHOLD,
             field_deltas={"reminder_count_unanswered": (1, 2)},
-            entity=EntityRef(customer_slug="carrier-alpha"),
+            entity=EntityRef(customer_id="carrier-alpha"),
         ))
         by_id = {t["rule_id"]: t for t in trace}
         assert by_id["send_reminder_on_no_contact"]["matched"] is True
@@ -709,7 +722,7 @@ class TestAudits:
         r1 = make_trigger_rule(rule_id="state_writer_a", trigger=TriggerKind.ATTACHMENT_RECEIVED,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         r2 = make_trigger_rule(rule_id="state_writer_b", trigger=TriggerKind.ATTACHMENT_RECEIVED,
-                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "carrier-alpha"},
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_id": "carrier-alpha"},
                                source_tier=RuleScope.CUSTOMER,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         with caplog.at_level("WARNING"):
@@ -722,18 +735,18 @@ class TestAudits:
         r1 = make_trigger_rule(rule_id="w", trigger=TriggerKind.STATE_CHANGE,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         r2 = make_trigger_rule(rule_id="w", trigger=TriggerKind.STATE_CHANGE,
-                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c1"},
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_id": "c1"},
                                source_tier=RuleScope.CUSTOMER,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         assert collision_audit_update_state({TriggerKind.STATE_CHANGE: [r1, r2]}) == []
 
     def test_disjoint_customer_scopes_no_collision(self):
         r1 = make_trigger_rule(rule_id="a", trigger=TriggerKind.STATE_CHANGE,
-                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c1"},
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_id": "c1"},
                                source_tier=RuleScope.CUSTOMER,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         r2 = make_trigger_rule(rule_id="b", trigger=TriggerKind.STATE_CHANGE,
-                               scope=RuleScope.CUSTOMER, scope_keys={"customer_slug": "c2"},
+                               scope=RuleScope.CUSTOMER, scope_keys={"customer_id": "c2"},
                                source_tier=RuleScope.CUSTOMER,
                                actions=(make_action(ActionKind.UPDATE_STATE),))
         assert collision_audit_update_state({TriggerKind.STATE_CHANGE: [r1, r2]}) == []
@@ -798,7 +811,7 @@ class TestCLI:
         rc = cli_main([
             "--explain", "--rules-dir", str(rules_tree), "--run-id", "run-test",
             "--trigger", "LastContactThreshold",
-            "--entity", '{"customer_slug": "carrier-alpha"}',
+            "--entity", '{"customer_id": "carrier-alpha"}',
             "--field-deltas", '{"reminder_count_unanswered": [1, 2]}',
         ])
         assert rc == 0
@@ -810,7 +823,7 @@ class TestCLI:
     def test_explain_unknown_trigger_errors(self, rules_tree, capsys):
         rc = cli_main([
             "--explain", "--rules-dir", str(rules_tree),
-            "--trigger", "NotATrigger", "--entity", '{"customer_slug": "c1"}',
+            "--trigger", "NotATrigger", "--entity", '{"customer_id": "c1"}',
         ])
         assert rc == 1
         assert "RUL-E003" in capsys.readouterr().err

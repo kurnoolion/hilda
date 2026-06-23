@@ -1,14 +1,22 @@
 """YAML rule loader.
 
-Walks the customizations/rules/ tree (global/ + <customer_slug>/ + <customer_slug>/<device_slug>/),
-validates shape against the Rule discriminated model, loads item-level FR-31 overrides through
-the injected OverrideStore seam (D-DRAFT-1 — NOT storage.AutomationRuleOverride), and runs the
-orphan + collision startup audits.
+Ph-1 (per D7 cascade 2026-06-23): walks `<rules_dir>/global/*.yaml` ONLY. The
+per-customer + per-device YAML directories are Ph-2 forward-looking; the walking
+code below treats any non-global subdirectory as Ph-2 territory (no rules placed
+there in Ph-1 by ops convention; if any happen to be present, they load — but the
+Global-only Ph-1 ops contract makes this irrelevant). Ph-2 will actively populate
+the Customer + Device tiers.
+
+The OverrideStore param is Ph-2 forward-looking per D4 cascade 2026-06-23: Ph-1
+defaults to override_store=None (no Postgres-override consumption); Ph-2 activates
+the seam.
 
 Directory tier mapping per FR-30 / MODULE.md:
-    <rules_dir>/global/*.yaml                          -> RuleScope.GLOBAL,   scope_keys {}
-    <rules_dir>/<customer_slug>/*.yaml                 -> RuleScope.CUSTOMER, scope_keys {customer_slug}
-    <rules_dir>/<customer_slug>/<device_slug>/*.yaml   -> RuleScope.DEVICE,   scope_keys {customer_slug, device_slug}
+    <rules_dir>/global/*.yaml                       -> RuleScope.GLOBAL,   scope_keys {}              (Ph-1 + Ph-2)
+    <rules_dir>/<customer_id>/*.yaml                -> RuleScope.CUSTOMER, scope_keys {customer_id}   (Ph-2)
+    <rules_dir>/<customer_id>/<device_id>/*.yaml    -> RuleScope.DEVICE,   scope_keys {customer_id, device_id} (Ph-2)
+
+Renamed 2026-06-23 per [D-091]: customer_slug -> customer_id; device_slug -> device_id.
 
 Each YAML file may carry two top-level keys: `rules:` (TRIGGER_ACTION shape) and
 `polling_schedules:` (POLLING_SCHEDULE shape).
@@ -182,13 +190,13 @@ class RuleSet:
             for customer_dir in sorted(p for p in rules_dir.iterdir() if p.is_dir() and p.name != "global"):
                 if customer_dir.name.startswith((".", "_")):
                     continue
-                customer_keys = {"customer_slug": customer_dir.name}
+                customer_keys = {"customer_id": customer_dir.name}     # [D-091] slug->id rename
                 for path in _yaml_files(customer_dir):
                     rules.extend(_parse_file(path, RuleScope.CUSTOMER, customer_keys))
                 for device_dir in sorted(p for p in customer_dir.iterdir() if p.is_dir()):
                     if device_dir.name.startswith((".", "_")):
                         continue
-                    device_keys = {**customer_keys, "device_slug": device_dir.name}
+                    device_keys = {**customer_keys, "device_id": device_dir.name}    # [D-091] slug->id rename
                     for path in _yaml_files(device_dir):
                         rules.extend(_parse_file(path, RuleScope.DEVICE, device_keys))
 

@@ -27,7 +27,8 @@ from .models import (
     TriggerEvent,
     TriggerKind,
 )
-from .pause_state import NoPauseState
+# PauseStateLookup Protocol dropped per D5 cascade 2026-06-23 — CLI runs without item
+# snapshot context (no pause check; --explain shows pause_state=None for matched rules).
 
 __all__ = ["main"]
 
@@ -106,7 +107,7 @@ def _cmd_explain(
     derived_fields = json.loads(derived_fields_json) if derived_fields_json else None
 
     rule_set = _load(rules_dir)
-    engine = RuleEngine(rule_set, NoPauseState())
+    engine = RuleEngine(rule_set)        # Ph-1: no pause_lookup; item_snapshot passed per-evaluate per D5 cascade
     event = TriggerEvent(
         trigger=trigger_kind,
         sub_trigger=sub_trigger,

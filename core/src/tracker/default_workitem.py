@@ -51,6 +51,7 @@ _DEFAULT_WORKITEM_FIELDS: dict[str, Any] = {
     "review_status":          "not_required",             # per template_schema review_status enum
     "item_description":       None,                       # nested tag-set null on default WI per FR-82
     "manual_triage_required": False,
+    "rules_paused":           False,                       # default WI never rule-paused per FR-78 + rule_engine D5 cascade 2026-06-23
 }
 
 

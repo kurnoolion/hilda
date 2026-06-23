@@ -1,8 +1,14 @@
 """Scope-precedence resolver per FR-30 + FR-31.
 
-Per (entity_ref, rule_id): Device tier replaces Customer replaces Global; the FR-31
-item-level Postgres override (via the OverrideStore seam, D-DRAFT-1) replaces the whole
-resolved YAML ladder for that specific item.
+Ph-1 (per D4 + D7 cascade 2026-06-23): Global tier only. The Customer + Device tier
+overlays + the FR-31 item-level Postgres override layer remain in code as Ph-2
+forward-looking — they fire only when the loader has populated those tiers (Ph-1
+loader reads Global only by default), so Ph-1 active behavior is Global resolution
+with no overlays.
+
+Ph-2 expansion: Device tier replaces Customer replaces Global; the FR-31 item-level
+Postgres override (via the OverrideStore seam, D-DRAFT-1) replaces the whole resolved
+YAML ladder for that specific item.
 """
 from __future__ import annotations
 
@@ -33,12 +39,16 @@ def _trigger_matches(rule: Rule, trigger: TriggerKind, sub_trigger: str | None) 
 
 
 def _ladder(rule_set: RuleSet, entity_ref: EntityRef) -> list[tuple[RuleScope, dict[str, str]]]:
-    """The FR-30 tiers applicable to this entity, least-specific first."""
+    """The FR-30 tiers applicable to this entity, least-specific first.
+    Ph-1 (D7 cascade 2026-06-23): Global tier only is populated by the loader; Customer
+    + Device entries below are Ph-2 forward-looking (no rules exist at those tiers in
+    Ph-1 -- the tier returns no rules, so the overlay is a no-op).
+    Renamed 2026-06-23 per [D-091]: customer_slug -> customer_id; device_slug -> device_id."""
     tiers: list[tuple[RuleScope, dict[str, str]]] = [(RuleScope.GLOBAL, {})]
-    tiers.append((RuleScope.CUSTOMER, {"customer_slug": entity_ref.customer_slug}))
-    if entity_ref.device_slug is not None:
+    tiers.append((RuleScope.CUSTOMER, {"customer_id": entity_ref.customer_id}))
+    if entity_ref.device_id is not None:
         tiers.append(
-            (RuleScope.DEVICE, {"customer_slug": entity_ref.customer_slug, "device_slug": entity_ref.device_slug})
+            (RuleScope.DEVICE, {"customer_id": entity_ref.customer_id, "device_id": entity_ref.device_id})
         )
     return tiers
 

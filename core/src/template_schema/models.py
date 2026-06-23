@@ -98,6 +98,7 @@ class DefaultWorkItemConfig(BaseModel):
     no_customer_upload:    Literal[True]             = True
     review_required:       Literal[False]            = False
     review_status:         Literal["not_required"]   = "not_required"
+    rules_paused:          Literal[False]            = False    # default WI is never rule-paused per FR-78 hardcoded inventory + rule_engine D5 cascade 2026-06-23
     doc_count:             Literal[0]                = 0
     # Structural:
     sort_order_strategy:   Literal["max_plus_1", "fixed"] = "max_plus_1"
@@ -290,6 +291,7 @@ class DeliveryItemBase(_Base):
     no_customer_upload:              bool  = False
     force_tracking_enabled:          bool  = True       # SP BOOL column-default=true per FR-81 option (a) lock 2026-06-20
     manual_triage_required:          bool  = False
+    rules_paused:                    bool  = False  # FR-31 sub-1 per-item rule pause per rule_engine D5 cascade 2026-06-23; TPM-writable via SP UI; HILDA reads at rule eval (skip all rules when True). SP-side: Choice(Yes/No) column on Deliverables_<customer_id>.
     # FR-77 routing fields:
     ingress_folder:                  str | None = None
     target_folder:                   str | None = None   # template-author-supplied per-item sub-path under milestone HOME

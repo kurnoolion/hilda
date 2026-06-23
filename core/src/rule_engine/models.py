@@ -96,10 +96,12 @@ class PollingScheduleTier:
 
 @dataclass(frozen=True)
 class EntityRef:
-    """Identifies the entity a TriggerEvent or rule applies to. Not all fields required for all triggers."""
+    """Identifies the entity a TriggerEvent or rule applies to. Not all fields required
+    for all triggers. Renamed 2026-06-23 per [D-091]: customer_slug -> customer_id;
+    device_slug -> device_id."""
 
-    customer_slug: str
-    device_slug: str | None = None
+    customer_id: str                       # was customer_slug per [D-091] slug->id rename
+    device_id: str | None = None           # was device_slug per [D-091]
     milestone_id: str | None = None
     delivery_item_id: str | None = None
 
@@ -126,7 +128,7 @@ class Rule:
     rule_id: str  # globally unique within {scope, scope_keys, kind} bucket
     kind: RuleKind
     scope: RuleScope
-    scope_keys: dict[str, str]  # {} global; {"customer_slug": ...} customer; +{"device_slug": ...} device
+    scope_keys: dict[str, str]  # {} global; {"customer_id": ...} customer; +{"device_id": ...} device per [D-091]
     source: Literal["yaml", "postgres_override"]
     source_file: str | None  # YAML file path for "yaml"; None for "postgres_override"
     source_tier: RuleScope | Literal["postgres_override"]  # for FR-31 sub-2 "overridden from X" UI surfacing

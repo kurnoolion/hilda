@@ -19,8 +19,7 @@ from typing import Any
 from core.src.diagnostics import format_code
 
 from .loader import RuleSet
-from .models import Rule, RuleMatch, TriggerEvent
-from .pause_state import PauseStateLookup
+from .models import Rule, RuleAction, RuleMatch, TriggerEvent
 from .resolver import resolve_rules_for_entity
 
 __all__ = ["RuleEngine"]
@@ -86,11 +85,16 @@ def _eval_condition(cond: dict[str, Any] | None, event: TriggerEvent, rule_id: s
 
 
 class RuleEngine:
-    """Consumes a RuleSet snapshot + injected PauseStateLookup. Pure per evaluation."""
+    """Consumes a RuleSet snapshot. Pure per evaluation.
 
-    def __init__(self, rule_set: RuleSet, pause_lookup: PauseStateLookup) -> None:
+    Per D5 cascade 2026-06-23: PauseStateLookup Protocol DROPPED from Ph-1. Pause state
+    is read directly from `item_snapshot.rules_paused` passed by the caller (workflow_engine
+    task body reads the item from storage before invoking the evaluator). Item-less events
+    (MilestoneAllClosed, CredentialExpired, etc.) skip the pause check entirely.
+    """
+
+    def __init__(self, rule_set: RuleSet) -> None:
         self._rule_set = rule_set
-        self._pause_lookup = pause_lookup
 
     # -- internals ----------------------------------------------------------
 
@@ -101,17 +105,17 @@ class RuleEngine:
             logger.warning("RUL-W005: " + format_code("RUL-W005", op=exc.op, rule_id=rule.rule_id))
             return False
 
-    def _pause_state(self, rule: Rule, event: TriggerEvent) -> str:
+    def _pause_state(self, rule: Rule, event: TriggerEvent, item_snapshot: Any) -> str:
+        """Ph-1 pause check per D5 cascade 2026-06-23: read item_snapshot.rules_paused if
+        the caller supplied a snapshot AND the event carries a delivery_item_id. Item-less
+        triggers skip the pause check (active by default)."""
         ref = event.entity_ref
-        paused = False
-        if ref.delivery_item_id is not None and self._pause_lookup.is_item_paused(ref.delivery_item_id):
-            paused = True
-        elif ref.milestone_id is not None and self._pause_lookup.is_milestone_paused(ref.milestone_id):
-            paused = True
-        if paused:
+        if ref.delivery_item_id is None or item_snapshot is None:
+            return "active"
+        if getattr(item_snapshot, "rules_paused", False):
             logger.warning(
                 "RUL-W003: " + format_code(
-                    "RUL-W003", rule_id=rule.rule_id, delivery_item_id=ref.delivery_item_id or "<none>",
+                    "RUL-W003", rule_id=rule.rule_id, delivery_item_id=ref.delivery_item_id,
                 )
             )
             return "paused"
@@ -119,11 +123,18 @@ class RuleEngine:
 
     # -- public surface ------------------------------------------------------
 
-    def evaluate(self, event: TriggerEvent) -> list[RuleMatch]:
+    def evaluate(self, event: TriggerEvent, item_snapshot: Any = None) -> list[RuleMatch]:
         """Pure function. Returns ALL matching rules for the trigger, with intra-rule action
-        order preserved. Across-RuleMatch ordering is NOT guaranteed — workflow_engine treats
-        each RuleMatch as an independent Celery task chain. Paused items' matches are returned
-        with pause_state="paused" — caller decides whether to skip (default: skip)."""
+        order preserved. Across-RuleMatch ordering is NOT guaranteed -- workflow_engine treats
+        each RuleMatch as an independent Celery task chain.
+
+        `item_snapshot` (Ph-1, NEW per D5 cascade 2026-06-23): when the event carries a
+        delivery_item_id, caller passes the item snapshot (DeliveryItemBase or compatible
+        SimpleNamespace) so evaluator can read `item_snapshot.rules_paused` for FR-31 sub-1
+        per-item pause. If `item_snapshot.rules_paused` is True, all matches are returned
+        with pause_state='paused' -- workflow_engine skips the chain by default policy.
+        Item-less events (e.g., MilestoneAllClosed) pass item_snapshot=None and skip the
+        pause check entirely."""
         matches: list[RuleMatch] = []
         resolved = resolve_rules_for_entity(self._rule_set, event.entity_ref, event.trigger, event.sub_trigger)
         for rule in resolved:
@@ -134,14 +145,14 @@ class RuleEngine:
                     rule_id=rule.rule_id,
                     matched_scope=rule.scope,
                     actions=rule.actions,
-                    pause_state=self._pause_state(rule, event),  # type: ignore[arg-type]
+                    pause_state=self._pause_state(rule, event, item_snapshot),  # type: ignore[arg-type]
                     override_source=rule.source,
                     correlation_id=event.correlation_id,
                 )
             )
         return matches
 
-    def explain(self, event: TriggerEvent) -> list[dict[str, Any]]:
+    def explain(self, event: TriggerEvent, item_snapshot: Any = None) -> list[dict[str, Any]]:
         """Same resolution as evaluate() PLUS the trace per resolved rule (matched or not):
         which scope tier won, whether an FR-31 override applied, the condition result, the
         pause state, and the ordered action kinds. Used by --explain CLI mode. Pure."""
@@ -158,7 +169,7 @@ class RuleEngine:
                     "source_file": rule.source_file,
                     "condition": rule.condition,
                     "matched": matched,
-                    "pause_state": self._pause_state(rule, event) if matched else None,
+                    "pause_state": self._pause_state(rule, event, item_snapshot) if matched else None,
                     "actions": [a.kind.value for a in rule.actions],
                 }
             )
