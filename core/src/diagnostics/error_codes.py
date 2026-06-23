@@ -207,6 +207,49 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "LLG-W008": ErrorCode(
         "LLG-W008", "ROUTE_ATTACHMENT returned {n} matches with summed confidence {score} exceeding over-routing threshold {threshold} on '{file_hash}'; all committed per FR-79 but flagged", True
     ),
+    # --- tracker (TRK) — registered 2026-06-23 per tracker MODULE.md development phase ---
+    "TRK-E001": ErrorCode(
+        "TRK-E001", "Illegal transition: delivery_item '{item_id}' state '{from_state}' -> '{to_state}' not in LEGAL_TRANSITIONS", False
+    ),
+    "TRK-E002": ErrorCode(
+        "TRK-E002", "Reassignment source '{source_item_id}' is not a Default work-item -- FR-83 path rejects", False
+    ),
+    "TRK-E003": ErrorCode(
+        "TRK-E003", "Reassignment target '{target_item_id}' item_type '{target_type}' incompatible with doc_type '{doc_type}' per FR-86 alignment matrix", False
+    ),
+    "TRK-E004": ErrorCode(
+        "TRK-E004", "bypass_guards=True attempted from non-manual_tpm_override trigger_source '{source}' -- automated callers MUST NOT bypass", False
+    ),
+    "TRK-E005": ErrorCode(
+        "TRK-E005", "SP REST writeback permanent failure on state transition (delivery_item '{item_id}' -> '{state}'): {sp_error} -- ops triage", False
+    ),
+    "TRK-E006": ErrorCode(
+        "TRK-E006", "Rewind from SubmittedToCustomer to '{target_state}' attempted without TPM attribution (trigger_source='{source}') -- automated rules cannot rewind a submitted item; manual TPM override required per FR-14", False
+    ),
+    "TRK-W001": ErrorCode(
+        "TRK-W001", "Transition guard denied: delivery_item '{item_id}' state '{from_state}' -> '{to_state}' (blocking: {conditions}) -- PM/TPM dashboard surface", True
+    ),
+    "TRK-W002": ErrorCode(
+        "TRK-W002", "FR-82 tag propagation: item '{item_id}' skipped (terminal state '{state}')", True
+    ),
+    "TRK-W003": ErrorCode(
+        "TRK-W003", "Transition idempotent no-op: delivery_item '{item_id}' already at '{state}' -- Celery retry collapsed", True
+    ),
+    "TRK-W004": ErrorCode(
+        "TRK-W004", "Default work-item already instantiated for milestone '{milestone_id}'; reusing existing row '{item_id}'", True
+    ),
+    "TRK-W005": ErrorCode(
+        "TRK-W005", "FR-83 reassignment: target item's tpm_reassignment_target_item_id field was not cleared post-resolution -- surfacing for ops triage; may indicate SP UI engineer's button UX out of sync", True
+    ),
+    "TRK-W006": ErrorCode(
+        "TRK-W006", "pm_approval_at not cleared on entry to UNDER_PM_REVIEW for item '{item_id}' -- defensive clear discipline missed; ops triage (stale approval may silently auto-advance on next UpdateState)", True
+    ),
+    "TRK-W007": ErrorCode(
+        "TRK-W007", "[D-039] Step 2 LLM disambiguation deferred (Ph-2) on reassignment of file '{file_hash}' to item '{target_item_id}': multiple slug candidates {candidates}; Ph-1 fallback set revision_classification=new_document (rev1) -- Ph-2 LLM will resolve later", True
+    ),
+    "TRK-W008": ErrorCode(
+        "TRK-W008", "Automated DELAYED/BLOCKED resume on delivery_item '{item_id}' targets '{to_state}' but prior_delivery_state was '{prior_state}' -- resume target mismatch; TPM override path required to resume to a different active state per FR-14", True
+    ),
 }
 
 
