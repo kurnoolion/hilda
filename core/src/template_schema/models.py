@@ -64,7 +64,7 @@ class DefaultWorkItemConfig(BaseModel):
 
     Hardcoded inventory per FR-78 architect lock 2026-06-21 (expanded):
     - tg_name = "_unrouted" (system-reserved TG)
-    - item_type = "default" (lowercase_snake_case per item_type enum cascade)
+    - item_type = "Default" (PascalCase per SP UI engineer lock 2026-06-23)
     - tg_path_id = "_unrouted" (first segment of FR-86 _unrouted/<inferred_tg_name>/ NSD path)
     - item_path_id = None (no per-WI item subfolder; documents fan out under
       per-document <inferred_tg_name>)
@@ -81,7 +81,7 @@ class DefaultWorkItemConfig(BaseModel):
     # Identity:
     tg_name:               Literal["_unrouted"]     = "_unrouted"
     item_name:             str                       = "Unrouted Documents"
-    item_type:             Literal["default"]        = "default"
+    item_type:             Literal["Default"]        = "Default"
     # Path components per FR-78 + FR-86 (added 2026-06-21):
     tg_path_id:            Literal["_unrouted"]      = "_unrouted"
     item_path_id:          None                      = None
@@ -298,7 +298,7 @@ class DeliveryItemBase(_Base):
     tg_path_id:                      str | None = None
     # TG-denormalized fields per [D-051]:
     tg_name:                         str | None = None
-    ingress_nsd:                     str         = "none"   # Choice per FR-13: none / nsd1 / nsd2
+    ingress_nsd:                     str         = "None"   # Choice per FR-13 + SP UI engineer lock 2026-06-23: None / NSD1 / NSD2
     folder_routing_enabled:          bool        = False
     tg_email_group_alias:            str | None = None
     tg_owner_name:                   str | None = None
@@ -368,8 +368,8 @@ class DeliveryItemBase(_Base):
     @field_validator("ingress_nsd")
     @classmethod
     def _v_ingress_nsd(cls, v: str) -> str:
-        # Choice per FR-13: none / nsd1 / nsd2
-        valid = {"none", "nsd1", "nsd2"}
+        # Choice per FR-13 + SP UI engineer lock 2026-06-23: None / NSD1 / NSD2
+        valid = {"None", "NSD1", "NSD2"}
         if v not in valid:
             raise ValueError(
                 f"ingress_nsd must be one of {sorted(valid)}; got {v!r}"

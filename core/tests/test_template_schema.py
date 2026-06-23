@@ -232,7 +232,7 @@ class TestEntityModels:
     def test_delivery_item_validates_all_registries(self) -> None:
         di = _make_delivery_item()
         assert di.delivery_state == "Open"
-        assert di.item_type == "confirmation"   # lowercase_snake_case per item_type rename 2026-06-20
+        assert di.item_type == "Confirmation"   # PascalCase per SP UI engineer lock 2026-06-23
         assert di.tracking_modality == ["Email"]   # MULTI-VALUE per [D-037] Phase 5
         assert di.customer_delivery_modality == "None"
 
@@ -262,7 +262,7 @@ class TestPhase5Models:
         from core.src.template_schema import DefaultWorkItemConfig
         cfg = DefaultWorkItemConfig()
         assert cfg.tg_name == "_unrouted"
-        assert cfg.item_type == "default"   # lowercase_snake_case per item_type rename 2026-06-20
+        assert cfg.item_type == "Default"   # PascalCase per SP UI engineer lock 2026-06-23
         assert cfg.item_name == "Unrouted Documents"
         assert cfg.sort_order_strategy == "max_plus_1"
         assert cfg.not_editable is True
@@ -320,7 +320,7 @@ class TestPhase5Models:
         # Replacement: TG fields live on DeliveryItemBase. Verify default values:
         di = _make_delivery_item()
         assert di.tg_name is None        # validated against TGNameRegistry
-        assert di.ingress_nsd == "none"  # Ph-1 lock; Choice values: none/nsd1/nsd2
+        assert di.ingress_nsd == "None"  # Ph-1 lock; Choice values: None/NSD1/NSD2 per SP UI engineer lock 2026-06-23
         assert di.folder_routing_enabled is False
         assert di.tg_email_group_alias is None
         assert di.tg_owner_name is None
@@ -387,7 +387,7 @@ class TestPhase5Models:
             item_type=ItemType.CONFIRMATION.value,
             no_customer_upload=True,
         )
-        assert di.item_type == "confirmation"   # lowercase_snake_case 2026-06-20
+        assert di.item_type == "Confirmation"   # PascalCase per SP UI engineer lock 2026-06-23
         assert di.no_customer_upload is True
 
     def test_delivery_item_confirmation_with_no_customer_upload_false_warns(self, caplog) -> None:
@@ -654,22 +654,25 @@ class TestEnums:
         }
 
     def test_item_type_4_values_per_d053(self) -> None:
-        """Per [D-053] impl note 2026-06-08 + lowercase_snake_case rename
-        2026-06-20 — 4-value collapsed enum."""
+        """Per [D-053] impl note 2026-06-08 + SP UI engineer lock 2026-06-23 (mixed case:
+        short-label categories Confirmation/Default PascalCase; long-named categories
+        test_tech_waiver_report/compliance_certification_release_notes snake_case)."""
         assert len(ItemType) == 4
         assert {s.value for s in ItemType} == {
-            "confirmation",
+            "Confirmation",
             "test_tech_waiver_report",
             "compliance_certification_release_notes",
-            "default",
+            "Default",
         }
 
-    def test_tracking_modality_5_values_per_d037(self) -> None:
-        """Per [D-037] — 5 Ph-1 values; valid combinations require status + document capable."""
-        assert len(TrackingModality) == 5
+    def test_tracking_modality_6_values_per_d037(self) -> None:
+        """Per [D-037] + architect direction 2026-06-23 — 6 Ph-1 values (HILDA forward-looking;
+        SP UI engineer has 5-value SP Choice column with SPUI omitted — to be added Ph-2).
+        Valid combinations require status + document capable per FR-7."""
+        assert len(TrackingModality) == 6
         assert {s.value for s in TrackingModality} == {
             "Email", "CorporateMessenger", "CorporatePLM",
-            "NetworkSharedDrive", "CustomerJIRA",
+            "NetworkSharedDrive", "CustomerJIRA", "SPUI",
         }
 
     def test_ingest_source_4_values_per_fr13(self) -> None:

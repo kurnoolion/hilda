@@ -43,7 +43,7 @@ milestones:
 
       - item_no: 1
         item_name: Device Readiness Review
-        item_type: confirmation
+        item_type: Confirmation
         tracking_modality: [Email]
         doc_count: 0
         review_required: false
@@ -65,7 +65,7 @@ milestones:
         hmr_smr: true
         # TG-denormalized fields (per [D-051]):
         tg_name: MNO-TPM
-        ingress_nsd: none                         # Ph-1 lock — no NSD ingress for early drop
+        ingress_nsd: None                         # Ph-1 lock — no NSD ingress for early drop
         folder_routing_enabled: false
         tg_email_group_alias: null                # null in template; TPM types before Start Collection
         tg_owner_name: null
@@ -97,7 +97,7 @@ milestones:
         rmr: true
         hmr_smr: true
         tg_name: CPM
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -129,7 +129,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: SW PL
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -161,7 +161,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: SW PL
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -193,7 +193,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: MNO-ETM
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -225,7 +225,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: MNO-CP
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -257,7 +257,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: APPS
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -289,7 +289,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: MNO-OMADM
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -321,7 +321,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: MQL
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null
@@ -353,7 +353,7 @@ milestones:
         rmr: false
         hmr_smr: false
         tg_name: MQL
-        ingress_nsd: none
+        ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
         tg_owner_name: null

@@ -454,7 +454,7 @@ async def tpm_resolve_revision(
 
 # Default work-item lookup (FR-78) — REMOVED from storage 2026-06-11 (architect review):
 # a pure entity lookup; the FR-52 caller resolves the milestone's default work-item via
-# sharepoint_integration get_items (item_type = "default" per lowercase_snake_case rename 2026-06-20) and fires
+# sharepoint_integration get_items (item_type = "Default" per SP UI engineer lock 2026-06-23) and fires
 # INSTANTIATE_DEFAULT_WORK_ITEM (STR-W003 signal) when absent. Storage holds no
 # DeliveryItem mirror — see rollback log 2026-06-11.
 
@@ -687,7 +687,7 @@ class NSDPath:
         cls, customer_id, device_id, milestone_name, inferred_tg_path_id, original_filename
     ) -> NSDPath:
         """Per FR-78 + FR-86 + `[D-060]` impl note 2026-06-08 — landing path for documents
-        routed to the milestone's default work-item (item_type = "default" per lowercase_snake_case rename 2026-06-20; ItemType.DEFAULT enum member). Path:
+        routed to the milestone's default work-item (item_type = "Default" per SP UI engineer lock 2026-06-23; ItemType.DEFAULT enum member). Path:
         ...\internal\<carrier>\<device>\<milestone>\<inferred_tg_name>\_unrouted\<original_filename>
 
         **Signature change 2026-06-09**: added `inferred_tg_path_id` parameter per `[D-060]`

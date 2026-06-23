@@ -40,18 +40,23 @@ class ItemType(str, Enum):
     if backward compatibility is needed.
     """
 
-    # Lowercase_snake_case per architect lock 2026-06-20 (item_type enum rename cascade —
-    # ~190 spec sites updated). Aligns with template.yaml authoring conventions.
-    CONFIRMATION                           = "confirmation"
+    # Mixed-case per SP UI engineer lock 2026-06-23: short-label categories
+    # (Confirmation, Default) use PascalCase; long-named categories
+    # (test_tech_waiver_report, compliance_certification_release_notes) use
+    # lowercase_snake_case. Reverts 2026-06-20 all-lowercase rename for the two
+    # short labels per SP UI engineer locked SP Choice column values.
+    CONFIRMATION                           = "Confirmation"
     TEST_TECH_WAIVER_REPORT                = "test_tech_waiver_report"
     COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"
-    DEFAULT                                = "default"
+    DEFAULT                                = "Default"
 
 
 class TrackingModality(str, Enum):
     """Multi-value per DeliveryItem (stored as a list) per [D-037] (2026-05-13).
-    Five Ph-1 values; valid combinations require at least one status-capable +
-    one document-capable modality per FR-7.
+    Six Ph-1 values per architect direction 2026-06-23 (HILDA forward-looking;
+    SP UI engineer has 5-value SP Choice column with SPUI omitted — to be added
+    Ph-2). Valid combinations require at least one status-capable + one
+    document-capable modality per FR-7.
     """
 
     EMAIL                = "Email"                # status + documents via email reply
@@ -59,6 +64,7 @@ class TrackingModality(str, Enum):
     CORPORATE_PLM        = "CorporatePLM"         # documents only; HILDA polls per FR-26
     NETWORK_SHARED_DRIVE = "NetworkSharedDrive"   # documents only; FR-13/FR-55
     CUSTOMER_JIRA        = "CustomerJIRA"         # status only; FR-25
+    SP_UI                = "SPUI"                 # status via SP UI button per [D-074]; HILDA forward-looking Ph-1 (SP UI engineer adds Ph-2)
 
 
 class IngestSource(str, Enum):

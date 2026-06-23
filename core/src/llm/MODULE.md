@@ -183,7 +183,7 @@ class RouteAttachmentOutput(BaseModel):
 # REVIEW_DOCUMENT — FR-53
 class ReviewDocumentInput(BaseModel):
     doc_excerpt: str
-    doc_type:    str               # test_report | tech_report | waiver — NOT called for "default" per FR-7 amendment + [D-053]
+    doc_type:    str               # test_report | tech_report | waiver — NOT called for "Default" item_type per FR-7 amendment + [D-053]
     checklist:   list[dict]        # per-customer YAML list of criteria, each {id, description, severity, evidence_hint?}.
                                     # Generated BUILD-TIME by the Test Report Profiler per [D-011] — same profiler run
                                     # that generates the rule-based test_report parser. Loaded at runtime from
