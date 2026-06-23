@@ -1,35 +1,8 @@
 # D-DRAFT batch 2026-06-25 -- PENDING ITEMS
 
-> 21 ADRs (D-094..D-111, D-113, D-114, D-115) appended to DECISIONS.md 2026-06-25 after architect review. Two ADRs RETAINED here pending architect resolution:
+> 22 ADRs (D-094..D-115) appended to DECISIONS.md across 2026-06-25 session. 1 ADR RETAINED pending architect input:
 >
-> - **D-112** -- code drift surfaced (pause_state.py still defines PauseStateLookup Protocol contrary to STATUS Done entry). Architect must decide: (a) clean up code per Done entry; (b) revise ADR to reflect Protocol-survives-as-read-interface; (c) backward-compat retention for tests.
 > - **D-116** -- 2 TODO fields (user-binding signature shape + selector-pack-versioning + session-pool ownership applicability) -- only the architect knows the existing Google Drive code shape.
-
----
-
-## D-112: `PauseStateLookup` Protocol DROPPED — replaced by `rules_paused` SP column read
-
-**Date**: 2026-06-23
-**Status**: Ratified
-
-**Context**: `PauseStateLookup` Protocol was specified during earlier rule_engine + storage MODULE.md design as the abstraction layer for FR-31 sub-1 per-item pause-state reads. The 2026-06-23 rule_engine arch revisit (with `[D-108]` `rules_paused` SP-column mechanism) eliminated the need for the Protocol entirely — item snapshot already flows through the dispatcher and carries the boolean.
-
-**Decision**: `PauseStateLookup` Protocol is DROPPED. Replaced by direct read of `item_snapshot.rules_paused` (per `[D-108]`). `rule_engine.RuleEngine` constructor no longer takes a `pause_lookup` parameter. `rule_engine.evaluate(event, item_snapshot=...)` reads `item_snapshot.rules_paused` directly. Item-less events pass `item_snapshot=None` and skip the pause check entirely.
-
-**Why**:
-- (a) Adding the Protocol abstraction on top of the new `rules_paused` SP column would be ceremony without value — the item snapshot already carries the field.
-- (b) Simplifies `RuleEngine` construction (1-arg constructor vs 2-arg with lookup).
-- (c) Eliminates `NoPauseState` no-op implementation + InMemoryOverrideStore-style fixtures.
-- (d) Aligns with `[D-113]` TriggerDispatcher item_snapshot flow.
-
-**Consequences**:
-- (a) `rule_engine.evaluator.RuleEngine` constructor: `pause_lookup` parameter removed; new `item_snapshot` kwarg on `evaluate()` + `explain()` (commit `b6c13a6`).
-- (b) `rule_engine/__init__.py`: `PauseStateLookup` + `NoPauseState` dropped from `__all__` (still importable from sub-modules for Ph-2 dev) (commit `b6c13a6`).
-- (c) `workflow_engine.TriggerDispatcher.__init__` drops `pause_lookup` param (commit `11f5e5d`, `1e7e8a0` D2).
-- (d) Tests: `test_paused_item_flagged_not_dropped` rewritten to pass `item_snapshot=SimpleNamespace(rules_paused=True)`; `test_milestone_pause_is_ph2_deferred` verifies item-less events skip pause check (commit `b6c13a6`).
-- (e) `diagnostics_cli.py`: `NoPauseState` import dropped; `RuleEngine()` 1-arg constructor (commit `b6c13a6`).
-
-**Anchors**: FR-31 sub-1, `[D-108]` (`rules_paused` SP column origin), `[D-113]` (TriggerDispatcher item_snapshot flow; sibling decision), `rule_engine/MODULE.md` D5, commits `20aa181` / `b6c13a6` / `11f5e5d`.
 
 ---
 

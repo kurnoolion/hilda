@@ -5,8 +5,8 @@ with an `item_snapshot` (per D2 + D12 cascade 2026-06-23), and schedules each re
 `RuleMatch`'s action chain as an independent Celery chain per [D-066].
 
 Pause check (FR-31 sub-1) reads `item.rules_paused: bool` from the snapshot per D5
-cascade 2026-06-23 -- no PauseStateLookup Protocol. Per Ph-1 cascade,
-PauseStateLookup is Ph-2 forward-looking only.
+cascade 2026-06-23 -- no PauseStateLookup Protocol (dropped per [D-112]; SP column
+is the canonical home per [D-108]).
 
 Pure orchestration -- workflow_engine does not execute action logic; downstream
 modules own the actual work.

@@ -31,7 +31,8 @@ from core.src.rule_engine.resolver import (
 # tests + Ph-2 development, but NOT in Ph-1 public __all__:
 #   from core.src.rule_engine.orphan_audit import OrphanFinding, orphan_audit_postgres_overrides
 #   from core.src.rule_engine.override_store import InMemoryOverrideStore, ItemOverride, OverrideStore
-#   from core.src.rule_engine.pause_state import NoPauseState, PauseStateLookup
+# Note: PauseStateLookup Protocol DROPPED per [D-112] -- pause state is read directly from
+# item_snapshot.rules_paused via the SP column per [D-108].
 
 __all__ = [
     "ITEM_MODIFIED_SUB_TRIGGERS_PH1",
