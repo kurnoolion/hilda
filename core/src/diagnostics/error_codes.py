@@ -250,6 +250,40 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "TRK-W008": ErrorCode(
         "TRK-W008", "Automated DELAYED/BLOCKED resume on delivery_item '{item_id}' targets '{to_state}' but prior_delivery_state was '{prior_state}' -- resume target mismatch; TPM override path required to resume to a different active state per FR-14", True
     ),
+    # --- workflow_engine (WFL) -- registered 2026-06-23 per workflow_engine MODULE.md dev phase ---
+    "WFL-E001": ErrorCode(
+        "WFL-E001", "ActionKind '{action_kind}' has no TaskBinding in ACTION_KIND_TO_TASK registry -- registry incomplete; ops triage", False
+    ),
+    "WFL-E002": ErrorCode(
+        "WFL-E002", "Manual trigger '{action_kind}' not applicable to item '{item_id}' state '{state}' -- FR-31 sub-3 state-filter rejection", False
+    ),
+    "WFL-E003": ErrorCode(
+        "WFL-E003", "Celery-beat schedule build failed: storage error '{reason}' -- beat singleton cannot start", False
+    ),
+    "WFL-E004": ErrorCode(
+        "WFL-E004", "Celery broker connection failure: {reason} -- task enqueue fails", False
+    ),
+    "WFL-E005": ErrorCode(
+        "WFL-E005", "Task '{task_name}' terminal failure after {retries} retries on item '{item_id}': {exc_class} -- manual triage", False
+    ),
+    "WFL-E006": ErrorCode(
+        "WFL-E006", "Trigger source '{source}' constructed malformed TriggerEvent (missing required field '{field}') -- caller bug; dispatcher rejects", False
+    ),
+    "WFL-W001": ErrorCode(
+        "WFL-W001", "RuleMatch for rule '{rule_id}' on item '{item_id}' skipped (FR-31 sub-1 pause active per item.rules_paused)", True
+    ),
+    "WFL-W002": ErrorCode(
+        "WFL-W002", "Polling-schedule for item '{item_id}' invalid (RUL-W004 from rule_engine); using baseline default {minutes}min", True
+    ),
+    "WFL-W003": ErrorCode(
+        "WFL-W003", "Task '{task_name}' retried (attempt {n}/{max}) on item '{item_id}' -- transient {exc_class}", True
+    ),
+    "WFL-W004": ErrorCode(
+        "WFL-W004", "Celery worker concurrency saturated on queue '{queue}'; task '{task_name}' queue depth {n} -- capacity flag", True
+    ),
+    "WFL-W005": ErrorCode(
+        "WFL-W005", "Beat singleton skew detected: two beat instances running (multi-fire risk) -- ops triage", True
+    ),
 }
 
 
