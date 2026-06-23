@@ -5,7 +5,7 @@
 #
 # Path composition for carrier-portal upload (FR-77 dispatch):
 #   {customer_delivery_info}/{delivery_path_template expanded}/{per-item target_folder}
-#   = drive.google.com/OEM_Folder1/OEM_Folder2/SM-S901U/P1/{item target_folder}
+#   = drive.google.com/OEM_Folder1/OEM_Folder2/MODEL-A/P1/{item target_folder}
 
 # ============================================================
 # Customer-level
@@ -23,8 +23,8 @@ delivery_path_template: "OEM_Folder1/OEM_Folder2/{project_model}/{milestone_name
 # Devices (no work-items here; same work-items apply across devices per FR-40)
 # ============================================================
 devices:
-  SM-S901U:                                       # device_id (YAML key per [D-091])
-    device_name: Galaxy S22
+  MODEL-A:                                        # device_id (YAML key per [D-091])
+    device_name: Mock Device A
     target_launch_date: 2026-12-01
 
 # ============================================================
@@ -236,7 +236,7 @@ milestones:
         email_cc_list: null
 
       - item_no: 7
-        item_name: Verizon Cloud test plan
+        item_name: Carrier Cloud test plan
         item_type: test_tech_waiver_report
         tracking_modality: [Email]
         doc_count: 1
@@ -248,7 +248,7 @@ milestones:
         item_path_id: apps_item
         tg_path_id: apps
         customer_delivery_modality: GoogleDrive
-        target_folder: "TestReports/Verizon_Cloud"
+        target_folder: "TestReports/Carrier_Cloud"
         handset: true
         tablet: true
         wearable: false

@@ -374,7 +374,7 @@ class TestSopsCredentialServiceScopes:
             customer_files={"MMK": CUSTOMER_ENV},
         )
         with pytest.raises(PipelineError) as exc:
-            asyncio.run(service.get_credential("ops-team", "customer", customer_id="VZW"))
+            asyncio.run(service.get_credential("ops-team", "customer", customer_id="CARRIER1"))
         assert exc.value.code_id == "CRD-E001"
 
     def test_no_credential_messenger_raises_e001(self, tmp_path):
@@ -391,10 +391,10 @@ class TestSopsCredentialServiceScopes:
             root_files={"email.enc.env": EMAIL_ENV},
             customer_jira_files={
                 ("y.vasilyev", "MMK"): ITR_ENV,
-                ("y.vasilyev", "VZW"): ITR_ENV,
-                ("ops.member", "TMO"): ITR_ENV,
+                ("y.vasilyev", "CARRIER1"): ITR_ENV,
+                ("ops.member", "CARRIER2"): ITR_ENV,
             },
-            customer_files={"MMK": CUSTOMER_ENV, "VZW": CUSTOMER_ENV},
+            customer_files={"MMK": CUSTOMER_ENV, "CARRIER1": CUSTOMER_ENV},
         )
         count = asyncio.run(service.load())
         # 1 email + 3 customer_jira + 2 customer = 6 entries

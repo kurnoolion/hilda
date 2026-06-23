@@ -385,7 +385,7 @@ class CustomerTemplateBase(BaseModel):
     customer_jira_url:        str | None = None    # read from template.yaml at startup per FR-25 (b)
     # Customer-level carrier-portal delivery config (added 2026-06-21 per FR-77 + NFR-21 §6 amendment):
     customer_delivery_info:   str        # base URL for carrier upload (e.g. "drive.google.com"); denormalized per-item at setup_milestone
-    delivery_path_template:   str        # template producing milestone HOME directory path; supports literal segments + {placeholders}. Example: "OEM_Folder1/OEM_Folder2/{project_model}/{milestone_name}" → "OEM_Folder1/OEM_Folder2/SM-S901U/P1". Expanded at FR-77 dispatch; combined with customer_delivery_info + per-item target_folder to yield final upload destination.
+    delivery_path_template:   str        # template producing milestone HOME directory path; supports literal segments + {placeholders}. Example: "OEM_Folder1/OEM_Folder2/{project_model}/{milestone_name}" → "OEM_Folder1/OEM_Folder2/MODEL-A/P1". Expanded at FR-77 dispatch; combined with customer_delivery_info + per-item target_folder to yield final upload destination.
     # Devices + milestones:
     devices:    dict[str, DeviceBase]    # YAML key = device_id per [D-091]; one entry per device launched under this customer
     milestones: list[MilestoneBase]      # same milestone set instantiated for every device at setup_milestone per FR-40

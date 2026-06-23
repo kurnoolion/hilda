@@ -220,8 +220,8 @@ class TestEntityModels:
         m = MilestoneBase(
             milestone_id="m1",
             carrier="MMK",                          # added 2026-06-21
-            project_id=2479,                        # added 2026-06-21 per [D-088]
-            project_model="SM-S901U",               # added 2026-06-21
+            project_id=1001,                         # added 2026-06-21 per [D-088]
+            project_model="MODEL-A",               # added 2026-06-21
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
@@ -333,8 +333,8 @@ class TestPhase5Models:
         m = MilestoneBase(
             milestone_id="m1",
             carrier="MMK",
-            project_id=2479,
-            project_model="SM-S901U",
+            project_id=1001,
+            project_model="MODEL-A",
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
@@ -353,8 +353,8 @@ class TestPhase5Models:
         m = MilestoneBase(
             milestone_id="m1",
             carrier="MMK",
-            project_id=2479,
-            project_model="SM-S901U",
+            project_id=1001,
+            project_model="MODEL-A",
             milestone_name="M1",
             sort_order=1,
             status=MilestoneStatus.NOT_STARTED,
