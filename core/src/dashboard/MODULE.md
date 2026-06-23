@@ -1,8 +1,9 @@
 # Module: dashboard
 
-> **Status:** Skeleton draft 2026-06-12 (Ph-1; promoted Batch 2 → Batch 1 architecture queue per `D-074` decision today). Sections curated; pending section-by-section user review during the architecture session that opens the `dashboard-v1` strand. Code implementation begins after MODULE.md is signed off + decisions captured.
+> **Status:** Skeleton draft 2026-06-12 + **2026-06-23 architect cascade revisit applied (8 drift items D1-D8 against locks since 2026-06-12)**. Sections curated; pending section-by-section user review during the architecture session that opens the `dashboard-v1` strand. Code implementation begins after MODULE.md is signed off + decisions captured.
 >
 > **Rollback log:**
+> - **2026-06-23 (architect cascade revisit — 8 drift items applied)** — strict-order module-by-module sweep Module #9 of 13. **D1 — `/admin/overrides` Ph-2 forward-looking**: per rule_engine D4 cascade 2026-06-23, `AutomationRuleOverride` Postgres consumption is deferred to Ph-2 (early drop has single mock customer; no per-customer/device runtime tuning needed; YAML edit + service restart sufficient). In Ph-1, `storage.list_active_overrides()` returns empty list — `/admin/overrides` renders empty table with "No active overrides (Ph-1 — overrides Ph-2 per rule_engine D4 cascade)" message; endpoint stays in code for Ph-2 activation without surface change. **D2 — `item_type="Confirmation"` → `item_type=Confirmation`** per SP UI engineer lock 2026-06-23 (mixed-case: short-label categories Confirmation/Default PascalCase; long-named categories test_tech_waiver_report/compliance_certification_release_notes snake_case). **D3 — workflow_engine integration**: `FR-56 /milestone/<id>/refresh` POST endpoint now references `workflow_engine.TriggerDispatcher.dispatch(event)` with a constructed `RefreshRequested` TriggerEvent OR directly enqueues a soft-poll Celery task via the workflow_engine task registry — implementation choice in dashboard dev phase. **D4 — FR-87 step (A)(B)(C) clarification**: `doc_row_staged.html` variant surfaces FR-87 step (A) TPM reassignment button (per tracker MODULE.md cascade 2026-06-23 D18) + step (B) doc_type re-classification + step (C) `[D-039]` revision resolution (Ph-1 Steps 0+1 deterministic; Step 2 LLM Ph-2 per CLASSIFY_DOC demotion). **D5 — Status header refresh (this entry)**. **D6 — Anchors update**: adds `[D-080]` (4-field owner identity for outreach display), `[D-083]` (Projects-per-customer architecture; 3-tuple PM resolution rendering), `[D-085]` (Milestone.target_date sole authoritative deadline; deadline rendering), `[D-086]` (free-form text owner identity discipline), `[D-091]` (slug → id rename throughout — dashboard URL params use `<delivery_item_id>` / `<milestone_id>` already, no slug references to rename). **D7 — llm Ph-1 phasing acknowledgment**: per architect direction 2026-06-22 llm Ph-1 phasing, `llm_review_findings` field is NULL/empty in Ph-1 early drop (review_required=false on all items per architect lock 2026-06-19 — REVIEW_DOCUMENT TaskKind is Ph-1 next pass + runtime-dormant). doc_section.html template renders "AI review not enabled for this item (Ph-1 early drop)" placeholder when `llm_review_findings is None`. **D8 — Architectural decisions partial resolution**: decisions 1 (Jinja2 chosen, line 171 ✓), 4 (HTML+JSON content negotiation, line 32 implements ✓), 5 (token-expiry friendly UX, line 65 ✓), 6 (CORS allowlist empty Ph-1, line 148 Invariant ✓) softly locked. Decisions 2 (reverse-proxy identity forwarding mechanism) + 3 (cross-cutting `core/src/auth/` module split) remain OPEN — to be ratified when dashboard dev begins or when FR-62 upload endpoint Ph-2 forces the question.
 > - **2026-06-12 (skeleton draft)** — initial MODULE.md created as part of the `dashboard-v1` strand seed; anchors `D-074` (Variant A SP↔HILDA integration — link-out architecture), `D-073` (SP UI engineer manually provisions SP lists), `[D-006]` (Kerberos auth), `[D-064]` (HILDA→SP REST writeback — unchanged; dashboard reads SP via sharepoint_integration but does not writeback itself), NFR-16 (HILDA-mediated download with AD auth), and serves FR-31 (admin overrides view), FR-56 (milestone soft-refresh), FR-57 (document enumeration), FR-58 (Confirmation no-doc-section), FR-59 (document section markup), FR-60 (review-results display), FR-61 (HILDA-mediated download). **OPEN ARCHITECTURAL DECISIONS** below — to be locked during architecture review pass; see `## Architectural decisions to lock`.
 
 ## Purpose
@@ -35,7 +36,7 @@ async def get_document_section(
     via `storage.make_download_token(file_hash, delivery_item_id)`. The HTML is
     intended for top-level browser navigation per `D-074` (SP renders link-out
     anchor; TPM clicks; browser opens new tab to this URL). Confirmation items
-    (item_type=CONFIRMATION) render with NO document section per FR-58.
+    (item_type="Confirmation") render with NO document section per FR-58.
 
     Content negotiation: if `Accept: application/json`, returns the FR-57 JSON
     shape — `[{doc_type, doc_id_slug, rev_number, original_filename,
@@ -67,13 +68,16 @@ async def download_file(scoped_token: str) -> StreamingResponse:
 
 @app.post("/milestone/{milestone_id}/refresh", status_code=202)
 async def request_milestone_refresh(milestone_id: str) -> dict:
-    """FR-56 — Soft-poll trigger. Calls `workflow_engine.enqueue_soft_poll(milestone_id)`,
-    returns 202 Accepted with task_id. Rate-limited per-milestone per FR-56
-    (default 5 min; configurable via `dashboard.config`). Deduplicated: if a
-    poll task for this milestone is already in-flight, returns 202 with the
-    existing task_id (no new task enqueued). FR-56 also specifies a 10s
-    status-poll endpoint — see `/milestone/{milestone_id}/refresh/status`
-    below.
+    """FR-56 — Soft-poll trigger. **Ph-1 per D3 cascade 2026-06-23**: dispatches
+    via `workflow_engine.TriggerDispatcher` -- constructs a `RefreshRequested`
+    TriggerEvent (item-less, milestone-scoped) and calls `dispatcher.dispatch(event)`;
+    workflow_engine resolves to rule_engine matches and schedules per-RuleMatch
+    Celery chains per `[D-066]`. Returns 202 Accepted with `dispatch_result.task_ids`
+    (one per matched RuleMatch). Rate-limited per-milestone per FR-56 (default
+    5 min; configurable via `dashboard.config`). Deduplicated: if a poll task for
+    this milestone is already in-flight, returns 202 with the existing task_ids
+    (no new chains enqueued). FR-56 also specifies a 10s status-poll endpoint --
+    see `/milestone/{milestone_id}/refresh/status` below.
 
     Raises: DSH-E004 on rate-limit (429 response, not error)."""
 
@@ -88,11 +92,16 @@ async def list_overrides(
     scope: Scope | None = None,
     scope_id: str | None = None,
 ) -> HTMLResponse:
-    """FR-31 — Admin view of active AutomationRuleOverride rows. Calls
-    `storage.list_active_overrides(scope, scope_id)`, renders HTML table with
-    set_by_pm_id attribution + expires_at. Read-only; no edit/delete UI in Ph-1
-    (use `rule_engine` CLI for changes). PM/TPM-accessible; restricted to
-    authenticated corp AD users per NFR-16."""
+    """FR-31 — Admin view of active AutomationRuleOverride rows. **Ph-1 per D1
+    cascade 2026-06-23 + rule_engine D4 cascade**: AutomationRuleOverride Postgres
+    consumption is Ph-2 deferred (early drop = single mock customer; no per-
+    customer/device runtime tuning needed; YAML edit + service restart sufficient).
+    Ph-1 endpoint renders empty table with "No active overrides (Ph-1 -- overrides
+    Ph-2 per rule_engine D4 cascade)" message; `storage.list_active_overrides()`
+    returns empty list in Ph-1. Ph-2: full view with set_by_pm_id attribution +
+    expires_at. Read-only; no edit/delete UI in Ph-1/Ph-2 (use `rule_engine` CLI
+    for changes). PM/TPM-accessible; restricted to authenticated corp AD users
+    per NFR-16."""
 
 # ---- Configuration ----
 class DashboardConfig(BaseModel):
@@ -144,7 +153,7 @@ DSH-W002  Static-asset cache miss (Ph-2 cold-cache warning)
 - **Reverse proxy is trusted; client identity headers are NOT** — dashboard MUST validate Kerberos from the proxy-forwarded Negotiate, and MUST NOT trust client-supplied `X-Authenticated-User` / `X-User-Email` headers. Reverse-proxy origin allowlist on source IP enforced.
 - **No writeback to SP from dashboard** — all SP state writes go through `sharepoint_integration` per `D-064`. Dashboard is read-side only (renders + downloads + admin views); the POST endpoints write to HILDA-local state (`workflow_engine.enqueue_soft_poll`), not to SP.
 - **No NSD path leakage in responses** — token URLs are opaque; NSD paths never appear in HTML or JSON. The 4 FR-86 path types (`classified` / `staged_*` / `unrouted`) are surfaced as `nsd_path_type` badge labels, not raw paths.
-- **Confirmation items render with NO document section** per FR-58 — `item_type=CONFIRMATION` short-circuits the document fetch + Jinja partial.
+- **Confirmation items render with NO document section** per FR-58 — `item_type="Confirmation"` short-circuits the document fetch + Jinja partial.
 - **CORS allowlist is empty in Ph-1** — no cross-origin XHR consumers per `D-074`. Future JSON consumers (HILDA-internal admin tools) require an explicit allowlist add via `DashboardConfig.cors_origins` (not in Ph-1 config).
 - **Server-side rendered HTML only — no SPA, no client-side framework** — Ph-1 + Ph-2; SPA reconsideration deferred to Ph-3+.
 - **Error-code contract**: all module errors raised as `PipelineError` with `DSH-E001..` codes registered in `core/src/diagnostics/error_codes.py` per `[D-002]` + `[D-017]`. Compact reports (RPT/MET/QC) emitted per `[D-002]` use only counts, status flags, and bounded enum tokens — never file content or proprietary identifiers.
@@ -184,8 +193,8 @@ These 6 decisions need to be locked during the architecture session that opens `
 ## Depends on
 
 - `core/src/storage/` — `list_documents_for_milestone` / `get_documents_for_item` / `make_download_token` / `resolve_download_token` / `read_file(NSDPath)` / `list_active_overrides` / `list_associations_for_item` per storage's Public surface
-- `core/src/workflow_engine/` — `enqueue_soft_poll(milestone_id)` for FR-56 POST endpoint
-- `core/src/template_schema/` — for enum rendering (DeliveryState, DocType, ItemType, RoutingResolution) + `RuleScope` enum for admin overrides view
+- `core/src/workflow_engine/` — `TriggerDispatcher.dispatch(event)` for FR-56 POST endpoint (per D3 cascade 2026-06-23 -- workflow_engine foundation lands commit 11f5e5d; soft-poll path constructs RefreshRequested TriggerEvent + dispatches via standard TriggerDispatcher path)
+- `core/src/template_schema/` — for enum rendering (DeliveryState, DocType, ItemType per SP UI engineer mixed-case lock 2026-06-23 -- Confirmation/Default PascalCase + test_tech_waiver_report/compliance_certification_release_notes snake_case, RoutingResolution) + `RuleScope` enum for admin overrides view. **Per D6 cascade 2026-06-23**: anchors `[D-080]` (4-field owner identity for outreach display); `[D-083]` (Projects-per-customer architecture; 3-tuple PM resolution rendering via `assigned_pm_id` + `pm_display_name` + `pm_email` per `[D-088]`); `[D-085]` (Milestone.target_date deadline rendering); `[D-086]` (free-form text owner identity discipline); `[D-091]` (slug → id rename throughout -- dashboard URL params already use `<delivery_item_id>` / `<milestone_id>` so no rename needed). **Per D7 cascade 2026-06-23**: `llm_review_findings` field is NULL/empty in Ph-1 early drop (review_required=false on all items per architect lock 2026-06-19 + llm Ph-1 phasing per architect direction 2026-06-22 — REVIEW_DOCUMENT is Ph-1 next pass + runtime-dormant). doc_section.html renders "AI review not enabled for this item (Ph-1 early drop)" placeholder when `llm_review_findings is None`.
 - *(NEW, candidate)* `core/src/auth/` — Kerberos/SPNEGO middleware shared by dashboard + future HTTP surfaces (FR-62 upload, FR-87 webhook receiver). Decision to split into separate MODULE.md is OPEN — see `## Architectural decisions to lock` item 3.
 - `core/src/diagnostics/` — `DSH-*` error codes registered + RPT/MET/QC compact-report schemas
 
