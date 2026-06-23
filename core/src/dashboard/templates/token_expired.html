@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}HILDA — Link expired{% endblock %}
+{% block content %}
+<h1>Link expired</h1>
+<p>This download link has expired or is invalid. Please return to the document section to refresh.</p>
+{% if delivery_item_id %}
+<p><a class="download-link" href="/docs/{{ delivery_item_id }}">Return to document section</a></p>
+{% endif %}
+{% endblock %}

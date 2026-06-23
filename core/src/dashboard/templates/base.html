@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{% block title %}HILDA{% endblock %}</title>
+    <style>
+        body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; margin: 2em; color: #222; }
+        h1 { color: #1a3a6c; border-bottom: 2px solid #1a3a6c; padding-bottom: 0.3em; }
+        h2 { color: #1a3a6c; margin-top: 1.5em; }
+        table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+        th, td { padding: 0.5em 1em; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f0f4fa; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.85em; font-weight: 600; }
+        .badge-classified { background: #d4edda; color: #155724; }
+        .badge-staged { background: #fff3cd; color: #856404; }
+        .badge-unrouted { background: #f8d7da; color: #721c24; }
+        .placeholder { color: #888; font-style: italic; }
+        .ph1-note { background: #fff3cd; color: #856404; padding: 1em; border-radius: 4px; margin: 1em 0; }
+        .principal { font-size: 0.85em; color: #666; margin-bottom: 1em; }
+        a.download-link { color: #1a3a6c; text-decoration: none; }
+        a.download-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    {% block content %}{% endblock %}
+    {% if principal %}
+    <div class="principal">Authenticated as: {{ principal.user_name }}{% if principal.mock %} (mock){% endif %}</div>
+    {% endif %}
+</body>
+</html>

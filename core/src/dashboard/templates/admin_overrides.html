@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}HILDA — Admin: Rule Overrides{% endblock %}
+{% block content %}
+<h1>AutomationRule Overrides (FR-31)</h1>
+
+{% if not overrides %}
+<div class="ph1-note">
+    <strong>{{ ph1_note }}</strong><br>
+    AutomationRuleOverride Postgres consumption is deferred to Ph-2 per rule_engine D4 cascade 2026-06-23.
+    Early drop (single mock customer) does not require runtime per-customer/device parameter tuning;
+    rule changes via YAML edit + service restart are sufficient. Ph-2 will activate full override
+    visibility here (with set_by_pm_id attribution + expires_at).
+</div>
+{% else %}
+<table>
+    <thead>
+        <tr>
+            <th>Scope</th>
+            <th>Scope ID</th>
+            <th>Rule</th>
+            <th>Parameter</th>
+            <th>Value</th>
+            <th>Set By</th>
+            <th>Set At</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for o in overrides %}
+        <tr>
+            <td>{{ o.scope.value if o.scope.value is defined else o.scope }}</td>
+            <td>{{ o.scope_id or "&mdash;" }}</td>
+            <td><code>{{ o.rule_id }}</code></td>
+            <td>{{ o.parameter_name }}</td>
+            <td><code>{{ o.parameter_value }}</code></td>
+            <td>{{ o.set_by_pm_id }}</td>
+            <td>{{ o.set_at }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

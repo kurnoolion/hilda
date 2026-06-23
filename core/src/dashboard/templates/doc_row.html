@@ -1,0 +1,31 @@
+{# One row per document. nsd_path_type drives the badge style + staged-variant indicator. #}
+<tr>
+    <td>{{ doc.doc_type or "&mdash;" }}</td>
+    <td><code>{{ doc.doc_id_slug or "&mdash;" }}</code></td>
+    <td>{{ doc.rev_number }}</td>
+    <td>{{ doc.original_filename }}</td>
+    <td>
+        {% set ptype = doc.nsd_path_type or "" %}
+        {% if "staged" in ptype %}
+            <span class="badge badge-staged">{{ ptype }}</span>
+            {% include "doc_row_staged.html" %}
+        {% elif "unrouted" in ptype %}
+            <span class="badge badge-unrouted">{{ ptype }}</span>
+            {% include "doc_row_staged.html" %}
+        {% elif ptype %}
+            <span class="badge badge-classified">{{ ptype }}</span>
+        {% else %}
+            &mdash;
+        {% endif %}
+    </td>
+    <td>
+        {# Per D7 cascade 2026-06-23: llm_review_findings is None in Ph-1 early drop
+           (review_required=false on all items + REVIEW_DOCUMENT Ph-1 next pass + runtime-dormant). #}
+        {% if doc.llm_review_findings %}
+            {{ doc.llm_review_findings }}
+        {% else %}
+            <span class="placeholder">AI review not enabled for this item (Ph-1 early drop)</span>
+        {% endif %}
+    </td>
+    <td><a class="download-link" href="{{ doc.download_url }}" target="_blank" rel="noopener">Download</a></td>
+</tr>

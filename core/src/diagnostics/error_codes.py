@@ -284,6 +284,25 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "WFL-W005": ErrorCode(
         "WFL-W005", "Beat singleton skew detected: two beat instances running (multi-fire risk) -- ops triage", True
     ),
+    # --- dashboard (DSH) -- registered 2026-06-24 per dashboard MODULE.md dev phase ---
+    "DSH-E001": ErrorCode(
+        "DSH-E001", "Delivery item '{item_id}' not found", False
+    ),
+    "DSH-E002": ErrorCode(
+        "DSH-E002", "Download token invalid or expired -- renders friendly page (HTTP 410)", True
+    ),
+    "DSH-E003": ErrorCode(
+        "DSH-E003", "Authentication failed: no Negotiate header / Kerberos validation failed (HTTP 401)", False
+    ),
+    "DSH-E004": ErrorCode(
+        "DSH-E004", "Refresh rate limit hit for milestone '{milestone_id}' (HTTP 429; informational, not an error)", True
+    ),
+    "DSH-W001": ErrorCode(
+        "DSH-W001", "Reverse proxy did not forward Negotiate header -- degraded mode warning; surface in /admin diagnostic", True
+    ),
+    "DSH-W002": ErrorCode(
+        "DSH-W002", "Static-asset cache miss (Ph-2 cold-cache warning)", True
+    ),
 }
 
 

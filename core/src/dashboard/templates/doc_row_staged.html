@@ -1,0 +1,16 @@
+{# FR-87 step (A)(B)(C) surface per dashboard D4 cascade 2026-06-23.
+   Renders inline FR-87 button info next to the badge. TPM clicks ZS-side
+   action button (per [D-074] link-out architecture); this is purely informational. #}
+{% if "staged_not_classified" in (doc.nsd_path_type or "") %}
+<div class="placeholder" style="display: inline-block; margin-left: 0.5em;">
+    Awaiting FR-87 step (B) doc_type re-classification (TPM action via SP UI).
+</div>
+{% elif "staged_not_revision" in (doc.nsd_path_type or "") %}
+<div class="placeholder" style="display: inline-block; margin-left: 0.5em;">
+    Awaiting FR-87 step (C) revision resolution -- [D-039] Step 2 LLM Ph-2 per CLASSIFY_DOC demotion.
+</div>
+{% elif "unrouted" in (doc.nsd_path_type or "") %}
+<div class="placeholder" style="display: inline-block; margin-left: 0.5em;">
+    Awaiting FR-87 step (A) TPM reassignment from default work-item.
+</div>
+{% endif %}
