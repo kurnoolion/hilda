@@ -1,13 +1,14 @@
 # Module: sharepoint_integration
 
 > **Rollback log:**
+> - **2026-06-25 (Module #11 arch revisit per architect Q1-Q5 + D-104 cascade + recent ADR sweep)** — major scope contraction + cascade alignment. **D1 — HILDA SP scope contracted to 3 lists** per architect Q1 lock: HILDA reads/writes ONLY `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>` (per-customer naming per `[D-104]`); IGNORES SP-side `TasksTemplate_<id>` + `Tasks_<id>` + `Trials_<id>` + `Activities_<id>` + `Email_<id>` + `CommunicationLog_<id>` (SP UI engineer's display surface only — NOT HILDA's concern). **Canonical entity set shrinks from 8 → 3**: `delivery_items` + `milestones` + `projects` (was: `customers, devices, milestones, delivery_items, users, pm_credentials, communication_log, tg_groups`). The other 5 SP lists (Customer, Device, User, PMCredentials, CommunicationLog, TGGroups) are NOT in HILDA's SP read/write scope — customer + device deployment-stable data lives in `customizations/template_schemas/<customer_id>/customer.yaml` per existing pattern; HILDA's CommunicationLog is Postgres-internal per FR-42; TGGroups DROPPED per `[D-106]`. **D2 — Per-customer SP list naming** per architect-confirmed pattern `<base>_<customer_id>` (e.g., `Projects_<customer_id>`, `Deliverables_<customer_id>`, `Milestones_<customer_id>`) per `[D-104]` + Q1. **D3 — slug → id rename** per `[D-091]`: `customer_slug` → `customer_id`; `device_slug` → `device_id` throughout. **D4 — Field-name authority** per architect Q5: `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (3 worksheets: Milestones / Deliverables / Projects) is the AUTHORITATIVE source for SP internal column names; supersedes stale `HILDA_SP_Schema.xlsx` + `DeliveryItem_visibility_review.xlsx` (both renamed `_DEPRECATED_2026-06-15.xlsx` in same directory). **D5 — SP REST URL pattern confirmed** per architect VS Code sample 2026-06-25: site URL = `<corp-sp-root>/sp/tg/<TG_SITE_NAME>` (one TG site per team-group); list URL = `<site>/_api/web/lists/getbytitle('<list_name>')/items?$top=N&$filter=...&$select=...`; header = `Accept: application/json;odata=verbose`. Matches existing SpClient design. **D6 — Browser vs server auth context**: sample uses XMLHttpRequest with implicit cookie auth (SP same-origin web part); HILDA server-side uses NTLM/Kerberos via service account per `[D-006]`. NTLM code snippets pending architect delivery; defer locking auth implementation details to next pass. **D7 — Pagination open question** per architect Q4: SP standard pattern is `$top + __next` continuation; architect mentioned "every element accessed individually" — surface as an OPEN architectural question pending NTLM code snippet review. Document Ph-1 as `$top + __next` auto-follow but flag for confirmation. **D8 — D-DRAFT-Y → [D-106] promotion**: TGGroups removal is now Ratified per [D-106]; replace `D-DRAFT-Y` references with `[D-106]`. **D9 — D-DRAFT-Z SUPERSEDED** by architect Q1 + `[D-104]`: HILDA scope is now 3 lists (Milestones + Projects + DeliveryItems per-customer), NOT 2 lists per D-DRAFT-Z. **D10 — D-DRAFT-X retained** (SP UI engineer manual provisioning still pending architect ratification — surface as P0 candidate for next ADR triage). **D11 — Anchors refresh**: drop `[D-051]` 8-list framing as authority (superseded by Q1 3-list); add `[D-091]` slug→id, `[D-104]` Projects per-customer, `[D-105]` 4-field owner identity, `[D-106]` TGGroupBase DROPPED, `[D-108]` rules_paused SP column. **D12 — Non-goals expand**: explicit "NOT a reader/writer of SP-side TasksTemplate/Tasks/Trials/Activities/Email/CommunicationLog lists" (SP UI engineer owns those) + "HILDA's CommunicationLog is Postgres-internal per FR-42 — distinct from SP-side CommunicationLog_<customer_id> list per architect Q3 lock 2026-06-25".
 > - **2026-06-10 (drift fixes + FR-84 / FR-87 / column-map cascade alignment)** — A-tier drift fixes against current Structure block: 8-list canonical entity set per `[D-051]` (was stale 7-list); `SpCrud.delete_item` added to declared Public surface; `SharePointListProvider.from_sp_fields` added to Protocol; `mock_server/` sub-module documented (FastAPI SP stub + `--serve --port` CLI mode); sample line counts bumped 7 → 8. B-tier additions reflecting recent session work: FR-84 outbound writeback invariant (SP→HILDA HTTP firewall-blocked; HILDA→SP REST is the sole HILDA-initiated writeback channel); FR-87 TPM resolution writeback path invariant (SP-UI-button → HILDA-REST → HILDA-DB → SpCrud.update_item, strict A→B→C ordering); column-map append-only invariant for the 2026-06-08 cascade fields (target_folder / no_customer_upload / FR-87 TPM resolution fields on DeliveryItems; ingress_nsd / folder_routing_enabled / tracking_enabled on TGGroups); SP Choice-field value sync added to Non-goals (SP UI engineer owns Choice value updates when HILDA enums change — e.g., 4-value ItemType per `[D-053]`); SP-alert email channel added to Non-goals (owned by `email_service` per FR-84). C-tier polish: Depended-on-by extended (`issue_tracker`, `customizations/issue_tracker`, indirect-via-workflow_engine `customer_adapter`); two-halves-of-the-same-conversation positioning note for SP UI engineer collaboration. Anchors `[D-051]` (8-list framing), `[D-053]` (4-value ItemType), FR-84 (SP-HILDA channel discipline), FR-87 (TPM resolution).
 
-**Purpose**: All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. Serves D-004, D-006, NFR-8, and anchors the SharePointListProvider Protocol pattern `[D-020]`.
+**Purpose**: All SharePoint 2017 REST API interaction for HILDA — entity CRUD on SP Lists, NTLM/Kerberos authentication, and the mapping from HILDA's canonical entity fields to customer-deployment-specific SP list names and column names. Serves D-004, D-006, NFR-8, and anchors the SharePointListProvider Protocol pattern `[D-020]`. **HILDA's SP read/write scope is 3 per-customer lists** per architect Q1 lock 2026-06-25 + `[D-104]`: `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>` (per-customer naming pattern `<base>_<customer_id>`). SP UI engineer maintains additional SP lists (`TasksTemplate`, `Tasks`, `Trials`, `Activities`, `Email`, `CommunicationLog`) in the same TG site as display surfaces — HILDA does not touch those.
 
 *SharePoint scope is frozen at 2017 Lists + classic web parts only — no SPFx, no Power Apps, no Document Libraries per `[D-006]` `[D-013]` NFR-8.*
 
-*This module is list-agnostic by design per `[D-020]` — it CRUDs any list named by `FileBasedListProvider` via `customizations/sharepoint_config/<deployment>.yaml`. The 8 SP lists in scope per `sharepoint/REQUIREMENTS.md §2` (2026-05-26: Customers, Devices, Milestones, DeliveryItems, Users, PMCredentials, CommunicationLog, TGGroups per `[D-051]`) are all served by the same SpClient + SpCrud + SharePointListProvider stack without per-list code. Adding a new SP list in a future deployment is a config-only change in customizations/sharepoint_config/.*
+*This module is list-agnostic by design per `[D-020]` — it CRUDs any list named by `FileBasedListProvider` via `customizations/sharepoint_config/<deployment>.yaml`. The 3 SP lists in HILDA's runtime scope per architect Q1 2026-06-25 + `[D-104]` (Milestones / Projects / DeliveryItems, per-customer-named) are all served by the same SpClient + SpCrud + SharePointListProvider stack without per-list code. SP internal column names are sourced from `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (3 worksheets: Milestones / Deliverables / Projects) per architect Q5 — the AUTHORITATIVE field-name source (supersedes stale `HILDA_SP_Schema.xlsx` + `DeliveryItem_visibility_review.xlsx`, both renamed `_DEPRECATED_2026-06-15.xlsx`). Adding a per-customer scope in a future deployment is a config-only change in customizations/sharepoint_config/.*
 
 ---
 
@@ -19,6 +20,8 @@ Two orthogonal concerns, composed by `list_crud.py`:
 2. **SharePointListProvider** — *what to talk about*: pure lookup service — given a HILDA entity type and a scope, returns the SP list name and column map. Makes no HTTP calls.
 
 `list_crud.py` is the only compositor and the only public call site for all other modules.
+
+**SP REST URL pattern** (architect-confirmed via VS Code sample 2026-06-25): site URL = `<corp-sp-root>/sp/tg/<TG_SITE_NAME>` (one TG site per team-group); list URL = `<site>/_api/web/lists/getbytitle('<list_name>')/items?$top=N&$filter=...&$select=...`; request header = `Accept: application/json;odata=verbose`. The architect's sample is a browser-context XMLHttpRequest with implicit cookie auth (SP same-origin web part); HILDA's server-side `SpClient` uses NTLM/Kerberos via service account per `[D-006]`. **Pagination — OPEN**: architect Q4 2026-06-25 ambiguous ("every element accessed individually"). Ph-1 documents standard SP `$top + __next` auto-follow continuation; flag for confirmation when NTLM code snippets land. **TODO**: confirm pagination pattern with architect on NTLM snippet delivery.
 
 **Sub-module: `mock_server/`** — local FastAPI-backed SP stub for SP-less dev + integration tests. `mock_server/store.py:InMemoryStore` (thread-safe, list-addressed by display name, monotonic per-list item IDs, audit log) + `mock_server/app.py:build_app(store)` expose the SP 2017 REST surface that `SpClient` consumes + an HTML browser UI for manual data inspection. Started via `sharepoint_integration_cli --serve --port <N>`. Not used in production; not under the `[D-006]` SP-2017-only invariant — the mock surface is a test-time convenience that the real SP 2017 box also supports.
 
@@ -67,8 +70,8 @@ Auth: NTLM via `requests-ntlm` (sync wrapped in `asyncio.to_thread`) or Kerberos
 ```python
 @dataclass
 class ListScope:
-    customer_slug: str
-    device_slug: str | None = None  # non-None triggers device-level override lookup
+    customer_id: str
+    device_id: str | None = None  # non-None triggers device-level override lookup (Ph-2/Ph-3+ Deferred per Q1 2026-06-25)
 
 class SharePointListProvider(Protocol):
     """Pure lookup service — no HTTP, no side effects."""
@@ -93,7 +96,7 @@ class SharePointListProvider(Protocol):
         Used by SpCrud.get_items to return canonical-shaped results to callers."""
 ```
 
-Entities (8-list canonical set per `[D-051]` — updated 2026-06-10 from prior 7-list stale set): `"customers"`, `"devices"`, `"milestones"`, `"delivery_items"`, `"users"`, `"pm_credentials"`, `"communication_log"`, `"tg_groups"`.
+Entities (3-list canonical set per architect Q1 2026-06-25 lock + `[D-104]` — contracted from prior 8-list `[D-051]` framing): `"delivery_items"`, `"milestones"`, `"projects"`. The other SP lists in the architect's TG site (`TasksTemplate`, `Tasks`, `Trials`, `Activities`, `Email`, `CommunicationLog`) are SP UI engineer's display surface only and NOT in HILDA's read/write scope. HILDA's `CommunicationLog` is Postgres-internal per FR-42 — distinct concept from the SP-side `CommunicationLog_<customer_id>` list per architect Q3 lock 2026-06-25.
 
 ### FileBasedListProvider
 
@@ -107,35 +110,36 @@ class FileBasedListProvider:
     # loads customers/<slug>.yaml and devices/special_devices.yaml at init
 ```
 
-Customer YAML shape (`customizations/sharepoint_config/customers/<customer_slug>.yaml`):
+Customer YAML shape (`customizations/sharepoint_config/customers/<customer_id>.yaml`) — 3 lists per Q1 2026-06-25 lock + `[D-104]`; field names per `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (3 worksheets: Milestones / Deliverables / Projects) per architect Q5:
 ```yaml
-customer_slug: carrier-alpha
+customer_id: <customer_id>                         # slug→id rename per [D-091]
 lists:
-  devices:
-    name: "CA - Device Tracker"
+  # Field names per docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx
+  # (3 worksheets: Milestones/Deliverables/Projects) — AUTHORITATIVE per architect Q5 2026-06-25
+  milestones:
+    name: "Milestones_<customer_id>"               # per-customer naming per [D-104] + architect Q1
     columns:
-      device_name: "Title"
-      assigned_pm_id: "PM_Owner"
-      target_launch_date: "Target_x0020_Launch_x0020_Date"
+      milestone_name: "Title"
+      # ... per Milestones worksheet
+  projects:
+    name: "Projects_<customer_id>"
+    columns:
+      # ... per Projects worksheet; TPM 3-tuple per [D-088]
   delivery_items:
-    name: "CA - Delivery Items"
+    name: "Deliverables_<customer_id>"
     columns:
       item_name: "Title"
-      delivery_state: "Status"
-      expected_completion_date: "Expected_x0020_Completion_x0020_Date"
-      owner_email: "Owner_x0020_Email"
+      delivery_state: "Delivery_x0020_State"
+      rules_paused: "Rules_x0020_Paused"           # Boolean per [D-108] FR-31 sub-1
+      # 4-field owner identity per [D-105]:
+      owner_corp_usa_email: "Owner_x0020_Corp_x0020_USA_x0020_Email"
+      owner_corp_email: "Owner_x0020_Corp_x0020_Email"
+      owner_corp_id: "Owner_x0020_Corp_x0020_Id"
+      owner_name: "Owner_x0020_Name"
+      # ... per Deliverables worksheet
 ```
 
-Device override YAML shape (`customizations/sharepoint_config/devices/special_devices.yaml`):
-```yaml
-device_overrides:
-  - customer_slug: carrier-alpha
-    device_slug: special-device-x
-    entity: delivery_items
-    list_name: "CA - SpecialDev-X Items"
-    # column map inherits from customer config unless overridden here
-    columns: {}
-```
+Device override YAML (`customizations/sharepoint_config/devices/special_devices.yaml`) — Deferred to Ph-2/Ph-3+ per architect Q1 2026-06-25 (no Ph-1 surface for device-level SP-list overrides; Ph-1 scope is per-customer only). See Deferred section.
 
 ### list_crud.py — compositor (canonical call site)
 
@@ -207,7 +211,10 @@ Customer-specific SP list names and SP internal column names live in `customizat
 - **SP 2017 Lists + classic web parts only.** No Document Libraries, no SPFx endpoints, no `/_api/v2.0/` Graph-compatibility surface. Anchors NFR-8 `[D-006]`.
 - **HILDA→SP REST is the sole HILDA-initiated state writeback channel per FR-84** (added 2026-06-10). SP→HILDA HTTP is **unconditionally firewall-blocked** on the corp network — SP→HILDA flows reach HILDA only via SP-alert emails (owned by `email_service`, not this module). Every HILDA-side state mutation that PMs/TPMs need to see in SP UI (most importantly `DeliveryItem.delivery_state` transitions and `CommunicationLog` rows) must flow through `SpCrud.update_item` / `SpCrud.create_item` here. SP UI's per-§8.1 5–10s REST polling picks up the writes.
 - **FR-87 TPM resolution writeback path** (added 2026-06-10; corrected 2026-06-10 per drift-check `[DRIFT-4]`) — SP UI TPM-resolution buttons (§4.9 Reassign Work-Item, §4.10 Resolve doc_type, §4.11 Resolve revision) MUST be invoked in **strict order A → B → C** per FR-87 — across the three resolution steps (not per-step ordering): **(A)** Reassign work-item must complete before **(B)** Resolve doc_type before **(C)** Resolve revision. **Per-step path** (per FR-84 + `[D-047]` + `[D-064]`): SP-UI-button → SP-field-write → SP-alert email → `email_service.sp_alert_parser` → HILDA Celery dispatch → HILDA DB state mutation → `SpCrud.update_item` writes resolution fields (`tpm_reassignment_target_item_id`, `tpm_resolved_doc_type`, `tpm_revision_resolution`) back to SP → SP UI focus-aware refresh surfaces the result. **SP UI never calls hilda-api directly** (firewall-blocked per FR-84) — every TPM-resolution action round-trips through the SP-alert email channel `[D-047]` and returns via `[D-064]` writeback.
-- **Column maps are append-only** (added 2026-06-10) — when HILDA adds canonical fields (e.g., the 2026-06-08 cascade added `target_folder`, `no_customer_upload`, FR-87 TPM-resolution fields on `DeliveryItems`; `ingress_nsd`, `folder_routing_enabled`, `tracking_enabled` on `TGGroups`), the SP UI engineer adds the corresponding SP columns + the customer YAML extends the `columns:` block. No code change in this module — list-agnosticism per `[D-020]` makes the addition mechanical.
+- **Column maps are append-only** (added 2026-06-10) — when HILDA adds canonical fields (e.g., the 2026-06-08 cascade added `target_folder`, `no_customer_upload`, FR-87 TPM-resolution fields on `DeliveryItems`; `rules_paused` per `[D-108]` for FR-31 sub-1), the SP UI engineer adds the corresponding SP columns + the customer YAML extends the `columns:` block. No code change in this module — list-agnosticism per `[D-020]` makes the addition mechanical. TGGroups-side fields DROPPED per `[D-106]` (TGGroupBase Pydantic model removed; TG denormalization onto delivery_items lives in customer YAML, not SP-side TG list).
+- **3-list per-customer scope per architect Q1 lock 2026-06-25 + `[D-104]`** — HILDA reads/writes ONLY `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>`. Adding a 4th list to HILDA's runtime SP scope requires an ADR. SP UI engineer's TG site contains additional SP lists (`TasksTemplate`, `Tasks`, `Trials`, `Activities`, `Email`, `CommunicationLog`) — HILDA does not read or write those; they are SP UI engineer's display surface only.
+- **Per-customer SP list naming `<base>_<customer_id>`** per architect Q1 confirmed pattern 2026-06-25 + `[D-104]`. List names embed the customer identifier (e.g., `Projects_<customer_id>`); HILDA resolves the name via `SharePointListProvider.get_list_name(entity, scope)` — never hardcoded.
+- **Field-name authority** per architect Q5 2026-06-25: `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (3 worksheets: Milestones / Deliverables / Projects) is the AUTHORITATIVE source for SP internal column names. Stale `HILDA_SP_Schema.xlsx` and `DeliveryItem_visibility_review.xlsx` were renamed `_DEPRECATED_2026-06-15.xlsx` in the same directory; do not reference them.
 
 ---
 
@@ -216,6 +223,13 @@ Customer-specific SP list names and SP internal column names live in `customizat
 - **`[D-004]`** — SharePoint integration split: standard API mechanics in `core/`; deployment-specific SP list names + column maps in `customizations/`. This module is the authority for that split.
 - **`[D-006]`** — SP REST API + on-prem AD auth (NTLM/Kerberos). No Microsoft Graph.
 - **`[D-020]`** — SharePointListProvider Protocol pattern: SpClient owns the "how"; SharePointListProvider owns the "what". FileBasedListProvider boilerplate ships in `core/`; `customizations/` provides the YAML data. `list_crud.py` is the sole compositor.
+- **`[D-104]`** — Projects per-customer SP list (supersedes earlier framing where Projects was global). Combined with `[D-051]` superseded-by-Q1, HILDA's SP scope is now 3 per-customer lists: `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>`. Architect Q1 lock 2026-06-25.
+- **`[D-091]`** — slug → id rename throughout: `customer_slug` → `customer_id`; `device_slug` → `device_id` (both Protocol surface `ListScope` and YAML field names).
+- **`[D-105]`** — 4-field owner identity model on Deliverables (`owner_corp_usa_email`, `owner_corp_email`, `owner_corp_id`, `owner_name`); replaces single `owner_email` field.
+- **`[D-106]`** — TGGroupBase Pydantic model DROPPED (formerly D-DRAFT-Y; ratified per `[D-051]` denormalization architect lock 2026-06-21). No SP-side TG list; TG metadata lives only as customer YAML / denormalized columns on Deliverables.
+- **`[D-108]`** — `rules_paused` SP column on Deliverables for FR-31 sub-1 (Boolean; column-map append).
+- **Per-customer SP list naming `<base>_<customer_id>`** per architect Q1 lock 2026-06-25 + `[D-104]`.
+- **`[D-051]` historical / superseded** — was 8-list canonical entity set; superseded by architect Q1 2026-06-25 3-list scope. Retained as historical anchor.
 - **NTLM sync-wrapped vs. native async** — `requests-ntlm` + `asyncio.to_thread` chosen over a native async NTLM implementation. The SP 2017 auth handshake is synchronous at the protocol level; wrapping is simpler and test-equivalent. Revisit if throughput becomes a bottleneck.
 - **Page_size capped at 100** — SP 2017 REST API default page size is 100; HILDA queries use explicit `$top` with server-side paging for any query that may return >100 results. SpClient handles pagination internally.
 
@@ -230,13 +244,16 @@ Customer-specific SP list names and SP internal column names live in `customizat
 - Not responsible for PM credential management — credentials come from `credential_service` per `[D-019]`; `GlobalSharePointConfig` holds the service-account (NTLM/Kerberos) for List access, not per-PM credentials.
 - **Not a SP Choice-field value synchronizer** (added 2026-06-10). When HILDA enums change (e.g., 4-value `ItemType` per `[D-053]` 2026-06-08 — Confirmation / TestReport / TechReport / Waiver + Default; 5-value `DocType`; `delivery_state` 8-state machine), this module does NOT introspect or push allowed values to SP Choice columns. The column map (`columns: {item_type: "Item_x0020_Type"}`) tells the client how to address the column; the SP UI engineer updates the SP Choice field's allowed values + UI rendering on the SP side. Mismatches surface as SP API errors → `SHP-E001`, not as silent dropped data.
 - **Not an SP-alert email receiver** — SP→HILDA via SP-alert email is owned by `email_service` per FR-84. This module owns only the HILDA→SP REST direction.
+- **NOT a reader/writer of SP-side `TasksTemplate` / `Tasks` / `Trials` / `Activities` / `Email` / `CommunicationLog` lists** per architect Q1 lock 2026-06-25 — those 6 SP lists exist in the architect's TG site but are SP UI engineer's display surface only; HILDA does not touch them. HILDA's runtime SP scope is exactly `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>`.
+- **NOT a sync target for the SP-side `CommunicationLog_<customer_id>` list** per architect Q3 lock 2026-06-25 — HILDA's `CommunicationLog` is Postgres-internal per FR-42; the SP-side list (if it exists per SP UI engineer's design) is independent.
+- **NOT the TasksTemplate authority** per architect Q2 lock 2026-06-25 — template.yaml lives in `customizations/template_schemas/` per existing pattern; no SP-side mirror needed.
 
 ---
 
 ## Depends on
 
 - `diagnostics` — `ErrorCode`, `ReportWriter`, `QCTemplate` (SHP error codes registered in `error_codes.py`).
-- `template_schema` — `CustomerSchema` (used at startup to validate SP column map coverage against canonical fields); `ListScope` co-located here but typed against `customer_slug` / `device_slug` from `template_schema`.
+- `template_schema` — `CustomerSchema` (used at startup to validate SP column map coverage against canonical fields); `ListScope` co-located here but typed against `customer_id` / `device_id` from `template_schema` per `[D-091]` slug→id rename.
 
 ---
 
@@ -253,7 +270,7 @@ python -m core.src.sharepoint_integration.sharepoint_integration_cli --diagnosti
 ```
 Connects to SP (using config), reads one item from each registered list name in `customizations/sharepoint_config/customers/*.yaml`, emits `SHP-RPT`:
 ```
-RPT|SHP|run-00001|2026-06-10T10:00:00Z|customers_configured=1|lists_reachable=8|lists_unreachable=0|auth_type=ntlm
+RPT|SHP|run-00001|2026-06-25T10:00:00Z|customers_configured=1|lists_reachable=3|lists_unreachable=0|auth_type=ntlm
 ```
 
 ```
@@ -266,7 +283,7 @@ python -m core.src.sharepoint_integration.sharepoint_integration_cli --dry-run -
 ```
 Logs all SP operations that would be performed for the given customer scope but performs no writes. Emits `SHP-MET`:
 ```
-MET|SHP|run-00001|2026-06-10T10:00:00Z|customer=carrier-alpha|lists_validated=8|columns_mapped=58|missing_columns=0
+MET|SHP|run-00001|2026-06-25T10:00:00Z|customer=<customer_id>|lists_validated=3|columns_mapped=58|missing_columns=0
 ```
 
 ```
@@ -302,7 +319,7 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 
 ### `config.py`
 - `GlobalSharePointConfig` — Pydantic BaseModel — pub (via `__all__`) — Operational SP config (site_url, auth_type, creds, timeouts, page_size); secret-redacted `__repr__`; `from_sources(config_path, cli_overrides, env_prefix)` 3-tier loader.
-- `ListScope` — frozendataclass — pub (via `__all__`) — Lookup scope (customer_slug, optional device_slug for override path).
+- `ListScope` — frozendataclass — pub (via `__all__`) — Lookup scope (customer_id, optional device_id for override path per `[D-091]` slug→id rename).
 
 ### `error_codes.py`
 - (no public top-level names — registers SHP-E001..E004 + SHP-W001 on import via `register_code` side-effect.)
