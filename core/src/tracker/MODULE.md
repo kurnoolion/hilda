@@ -1,11 +1,12 @@
 # Module: tracker
 
-> **Status:** Initial draft 2026-06-10 (Ph-1-first scope per discipline locked 2026-06-09). DeliveryItem lifecycle orchestrator — owns the 11-state `delivery_state` machine + per-transition guards per FR-7 / FR-28. Pure library; no Celery, no SP REST writes (delegates to `sharepoint_integration`), no rule evaluation (delegates to `workflow_engine`'s downstream `StateChange` dispatch). Sections curated; code implementation begins after `/switch-phase development tracker`.
+> **Status:** Initial draft 2026-06-10 + 2026-06-23 architect cascade revisit applied (13 drift items D1-D18 against recent locks since 2026-06-10: slug→id rename per `[D-091]`, 4-field owner identity per `[D-080]`+`[D-086]`, FR-78 default WI hardcoded inventory expansion, item_type case cleanup per SP UI engineer lock 2026-06-23, FR-82 nested tag-set per architect lock 2026-06-20, Projects-per-customer per NFR-21 amendment + `[D-083]`, FR-64 Option (b) HILDA-owned cascade, Confirmation FR-25 (b) role-collapse skip-pattern, `expected_completion_date` removal per `[D-085]`, FR-87 step (A)(B)(C) clarification). DeliveryItem lifecycle orchestrator — owns the 11-state `delivery_state` machine + per-transition guards per FR-7 / FR-28. Pure library; no Celery, no SP REST writes (delegates to `sharepoint_integration`), no rule evaluation (delegates to `workflow_engine`'s downstream `StateChange` dispatch). Sections curated; code implementation begins after `/switch-phase development tracker`.
 >
 > **Rollback log:**
+> - **2026-06-23 (architect cascade revisit — 13 drift items applied against recent locks since 2026-06-10)** — strict-order module-by-module sweep Module #6 of 13 (per architect direction 2026-06-21). **D1 — slug → id rename per `[D-091]`**: `customer_slug` → `customer_id`, `device_slug` → `device_id`, `inferred_tg_name_slug` → `inferred_tg_path_id` (7 sites: `instantiate_default_workitem` params + `TagPropagationResult` + `propagate_tags_to_active_trackers` params + `StorageWriter.find_items_by_natural_key` Protocol signature + docstrings). **D2 — `owner_email` → 4-field owner identity per `[D-080]` + `[D-086]`**: `sp_alert_parser` routing description updated — `owner_corp_usa_email` / `owner_corp_email` / `owner_corp_id` / `owner_name` field changes route to `ItemModified.OwnerReassigned` (was single `owner_email`). PLM grouping key is `owner_corp_id` per FR-5 + `[D-035]`. **D3 — FR-78 default WI hardcoded inventory expansion**: `instantiate_default_workitem` docstring expanded with full 11-field inventory per FR-78 lock (`tg_path_id="_unrouted"`, `item_path_id=None`, `force_tracking_enabled=False`, `owner_corp_usa_email=None`, `owner_corp_email=None`, `owner_corp_id=None`, `owner_name=None`, `tracking_modality=None`, `milestone_gating=True`, `no_customer_upload=True`, `review_required=False`, `doc_count=0`, `item_type="Default"`, `delivery_state=Open`). **D4 — item_type literal cleanup**: SCREAMING enum names (`TEST_TECH_WAIVER_REPORT`, `COMPLIANCE_CERTIFICATION_RELEASE_NOTES`) replaced with snake_case literal values per FR-7 / `[D-053]` (the enum NAMES remain SCREAMING per PEP 8; the VALUES are snake_case). `Confirmation` + `Default` stay PascalCase per SP UI engineer lock 2026-06-23. **D5 — FR-82 nested tag-set per architect lock 2026-06-20**: `propagate_tags_to_active_trackers.new_tags` type `list[str]` → `list[list[str]]` (nested synonym groups); `TagPropagationResult.new_tags` same type change; docstring + dedup-at-write-time semantics updated for nested structure. **D6 — Projects-per-customer per NFR-21 amendment + `[D-083]`**: anchor added to Purpose + Status header. **D7 — FR-64 Option (b) HILDA-owned per-item cascade**: anchor add to Purpose + Status header (cascade implementation at lines 556-589 already aligns — Close All Items batch iterates per-item via `tracker.update_delivery_state`; matches Option (b) semantic). **D10 — Status header refresh (this entry)**. **D11 — Anchors update**: Purpose adds `[D-080]`, `[D-083]`, `[D-086]`, `[D-091]`; D-DRAFT candidates `D-094` (item_type rename + 2026-06-23 mixed-case lock) and `D-100` (FR-64 Option (b)) noted. **D12 — Confirmation FR-25 (b) skip-pattern**: state machine narrative updated — Confirmation items (`item_type = "Confirmation"`) skip `DocumentReceived` + `OwnerClosed` per FR-7 confirmation carve-out + FR-25 (b) role-collapse lock 2026-06-19; advance `OutreachSent → UnderPMReview` directly on close-intent reply. **D13 — `previous_active_state` → `prior_delivery_state` field name** (verified consistency with `template_schema.DeliveryItemBase.prior_delivery_state`). **D14 — `expected_completion_date` removed per `[D-085]`**: `ItemModified.DeadlineMoved` sub-trigger now sources from `Milestone.target_date` edit on the Milestones SP list row (was per-item `expected_completion_date`); sp_alert_parser routing description updated. **D15 — `actual_item_info` field confirmed exists** (PLM URL per architect direction 2026-06-23) — kept in `apply_manual_tpm_override` field list. **D18 — FR-87 step (A)(B)(C) clarification**: `reassign_document_to_workitem` docstring clarified to scope step (A) (TPM reassignment from default WI to non-default item); FR-86 alignment matrix enforcement covers step (B) (doc_type-misclassification resolution); `[D-039]` Steps 0-1 fire during reassignment but Step 2 LLM + Step 3 staged remain Ph-2 per architect direction 2026-06-21 (CLASSIFY_DOC Ph-2 demotion).
 > - **2026-06-10 (initial draft)** — first MODULE.md for `tracker`. Scope locked to **Ph-1 only**: 11-state `delivery_state` machine (Not Started + 8 active happy-path + Delayed + Blocked off-path); per-transition guards per FR-7 / FR-28 (OwnerClosed 2-condition guard; Confirmation-item carve-out; PMApproval gate per NFR-5); FR-78 default work-item instantiation; FR-82 cross-tracker tag propagation; FR-83 TPM-manual document reassignment; FR-14 manual TPM field overrides with `bypass_guards` discipline; idempotent transitions for Celery at-least-once retry safety. Ph-2 (corp-messenger version-selection FR-66 reflected in transition map + `## Deferred`). Anchors `[D-022]` (workflow_engine consumes tracker; rule_engine does not depend on tracker), `[D-064]` (state writebacks via `sharepoint_integration.SpCrud` per FR-84), `[D-066]` (`StateChange` is the canonical downstream trigger; tracker returns the dispatch signal but does NOT call workflow_engine — caller fires), `[D-053]` (4-value `ItemType` + Confirmation carve-out path), `[D-060]` (default work-item per-MILESTONE; FR-78 instantiation site), `[D-005]` (`--diagnostic` + `--validate` CLI), `[D-002]` (TRK-* error codes + RPT/MET/FIX/QC compact reports + no-proprietary-content invariant). New error code prefix `TRK` already in `diagnostics.PREFIX_REGISTRY`.
 
-**Purpose**: `tracker` is HILDA's **DeliveryItem lifecycle orchestrator**. It owns: (a) the **11-state `delivery_state` machine** (`Not Started`, `Open`, `OutreachSent`, `DocumentReceived`, `OwnerClosed`, `UnderPMReview`, `ReadyForSubmission`, `SubmittedToCustomer`, `Closed`, `Delayed`, `Blocked`) — the canonical transition matrix + per-transition guard predicates per FR-7 + FR-28; (b) the four **cross-cutting orchestration actions** that `workflow_engine` consumes: `update_delivery_state` (`UPDATE_STATE` action target), `instantiate_default_workitem` (FR-78 / `INSTANTIATE_DEFAULT_WORK_ITEM`), `reassign_document_to_workitem` (FR-83 / `REASSIGN_DOCUMENT_TO_WORK_ITEM`), `propagate_tags_to_active_trackers` (FR-82 / `PROPAGATE_TAGS_TO_ACTIVE_TRACKERS`); (c) the **`StateChangeDispatchSignal`** that callers (workflow_engine task bodies) consume to fire the canonical `StateChange` TriggerEvent per `[D-066]` downstream-trigger pattern. **No Celery, no rule evaluation, no SP writes of its own** — tracker is a pure library. Side effects (DB writes, SP REST writebacks, audit-log writes, follow-on trigger dispatches) are mediated through injected Protocols (`StorageWriter`, `SpWriter`, `AuditWriter`) so unit tests are mock-friendly and dependency cycles are avoided. Serves FR-2 (item lifecycle init), FR-7 (state machine + transition guards), FR-14 (manual TPM field override path), FR-18 (state advancement to `SubmittedToCustomer` on carrier upload success), FR-28 (OwnerStatusConfirmed 2-condition guard, PMApproval gate, MilestoneAllClosed eligibility), FR-31 sub-1 (pause check on automated transitions; sub-3 manual bypasses guards via explicit `bypass_guards` flag), FR-42 (CommunicationLog row per state transition), FR-52 / FR-83 (document-to-work-item reassignment via TPM SP UI), FR-78 (default work-item per milestone), FR-82 (tag propagation across active trackers). Anchors `[D-022]` (rule_engine boundary — tracker depends on neither rule_engine nor workflow_engine; consumers fire the StateChange trigger), `[D-064]` (state writebacks via `SpCrud`), `[D-066]` (StateChange as downstream trigger primitive), `[D-053]` (4-value ItemType + Confirmation carve-out), `[D-060]` (default work-item per-MILESTONE), `[D-005]`, `[D-002]`.
+**Purpose**: `tracker` is HILDA's **DeliveryItem lifecycle orchestrator**. It owns: (a) the **11-state `delivery_state` machine** (`Not Started`, `Open`, `OutreachSent`, `DocumentReceived`, `OwnerClosed`, `UnderPMReview`, `ReadyForSubmission`, `SubmittedToCustomer`, `Closed`, `Delayed`, `Blocked`) — the canonical transition matrix + per-transition guard predicates per FR-7 + FR-28; (b) the four **cross-cutting orchestration actions** that `workflow_engine` consumes: `update_delivery_state` (`UPDATE_STATE` action target), `instantiate_default_workitem` (FR-78 / `INSTANTIATE_DEFAULT_WORK_ITEM`), `reassign_document_to_workitem` (FR-83 / `REASSIGN_DOCUMENT_TO_WORK_ITEM`), `propagate_tags_to_active_trackers` (FR-82 / `PROPAGATE_TAGS_TO_ACTIVE_TRACKERS`); (c) the **`StateChangeDispatchSignal`** that callers (workflow_engine task bodies) consume to fire the canonical `StateChange` TriggerEvent per `[D-066]` downstream-trigger pattern. **No Celery, no rule evaluation, no SP writes of its own** — tracker is a pure library. Side effects (DB writes, SP REST writebacks, audit-log writes, follow-on trigger dispatches) are mediated through injected Protocols (`StorageWriter`, `SpWriter`, `AuditWriter`) so unit tests are mock-friendly and dependency cycles are avoided. Serves FR-2 (item lifecycle init), FR-7 (state machine + transition guards), FR-14 (manual TPM field override path), FR-18 (state advancement to `SubmittedToCustomer` on carrier upload success), FR-28 (OwnerStatusConfirmed 2-condition guard, PMApproval gate, MilestoneAllClosed eligibility), FR-31 sub-1 (pause check on automated transitions; sub-3 manual bypasses guards via explicit `bypass_guards` flag), FR-42 (CommunicationLog row per state transition), FR-52 / FR-83 (document-to-work-item reassignment via TPM SP UI; FR-87 step (A) TPM resolution path), FR-64 (per-item Close All Items cascade per Option (b) HILDA-owned lock 2026-06-20), FR-78 (default work-item per milestone with hardcoded inventory per architect lock 2026-06-21), FR-82 (cross-tracker tag propagation with nested tag-set per architect lock 2026-06-20). Anchors `[D-022]` (rule_engine boundary — tracker depends on neither rule_engine nor workflow_engine; consumers fire the StateChange trigger), `[D-064]` (state writebacks via `SpCrud`), `[D-066]` (StateChange as downstream trigger primitive), `[D-053]` (4-value ItemType + Confirmation carve-out + mixed-case per SP UI engineer lock 2026-06-23), `[D-060]` (default work-item per-MILESTONE), `[D-080]` (4-field owner identity preference rule for outreach), `[D-083]` (Projects-per-customer architecture; tracker reads `assigned_pm_id` via per-customer `Projects_<customer_id>` SP list lookup per NFR-21 amendment), `[D-085]` (Milestone.target_date sole authoritative deadline; per-item `expected_completion_date` removed), `[D-086]` (free-form text owner identity discipline), `[D-088]` (3-tuple `(assigned_pm_id, pm_display_name, pm_email)` PM resolution from Projects-list TPM Person/Group column), `[D-091]` (slug → id rename throughout: `customer_slug`→`customer_id`, `device_slug`→`device_id`, `inferred_tg_name_slug`→`inferred_tg_path_id`), `[D-005]`, `[D-002]`. D-DRAFT candidates `D-094` (item_type rename + 2026-06-23 mixed-case lock), `D-100` (FR-64 Option (b)) — pending ADR ratification.
 
 **Workload assignment**: Library code imported by `hilda-worker` (task bodies for all 4 cross-cutting actions) + `hilda-api` (read-only state queries from REST endpoints; never invokes mutating functions from the API side). No standalone Deployment, no Celery worker, no scheduled tasks of its own.
 
@@ -112,14 +113,20 @@ def check_transition_guards(
 
     1. **transition_legal(item.delivery_state, target_state)** — basic state-machine legality.
     2. **OwnerClosed 2-condition guard** per FR-28 OwnerStatusConfirmed: when target is OWNER_CLOSED,
-       (a) if item_type == Confirmation → no doc/review requirement; allowed
+       (a) if item_type == "Confirmation" → no doc/review requirement; allowed. **Note**: per
+           FR-25 (b) role-collapse lock 2026-06-19 + FR-7 confirmation carve-out, Confirmation
+           items skip OWNER_CLOSED + DOCUMENT_RECEIVED entirely (close-intent reply advances
+           OUTREACH_SENT → UNDER_PM_REVIEW directly via the FR-12 path (a)/(c) close-intent
+           processor); this guard branch covers any legacy/edge case where OWNER_CLOSED is
+           requested for a Confirmation item.
        (b) else: (i) doc_count_received >= doc_count AND (ii) **only when `review_required = true`**:
                   all received docs+revisions reviewed (for test_report: parser_result + non-null
                   llm_review_findings; for tech_report/waiver: non-null llm_review_findings).
                   **When `review_required = false`, condition (ii) is vacuously satisfied** —
                   guard advances on (i) alone. Per FR-53: review_required is set true only when
-                  item_type == TEST_TECH_WAIVER_REPORT (compliance/certification/release-notes
-                  items + Default items have review_required = false). If (i) unmet:
+                  item_type == "test_tech_waiver_report" (compliance/certification/release-notes
+                  items + Default items have review_required = false; in Ph-1 early drop ALL
+                  items have review_required = false per architect lock 2026-06-19). If (i) unmet:
                   blocking_conditions=['doc_count_not_reached']; if (ii) applies and is unmet:
                   blocking_conditions=['reviews_pending'].
     3. **READY_FOR_SUBMISSION requires UNDER_PM_REVIEW → ReadyForSubmission AND `item.pm_approval_at`
@@ -262,20 +269,45 @@ def auto_advance_owner_closed_to_under_pm_review(
 
 ```python
 def instantiate_default_workitem(
-    milestone_id:       str,
-    customer_slug:      str,
-    device_slug:        str,
-    inferred_tg_name_slug: str                              = "_unrouted",
-    storage:            "StorageWriter",
-    sp_writer:          "SpWriter",
-    audit:              "AuditWriter",
+    milestone_id:           str,
+    customer_id:            str,                              # was customer_slug per [D-091] slug→id rename 2026-06-21
+    device_id:              str,                              # was device_slug per [D-091]
+    inferred_tg_path_id:    str                              = "_unrouted",   # was inferred_tg_name_slug per [D-091]
+    storage:                "StorageWriter",
+    sp_writer:              "SpWriter",
+    audit:                  "AuditWriter",
 ) -> "DeliveryItem":
     """FR-78 default work-item instantiation. Called by workflow_engine
     INSTANTIATE_DEFAULT_WORK_ITEM task body when TrackerCreated trigger fires. Idempotent:
     if milestone already has a Default work-item, returns the existing row (no-op). Otherwise
-    creates row with item_type=Default, tg_name='_unrouted', sort_order=max(existing)+1,
-    delivery_state=OPEN (Default work-items skip OutreachSent; documents land directly per
-    FR-78). Writes CommunicationLog row with action_type=default_workitem_instantiated."""
+    creates row with the FR-78 hardcoded inventory (architect lock 2026-06-21 — full default
+    work-item field set, none template-author-editable):
+
+      item_type             = "Default"               # PascalCase per SP UI engineer lock 2026-06-23
+      tg_name               = "_unrouted"             # sentinel TG name (underscore-prefix per FR-86)
+      tg_path_id            = "_unrouted"             # NSD path segment matches tg_name
+      item_path_id          = None                    # default WI has no per-item NSD sub-path
+      item_no               = 0 (reserved)            # zero reserved for default WI per FR-5 architect lock
+      sort_order            = max(existing) + 1
+      delivery_state        = OPEN                    # default WI skips OutreachSent — docs land directly
+      tracking_modality     = None                    # default WI is HILDA-internal; no owner outreach
+      doc_count             = 0                       # default WI has no expected doc count
+      review_required       = False                   # default WI never AI-reviewed
+      milestone_gating      = True                    # default WI MUST be Marked Closed before milestone Completed
+      no_customer_upload    = True                    # default WI docs never uploaded to carrier portal
+      force_tracking_enabled = False                  # default WI ineligible for force-tracking (no owner)
+      owner_corp_usa_email  = None                    # 4-field owner identity null per [D-080] + [D-086]
+      owner_corp_email      = None
+      owner_corp_id         = None                    # PLM grouping key per FR-5 + [D-035] — null on default WI
+      owner_name            = None
+      ingress_nsd           = "None"                  # PascalCase per SP UI engineer lock 2026-06-23
+      folder_routing_enabled = False                  # default WI never participates in FR-77 routing
+      pm_approval_at        = None                    # cleared on entry to UNDER_PM_REVIEW; never set on default WI Ph-1
+      pm_approval_pm_id     = None
+      target_folder         = None                    # NULL per FR-77 — default WI has no carrier-portal upload destination
+      customer_delivery_modality = None               # NULL — no carrier upload
+
+    Writes CommunicationLog row with action_type=default_workitem_instantiated."""
 ```
 
 ### `reassignment.py`
@@ -307,7 +339,14 @@ def reassign_document_to_workitem(
 ) -> ReassignmentResult:
     """FR-83 TPM-manual document reassignment via SP UI. Called by workflow_engine
     REASSIGN_DOCUMENT_TO_WORK_ITEM task body when sp_alert_parser dispatches the
-    tpm_reassign_to_workitem action verb from FR-87 step A button click. Pipeline:
+    tpm_reassign_to_workitem action verb from FR-87 step (A) button click on the HILDA-rendered
+    document section. **FR-87 step scope**: step (A) = TPM reassignment from default WI to a
+    template-defined work-item (this function's scope); step (B) = doc_type re-classification
+    when FR-86 alignment matrix flags mismatch (re-derivation happens inline at step 6 below;
+    if the corrected doc_type still mismatches the target item's item_type, TRK-E003 fires);
+    step (C) = `[D-039]` revision resolution (Ph-1 fires Steps 0+1 deterministic; Ph-2 adds
+    Step 2 LLM CLASSIFY_DOC + Step 3 staged per architect direction 2026-06-21 CLASSIFY_DOC
+    Ph-2 demotion). Pipeline:
     1. Verify source_item_id refers to a Default work-item (TRK-E002 if not).
     2. Verify target_item_id is in same milestone + has compatible item_type for the doc's
        doc_type per FR-86 alignment matrix (TRK-E003 if not — TPM picked an incompatible
@@ -346,19 +385,19 @@ def reassign_document_to_workitem(
 ```python
 @dataclass(frozen=True)
 class TagPropagationResult:
-    customer_slug:      str
+    customer_id:        str                              # was customer_slug per [D-091]
     tg_name:            str
     item_no:            int
-    new_tags:           list[str]
+    new_tags:           list[list[str]] | None           # nested tag-set per FR-82 lock 2026-06-20 (list of synonym groups; None = clear tags)
     propagated_count:   int                              # active items updated across milestones / devices
     skipped_count:      int                              # items skipped due to pause / mismatched state / etc.
     correlation_id:     str
 
 def propagate_tags_to_active_trackers(
-    customer_slug:      str,
+    customer_id:        str,                              # was customer_slug per [D-091]
     tg_name:            str,
     item_no:            int,
-    new_tags:           list[str],
+    new_tags:           list[list[str]] | None,           # nested tag-set per FR-82 lock 2026-06-20
     pm_id:              str,                              # TPM/ops attribution
     storage:            "StorageWriter",
     sp_writer:          "SpWriter",
@@ -367,16 +406,23 @@ def propagate_tags_to_active_trackers(
 ) -> TagPropagationResult:
     """FR-82 + ItemModified.TagsModified handler. Called by workflow_engine
     PROPAGATE_TAGS_TO_ACTIVE_TRACKERS task body. Propagates the new item_description
-    comma-separated tag list to ALL items matching (customer_slug, tg_name, item_no)
-    across all active milestones + devices for that customer. Pipeline:
-    1. storage.find_items_by_natural_key(customer_slug, tg_name, item_no, only_active=True)
-    2. Dedup tags within new_tags list (idempotent per FR-82).
+    **nested tag-set** (list of synonym groups per FR-82 lock 2026-06-20; each inner list is
+    a synonym group like `[["VoLTE", "Voice over LTE"], ["AGPS"]]`) to ALL items matching
+    (customer_id, tg_name, item_no) across all active milestones + devices for that customer.
+    Pipeline:
+    1. storage.find_items_by_natural_key(customer_id, tg_name, item_no, only_active=True)
+    2. Dedup at synonym-group level within new_tags (idempotent per FR-82): dedupe groups by
+       set-equality (order-insensitive within a group) + dedupe at the outer list level by
+       canonicalized-group-tuple. Subset-overlap warnings emitted via TSC-W007 at template_schema
+       validation time (not at propagation time — propagation is best-effort).
     3. For each matched item: skip if delivery_state in {CLOSED, SUBMITTED_TO_CUSTOMER} — tags
        no longer affect routing once dispatched; per FR-82.
     4. For each non-skipped item: update item_description via storage.update_delivery_item +
-       sp_writer.update_item; audit with action_type=tag_catalog_propagation + pm_id.
+       sp_writer.update_item (writes JSON serialization of nested list per template_schema
+       FR-82 field model); audit with action_type=tag_catalog_propagation + pm_id +
+       group_count + total_synonym_count (no raw tag text — NFR-2).
     5. Returns TagPropagationResult counts. Idempotent: re-running with same new_tags is a no-op
-       (dedup at write time)."""
+       (dedup at write time + idempotency on item_description JSON equality check)."""
 ```
 
 ### `manual_override.py`
@@ -394,9 +440,14 @@ def apply_manual_tpm_override(
     """FR-14 manual TPM field override — **generic handler for TPM SP UI field edits that do
     NOT have a dedicated ItemModified sub-trigger per FR-28**. Called by workflow_engine task
     body when `sp_alert_parser` detects a TPM-manual SP field edit on a field WITHOUT a
-    sub-trigger. **Sub-trigger fields route via rule_engine instead** — `owner_email`
-    (→ ItemModified.OwnerReassigned), `expected_completion_date` (→ ItemModified.DeadlineMoved),
-    `item_description` (→ ItemModified.TagsModified). For those fields, sp_alert_parser
+    sub-trigger. **Sub-trigger fields route via rule_engine instead** — any of the 4 owner
+    identity fields (`owner_corp_usa_email` / `owner_corp_email` / `owner_corp_id` / `owner_name`
+    per [D-080] + [D-086]) → ItemModified.OwnerReassigned (sp_alert_parser detects any of the
+    4-field set changing); Milestone-level `target_date` edit (was per-item `expected_completion_date`
+    pre-[D-085]) → ItemModified.DeadlineMoved (sourced from the Milestones SP list row per
+    [D-083] + [D-085]; cascades to ALL items in the milestone via re-arm semantics per FR-11);
+    `item_description` → ItemModified.TagsModified (nested tag-set per FR-82 lock 2026-06-20).
+    For those fields, sp_alert_parser
     constructs a TriggerEvent and dispatches through workflow_engine.TriggerDispatcher — NOT
     through this function.
 
@@ -432,8 +483,8 @@ class StorageWriter(Protocol):
     def update_document_item_association(self, file_hash: str,
                                           fields: dict[str, Any]) -> None: ...
     def update_document_index_row(self, file_hash: str, fields: dict[str, Any]) -> None: ...
-    def find_items_by_natural_key(self, customer_slug: str, tg_name: str, item_no: int,
-                                    only_active: bool = True) -> list["DeliveryItem"]: ...
+    def find_items_by_natural_key(self, customer_id: str, tg_name: str, item_no: int,
+                                    only_active: bool = True) -> list["DeliveryItem"]: ...    # customer_id per [D-091] slug→id rename
     def list_default_workitem_for_milestone(self, milestone_id: str) -> "DeliveryItem | None": ...
 
 class SpWriter(Protocol):
@@ -469,14 +520,14 @@ class TrackerConfig(BaseModel):
 - **Guards are pure functions** — `check_transition_guards` never mutates DB, SP, or any external system. Pure functional means easier unit tests + safe to call from `dashboard` / SP UI engineer's prototype for "would this transition be allowed?" queries.
 - **`bypass_guards=True` is reserved for FR-14 manual TPM override** — automated callers (rule_engine-driven UPDATE_STATE) MUST NOT set `bypass_guards=True`. TRK-E004 if attempted.
 - **Rewind from SUBMITTED_TO_CUSTOMER requires TPM attribution** — customer RFI / re-submission scenarios per Ph-1 production reality: TPM can rewind a submitted item to DOCUMENT_RECEIVED (additional/replacement document) or to OUTREACH_SENT (different deliverable; restart owner outreach). Rewind requires `trigger_source ∈ {"manual_tpm_override", "tpm_button"}`; automated rules MUST NOT rewind a SUBMITTED item — TRK-E006 if attempted. Audit row carries `action_type=state_rewind_for_rfi` + `prior_carrier_submission_ref` (FR-18 dispatch record's correlation_id) so audit chain preserves across re-submissions.
-- **sp_alert_parser routing discipline for TPM SP UI field edits** — `email_service.sp_alert_parser` (per `[D-047]`) routes TPM-edited field changes into one of two paths based on which field changed: (a) **rule_engine path** for fields with a dedicated ItemModified sub-trigger per FR-28 — `owner_email` → `ItemModified.OwnerReassigned`; `expected_completion_date` → `ItemModified.DeadlineMoved`; `item_description` → `ItemModified.TagsModified`. sp_alert_parser constructs a `TriggerEvent` and calls `workflow_engine.TriggerDispatcher.dispatch`; matched rules fire their action lists (NotifyNewOwner + StartItemCollection / REARM_DEADLINE_PROXIMITY / PROPAGATE_TAGS_TO_ACTIVE_TRACKERS respectively). (b) **FR-14 manual override path** for ALL other fields — `delivery_state`, `doc_count`, `review_required`, `no_customer_upload`, `plm_id`, `actual_item_info`, `target_folder`, etc. sp_alert_parser calls `workflow_engine.tasks.apply_manual_tpm_override` which invokes `tracker.apply_manual_tpm_override`. The routing decision is sp_alert_parser's responsibility, not tracker's — tracker accepts both `update_delivery_state(trigger_source="manual_tpm_override")` (from the FR-14 path) and `update_delivery_state(trigger_source="automated")` (from rule_engine path) symmetrically.
+- **sp_alert_parser routing discipline for TPM SP UI field edits** — `email_service.sp_alert_parser` (per `[D-047]`) routes TPM-edited field changes into one of two paths based on which field changed: (a) **rule_engine path** for fields with a dedicated ItemModified sub-trigger per FR-28 — **any of the 4-field owner identity set** (`owner_corp_usa_email` / `owner_corp_email` / `owner_corp_id` / `owner_name` per `[D-080]` + `[D-086]`) → `ItemModified.OwnerReassigned` (sp_alert_parser detects any of the 4-field set changing on Deliverables row); **Milestone-level `target_date`** edit on Milestones SP list row per `[D-083]` + `[D-085]` (was per-item `expected_completion_date` pre-`[D-085]`) → `ItemModified.DeadlineMoved` (cascades to ALL items in the milestone via FR-11 re-arm semantics; sp_alert_parser scopes the trigger to the milestone, not the row); **`item_description`** → `ItemModified.TagsModified` (nested tag-set per FR-82 lock 2026-06-20). sp_alert_parser constructs a `TriggerEvent` and calls `workflow_engine.TriggerDispatcher.dispatch`; matched rules fire their action lists (NotifyNewOwner + StartItemCollection / REARM_DEADLINE_PROXIMITY / PROPAGATE_TAGS_TO_ACTIVE_TRACKERS respectively). (b) **FR-14 manual override path** for ALL other fields — `delivery_state`, `doc_count`, `review_required`, `no_customer_upload`, `plm_id`, `actual_item_info` (PLM URL per architect direction 2026-06-23), `target_folder`, etc. sp_alert_parser calls `workflow_engine.tasks.apply_manual_tpm_override` which invokes `tracker.apply_manual_tpm_override`. The routing decision is sp_alert_parser's responsibility, not tracker's — tracker accepts both `update_delivery_state(trigger_source="manual_tpm_override")` (from the FR-14 path) and `update_delivery_state(trigger_source="automated")` (from rule_engine path) symmetrically.
 - **All Ph-1 CLOSED transitions are TPM-manual** per FR-7 amendment + DEF-20 — automatic CLOSED is deferred. Two paths only: (a) per-item TPM-Mark-Closed button (FR-7), (b) per-milestone FR-64 "Close All Items" batch (which internally invokes the per-item close for each eligible item). Automated rules MUST NOT produce `UpdateState(target=CLOSED)` — TRK-E006-style rejection (the same "requires TPM attribution" guard that rejects rewinds from SUBMITTED also rejects automated close).
-- **Confirmation items MUST have `no_customer_upload=True`** — Confirmation (`[D-053]` ItemType) is an owner Yes/No confirmation; by nature there is no document to upload, hence no carrier upload. Enforced at template_schema validation time (TSC-W003-style warning at customer-template load if a Confirmation item declares `no_customer_upload=False`); enforced at `tracker.instantiate_default_workitem` if a default work-item is created with conflicting flags. PM-Review step for Confirmation items is a nominal approval (no docs/results to evaluate); TPM-Mark-Closed from `ReadyForSubmission` is the close path (per the `no_customer_upload=True` carve-out).
+- **Confirmation items MUST have `no_customer_upload=True`** — `item_type = "Confirmation"` (`[D-053]` + SP UI engineer lock 2026-06-23 PascalCase) is an owner Yes/No confirmation; by nature there is no document to upload, hence no carrier upload. Enforced at template_schema validation time (TSC-W003-style warning at customer-template load if a Confirmation item declares `no_customer_upload=False`); enforced at `tracker.instantiate_default_workitem` if a default work-item is created with conflicting flags. **Confirmation state-traversal carve-out per FR-7 + FR-25 (b) role-collapse lock 2026-06-19**: Confirmation items skip `DOCUMENT_RECEIVED` + `OWNER_CLOSED` entirely (no doc to receive, no doc-driven close gate); close-intent reply advances `OUTREACH_SENT → UNDER_PM_REVIEW` directly via FR-12 path (a)/(c) close-intent processor. The OwnerClosed 2-condition guard's `item_type == "Confirmation"` branch (line 114) is a backstop for legacy/edge cases — in normal Ph-1 operation Confirmation items never reach OWNER_CLOSED. PM-Review step for Confirmation items is a nominal approval (no docs/results to evaluate); TPM-Mark-Closed from `ReadyForSubmission` is the close path (per the `no_customer_upload=True` carve-out).
 - **`pm_approval_at` clearing discipline** — the field is set by the PMApproval-trigger flow before tracker advances UNDER_PM_REVIEW → READY_FOR_SUBMISSION. tracker MUST clear `pm_approval_at = None` + `pm_approval_pm_id = None` on (a) entry to UNDER_PM_REVIEW (auto-advance from OWNER_CLOSED — fresh review cycle starts), (b) all rewind transitions from SUBMITTED_TO_CUSTOMER (re-traversal of UNDER_PM_REVIEW requires fresh PM approval), (c) DELAYED / BLOCKED return to UNDER_PM_REVIEW (state was lost; re-approval required). Failure to clear means a stale prior approval would silently let a re-traversal jump to READY_FOR_SUBMISSION without genuine PM input — defensive against this case is the whole point of Option B. TRK-W006 emitted if guard finds `pm_approval_at` non-None on an item just-entered UNDER_PM_REVIEW (detection of missed clear).
 - **`StateChange` trigger is fired by the CALLER, not by tracker** — per `[D-022]` boundary discipline + module-load-cycle avoidance. tracker returns `StateChangeDispatchSignal`; workflow_engine task body fires the trigger via `trigger_sources.state_change_source.fire_state_change` AFTER successful transaction commit. tracker never imports workflow_engine.
 - **State transition + SP writeback + CommunicationLog write are one transaction** — DB transaction wraps all three; on SP write failure (transient), entire transaction rolls back; Celery retry replays the call (idempotent per above). On SP write permanent failure (SHP-E001 from value mismatch per `[D-065]`), tracker emits TRK-E005 + Celery does NOT retry — ops triage required.
 - **OWNER_CLOSED is transient** — never observably stable; auto-advances to UNDER_PM_REVIEW within the same Celery task body via `auto_advance_owner_closed_to_under_pm_review`. SP UI never shows OWNER_CLOSED for any meaningful duration.
-- **DELAYED and BLOCKED are off-path holding states** — reachable from active states **OutreachSent onwards** via FR-28 OwnerStatusConfirmed; NOT reachable from Open (owner has not yet received outreach and therefore cannot report a delay or block). Resume from DELAYED/BLOCKED returns to the previous active state (stored in item's `previous_active_state` field per FR-7) — one of OutreachSent / DocumentReceived / UnderPMReview / ReadyForSubmission. Cannot transition directly from DELAYED/BLOCKED to CLOSED (must resume first).
+- **DELAYED and BLOCKED are off-path holding states** — reachable from active states **OutreachSent onwards** via FR-28 OwnerStatusConfirmed; NOT reachable from Open (owner has not yet received outreach and therefore cannot report a delay or block). Resume from DELAYED/BLOCKED returns to the previous active state (stored in item's `prior_delivery_state` field per `template_schema.DeliveryItemBase` + FR-7 Delayed/Blocked exit paths) — one of OutreachSent / DocumentReceived / UnderPMReview / ReadyForSubmission. Cannot transition directly from DELAYED/BLOCKED to CLOSED (must resume first).
 - **`Default work-item` is per-MILESTONE per `[D-060]`** — not per-TG. `instantiate_default_workitem` is idempotent per milestone; second call returns the existing row.
 - **FR-82 tag propagation is dedup'd at write time** — duplicate tags in `new_tags` list are silently de-duplicated; matching items in CLOSED/SUBMITTED states are silently skipped per FR-82.
 - **FR-83 reassignment enforces FR-86 alignment matrix** — TPM-selected target item must have a compatible `item_type` for the document's doc_type; TRK-E003 if not (SP UI engineer SHOULD filter at button-picker time, but tracker enforces as backstop).
