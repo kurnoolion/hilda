@@ -175,7 +175,7 @@ rules:
       value: Owner Closed
     actions:
       - kind: UpdateState
-        params: { target_state: ReadyForSubmission }
+        params: { target_state: "Ready For Submission" }   # D-124 (α) lock 2026-06-26: PascalCase + space
       - kind: QueueSubmission
         params: { channel: customer_adapter }
 
