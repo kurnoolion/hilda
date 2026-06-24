@@ -414,11 +414,12 @@ class TestLoader:
 
     def test_repo_sample_global_defaults_loads(self):
         rs = RuleSet.load(REPO_ROOT / "customizations" / "rules")
-        # 6 rules from defaults.yaml (Worked Examples 1-3) + 19 rules from
+        # 6 rules from defaults.yaml (Worked Examples 1-3) + 18 rules from
         # automation_rules.yaml (Ph-1 end-to-end test scaffold; 3 FR-87 rules
-        # REMOVED 2026-06-26 per [D-122] -- FR-87 is dashboard-direct-POST not
-        # rule_engine triggered) = 25 total.
-        assert len(rs.all_rules()) == 25
+        # REMOVED per [D-122] dashboard-direct-POST; advance_to_ai_reviewed_on_pass
+        # REMOVED per architect lock 2026-06-26 -- AI review tracks via review_status
+        # field, not delivery_state) = 24 total.
+        assert len(rs.all_rules()) == 24
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):

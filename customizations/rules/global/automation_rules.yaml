@@ -56,17 +56,19 @@ rules:
   # Tiered cadence: 1st reminder under count<2; 2nd under <3; escalation handled below.
   # =====================================================================================
 
+  # Reminder cadence tracks via reminder_count field only -- NO intermediate state
+  # per architect lock 2026-06-26. OwnerResponseReceived removed (redundant with
+  # LastContactThreshold trigger; trigger inherently means no recent contact).
+  # OutreachReminded removed (cadence is reminder_count, not state).
   - rule_id: send_first_reminder_on_no_contact
     trigger: LastContactThreshold
     condition:
       and:
         - { field: reminder_count, op: lt, value: 1 }
-        - { field: delivery_state, op: in, value: [Outreach Sent, OwnerResponseReceived] }
+        - { field: delivery_state, op: eq, value: "Outreach Sent" }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_1, channel: email }
-      - kind: UpdateState
-        params: { target_state: OutreachReminded }
 
   - rule_id: send_second_reminder_on_no_contact
     trigger: LastContactThreshold
@@ -74,7 +76,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 1 }
         - { field: reminder_count, op: lt, value: 2 }
-        - { field: delivery_state, op: in, value: [Outreach Sent, OutreachReminded] }
+        - { field: delivery_state, op: eq, value: "Outreach Sent" }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_2, channel: email }
@@ -90,7 +92,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 2 }
         - { field: days_to_deadline, op: lte, value: 3 }
-        - { field: delivery_state, op: in, value: [Outreach Sent, OutreachReminded] }
+        - { field: delivery_state, op: eq, value: "Outreach Sent" }
     actions:
       - kind: Escalate
         params:
@@ -140,16 +142,11 @@ rules:
       - kind: TriggerAIReview
         params: {}
 
-  - rule_id: advance_to_ai_reviewed_on_pass
-    trigger: AIReviewResult
-    condition:
-      field: review_result
-      op: eq
-      value: passed
-    actions:
-      - kind: UpdateState
-        params: { target_state: AIReviewed }
-
+  # AI review pass tracks via review_status field on the item -- NO intermediate state
+  # per architect lock 2026-06-26. advance_to_ai_reviewed_on_pass rule DELETED;
+  # downstream rules check review_status == passed instead of delivery_state == AIReviewed.
+  # notify_pm_on_ai_review_fail RETAINED -- this is an action notification, not a state
+  # transition (uses NotifyPM action; doesn't touch delivery_state).
   - rule_id: notify_pm_on_ai_review_fail
     trigger: AIReviewResult
     condition:
@@ -165,7 +162,7 @@ rules:
     condition:
       and:
         - { field: doc_count_reached, op: eq, value: true }                 # FR-7 Owner Closed 2-condition guard
-        - { field: delivery_state, op: in, value: [Document Received, AIReviewed] }
+        - { field: delivery_state, op: eq, value: "Document Received" }
     actions:
       - kind: UpdateState
         params: { target_state: Owner Closed }
