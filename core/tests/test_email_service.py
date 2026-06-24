@@ -178,7 +178,13 @@ class TestClassifier:
         assert classify(msg) == EmailKind.OWNER_REPLY
 
     def test_classifies_sp_alert(self):
-        msg = _msg(subject="Alert_Deliverables_acme - Item changed")
+        # Real SP format per architect screenshots 2026-06-27.
+        msg = _msg(subject="Deliverables_acme - Item changed")
+        assert classify(msg) == EmailKind.SP_ALERT
+
+    def test_classifies_milestones_global_alert(self):
+        # Milestones list is GLOBAL -- subject has no _<customer_id> suffix.
+        msg = _msg(subject="Milestones - P1")
         assert classify(msg) == EmailKind.SP_ALERT
 
     def test_classifies_other(self):
@@ -187,7 +193,7 @@ class TestClassifier:
 
     def test_sp_alert_wins_over_batch_id_in_subject(self):
         # If a subject somehow contains both -- SP alert pattern (anchored) wins
-        msg = _msg(subject="Alert_Projects_acme - BATCH-xyz changed")
+        msg = _msg(subject="Projects_acme - BATCH-xyz changed")
         assert classify(msg) == EmailKind.SP_ALERT
 
 
@@ -486,9 +492,11 @@ class TestTgResolver:
 
 class TestSpAlertParser:
     def test_parses_in_scope_alert(self):
+        # Real SP subject format per architect screenshots 2026-06-27:
+        # "Deliverables_<customer_id> - <Title>" (no Alert_ prefix).
         msg = _msg(
-            subject="Alert_Deliverables_acme - Test item changed",
-            body="ProjectID: PROJ-1\nMinorMilestone: P1\nItemNumber: 3\n",
+            subject="Deliverables_acme - Test item changed",
+            body="ProjectID: PROJ-1\nmilestone_name: P1\nitem_no: 3\n",
         )
         parser = SpAlertParser(storage=_make_fake_sp_storage())
         parsed = parser.parse(msg)
@@ -500,16 +508,21 @@ class TestSpAlertParser:
         assert parsed.routing_key.item_number == 3
 
     def test_drops_out_of_scope_alert(self):
+        # TasksTemplate is not in the 3-list scope; subject won't match the
+        # restricted (Milestones|Projects|Deliverables) prefix.
         msg = _msg(
-            subject="Alert_TasksTemplate_acme - Item changed",
+            subject="TasksTemplate_acme - Item changed",
             body="ProjectID: PROJ-1\n",
         )
         parser = SpAlertParser(storage=_make_fake_sp_storage())
         assert parser.parse(msg) is None
 
     def test_raises_eml_e007_on_missing_routing_key(self):
+        # Deliverables alert with no routing-key fields in body.
+        # (Projects alerts dropped Ph-1 per architect Q1 2026-06-27 -- they
+        # don't reach the routing-key extractor.)
         msg = _msg(
-            subject="Alert_Projects_acme - Item changed",
+            subject="Deliverables_acme - Item changed",
             body="totally unrelated body",
         )
         parser = SpAlertParser(storage=_make_fake_sp_storage())
@@ -525,6 +538,386 @@ class TestSpAlertParser:
     # (FR-87 step A/B handlers removed from sp_alert_parser; flow now via
     # dashboard direct POST endpoints -- see test_dashboard.py
     # TestFr87ResolveReassign + TestFr87ResolveDocType).
+
+
+# ===========================================================================
+# TestSpAlertParserRegression -- 2026-06-27 architect screenshots
+# (4 real SP alert formats: M-add, M-change, M-delete, D-add, D-change,
+# D-delete) + dedup + no-change-drop + Projects-Ph1-drop.
+# ===========================================================================
+
+
+# Real bodies from architect screenshots 2026-06-27 (sanitized: project_id 2481
+# preserved, project_model SM-M456U preserved, milestone_id 181 preserved as
+# these aren't proprietary). Real corp-data redacted in fixtures.
+
+_MILESTONE_ADD_BODY = """\
+P1 has been added
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 8:53 AM
+
+Title: P1
+carrier: MMK
+project_id: 2481
+project_model: SM-M456U
+status: Not Started
+milestone_completion_pct: 0
+"""
+
+_MILESTONE_CHANGE_BODY = """\
+P1 has been changed
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 9:02 AM
+
+Title: P1
+carrier: MMK
+project_id: 2481
+project_model: SM-M456U
+status: Not Started
+milestone_collection_started_at: - 6/22/2026 Edited
+milestone_completion_pct: 0
+"""
+
+_MILESTONE_DELETE_BODY = """\
+P1 has been deleted
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 1:59 PM
+
+Title: P1
+carrier: MMK
+project_id: 2481
+project_model: SM-M456U
+status: Not Started
+target_date: 6/30/2026
+milestone_completion_pct: 0
+"""
+
+_DELIVERABLE_ADD_BODY = """\
+Device Readiness Review has been added
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 8:54 AM
+
+Title: Device Readiness Review
+milestone_name: P1
+milestone_id: 181
+item_no: 1
+milestone_gating: Yes
+item_type: Confirmation
+delivery_state: Not Started
+item_completion_pct: 0
+review_required: No
+owner_name:
+owner_corp_usa_email:
+owner_corp_email:
+owner_corp_id:
+tracking_modality: Email
+no_customer_upload: Yes
+force_tracking_enabled: Yes
+tg_name: MNO-TPM
+tg_email_group_alias:
+tg_owner_name:
+tg_owner_corp_usa_email:
+tg_owner_corp_id:
+email_cc_list:
+project_id: 2481
+project_model: SM-M456U
+item_description:
+customer_delivery_modality: None
+customer_delivery_info:
+doc_count: 0
+review_status: Pending
+ingress_nsd: None
+folder_routing_enabled: No
+sort_order: 1
+"""
+
+_DELIVERABLE_CHANGE_BODY = """\
+Device Readiness Review has been changed
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 8:59 AM
+
+Title: Device Readiness Review
+milestone_name: P1
+milestone_id: 181
+item_no: 1
+milestone_gating: Yes
+item_type: Confirmation
+delivery_state: Not Started
+expected_completion_date:
+item_completion_pct: 0
+review_required: No
+owner_status_note:
+owner_name: - Thendral Arasu Edited
+owner_corp_usa_email: - tarasu@sea.samsung.com Edited
+owner_corp_email: - t.arasu@samsung.com Edited
+owner_corp_id: - t.arasu Edited
+plm_id:
+comment:
+tracking_modality: Email
+no_customer_upload: Yes
+force_tracking_enabled: Yes
+tg_name: MNO-TPM
+project_id: 2481
+project_model: SM-M456U
+customer_delivery_modality: None
+doc_count: 0
+"""
+
+_DELIVERABLE_DELETE_BODY = """\
+Motive IOT has been deleted
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 1:59 PM
+
+Title: Motive IOT
+milestone_name: P1
+milestone_id: 185
+item_no: 8
+milestone_gating: Yes
+item_type: test_tech_waiver_report
+delivery_state: Not Started
+item_completion_pct: 0
+review_required: No
+tracking_modality: Email
+no_customer_upload: No
+force_tracking_enabled: Yes
+tg_name: MNO-OMADM
+project_id: 2481
+"""
+
+_DELIVERABLE_NOOP_CHANGE_BODY = """\
+Device Readiness Review has been changed
+
+Thendral Arasu Panneer Selvam/Device Management /MNOs Lab./Senior Professional/Samsung Electronics
+6/22/2026 9:00 AM
+
+Title: Device Readiness Review
+milestone_name: P1
+milestone_id: 181
+item_no: 1
+project_id: 2481
+"""
+
+
+class TestSpAlertParserRegression:
+    """Regression tests using exact bodies from architect screenshots 2026-06-27."""
+
+    # -- Milestones add -- subject has no suffix, customer_id from body carrier --
+    def test_milestone_add_full_flow(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_ADD_BODY,
+            message_id="<m-add-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.routing_key.list_name == "Milestones"
+        assert parsed.routing_key.list_suffix == "MMK"      # from body carrier
+        assert parsed.routing_key.project_id == "2481"
+        assert parsed.routing_key.milestone_name == "P1"    # from subject Title
+        assert parsed.routing_key.item_number is None
+        assert parsed.action_type == "added"
+        assert parsed.field_deltas == {}                    # no Edited markers on Added
+        assert parsed.body_kvs["carrier"] == "MMK"
+        assert parsed.body_kvs["status"] == "Not Started"
+
+    def test_milestone_change_extracts_field_delta(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_CHANGE_BODY,
+            message_id="<m-change-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "changed"
+        # The Edited field is milestone_collection_started_at (NFR-21 dual-writer)
+        assert parsed.field_deltas == {
+            "milestone_collection_started_at": "6/22/2026",
+        }
+
+    def test_milestone_delete(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_DELETE_BODY,
+            message_id="<m-delete-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "deleted"
+        assert parsed.routing_key.list_suffix == "MMK"
+        assert parsed.body_kvs["target_date"] == "6/30/2026"
+
+    # -- Deliverables add -- subject suffix carries customer_id --
+    def test_deliverable_add_full_flow(self):
+        msg = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<d-add-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.routing_key.list_name == "Deliverables"
+        assert parsed.routing_key.list_suffix == "MMK"       # from subject suffix
+        assert parsed.routing_key.milestone_name == "P1"     # from body milestone_name
+        assert parsed.routing_key.item_number == 1
+        assert parsed.action_type == "added"
+        assert parsed.field_deltas == {}
+        # Empty fields captured as "" per Q3 (architect 2026-06-27).
+        assert parsed.body_kvs["owner_name"] == ""
+        assert parsed.body_kvs["customer_delivery_info"] == ""
+        # Non-empty fields preserved.
+        assert parsed.body_kvs["item_type"] == "Confirmation"
+        assert parsed.body_kvs["customer_delivery_modality"] == "None"
+
+    def test_deliverable_change_extracts_4_owner_deltas(self):
+        msg = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_CHANGE_BODY,
+            message_id="<d-change-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "changed"
+        # All 4 owner-identity fields Edited per architect Ph-1 setup-window lock.
+        assert parsed.field_deltas == {
+            "owner_name":           "Thendral Arasu",
+            "owner_corp_usa_email": "tarasu@sea.samsung.com",
+            "owner_corp_email":     "t.arasu@samsung.com",
+            "owner_corp_id":        "t.arasu",
+        }
+
+    def test_deliverable_delete(self):
+        msg = _msg(
+            subject="Deliverables_MMK - Motive IOT",
+            body=_DELIVERABLE_DELETE_BODY,
+            message_id="<d-delete-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "deleted"
+        assert parsed.item_title == "Motive IOT"
+        assert parsed.routing_key.list_suffix == "MMK"
+        assert parsed.routing_key.item_number == 8
+
+    # -- Duplicate dedup per architect 2026-06-27 --
+    def test_dedup_drops_duplicate_message_id(self):
+        msg1 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<dup-001@samsung.com>",
+        )
+        msg2 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<dup-001@samsung.com>",   # same id
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        first = parser.parse(msg1)
+        second = parser.parse(msg2)
+        assert first is not None
+        assert second is None       # duplicate dropped
+
+    def test_dedup_does_not_drop_different_message_ids(self):
+        msg1 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<nondup-001@samsung.com>",
+        )
+        msg2 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<nondup-002@samsung.com>",  # different id
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        first = parser.parse(msg1)
+        second = parser.parse(msg2)
+        assert first is not None
+        assert second is not None
+
+    # -- "Changed" alert with no Edited markers -> silent drop per architect 2026-06-27 --
+    def test_change_with_empty_field_deltas_dropped(self):
+        msg = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_NOOP_CHANGE_BODY,
+            message_id="<noop-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is None       # no-op change dropped
+
+    # -- Projects alerts dropped Ph-1 per architect Q1 2026-06-27 --
+    def test_projects_dropped_ph1(self):
+        msg = _msg(
+            subject="Projects_MMK - Some project title",
+            body="Title: Some project title\nproject_id: 2481\nmilestone_name: P1\n",
+            message_id="<proj-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is None       # Projects Ph-2
+
+    # -- Action verb cases --
+    def test_action_verb_added(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_ADD_BODY,
+            message_id="<av-add@samsung.com>",
+        )
+        parsed = SpAlertParser(storage=_make_fake_sp_storage()).parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "added"
+
+    def test_action_verb_changed(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_CHANGE_BODY,
+            message_id="<av-chg@samsung.com>",
+        )
+        parsed = SpAlertParser(storage=_make_fake_sp_storage()).parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "changed"
+
+    def test_action_verb_deleted(self):
+        msg = _msg(
+            subject="Milestones - P1",
+            body=_MILESTONE_DELETE_BODY,
+            message_id="<av-del@samsung.com>",
+        )
+        parsed = SpAlertParser(storage=_make_fake_sp_storage()).parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "deleted"
+
+    # -- Edited value cleanup -- leading "- " strip + trailing "Edited" strip --
+    def test_edited_value_cleanup(self):
+        body = (
+            "Device Readiness Review has been changed\n\n"
+            "Title: Device Readiness Review\n"
+            "milestone_name: P1\n"
+            "milestone_id: 181\n"
+            "item_no: 1\n"
+            "project_id: 2481\n"
+            "some_field: - some_value_with_spaces Edited\n"
+        )
+        msg = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=body,
+            message_id="<edited-cleanup@samsung.com>",
+        )
+        parsed = SpAlertParser(storage=_make_fake_sp_storage()).parse(msg)
+        assert parsed is not None
+        # "- some_value_with_spaces Edited" -> "some_value_with_spaces"
+        assert parsed.field_deltas == {"some_field": "some_value_with_spaces"}
 
 
 def _make_fake_sp_storage():

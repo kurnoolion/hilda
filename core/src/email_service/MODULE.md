@@ -412,7 +412,28 @@ class Fr52AttachmentRouter(AttachmentRouter):
 
 ### `sp_alert_parser/` *(Ph-1 — exercised in every scenario including the basic flow; email is the ONLY SP→HILDA channel per FR-84)*
 
-Per `[D-047]` + FR-84 + FR-87 + Module #11 Q1 architect lock 2026-06-25 (3-list scope) + `[D-104]` Projects per-customer + `[D-108]` rules_paused + `[D-113]` TriggerDispatcher + `[D-117]` SP NTLM + `[D-118]` SP UI engineer provisioning. SP sends one alert email per entity change (configured "Anything changes" on each list). Subject format `Alert_<List>_<Suffix> - <ItemTitle>`; body carries key:value pairs identifying the changed entity. Sub-module extracts the routing key `(ProjectID, MinorMilestone, ItemNumber)` from the body, resolves to a SP list + row, and emits a `TriggerEvent` (with `item_snapshot` when applicable per `[D-113]`) via `workflow_engine.TriggerDispatcher.dispatch(...)` for downstream rule evaluation. `email_service` is a TRIGGER SOURCE per `[D-113]`; downstream `workflow_engine` translates events into ActionKinds (SCREAMING_SNAKE_CASE).
+Per `[D-047]` + FR-84 + FR-87 + Module #11 Q1 architect lock 2026-06-25 (3-list scope) + `[D-104]` Projects per-customer + `[D-108]` rules_paused + `[D-113]` TriggerDispatcher + `[D-117]` SP NTLM + `[D-118]` SP UI engineer provisioning. SP sends one alert email per entity change (configured "Anything changes" on each list).
+
+**Real SP alert subject format per architect screenshots 2026-06-27** (supersedes the pre-2026-06-27 `Alert_<List>_<Suffix> - <ItemTitle>` assumption which was WRONG):
+- Milestones (GLOBAL list per architect lock 2026-06-21): `Milestones - <Title>` (no customer suffix)
+- Deliverables (per-customer): `Deliverables_<customer_id> - <Title>`
+- Projects (per-customer): `Projects_<customer_id> - <Title>` (Ph-2 per architect Q1 2026-06-27; Ph-1 alerts dropped)
+
+**Real SP alert body shape**:
+- Header line: `<Title> has been (added|changed|deleted)` -- action verb extracted from this
+- Then user attribution + timestamp
+- Then `key: value` pairs identifying the entity + its current state
+- **Modified fields carry an `Edited` suffix marker** with format `key: - <new_value> Edited` (leading `-` separator + trailing `Edited`); these are extracted into `TriggerEvent.field_deltas` per [D-047] + architect Q4 lock 2026-06-27. NEW values only (no extra SP roundtrip for OLD).
+- **Empty body fields** (e.g. `tg_email_group_alias:` with no value) captured as `""` per architect Q3 2026-06-27.
+- **Milestones body** has `carrier: <customer_id>` field -- customer_id source for Milestones (subject has no suffix since list is global). For Deliverables, customer_id comes from the subject suffix.
+- **Milestones milestone_name** is the subject Title (no separate `milestone_name:` field in Milestones body).
+
+Sub-module extracts the routing key + emits `TriggerEvent.field_deltas` carrying the Edited field new-values. `email_service` is a TRIGGER SOURCE per `[D-113]`; downstream `workflow_engine` translates events into ActionKinds (SCREAMING_SNAKE_CASE).
+
+**Operational guards per architect 2026-06-27**:
+- **Duplicate dedup**: Message-ID LRU cache (size 1024, TTL 10 min) -- SP can resend the same alert; dups silently dropped.
+- **No-op `changed` alert drop**: when action verb is `changed` but `field_deltas` is empty (no `Edited` markers found in body), the parser silently drops the alert (no TriggerEvent emitted).
+- **Projects alerts dropped Ph-1**: SP UI engineer has not enabled Projects alerts in Ph-1 (TPM project changes are rare); if such an alert arrives the parser drops it silently with an INFO log.
 
 **Scope per architect Q1 lock 2026-06-25 (Module #11 narrowed to 3 lists)**: sp_alert_parser processes alerts ONLY from HILDA's 3-list per-customer scope — `Milestones_<customer_id>`, `Projects_<customer_id>` per `[D-104]`, `Deliverables_<customer_id>`. **Ignores** alerts from out-of-scope SP lists (TasksTemplate / Tasks / Trials / Activities / Email / CommunicationLog — those are the SP UI engineer's domain per `[D-118]`). Routing key resolution targets one of the 3 in-scope lists; out-of-scope alert subjects are dropped with an INFO-level CommunicationLog entry (kind='sp_alert_out_of_scope'). `[D-051]` 8-list framing is superseded by this lock.
 

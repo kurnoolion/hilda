@@ -1,7 +1,11 @@
 """Email-kind discriminator. Pure function -- no IO.
 
 Order of checks per MODULE.md (first match wins):
-  1. Subject matches D-047 SP-alert pattern `Alert_<List>_<Suffix> - <ItemTitle>`
+  1. Subject matches D-047 SP-alert pattern -- per architect screenshots
+     2026-06-27 the real SP format is:
+       * Milestones (GLOBAL list):  `Milestones - <Title>`
+       * Deliverables (per-cust):   `Deliverables_<customer_id> - <Title>`
+       * Projects   (per-customer): `Projects_<customer_id> - <Title>` (Ph-2)
      -> SP_ALERT
   2. Subject contains `BATCH-<id>` per FR-24 -> OWNER_REPLY
   3. Otherwise -> OTHER (logged in CommunicationLog with kind='other';
@@ -16,8 +20,12 @@ from core.src.email_service.protocol import EmailKind, InboundMessage
 __all__ = ["classify", "SP_ALERT_SUBJECT_RE", "BATCH_ID_RE"]
 
 
-# D-047 SP-alert subject -- `Alert_<List>_<Suffix> - <ItemTitle>`
-SP_ALERT_SUBJECT_RE = re.compile(r"^Alert_([A-Za-z0-9_]+)_([A-Za-z0-9]+)\s*-\s*.+")
+# D-047 SP-alert subject -- real format per architect screenshots 2026-06-27.
+# Milestones (global) has no customer suffix; Deliverables/Projects (per-customer)
+# carry _<customer_id> suffix. NO "Alert_" prefix (was a wrong assumption pre-2026-06-27).
+SP_ALERT_SUBJECT_RE = re.compile(
+    r"^(?:Milestones|Projects|Deliverables)(?:_[A-Za-z0-9]+)?\s*-\s*.+"
+)
 
 # FR-24 BATCH-id token -- per outbound composer convention `BATCH-<alphanumeric>`
 BATCH_ID_RE = re.compile(r"BATCH-[a-zA-Z0-9]+")
