@@ -24,13 +24,16 @@ from core.src.diagnostics.error_codes import ErrorCode
 
 
 class TestErrorCodes:
-    def test_all_21_prefixes_registered(self) -> None:
-        # 21 prefixes per 2026-06-21 expansion: 18 + CMG/CPG (corp-side gateways)
-        # + STATUS (meta-prefix for cross-cutting HildaOpsAlert codes per FR-75 + [D-002]).
-        assert len(PREFIX_REGISTRY) == 21
+    def test_all_22_prefixes_registered(self) -> None:
+        # 22 prefixes: 21 per 2026-06-21 expansion (18 + CMG/CPG/STATUS) + CAD
+        # re-added 2026-06-25 per [D-116] customer_adapter dev (CAD-W005 etc.).
+        # CSA remains as the credential_service env-var prefix for customer_adapter;
+        # CAD is the diagnostics error-code prefix per customer_adapter MODULE.md.
+        assert len(PREFIX_REGISTRY) == 22
         assert PREFIX_REGISTRY["DGN"] == "diagnostics"
         assert PREFIX_REGISTRY["SHP"] == "sharepoint_integration"
-        assert PREFIX_REGISTRY["CSA"] == "customer_adapter"   # renamed from CAD 2026-06-21
+        assert PREFIX_REGISTRY["CSA"] == "customer_adapter"   # env-var prefix
+        assert PREFIX_REGISTRY["CAD"] == "customer_adapter"   # error-code prefix per [D-116]
         assert PREFIX_REGISTRY["STATUS"] == "diagnostics"     # meta-prefix added 2026-06-21
         assert PREFIX_REGISTRY["CMG"] == "corp_messenger_gateway"
         assert PREFIX_REGISTRY["CPG"] == "corp_plm_gateway"

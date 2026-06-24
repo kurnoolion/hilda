@@ -20,7 +20,7 @@ __all__ = [
     "SYSTEM_SUBTREE",
 ]
 
-AuthType = Literal["api_token", "basic", "ntlm", "kerberos", "oauth2_bearer"]
+AuthType = Literal["api_token", "basic", "basic_totp", "ntlm", "kerberos", "oauth2_bearer"]
 
 
 class SystemType(str, Enum):
@@ -135,6 +135,10 @@ class Credential:
     password: str | None = None   # never logged, never __repr__'d
     keytab_path: Path | None = None
     bearer: str | None = None
+    # basic_totp (added per [D-116] D15 2026-06-25 — customer_adapter Google Drive):
+    # long-lived base32 seed captured during MFA setup; HILDA generates ephemeral
+    # 6-digit code per upload via pyotp.TOTP(totp_seed).now(). NEVER logged.
+    totp_seed: str | None = None
     expires_at: datetime | None = None  # Ph-3+ Vault populates; Ph-1/Ph-2 always None
 
     def __repr__(self) -> str:
@@ -151,11 +155,12 @@ class Credential:
         required: dict[str, tuple[str, ...]] = {
             "api_token": ("api_token",),
             "basic": ("username", "password"),
+            "basic_totp": ("username", "password", "totp_seed"),
             "ntlm": ("username", "password"),
             "kerberos": ("keytab_path",),
             "oauth2_bearer": ("bearer",),
         }
-        carriers = ("api_token", "username", "password", "keytab_path", "bearer")
+        carriers = ("api_token", "username", "password", "keytab_path", "bearer", "totp_seed")
         needed = required[self.auth_type]
         for carrier in carriers:
             value = getattr(self, carrier)

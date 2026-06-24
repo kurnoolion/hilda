@@ -27,6 +27,9 @@ PREFIX_REGISTRY: dict[str, str] = {
     "ITR": "issue_tracker",
     "MSG": "messenger",
     "CSA": "customer_adapter",
+    # CAD prefix used by customer_adapter MODULE.md + [D-116] ADR error codes
+    # (parallel to CSA env-var prefix in credential_service; semantically distinct):
+    "CAD": "customer_adapter",
     "TRK": "tracker",
     "TRC": "test_report",
     "RUL": "rule_engine",
@@ -302,6 +305,49 @@ ERROR_CODES: dict[str, ErrorCode] = {
     ),
     "DSH-W002": ErrorCode(
         "DSH-W002", "Static-asset cache miss (Ph-2 cold-cache warning)", True
+    ),
+    # --- customer_adapter (CAD) -- registered 2026-06-25 per [D-116] Ratified ---
+    "CAD-E001": ErrorCode(
+        "CAD-E001", "Selector config file '{path}' not found for carrier '{customer_id}' (Ph-2 forward-looking; selector_loader)", False
+    ),
+    "CAD-E002": ErrorCode(
+        "CAD-E002", "Selector config '{path}' missing required field '{field}' for selectors_version '{version}' (Ph-2 forward-looking)", False
+    ),
+    "CAD-E003": ErrorCode(
+        "CAD-E003", "Chromium binary not found at '{path}' (Ph-2 forward-looking; binding owns Chromium per [D-116] D17)", False
+    ),
+    "CAD-E004": ErrorCode(
+        "CAD-E004", "Binding session establishment failed for carrier '{customer_id}': {reason}", False
+    ),
+    "CAD-E005": ErrorCode(
+        "CAD-E005", "Upload timed out after {timeout_s}s on filename='{filename}' carrier='{customer_id}' target_dir='{target_dir}'", False
+    ),
+    "CAD-E006": ErrorCode(
+        "CAD-E006", "Upload selector '{selector_name}' not found in current Google Drive DOM -- selectors_version stale (Ph-2 forward-looking)", False
+    ),
+    "CAD-E007": ErrorCode(
+        "CAD-E007", "Carrier file_id extraction failed post-upload (Ph-2 forward-looking; Ph-1 binding returns bool only per [D-116] D16)", False
+    ),
+    "CAD-E008": ErrorCode(
+        "CAD-E008", "Customer credential '{credential_id}' not retrievable from credential_service", False
+    ),
+    "CAD-E009": ErrorCode(
+        "CAD-E009", "Binding _invoke_binding method not implemented for customer '{customer_id}' -- per-customer subclass missing or stub (per [D-027] Teacher/Student split)", False
+    ),
+    "CAD-W001": ErrorCode(
+        "CAD-W001", "Capability flag '{flag}' is False for carrier '{customer_id}' -- operation '{op}' not supported (Ph-2 forward-looking)", True
+    ),
+    "CAD-W002": ErrorCode(
+        "CAD-W002", "Browser session expired during upload; re-established and retried (Ph-2 forward-looking)", True
+    ),
+    "CAD-W003": ErrorCode(
+        "CAD-W003", "Selector '{selector}' returned multiple matches -- used first; selectors_version may need refinement (Ph-2 forward-looking)", True
+    ),
+    "CAD-W004": ErrorCode(
+        "CAD-W004", "Selector-pack version mismatch: subclass expects '{subclass_version}', YAML provides '{yaml_version}' (Ph-2 forward-looking)", True
+    ),
+    "CAD-W005": ErrorCode(
+        "CAD-W005", "Clock skew exceeds TOTP tolerance: HILDA host {skew_s}s off NTP server; TOTP window is ~30s; uploads may fail until clock resyncs", True
     ),
 }
 
