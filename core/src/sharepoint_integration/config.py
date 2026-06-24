@@ -16,11 +16,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 @dataclass(frozen=True)
 class ListScope:
-    """Scope for list-name + column-map lookup. customer_slug required;
-    device_slug non-None triggers device-level override lookup."""
+    """Scope for list-name + column-map lookup. customer_id required;
+    device_id non-None triggers device-level override lookup.
 
-    customer_slug: str
-    device_slug: str | None = None
+    Renamed per [D-091]: customer_slug → customer_id, device_slug → device_id.
+    Device-level override path is Ph-2/Ph-3+ Deferred per architect Q1 2026-06-25;
+    Ph-1 scope is per-customer only."""
+
+    customer_id: str
+    device_id: str | None = None
 
 
 _AUTH_LITERAL = Literal["none", "ntlm", "kerberos"]

@@ -163,17 +163,17 @@ class TestSpCrudAgainstMockServer:
         # Set up a customer config
         customers = tmp_path / "customers"
         customers.mkdir()
-        (customers / "carrier-alpha.yaml").write_text(
+        (customers / "test_customer.yaml").write_text(
             json.dumps(
                 {
-                    "customer_slug": "carrier-alpha",
+                    "customer_id": "test_customer",
                     "lists": {
                         "delivery_items": {
-                            "name": "CA-Delivery",
+                            "name": "Deliverables_test_customer",
                             "columns": {
                                 "item_name": "Title",
-                                "owner_email": "Owner_Email",
-                                "delivery_state": "Status",
+                                "owner_corp_email": "Owner_x0020_Corp_x0020_Email",
+                                "delivery_state": "Delivery_x0020_State",
                             },
                         },
                     },
@@ -197,25 +197,25 @@ class TestSpCrudAgainstMockServer:
             # Create
             item_id = await crud.create_item(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 {
                     "item_name": "Band-1",
-                    "owner_email": "rd@corp.com",
+                    "owner_corp_email": "rd@corp.com",
                     "delivery_state": "Open",
                 },
             )
             assert item_id == "1"
 
             # Read all
-            items = await crud.get_items("delivery_items", ListScope("carrier-alpha"))
+            items = await crud.get_items("delivery_items", ListScope("test_customer"))
             assert len(items) == 1
             assert items[0]["item_name"] == "Band-1"
-            assert items[0]["owner_email"] == "rd@corp.com"
+            assert items[0]["owner_corp_email"] == "rd@corp.com"
 
             # Filter
             items_filtered = await crud.get_items(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 canonical_filters={"delivery_state": "Open"},
             )
             assert len(items_filtered) == 1
@@ -223,20 +223,20 @@ class TestSpCrudAgainstMockServer:
             # Update
             await crud.update_item(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 item_id,
                 {"delivery_state": "Closed"},
             )
             items_after = await crud.get_items(
-                "delivery_items", ListScope("carrier-alpha")
+                "delivery_items", ListScope("test_customer")
             )
             assert items_after[0]["delivery_state"] == "Closed"
 
             # Delete
             await crud.delete_item(
-                "delivery_items", ListScope("carrier-alpha"), item_id
+                "delivery_items", ListScope("test_customer"), item_id
             )
             items_empty = await crud.get_items(
-                "delivery_items", ListScope("carrier-alpha")
+                "delivery_items", ListScope("test_customer")
             )
             assert items_empty == []

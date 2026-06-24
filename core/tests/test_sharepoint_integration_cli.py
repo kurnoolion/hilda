@@ -37,19 +37,19 @@ def _mk_args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def _seed_customer(base: Path, slug: str = "example") -> None:
+def _seed_customer(base: Path, customer_id: str = "test_customer") -> None:
     customers = base / "customers"
     customers.mkdir(parents=True, exist_ok=True)
     payload = {
-        "customer_slug": slug,
+        "customer_id": customer_id,
         "lists": {
             "delivery_items": {
-                "name": f"{slug}-Delivery",
+                "name": f"Deliverables_{customer_id}",
                 "columns": {"item_name": "Title", "delivery_state": "Status"},
             },
         },
     }
-    (customers / f"{slug}.yaml").write_text(json.dumps(payload))
+    (customers / f"{customer_id}.yaml").write_text(json.dumps(payload))
 
 
 class TestCli:
@@ -80,15 +80,15 @@ class TestCli:
         assert "customers_configured=0" in line
 
     def test_dry_run_emits_met(self, tmp_path: Path) -> None:
-        _seed_customer(tmp_path, slug="carrier-alpha")
-        args = _mk_args(dry_run=True, customer="carrier-alpha", base_path=tmp_path)
+        _seed_customer(tmp_path, customer_id="test_customer")
+        args = _mk_args(dry_run=True, customer="test_customer", base_path=tmp_path)
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = _dry_run(args)
         assert rc == 0
         line = buf.getvalue().strip()
         assert line.startswith("MET|SHP|")
-        assert "customer=carrier-alpha" in line
+        assert "customer=test_customer" in line
         assert "lists_validated=1" in line
         assert "columns_mapped=2" in line
 

@@ -1,0 +1,83 @@
+# =====================================================================================
+# HILDA SharePoint test fixture — test_customer
+# =====================================================================================
+#
+# 3-list per-customer scope per architect Q1 lock 2026-06-25 + [D-104]:
+#   delivery_items → Deliverables_test_customer
+#   milestones     → Milestones_test_customer
+#   projects       → Projects_test_customer
+#
+# Field names per docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx
+# (3 worksheets: Milestones / Deliverables / Projects) per architect Q5
+# AUTHORITATIVE source.
+#
+# Privacy: synthetic identifier `test_customer` only — no real carrier names.
+# =====================================================================================
+
+customer_id: test_customer                       # slug→id rename per [D-091]
+
+lists:
+
+  # ---------------------------------------------------------------------------
+  # Deliverables_<customer_id> — primary tracking table (per architect Q1)
+  # ---------------------------------------------------------------------------
+  delivery_items:
+    name: "Deliverables_test_customer"
+    columns:
+      # Item identity
+      item_no: "Item_x0020_No"
+      item_name: "Title"
+      item_description: "Item_x0020_Description"
+
+      # Item type + state
+      item_type: "Item_x0020_Type"                # Confirmation/TestReport/TechReport/Waiver per [D-053]
+      delivery_state: "Delivery_x0020_State"
+      rules_paused: "Rules_x0020_Paused"          # Boolean per [D-108] FR-31 sub-1
+
+      # 4-field owner identity per [D-105]
+      owner_corp_usa_email: "Owner_x0020_Corp_x0020_USA_x0020_Email"
+      owner_corp_email: "Owner_x0020_Corp_x0020_Email"
+      owner_corp_id: "Owner_x0020_Corp_x0020_Id"
+      owner_name: "Owner_x0020_Name"
+      owner_status_note: "Owner_x0020_Status_x0020_Note"
+
+      # Pipeline routing
+      target_folder: "Target_x0020_Folder"
+      no_customer_upload: "No_x0020_Customer_x0020_Upload"
+
+      # TG denormalization per [D-106] (TGGroupBase DROPPED — fields flat on DI)
+      tg_name: "TG_x0020_Name"
+
+      # Time tracking
+      actual_completion_date: "Actual_x0020_Completion_x0020_Date"
+
+      # Communication routing
+      email_cc_list: "Email_x0020_CC_x0020_List"
+      plm_id: "PLM_x0020_Id"
+
+      # Form-factor flags
+      handset: "Handset"
+      tablet: "Tablet"
+      wearable: "Wearable"
+      mr: "MR"
+      hmr_smr: "HMR_x0020_SMR"
+
+  # ---------------------------------------------------------------------------
+  # Milestones_<customer_id>
+  # ---------------------------------------------------------------------------
+  milestones:
+    name: "Milestones_test_customer"
+    columns:
+      milestone_name: "Title"
+      milestone_status: "Status"
+      close_all_items_triggered_at: "Close_x0020_All_x0020_Items_x0020_Triggered_x0020_At"
+
+  # ---------------------------------------------------------------------------
+  # Projects_<customer_id> per [D-104]
+  # ---------------------------------------------------------------------------
+  projects:
+    name: "Projects_test_customer"
+    columns:
+      project_id: "Title"
+      project_model: "Project_x0020_Model"
+      tpm_email: "TPM_x0020_Email"

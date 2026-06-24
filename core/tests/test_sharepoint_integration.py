@@ -22,18 +22,18 @@ from core.src.sharepoint_integration import (
 
 class TestListScope:
     def test_customer_only(self) -> None:
-        s = ListScope(customer_slug="carrier-alpha")
-        assert s.customer_slug == "carrier-alpha"
-        assert s.device_slug is None
+        s = ListScope(customer_id="test_customer")
+        assert s.customer_id == "test_customer"
+        assert s.device_id is None
 
     def test_with_device(self) -> None:
-        s = ListScope(customer_slug="c", device_slug="d")
-        assert s.device_slug == "d"
+        s = ListScope(customer_id="c", device_id="d")
+        assert s.device_id == "d"
 
     def test_immutable(self) -> None:
-        s = ListScope(customer_slug="c")
+        s = ListScope(customer_id="c")
         with pytest.raises(Exception):
-            s.customer_slug = "other"  # type: ignore[misc]
+            s.customer_id = "other"  # type: ignore[misc]
 
 
 # --- GlobalSharePointConfig -------------------------------------------------
@@ -102,11 +102,11 @@ class TestGlobalSharePointConfig:
 # --- FileBasedListProvider --------------------------------------------------
 
 
-def _write_customer(base: Path, slug: str, lists: dict[str, dict[str, object]]) -> None:
+def _write_customer(base: Path, customer_id: str, lists: dict[str, dict[str, object]]) -> None:
     customers = base / "customers"
     customers.mkdir(parents=True, exist_ok=True)
-    payload = {"customer_slug": slug, "lists": lists}
-    (customers / f"{slug}.yaml").write_text(json.dumps(payload))
+    payload = {"customer_id": customer_id, "lists": lists}
+    (customers / f"{customer_id}.yaml").write_text(json.dumps(payload))
 
 
 def _write_device_overrides(base: Path, overrides: list[dict[str, object]]) -> None:
@@ -120,38 +120,38 @@ class TestFileBasedListProvider:
     def test_get_list_name(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
-                "delivery_items": {"name": "CA-Delivery", "columns": {"item_name": "Title"}},
+                "delivery_items": {"name": "Deliverables_test_customer", "columns": {"item_name": "Title"}},
             },
         )
         p = FileBasedListProvider(tmp_path)
         assert (
-            p.get_list_name("delivery_items", ListScope("carrier-alpha")) == "CA-Delivery"
+            p.get_list_name("delivery_items", ListScope("test_customer")) == "Deliverables_test_customer"
         )
 
     def test_get_column_map(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title", "owner_email": "Owner_Email"},
                 },
             },
         )
         p = FileBasedListProvider(tmp_path)
-        m = p.get_column_map("delivery_items", ListScope("carrier-alpha"))
+        m = p.get_column_map("delivery_items", ListScope("test_customer"))
         assert m == {"item_name": "Title", "owner_email": "Owner_Email"}
 
     def test_to_sp_fields(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title", "owner_email": "Owner_Email"},
                 },
             },
@@ -159,7 +159,7 @@ class TestFileBasedListProvider:
         p = FileBasedListProvider(tmp_path)
         sp = p.to_sp_fields(
             "delivery_items",
-            ListScope("carrier-alpha"),
+            ListScope("test_customer"),
             {"item_name": "Band-1", "owner_email": "rd@corp.com"},
         )
         assert sp == {"Title": "Band-1", "Owner_Email": "rd@corp.com"}
@@ -167,10 +167,10 @@ class TestFileBasedListProvider:
     def test_to_sp_fields_unmapped_raises(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title"},
                 },
             },
@@ -179,7 +179,7 @@ class TestFileBasedListProvider:
         with pytest.raises(PipelineError) as ei:
             p.to_sp_fields(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 {"item_name": "x", "stranger": "y"},
             )
         assert ei.value.code_id == "SHP-E003"
@@ -193,21 +193,21 @@ class TestFileBasedListProvider:
     def test_unknown_entity_raises_e002(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
-            {"delivery_items": {"name": "CA-Delivery", "columns": {}}},
+            "test_customer",
+            {"delivery_items": {"name": "Deliverables_test_customer", "columns": {}}},
         )
         p = FileBasedListProvider(tmp_path)
         with pytest.raises(PipelineError) as ei:
-            p.get_list_name("missing_entity", ListScope("carrier-alpha"))
+            p.get_list_name("missing_entity", ListScope("test_customer"))
         assert ei.value.code_id == "SHP-E002"
 
     def test_device_override_changes_list_name(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title"},
                 },
             },
@@ -216,8 +216,8 @@ class TestFileBasedListProvider:
             tmp_path,
             [
                 {
-                    "customer_slug": "carrier-alpha",
-                    "device_slug": "special-x",
+                    "customer_id": "test_customer",
+                    "device_id": "special-x",
                     "entity": "delivery_items",
                     "list_name": "CA-SpecialX-Delivery",
                     "columns": {},
@@ -227,23 +227,23 @@ class TestFileBasedListProvider:
         p = FileBasedListProvider(tmp_path)
         assert (
             p.get_list_name(
-                "delivery_items", ListScope("carrier-alpha", device_slug="special-x")
+                "delivery_items", ListScope("test_customer", device_id="special-x")
             )
             == "CA-SpecialX-Delivery"
         )
         # Without device — base name
         assert (
-            p.get_list_name("delivery_items", ListScope("carrier-alpha"))
-            == "CA-Delivery"
+            p.get_list_name("delivery_items", ListScope("test_customer"))
+            == "Deliverables_test_customer"
         )
 
     def test_device_override_columns_merge(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title", "extra": "Extra"},
                 },
             },
@@ -252,8 +252,8 @@ class TestFileBasedListProvider:
             tmp_path,
             [
                 {
-                    "customer_slug": "carrier-alpha",
-                    "device_slug": "special-x",
+                    "customer_id": "test_customer",
+                    "device_id": "special-x",
                     "entity": "delivery_items",
                     "columns": {"item_name": "Override_Title"},
                 }
@@ -261,7 +261,7 @@ class TestFileBasedListProvider:
         )
         p = FileBasedListProvider(tmp_path)
         m = p.get_column_map(
-            "delivery_items", ListScope("carrier-alpha", device_slug="special-x")
+            "delivery_items", ListScope("test_customer", device_id="special-x")
         )
         assert m["item_name"] == "Override_Title"
         assert m["extra"] == "Extra"
@@ -269,10 +269,10 @@ class TestFileBasedListProvider:
     def test_from_sp_fields_inverse(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title"},
                 },
             },
@@ -280,7 +280,7 @@ class TestFileBasedListProvider:
         p = FileBasedListProvider(tmp_path)
         canonical = p.from_sp_fields(
             "delivery_items",
-            ListScope("carrier-alpha"),
+            ListScope("test_customer"),
             {"Title": "Band-1", "Id": 42, "stranger": "ignored"},
         )
         assert canonical == {"item_name": "Band-1"}
@@ -447,10 +447,10 @@ class TestSpCrud:
     ) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title", "owner_email": "Owner_Email"},
                 },
             },
@@ -469,12 +469,12 @@ class TestSpCrud:
         async with client:
             item_id = await crud.create_item(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 {"item_name": "Band-1", "owner_email": "rd@corp.com"},
             )
         assert item_id == "42"
         assert captured["body"] == {"Title": "Band-1", "Owner_Email": "rd@corp.com"}
-        assert "getbytitle('CA-Delivery')" in captured["url"]
+        assert "getbytitle('Deliverables_test_customer')" in captured["url"]
 
     @pytest.mark.asyncio
     async def test_delete_item_resolves_list_name_and_issues_delete(
@@ -484,10 +484,10 @@ class TestSpCrud:
         scope+entity to SP list name, then issues DELETE on items(<id>)."""
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title"},
                 },
             },
@@ -507,11 +507,11 @@ class TestSpCrud:
         async with client:
             await crud.delete_item(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 "42",
             )
         assert captured["method"] == "DELETE"
-        assert "getbytitle('CA-Delivery')" in captured["url"]
+        assert "getbytitle('Deliverables_test_customer')" in captured["url"]
         assert "items(42)" in captured["url"]
         assert captured["if_match"] == "*"
 
@@ -521,10 +521,10 @@ class TestSpCrud:
     ) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title"},
                 },
             },
@@ -541,7 +541,7 @@ class TestSpCrud:
         provider = FileBasedListProvider(tmp_path)
         crud = SpCrud(client, provider)
         async with client:
-            items = await crud.get_items("delivery_items", ListScope("carrier-alpha"))
+            items = await crud.get_items("delivery_items", ListScope("test_customer"))
         assert items[0]["item_name"] == "Band-1"
         assert items[0]["_sp_id"] == 1
         assert items[1]["item_name"] == "Band-2"
@@ -550,10 +550,10 @@ class TestSpCrud:
     async def test_get_items_filter_translates(self, tmp_path: Path) -> None:
         _write_customer(
             tmp_path,
-            "carrier-alpha",
+            "test_customer",
             {
                 "delivery_items": {
-                    "name": "CA-Delivery",
+                    "name": "Deliverables_test_customer",
                     "columns": {"item_name": "Title", "delivery_state": "Status"},
                 },
             },
@@ -571,7 +571,7 @@ class TestSpCrud:
         async with client:
             await crud.get_items(
                 "delivery_items",
-                ListScope("carrier-alpha"),
+                ListScope("test_customer"),
                 canonical_filters={"delivery_state": "Open"},
             )
         url = captured["url"]
@@ -588,7 +588,7 @@ class TestNoProprietaryContent:
     def test_pipeline_error_repr_contains_only_codes_and_metadata(self) -> None:
         err = PipelineError(
             "SHP-E002",
-            context={"entity": "delivery_items", "customer": "carrier-alpha", "device": ""},
+            context={"entity": "delivery_items", "customer": "test_customer", "device": ""},
         )
         text = str(err)
         # Should contain the code and the canonical entity name; should NOT

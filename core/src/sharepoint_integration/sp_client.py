@@ -5,6 +5,14 @@ names. List name → SP REST URL conversion happens here. Pagination, retry,
 auth all handled at this layer.
 
 Anchors [D-006] (SP REST + AD auth), NFR-8 (Lists + classic web parts only).
+
+Auth: NTLM (`requests-ntlm` / `httpx-ntlm`) and Kerberos (`requests-kerberos`)
+both wrap sync libs at the httpx auth layer.  NTLM **code snippets pending
+architect delivery** (per architect Q4-adjacent thread 2026-06-25); the
+`NtlmAuthHandler` shape here is the Ph-1 placeholder and may be revised to
+match the architect's reference once received.  Do NOT redesign without
+those snippets in hand — see `auth.py` for the matching TODO(architect)
+markers.
 """
 from __future__ import annotations
 
@@ -66,6 +74,11 @@ class SpClient:
         select: list[str] | None = None,
         filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
+        # Pagination: standard SP `$top + odata.nextLink` continuation pattern.
+        # TODO(architect Q4 2026-06-25): architect comment "every element accessed
+        # individually as far as I know" leaves this OPEN — confirm pattern when
+        # NTLM code snippets land. Ph-1 ships with auto-follow continuation as
+        # documented in MODULE.md Architecture / `[D-006]`.
         params: dict[str, str] = {"$top": str(self.config.page_size)}
         if select:
             params["$select"] = ",".join(select)
@@ -83,6 +96,8 @@ class SpClient:
                 resp = await self._request("GET", next_url)
             payload = resp.json()
             items.extend(payload.get("value", []))
+            # SP 2017 returns the continuation under `odata.nextLink` (nometadata)
+            # or `@odata.nextLink` (verbose). Both surfaces handled defensively.
             next_url = payload.get("odata.nextLink") or payload.get("@odata.nextLink")
         return items
 

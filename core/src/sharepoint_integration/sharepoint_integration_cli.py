@@ -38,7 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--dry-run", action="store_true")
     group.add_argument("--serve", action="store_true", help="run mock SP server")
 
-    parser.add_argument("--customer", help="customer slug (required for --dry-run)")
+    parser.add_argument(
+        "--customer",
+        help="customer_id (required for --dry-run) — per [D-091] slug→id rename",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--base-path", type=Path, default=DEFAULT_BASE)
     parser.add_argument("--host", default="127.0.0.1")
@@ -54,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_diagnostic(args))
     if args.dry_run:
         if not args.customer:
-            parser.error("--dry-run requires --customer <slug>")
+            parser.error("--dry-run requires --customer <customer_id>")
         return _dry_run(args)
     return 0  # unreachable; argparse enforces required group
 
@@ -112,10 +115,10 @@ async def _mock(args: argparse.Namespace) -> int:
     unreachable = 0
 
     async with client:
-        for slug, cfg_obj in provider._customers.items():  # noqa: SLF001
+        for customer_id, cfg_obj in provider._customers.items():  # noqa: SLF001
             for entity in cfg_obj.lists:
                 try:
-                    await crud.get_items(entity, ListScope(slug))
+                    await crud.get_items(entity, ListScope(customer_id))
                     reachable += 1
                 except PipelineError:
                     unreachable += 1
@@ -163,10 +166,10 @@ async def _diagnostic(args: argparse.Namespace) -> int:
     unreachable = 0
 
     async with client:
-        for slug, cfg_obj in provider._customers.items():  # noqa: SLF001
+        for customer_id, cfg_obj in provider._customers.items():  # noqa: SLF001
             for entity in cfg_obj.lists:
                 try:
-                    await crud.get_items(entity, ListScope(slug))
+                    await crud.get_items(entity, ListScope(customer_id))
                     reachable += 1
                 except PipelineError:
                     unreachable += 1

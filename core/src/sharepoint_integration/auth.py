@@ -43,7 +43,13 @@ class NoAuthHandler:
 
 
 class NtlmAuthHandler:
-    """NTLM via requests-ntlm. Sync library wrapped at the httpx level."""
+    """NTLM via requests-ntlm / httpx-ntlm. Sync library wrapped at httpx auth layer.
+
+    TODO(architect 2026-06-25): NTLM code snippets pending architect delivery.
+    The current implementation is Ph-1 placeholder shape; revise to match the
+    architect's reference once received (per MODULE.md Architecture D6 cascade
+    note + Q4-adjacent thread).  Do NOT redesign without those snippets — wait.
+    """
 
     auth_type = "ntlm"
 
