@@ -107,13 +107,13 @@ milestones:
         tg_name: GENERAL
         ingress_nsd: None                                   # Ph-1 lock -- no NSD ingress for early drop
         folder_routing_enabled: false
-        tg_email_group_alias: null                          # TPM fills before Start Collection
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "GeneralTeam-DL@mock-corp.com"                          # TPM fills before Start Collection
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       # ---- 2-3: compliance_certification_release_notes items ----
       - item_no: 2
@@ -140,13 +140,13 @@ milestones:
         tg_name: SUSTAINABILITY
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "SustainabilityTeam-DL@mock-corp.com"
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 3
         item_name: Bluetooth SIG Certification
@@ -172,13 +172,13 @@ milestones:
         tg_name: BLUETOOTH
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "BluetoothTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       # ---- 4-9: test_tech_waiver_report items (review_required=true on a few to
       #          exercise the Ph-1-next-pass LLM review hook -- runtime-dormant) ----
@@ -209,13 +209,13 @@ milestones:
         tg_name: PERFORMANCE
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "PerformanceTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 5
         item_name: WiFi 6 Performance Test Report
@@ -241,13 +241,13 @@ milestones:
         tg_name: PERFORMANCE
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "PerformanceTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 6
         item_name: LTE OTA Test Report
@@ -273,13 +273,13 @@ milestones:
         tg_name: PERFORMANCE
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "PerformanceTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 7
         item_name: Bluetooth Audio Test Report
@@ -305,13 +305,13 @@ milestones:
         tg_name: BLUETOOTH
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "BluetoothTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 8
         item_name: Carbon Footprint Disclosure
@@ -337,13 +337,13 @@ milestones:
         tg_name: SUSTAINABILITY
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "SustainabilityTeam-DL@mock-corp.com"
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 9
         item_name: General Compliance Attestation
@@ -369,13 +369,13 @@ milestones:
         tg_name: GENERAL
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "GeneralTeam-DL@mock-corp.com"
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 10
         item_name: Thermal Performance Test Report
@@ -401,13 +401,13 @@ milestones:
         tg_name: PERFORMANCE
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "PerformanceTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
   P2:
     target_date: 2026-08-15
@@ -440,13 +440,13 @@ milestones:
         tg_name: GENERAL
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "GeneralTeam-DL@mock-corp.com"
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 2
         item_name: P2 Sustainability Recertification
@@ -472,13 +472,13 @@ milestones:
         tg_name: SUSTAINABILITY
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "SustainabilityTeam-DL@mock-corp.com"
+        tg_owner_name: "John Smith"
+        tg_owner_corp_usa_email: "john.smith@mock-corp.com"
+        tg_owner_corp_email: "john.smith@mock-corp.com"
+        tg_owner_corp_id: "john_smith"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 3
         item_name: P2 5G Final Performance Report
@@ -504,13 +504,13 @@ milestones:
         tg_name: PERFORMANCE
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "PerformanceTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
       - item_no: 4
         item_name: P2 Bluetooth Final Certification
@@ -536,13 +536,13 @@ milestones:
         tg_name: BLUETOOTH
         ingress_nsd: None
         folder_routing_enabled: false
-        tg_email_group_alias: null
-        tg_owner_name: null
-        tg_owner_corp_usa_email: null
-        tg_owner_corp_email: null
-        tg_owner_corp_id: null
-        corp_id_list: null
-        email_cc_list: null
+        tg_email_group_alias: "BluetoothTeam-DL@mock-corp.com"
+        tg_owner_name: "Jane Doe"
+        tg_owner_corp_usa_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_email: "jane.doe@mock-corp.com"
+        tg_owner_corp_id: "jane_doe"
+        corp_id_list: "alex_admin"
+        email_cc_list: "alex.admin@mock-corp.com"
 
 # ============================================================
 # Owner identities (Ph-1: representative owners across the TGs)
