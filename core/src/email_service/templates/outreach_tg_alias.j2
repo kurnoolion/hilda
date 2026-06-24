@@ -1,0 +1,17 @@
+Hi {{ tg_alias }} team,
+
+HILDA is requesting status on the following work-items. Each owner: please
+reply by updating only your own ITEM-<n> line in the block below. Keep the
+header line unchanged.
+
+HILDA STATUS BLOCK
+{{ batch_id }}
+{% for it in items %}
+ITEM-{{ it.item_no }} OPEN: {{ it.item_name }} ({{ it.owner_name or it.owner_corp_email or "owner" }})
+{% endfor %}
+
+Replace OPEN with one of: OWNER_CLOSED, DELAYED, BLOCKED.
+Add a short note after the colon (free-text).
+
+Regards,
+HILDA

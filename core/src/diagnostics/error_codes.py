@@ -349,6 +349,52 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "CAD-W005": ErrorCode(
         "CAD-W005", "Clock skew exceeds TOTP tolerance: HILDA host {skew_s}s off NTP server; TOTP window is ~30s; uploads may fail until clock resyncs", True
     ),
+    # --- email_service (EML) -- registered 2026-06-25 per email_service MODULE.md dev phase ---
+    "EML-E001": ErrorCode(
+        "EML-E001", "Subject does not contain BATCH-<id> per FR-24 -- message_id='{mid}' sender='{sender_redacted}'", False
+    ),
+    "EML-E002": ErrorCode(
+        "EML-E002", "IMAP fetch failed: {reason}", False
+    ),
+    "EML-E003": ErrorCode(
+        "EML-E003", "IMAP authentication rejected (credential_service may need refresh)", False
+    ),
+    "EML-E004": ErrorCode(
+        "EML-E004", "SMTP send failed for outbound message: {reason}", False
+    ),
+    "EML-E005": ErrorCode(
+        "EML-E005", "FR-12 path (a) structured block expected but not found; falling back to path (c)", False
+    ),
+    "EML-E006": ErrorCode(
+        "EML-E006", "Attachment classification failed for '{filename_slug}' on message_id='{mid}': {reason}", False
+    ),
+    "EML-E007": ErrorCode(
+        "EML-E007", "SP alert subject matched pattern but routing key not resolvable (D-047)", False
+    ),
+    "EML-W001": ErrorCode(
+        "EML-W001", "Sender mismatch -- sender '{sender_redacted}' is not owner / tg_alias / cc for BATCH-<id> (FR-12; recoverable, surfaced as PM flag)", True
+    ),
+    "EML-W002": ErrorCode(
+        "EML-W002", "Duplicate attachment skipped -- file_hash already in document_index for item_id='{item}' (D-039 Step 0)", True
+    ),
+    "EML-W003": ErrorCode(
+        "EML-W003", "Attachment revision determination ambiguous -- written to '_staged_revision/' path per FR-86 (NSDPathType=STAGED_NOT_REVISION); awaits FR-87 step (C) TPM resolution", True
+    ),
+    "EML-W004": ErrorCode(
+        "EML-W004", "Email classified 'OTHER' -- neither SP alert nor BATCH-id; surfaced for PM triage", True
+    ),
+    # EML-W005 RETIRED 2026-06-09 per [D-053] impl note 2026-06-08 -- replaced by FR-86 storage matrix
+    # landing rule (misaligned (item_type, doc_type) pairs land on staged-not-classified per EML-W006).
+    # Code reserved (do not reuse); kept for registry-completeness audits.
+    "EML-W005": ErrorCode(
+        "EML-W005", "RETIRED -- prior routing/type-mismatch warning superseded by FR-86 storage matrix (use EML-W006); reserved, do not reuse", True
+    ),
+    "EML-W006": ErrorCode(
+        "EML-W006", "Attachment misaligned per FR-86 alignment invariant -- (item_type='{item_type}', doc_type='{doc_type}') pair landed on 'staged-not-classified' path (NSDPathType=STAGED_NOT_CLASSIFIED); awaits FR-87 step (B) TPM doc_type resolution OR step (A) work-item reassignment", True
+    ),
+    "EML-W007": ErrorCode(
+        "EML-W007", "Attachment over-routed per FR-79 -- N={n} matches on file_hash='{file_hash}' exceeds route_attachment_max_matches_threshold={threshold}; all matches committed per [D-055] symmetric M:M contract but flagged for ops review", True
+    ),
 }
 
 

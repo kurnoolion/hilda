@@ -1,0 +1,17 @@
+Hi {{ owner.owner_name or "Owner" }},
+
+HILDA is requesting status on the following work-item. Please reply by
+filling in the structured block below (do not change the header line):
+
+HILDA STATUS BLOCK
+{{ batch_id }}
+{% for it in items %}
+ITEM-{{ it.item_no }} OPEN: {{ it.item_name }}
+{% endfor %}
+
+Replace OPEN with one of: OWNER_CLOSED, DELAYED, BLOCKED.
+Add a short note after the colon (free-text). HILDA will record your reply
+verbatim and update the tracker.
+
+Regards,
+HILDA

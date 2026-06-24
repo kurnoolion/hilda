@@ -1,0 +1,36 @@
+# FR-85 Step 1 -- universal default filename regex rules per email_service/MODULE.md.
+# Per-customer overrides at customizations/<customer_id>/doc_type_filename_rules.yaml
+# (path resolved via Fr52Config.doc_type_filename_rules_path with <customer_id> placeholder).
+#
+# Format:
+#   <doc_type>:
+#     - regex: '<python-regex>'
+#       flags: IGNORECASE     # optional; only IGNORECASE supported in Ph-1
+#
+# Per FR-85: regex Step 1 covers all 4 actionable doc_types
+# {test_report, tech_report, waiver, compliance_certification_release_notes};
+# LLM Step 2 restricted candidate set excludes compliance_certification_release_notes
+# (LLM never classifies into the bundle) and unresolved (HILDA classifier-failure sentinel).
+# 5-value DocType enum per [D-053] impl note 2026-06-08.
+
+test_report:
+  - regex: '.*test[_\- ]?report.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+  - regex: '.*testreport.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+
+tech_report:
+  - regex: '.*tech[_\- ]?report.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+
+waiver:
+  - regex: '.*waiver.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+
+compliance_certification_release_notes:
+  - regex: '.*compliance.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+  - regex: '.*release[_\- ]?notes.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
+  - regex: '.*certification.*\.(pdf|docx|xlsx)$'
+    flags: IGNORECASE
