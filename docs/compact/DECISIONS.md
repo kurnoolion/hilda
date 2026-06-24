@@ -2618,3 +2618,80 @@ For (b) workflow: Claude generates corrected YAML content in chat -> architect c
 - (r) **Net code size**: ~80 lines code + ~30 lines MODULE.md + 14 YAML deletions in mock_customer.yaml + 1 YAML addition. Well within architect's original "small ~50-100 lines" estimate from 2026-06-26 morning D13 flag.
 
 **Anchors**: FR-77 (carrier-portal path composition), FR-80 (`no_customer_upload` upload gate), `[D-019]` (shared HILDA ops-team identity Ph-1/Ph-2), `[D-027]` (Teacher/Student split — binding bodies stay local), `[D-085]` (target_date authoritative deadline -- unrelated but in same neighborhood), `[D-088]` (3-tuple PM resolution), `[D-094]` SUPERSEDED (mixed-case enum precedent), `[D-104]` (Projects per-customer), `[D-116]` D11 + D12 + D13 (binding API + B-α lock), `[D-117]` (SpSession digest dance), `[D-119]` (4-value `tpm_resolved_doc_type`), `[D-123]` (dashboard `/docs/{customer_id}/{sp_id}` URL + `$expand` for User fields), `[D-125]` (Point 3 policy -- corp-derived YAML stays LOCAL), `customer_adapter/MODULE.md`, `template_schema/MODULE.md`, `tracker/MODULE.md`, `email_service/MODULE.md`, `customizations/customer_adapter/example_adapter.py`, `customizations/template_schemas/mock_customer/template.yaml`, `customizations/sharepoint_config/customers/customer.yaml`, this commit.
+
+---
+
+## D-127: ops_alerts module -- single ingress for HILDA-internal anomaly/failure signals (1 email + N messenger DMs)
+
+**Date**: 2026-06-26
+**Status**: Ratified
+
+**Context**: Across the 2026-06-25 + 2026-06-26 architect-review sessions, multiple signal sites surfaced that needed a destination for HILDA-internal anomaly/failure alerts: ITR-W004 (PLM N-retries-exhausted per issue_tracker Q5 lock 2026-06-25); FR-87 SP audit writeback silent failures (best-effort try/except per `[D-064]` + `[D-117]`); and an open expectation of "more operational signals likely to surface" as Ph-1 dev lands across modules. The accumulated "HILDA OPS alert mechanism" TODO was flagged in STATUS for separate architect-discussion sessions per close-session 2026-06-26 morning. Architect's design lock evening 2026-06-26 chose ONE module to own the alert-emit surface, fanning out to TWO channels.
+
+**Decision**: Create new module `core/src/ops_alerts/` per the standard HILDA module-boundary discipline. Public surface: `OpsAlerts.emit_alert(source, error_code, context, severity) -> OpsAlertResult`. Fan-out shape per architect Q1+Q2+Q3+Q4 locks 2026-06-26:
+
+- **(Q1) Single recipient set; severity surfaces visually**:
+  - Channel A: ONE email to `ops_bot_email` (HILDA OPS BOT alias, single SMTP destination) per alert
+  - Channel B: N messenger DMs to each `corp_id` in `broadcast_corp_ids` (e.g., `["y.yikilev", "a.john"]`) per alert
+  - Same recipient set for all severities (info / warning / error / critical)
+  - Subject prefix tag `[<SEVERITY>] HILDA: <source> <error_code>` (plain text per RFC 5322; works on every mail client)
+  - HTML body badge color-coded: `red` (critical, error), `orange` (warning), `gray` (info)
+  - Messenger DM body = email plaintext part WITHOUT color/badge (per architect "no differentiation in corp messenger communication")
+
+- **(Q2) Rate limiter `int | None`; default null**:
+  - `rate_limit_per_minute: null` in `customizations/ops_alerts/recipients.yaml` = no rate limit (Ph-1 default; every call fans out)
+  - `rate_limit_per_minute: N` (positive int) = at most N alerts per (source, error_code) tuple per rolling 60-second window
+  - Excess alerts return `OpsAlertResult.suppressed_by_rate_limit=True` with no fan-out
+  - NO summary alert at end of window (Ph-1 simplicity; deferred Ph-2)
+
+- **(Q3) Recipients config LOCAL per [D-125] Point 3**:
+  - File: `customizations/ops_alerts/recipients.yaml`
+  - Contains corp_ids → stays on architect's Linux deployment box
+  - Public github gets sanitized placeholder showing format only
+
+- **(Q4) ALL HILDA module failure sites wire `emit_alert(...)`** (Ph-1 baseline conservative at known-loud sites):
+  - issue_tracker: ITR-W004 + other ITR-EXXX
+  - customer_adapter: CAD-E004 / CAD-E005 / CAD-E008 / CAD-E009 / CAD-E010
+  - sharepoint_integration: SHP-E001 / SHP-E004
+  - workflow_engine: WFE-EXXX task body retry-exhausted
+  - rule_engine: rule eval failures
+  - tracker: state transition failures
+  - storage: NSD failures
+  - credential_service: vault/sops failures
+  - llm: classifier failures
+  - dashboard: FR-87 SP audit writeback silent failures
+  - **Excluded** (recursion guard): email_service, messenger, diagnostics (alerts about email/messenger failures cannot use email/messenger; diagnostics is a foundation)
+
+Fire-and-forget API: `emit_alert` MUST NOT raise to the caller -- internal failures (recipients.yaml load error, email send failure, messenger send failure) are caught + recorded in `OpsAlertResult.error_codes` + best-effort logged to local NSD ops-log file. The signal site continues unaffected. New error code prefix `OPS-EXXX` registered in diagnostics: `OPS-E001` recipients_yaml_load_failure; `OPS-E002` email_send_failure; `OPS-E003` messenger_dm_fanout_partial; `OPS-E004` messenger_dm_fanout_total; `OPS-E005` context_payload_too_large; `OPS-W001` rate_limit_suppressed; `OPS-W002` credential_field_redacted.
+
+**Why**:
+- (a) **Single dedicated module** over **helper function in diagnostics / email_service / messenger** -- diagnostics is a foundation every module depends on (helper there would invert dep graph); email_service + messenger are channel-owners (asymmetric fit for fan-out). New module isolates fan-out logic + recipients config + rate limiter cleanly. ~150 lines justifies the boundary.
+- (b) **Same recipient set for all severities (Q1)** over **severity-tiered routing** -- keeps Ph-1 simple + matches architect's actual ops surface (one BOT email, one broadcast list). Severity-driven routing IS captured in Deferred for Ph-2 if ops surface grows (e.g., dedicated on-call corp_id list for critical-only). Avoids premature complexity.
+- (c) **Subject prefix tag + HTML body badge** over **subject-line color** -- RFC 5322 email subjects are plain text; `[<SEVERITY>]` prefix is universal across all mail clients (Outlook / Gmail / Mac Mail / terminal mutt). Subject tag enables inbox-scan + filter rules; HTML body badge enables visual severity recognition on open. Architect approved dual pattern 2026-06-26 evening.
+- (d) **Per-(source, error_code) rate limit window** over **per-source** OR **per-(source, error_code, severity)** -- granularity matters: a 50× burst of ITR-W004 is rate-limit-worthy; but if the same source emits a separate ITR-E002 simultaneously, both signals are operationally distinct + both should land. Per-severity adds noise + matches no real operational need.
+- (e) **Rolling 60-second window** over **fixed 1-min buckets** -- slightly more complex impl but avoids the "59 alerts at bucket boundary second" pathology. Default null skips this entirely.
+- (f) **Fire-and-forget API surface** over **raises-on-failure** -- alerts must NEVER break the system they monitor. `OpsAlertResult` is a debug aid only; callers should NOT branch on it.
+- (g) **`emit_alert` accepts plain primitives (str + dict)** over **typed payload objects** -- keeps every caller's import surface tiny (no DeliveryItemBase / Credential / SpClient references); avoids circular-dep risk; bounded `context` dict per NFR-2 also prevents callers from accidentally dumping large objects.
+- (h) **Messenger + email_service recursion guard at module level** over **runtime detection** -- design-time guarantee that messenger never imports ops_alerts (enforced via dependency review). Simpler than runtime detection + provably no-recursion.
+- (i) **LOCAL recipients.yaml** per `[D-125]` Point 3 -- contains real corp_ids; architect maintains on Linux deployment box; same precedent as customer.yaml + MMK/template.yaml.
+- (j) **OPS-E prefix in diagnostics** -- distinct namespace for "the alert channel itself failed"; distinguishes from the alert's PAYLOAD (which carries the source-module's own error code).
+- (k) **Sync recipients.yaml load at module construction** over **per-alert reload** -- recipients are stable across deployment lifetime; SIGHUP-triggered reload deferred Ph-2.
+
+**Consequences**:
+- (a) **New module dir**: `core/src/ops_alerts/` with `MODULE.md` drafted 2026-06-26 (this commit). Code lands next session per architecture → development phase discipline.
+- (b) **Public surface** Ph-1: `OpsAlerts` Protocol, `Severity` enum, `OpsAlertResult` dataclass, `OpsAlertsService` concrete impl, `MockOpsAlerts` test double, `build_ops_alerts(...)` composition helper.
+- (c) **Sub-modules** Ph-1: `protocol.py`, `service.py`, `composer.py`, `rate_limiter.py`, `recipients_loader.py`, `mock_ops_alerts.py`, `config.py`. ~150 lines core + ~25 lines mock + ~120 lines tests.
+- (d) **New config file**: `customizations/ops_alerts/recipients.yaml` -- LOCAL on architect's Linux box per `[D-125]`; public github gets sanitized placeholder.
+- (e) **New error prefix** `OPS-EXXX` registered in `diagnostics/error_codes.py` `PREFIX_REGISTRY` -- 5 errors + 2 warnings Ph-1.
+- (f) **Dependency graph additions** Ph-1:
+  - ops_alerts DEPENDS ON: email_service + messenger + credential_service + diagnostics
+  - issue_tracker / customer_adapter / sharepoint_integration / workflow_engine / rule_engine / tracker / storage / credential_service / llm / dashboard each ADD outbound dep on ops_alerts (10 modules)
+  - email_service / messenger / diagnostics do NOT depend on ops_alerts (recursion guard)
+- (g) **MAP.md regen** required after Ph-1 dev lands -- new module + 10 inbound edges + 4 outbound edges.
+- (h) **Module count** grows: 13 → 14 dev-complete modules + ops_alerts arch-draft (no LLM module yet either).
+- (i) **STATUS Flag cleared**: "HILDA OPS alert mechanism" TODO removed from accumulated architect-discussion list (was item 1 of 4 in commit `2f791d6`).
+- (j) **Call-site wiring scope** Ph-1: conservative baseline at known-loud sites (Errors only, not Warnings/Info initially) with growth path Ph-2+. Each site is one async call: `await self._ops_alerts.emit_alert(source=..., error_code=..., context={...}, severity=Severity.ERROR)`. No other site change.
+- (k) **Test fixture**: `core/tests/fixtures/ops_alerts/test_recipients.yaml` -- placeholder ops_bot_email + 2 broadcast_corp_ids + `rate_limit_per_minute: null`; safe for public github.
+- (l) **Deferred items** (Ph-2+ forward-looking): severity-driven routing; per-source recipient overrides; fingerprint-based dedup; summary alert at rate-limit window end; Slack / PagerDuty / SMS channels; SIGHUP-triggered reload; acknowledge / mute workflow; alert correlation; metrics surface.
+
+**Anchors**: NFR-2 (bounded context payload + no proprietary content), `[D-019]` (shared HILDA ops-team identity Ph-1/Ph-2 -- same SMTP + messenger account for OPS BOT), `[D-027]` (Teacher/Student split -- recipients.yaml LOCAL), `[D-064]` (HILDA → SP REST writeback secondary channel -- failed writebacks emit via ops_alerts), `[D-117]` (SpSession NTLM digest dance -- failed digests emit via ops_alerts), `[D-122]` (FR-87 direct POST -- SP audit writeback silent failures emit via ops_alerts), `[D-125]` (Point 3 policy -- recipients.yaml LOCAL), `core/src/ops_alerts/MODULE.md`, this commit.
