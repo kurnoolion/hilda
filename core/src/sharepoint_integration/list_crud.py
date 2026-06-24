@@ -55,7 +55,9 @@ class SpCrud:
     ) -> str:
         list_name = self._provider.get_list_name(entity, scope)
         sp_fields = self._provider.to_sp_fields(entity, scope, canonical_fields)
-        return await self._client.create_list_item(list_name, sp_fields)
+        return await self._client.create_list_item(
+            list_name, sp_fields, customer_id=scope.customer_id
+        )
 
     async def update_item(
         self,
@@ -66,7 +68,9 @@ class SpCrud:
     ) -> None:
         list_name = self._provider.get_list_name(entity, scope)
         sp_fields = self._provider.to_sp_fields(entity, scope, canonical_fields)
-        await self._client.update_list_item(list_name, item_id, sp_fields)
+        await self._client.update_list_item(
+            list_name, item_id, sp_fields, customer_id=scope.customer_id
+        )
 
     async def delete_item(
         self, entity: str, scope: ListScope, item_id: str
@@ -84,7 +88,9 @@ class SpCrud:
         sp_items = [
             self._provider.to_sp_fields(entity, scope, c) for c in items
         ]
-        return await self._client.batch_create(list_name, sp_items)
+        return await self._client.batch_create(
+            list_name, sp_items, customer_id=scope.customer_id
+        )
 
     async def batch_update(
         self,
@@ -97,7 +103,9 @@ class SpCrud:
             (item_id, self._provider.to_sp_fields(entity, scope, c))
             for item_id, c in updates
         ]
-        await self._client.batch_update(list_name, sp_updates)
+        await self._client.batch_update(
+            list_name, sp_updates, customer_id=scope.customer_id
+        )
 
 
 def _odata_literal(v: Any) -> str:

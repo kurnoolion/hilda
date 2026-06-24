@@ -14,6 +14,7 @@ from core.src.sharepoint_integration.list_provider import (
     SharePointListProvider,
 )
 from core.src.sharepoint_integration.sp_client import SpClient
+from core.src.sharepoint_integration.sp_session import SpSession, list_item_type
 
 __all__ = [
     "FileBasedListProvider",
@@ -22,4 +23,6 @@ __all__ = [
     "SharePointListProvider",
     "SpClient",
     "SpCrud",
+    "SpSession",
+    "list_item_type",
 ]

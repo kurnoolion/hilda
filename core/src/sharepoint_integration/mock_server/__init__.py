@@ -8,6 +8,7 @@ Designed for extension: the InMemoryStore is pluggable so future modules
 (dashboard mock) can plug their own routes onto the same FastAPI app.
 """
 from core.src.sharepoint_integration.mock_server.app import build_app
+from core.src.sharepoint_integration.mock_server.client import MockSpSession
 from core.src.sharepoint_integration.mock_server.store import InMemoryStore, ListNotFoundError
 
-__all__ = ["InMemoryStore", "ListNotFoundError", "build_app"]
+__all__ = ["InMemoryStore", "ListNotFoundError", "MockSpSession", "build_app"]

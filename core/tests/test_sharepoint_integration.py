@@ -1,10 +1,16 @@
-"""Unit tests for sharepoint_integration core (no mock server)."""
+"""Unit tests for sharepoint_integration core.
+
+Post architect-lock 2026-06-25 refactor: SpClient is driven via an
+injected `SpSession` (`MockSpSession` for in-memory tests). The old
+`httpx.MockTransport` injection is gone — SpSession owns the transport
+and the digest dance.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-import httpx
 import pytest
 
 from core.src.diagnostics import PipelineError
@@ -14,7 +20,10 @@ from core.src.sharepoint_integration import (
     ListScope,
     SpClient,
     SpCrud,
+    SpSession,
+    list_item_type,
 )
+from core.src.sharepoint_integration.mock_server import MockSpSession, build_app
 
 
 # --- ListScope --------------------------------------------------------------
@@ -63,9 +72,6 @@ class TestGlobalSharePointConfig:
             username="alice",
             password="super-secret",
         )
-        # Even when explicitly dumping with mode='python', the secret is in
-        # the dict — but no compact-report path serializes config blindly.
-        # The guard is repr/str, which we just verified.
         assert c.password == "super-secret"
 
     def test_3_tier_precedence_cli_beats_env_beats_file(
@@ -88,7 +94,6 @@ class TestGlobalSharePointConfig:
         )
         assert c.site_url == "https://from-file.corp/x"
         assert c.timeout_seconds == 30  # CLI wins
-        # env-only field
         c2 = GlobalSharePointConfig.from_sources(config_path=cfg_file)
         assert c2.timeout_seconds == 20  # env beats file
 
@@ -97,6 +102,35 @@ class TestGlobalSharePointConfig:
             GlobalSharePointConfig(
                 site_url="https://sp.corp/x", auth_type="none", unknown="x"
             )  # type: ignore[call-arg]
+
+
+# --- list_item_type encoding (architect lock 2026-06-25) -------------------
+
+
+class TestListItemType:
+    """Architect Q1-Q4 lock 2026-06-25: `SP.Data.<list>_x005f_<carrier>ListItem`
+    with `_` → `_x005f_` and ` ` → `_x0020_` encoding."""
+
+    def test_underscore_encoding(self) -> None:
+        assert (
+            list_item_type("Deliverables_test_customer")
+            == "SP.Data.Deliverables_x005f_test_x005f_customerListItem"
+        )
+
+    def test_space_encoding(self) -> None:
+        assert (
+            list_item_type("My List")
+            == "SP.Data.My_x0020_ListListItem"
+        )
+
+    def test_mixed_encoding(self) -> None:
+        assert (
+            list_item_type("Foo Bar_baz")
+            == "SP.Data.Foo_x0020_Bar_x005f_bazListItem"
+        )
+
+    def test_no_special_chars(self) -> None:
+        assert list_item_type("Projects") == "SP.Data.ProjectsListItem"
 
 
 # --- FileBasedListProvider --------------------------------------------------
@@ -231,7 +265,6 @@ class TestFileBasedListProvider:
             )
             == "CA-SpecialX-Delivery"
         )
-        # Without device — base name
         assert (
             p.get_list_name("delivery_items", ListScope("test_customer"))
             == "Deliverables_test_customer"
@@ -286,161 +319,234 @@ class TestFileBasedListProvider:
         assert canonical == {"item_name": "Band-1"}
 
 
-# --- SpClient (with httpx.MockTransport) -----------------------------------
+# --- SpSession (digest dance + MERGE protocol) ----------------------------
 
 
-def _mock_handler(handler):
-    return httpx.MockTransport(handler)
+class _FakeResponse:
+    def __init__(
+        self,
+        status_code: int = 200,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self._json_body = json_body
+        self.headers = headers or {}
+        self.content = json.dumps(json_body).encode() if json_body is not None else b""
+
+    def json(self) -> Any:
+        if self._json_body is None:
+            raise ValueError("no body")
+        return self._json_body
 
 
-class _CallRecorder:
+class _RecordingSession:
+    """Stand-in for requests.Session that records calls + serves canned
+    responses keyed by URL + method."""
+
     def __init__(self) -> None:
-        self.calls: list[httpx.Request] = []
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.headers: dict[str, str] = {}
+        self.auth: Any = None
+        self._responses: dict[tuple[str, str], list[_FakeResponse]] = {}
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.calls.append(request)
-        return self._respond(request)
+    def queue(self, method: str, url: str, response: _FakeResponse) -> None:
+        self._responses.setdefault((method, url), []).append(response)
 
-    def _respond(self, request: httpx.Request) -> httpx.Response:
-        raise NotImplementedError
+    def _pop(self, method: str, url: str) -> _FakeResponse:
+        queue = self._responses.get((method, url))
+        if not queue:
+            raise AssertionError(f"unexpected {method} {url}")
+        return queue.pop(0)
+
+    def get(
+        self, url: str, params: dict[str, Any] | None = None, **kw: Any
+    ) -> _FakeResponse:
+        self.calls.append(("GET", url, {"params": params, **kw}))
+        return self._pop("GET", url)
+
+    def post(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        data: Any = None,
+        **kw: Any,
+    ) -> _FakeResponse:
+        self.calls.append(("POST", url, {"headers": headers, "data": data, **kw}))
+        return self._pop("POST", url)
+
+    def close(self) -> None:
+        pass
 
 
-class TestSpClient:
-    @pytest.mark.asyncio
-    async def test_get_list_items_passes_select_and_filter(self) -> None:
-        captured: dict[str, str] = {}
+def _make_session_with_fake(rec: _RecordingSession, site_url: str) -> SpSession:
+    """Build a real SpSession but swap its requests.Session for `rec`."""
+    sess = SpSession.__new__(SpSession)
+    sess._site_url = site_url.rstrip("/")
+    sess._session = rec  # type: ignore[assignment]
+    sess._cookie = None
+    sess._digest = None
+    return sess
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["url"] = str(request.url)
-            return httpx.Response(200, json={"value": [{"Id": 1, "Title": "x"}]})
 
-        cfg = GlobalSharePointConfig(
-            site_url="https://sp.corp/sites/x", auth_type="none"
+class TestSpSessionDigestDance:
+    def test_lazy_digest_acquired_on_first_write(self) -> None:
+        rec = _RecordingSession()
+        site = "https://sp.corp/sp/tg/site"
+        # Step 1: GET site root returns Set-Cookie
+        rec.queue("GET", site, _FakeResponse(
+            200, json_body={"d": {}}, headers={"Set-Cookie": "WSSAUTH=c1; Path=/"}
+        ))
+        # Step 2: POST /_api/contextinfo returns FormDigestValue
+        rec.queue("POST", f"{site}/_api/contextinfo", _FakeResponse(
+            200, json_body={"d": {"GetContextWebInformation": {"FormDigestValue": "DIG1"}}}
+        ))
+        # The MERGE itself
+        merge_url = f"{site}/_api/web/lists/getbytitle('Deliverables_test_customer')/items(7)"
+        rec.queue("POST", merge_url, _FakeResponse(204))
+
+        sess = _make_session_with_fake(rec, site)
+        status = sess.merge(
+            "Deliverables_test_customer", "test_customer", 7,
+            {"Title": "v2"},
         )
-        client = SpClient(cfg, transport=_mock_handler(handler))
+        assert status == 204
+        # Verify the dance happened + headers carry digest
+        methods = [(m, u) for m, u, _ in rec.calls]
+        assert methods == [
+            ("GET", site),
+            ("POST", f"{site}/_api/contextinfo"),
+            ("POST", merge_url),
+        ]
+        merge_call = rec.calls[2][2]
+        assert merge_call["headers"]["X-Http-Method"] == "MERGE"
+        assert merge_call["headers"]["X-RequestDigest"] == "DIG1"
+        assert merge_call["headers"]["IF-MATCH"] == "*"
+        assert merge_call["headers"]["Cookie"] == "WSSAUTH=c1"
+        # body wraps __metadata with correct type
+        body = json.loads(merge_call["data"])
+        assert body["__metadata"]["type"] == list_item_type("Deliverables_test_customer")
+        assert body["Title"] == "v2"
+
+    def test_403_triggers_digest_refresh_and_retry(self) -> None:
+        rec = _RecordingSession()
+        site = "https://sp.corp/sp/tg/site"
+        merge_url = f"{site}/_api/web/lists/getbytitle('Deliverables_test_customer')/items(7)"
+        # initial dance
+        rec.queue("GET", site, _FakeResponse(200, {"d": {}}, {"Set-Cookie": "WSSAUTH=c1"}))
+        rec.queue("POST", f"{site}/_api/contextinfo", _FakeResponse(
+            200, {"d": {"GetContextWebInformation": {"FormDigestValue": "DIG1"}}}
+        ))
+        # first merge: 403
+        rec.queue("POST", merge_url, _FakeResponse(403))
+        # refresh
+        rec.queue("GET", site, _FakeResponse(200, {"d": {}}, {"Set-Cookie": "WSSAUTH=c2"}))
+        rec.queue("POST", f"{site}/_api/contextinfo", _FakeResponse(
+            200, {"d": {"GetContextWebInformation": {"FormDigestValue": "DIG2"}}}
+        ))
+        # retry: 204
+        rec.queue("POST", merge_url, _FakeResponse(204))
+
+        sess = _make_session_with_fake(rec, site)
+        status = sess.merge(
+            "Deliverables_test_customer", "test_customer", 7, {"Title": "v2"},
+        )
+        assert status == 204
+        # 2 GETs + 2 contextinfo + 2 merge posts
+        get_calls = [c for c in rec.calls if c[0] == "GET"]
+        ctx_calls = [c for c in rec.calls if c[1].endswith("/_api/contextinfo")]
+        merge_calls = [c for c in rec.calls if c[1] == merge_url]
+        assert len(get_calls) == 2
+        assert len(ctx_calls) == 2
+        assert len(merge_calls) == 2
+        # second merge used the refreshed digest
+        assert merge_calls[1][2]["headers"]["X-RequestDigest"] == "DIG2"
+        assert merge_calls[1][2]["headers"]["Cookie"] == "WSSAUTH=c2"
+
+    def test_get_does_not_require_digest(self) -> None:
+        rec = _RecordingSession()
+        site = "https://sp.corp/sp/tg/site"
+        list_url = f"{site}/_api/web/lists/getbytitle('Projects_test_customer')/items"
+        rec.queue("GET", list_url, _FakeResponse(200, {"value": []}))
+        sess = _make_session_with_fake(rec, site)
+        resp = sess.get(list_url)
+        assert resp.status_code == 200
+        # No contextinfo call should have happened
+        assert all(not u.endswith("/_api/contextinfo") for _, u, _ in rec.calls)
+
+
+# --- SpClient + SpCrud against the mock-server --------------------------
+
+
+class TestSpClientAgainstMock:
+    @pytest.mark.asyncio
+    async def test_create_get_round_trip(self, tmp_path: Path) -> None:
+        _write_customer(
+            tmp_path,
+            "test_customer",
+            {
+                "delivery_items": {
+                    "name": "Deliverables_test_customer",
+                    "columns": {"item_name": "Title", "owner_email": "Owner_Email"},
+                },
+            },
+        )
+        app = build_app()
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(
+            site_url="http://mock-sp", auth_type="none", page_size=10
+        )
+        client = SpClient(cfg, session=session)
+        provider = FileBasedListProvider(tmp_path)
+        crud = SpCrud(client, provider)
         async with client:
-            items = await client.get_list_items(
-                "MyList",
-                select=["Id", "Title"],
-                filter_expr="Status eq 'Open'",
+            item_id = await crud.create_item(
+                "delivery_items",
+                ListScope("test_customer"),
+                {"item_name": "Band-1", "owner_email": "rd@corp.com"},
             )
-        assert items == [{"Id": 1, "Title": "x"}]
-        assert "getbytitle('MyList')" in captured["url"]
-        assert "%24select=Id%2CTitle" in captured["url"] or "$select=Id,Title" in captured["url"]
-
-    @pytest.mark.asyncio
-    async def test_create_list_item_returns_id(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.method == "POST"
-            return httpx.Response(201, json={"Id": 99, "Title": "x"})
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            item_id = await client.create_list_item("MyList", {"Title": "x"})
-        assert item_id == "99"
-
-    @pytest.mark.asyncio
-    async def test_update_list_item_uses_patch_with_if_match(self) -> None:
-        captured: dict[str, object] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["method"] = request.method
-            captured["if_match"] = request.headers.get("if-match")
-            return httpx.Response(204)
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            await client.update_list_item("MyList", "42", {"Title": "y"})
-        assert captured["method"] == "PATCH"
-        assert captured["if_match"] == "*"
-
-    @pytest.mark.asyncio
-    async def test_delete_list_item_uses_delete_with_if_match(self) -> None:
-        """Per drift sweep 2026-06-10 — verify SpClient.delete_list_item issues DELETE with IF-MATCH header."""
-        captured: dict[str, object] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["method"] = request.method
-            captured["if_match"] = request.headers.get("if-match")
-            captured["url"] = str(request.url)
-            return httpx.Response(204)
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            await client.delete_list_item("MyList", "42")
-        assert captured["method"] == "DELETE"
-        assert captured["if_match"] == "*"
-        assert "items(42)" in captured["url"]
-
-    @pytest.mark.asyncio
-    async def test_4xx_raises_shp_e001(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                404,
-                json={"error": {"code": "-1, NotFound", "message": "list missing"}},
+            assert item_id == "1"
+            items = await crud.get_items(
+                "delivery_items", ListScope("test_customer")
             )
-
-        cfg = GlobalSharePointConfig(
-            site_url="https://sp.corp/x", auth_type="none", max_retries=0
-        )
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            with pytest.raises(PipelineError) as ei:
-                await client.get_list_items("Missing")
-        assert ei.value.code_id == "SHP-E001"
-        assert ei.value.context["status"] == 404
+            assert items[0]["item_name"] == "Band-1"
+            assert items[0]["_sp_id"] == 1
 
     @pytest.mark.asyncio
-    async def test_401_raises_shp_e004(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401, json={})
-
-        cfg = GlobalSharePointConfig(
-            site_url="https://sp.corp/x", auth_type="none", max_retries=0
+    async def test_update_uses_merge_protocol(self, tmp_path: Path) -> None:
+        _write_customer(
+            tmp_path,
+            "test_customer",
+            {
+                "delivery_items": {
+                    "name": "Deliverables_test_customer",
+                    "columns": {"item_name": "Title", "delivery_state": "Status"},
+                },
+            },
         )
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            with pytest.raises(PipelineError) as ei:
-                await client.get_list_items("Anything")
-        assert ei.value.code_id == "SHP-E004"
+        app = build_app()
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(site_url="http://mock-sp", auth_type="none")
+        client = SpClient(cfg, session=session)
+        provider = FileBasedListProvider(tmp_path)
+        crud = SpCrud(client, provider)
+        async with client:
+            item_id = await crud.create_item(
+                "delivery_items",
+                ListScope("test_customer"),
+                {"item_name": "Band-1", "delivery_state": "Open"},
+            )
+            await crud.update_item(
+                "delivery_items",
+                ListScope("test_customer"),
+                item_id,
+                {"delivery_state": "Closed"},
+            )
+            items = await crud.get_items(
+                "delivery_items", ListScope("test_customer")
+            )
+            assert items[0]["delivery_state"] == "Closed"
 
-    @pytest.mark.asyncio
-    async def test_429_retries_then_succeeds(self) -> None:
-        attempts = {"n": 0}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            attempts["n"] += 1
-            if attempts["n"] < 3:
-                return httpx.Response(429, json={})
-            return httpx.Response(200, json={"value": []})
-
-        cfg = GlobalSharePointConfig(
-            site_url="https://sp.corp/x",
-            auth_type="none",
-            max_retries=3,
-            retry_backoff_seconds=0.001,
-        )
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            items = await client.get_list_items("X")
-        assert items == []
-        assert attempts["n"] == 3
-
-    @pytest.mark.asyncio
-    async def test_list_name_with_apostrophe_escaped(self) -> None:
-        captured: dict[str, str] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["path"] = request.url.path
-            return httpx.Response(200, json={"value": []})
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        async with SpClient(cfg, transport=_mock_handler(handler)) as client:
-            await client.get_list_items("PM's Items")
-        assert "PM''s Items" in captured["path"]
-
-
-# --- SpCrud (composition) ---------------------------------------------------
-
-
-class TestSpCrud:
     @pytest.mark.asyncio
     async def test_create_translates_canonical_to_sp_columns(
         self, tmp_path: Path
@@ -455,65 +561,22 @@ class TestSpCrud:
                 },
             },
         )
-        captured: dict[str, object] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["body"] = json.loads(request.content) if request.content else None
-            captured["url"] = str(request.url)
-            return httpx.Response(201, json={"Id": 42})
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        client = SpClient(cfg, transport=_mock_handler(handler))
+        app = build_app()
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(site_url="http://mock-sp", auth_type="none")
+        client = SpClient(cfg, session=session)
         provider = FileBasedListProvider(tmp_path)
         crud = SpCrud(client, provider)
         async with client:
-            item_id = await crud.create_item(
+            await crud.create_item(
                 "delivery_items",
                 ListScope("test_customer"),
                 {"item_name": "Band-1", "owner_email": "rd@corp.com"},
             )
-        assert item_id == "42"
-        assert captured["body"] == {"Title": "Band-1", "Owner_Email": "rd@corp.com"}
-        assert "getbytitle('Deliverables_test_customer')" in captured["url"]
-
-    @pytest.mark.asyncio
-    async def test_delete_item_resolves_list_name_and_issues_delete(
-        self, tmp_path: Path
-    ) -> None:
-        """Per drift sweep 2026-06-10 — verify SpCrud.delete_item resolves the
-        scope+entity to SP list name, then issues DELETE on items(<id>)."""
-        _write_customer(
-            tmp_path,
-            "test_customer",
-            {
-                "delivery_items": {
-                    "name": "Deliverables_test_customer",
-                    "columns": {"item_name": "Title"},
-                },
-            },
-        )
-        captured: dict[str, object] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["method"] = request.method
-            captured["url"] = str(request.url)
-            captured["if_match"] = request.headers.get("if-match")
-            return httpx.Response(204)
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        client = SpClient(cfg, transport=_mock_handler(handler))
-        provider = FileBasedListProvider(tmp_path)
-        crud = SpCrud(client, provider)
-        async with client:
-            await crud.delete_item(
-                "delivery_items",
-                ListScope("test_customer"),
-                "42",
-            )
-        assert captured["method"] == "DELETE"
-        assert "getbytitle('Deliverables_test_customer')" in captured["url"]
-        assert "items(42)" in captured["url"]
-        assert captured["if_match"] == "*"
+        # Inspect the stored record — translation happened
+        store = app.state.store
+        items = list(store.iter_items("Deliverables_test_customer"))
+        assert items == [{"Id": 1, "Title": "Band-1", "Owner_Email": "rd@corp.com"}]
 
     @pytest.mark.asyncio
     async def test_get_items_translates_back_to_canonical(
@@ -529,19 +592,19 @@ class TestSpCrud:
                 },
             },
         )
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={"value": [{"Id": 1, "Title": "Band-1"}, {"Id": 2, "Title": "Band-2"}]},
-            )
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        client = SpClient(cfg, transport=_mock_handler(handler))
+        app = build_app()
+        # Pre-seed
+        app.state.store.create_item("Deliverables_test_customer", {"Title": "Band-1"})
+        app.state.store.create_item("Deliverables_test_customer", {"Title": "Band-2"})
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(site_url="http://mock-sp", auth_type="none")
+        client = SpClient(cfg, session=session)
         provider = FileBasedListProvider(tmp_path)
         crud = SpCrud(client, provider)
         async with client:
-            items = await crud.get_items("delivery_items", ListScope("test_customer"))
+            items = await crud.get_items(
+                "delivery_items", ListScope("test_customer")
+            )
         assert items[0]["item_name"] == "Band-1"
         assert items[0]["_sp_id"] == 1
         assert items[1]["item_name"] == "Band-2"
@@ -558,27 +621,97 @@ class TestSpCrud:
                 },
             },
         )
-        captured: dict[str, str] = {}
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            captured["url"] = str(request.url)
-            return httpx.Response(200, json={"value": []})
-
-        cfg = GlobalSharePointConfig(site_url="https://sp.corp/x", auth_type="none")
-        client = SpClient(cfg, transport=_mock_handler(handler))
+        app = build_app()
+        app.state.store.create_item(
+            "Deliverables_test_customer", {"Title": "a", "Status": "Open"}
+        )
+        app.state.store.create_item(
+            "Deliverables_test_customer", {"Title": "b", "Status": "Closed"}
+        )
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(site_url="http://mock-sp", auth_type="none")
+        client = SpClient(cfg, session=session)
         provider = FileBasedListProvider(tmp_path)
         crud = SpCrud(client, provider)
         async with client:
-            await crud.get_items(
+            items = await crud.get_items(
                 "delivery_items",
                 ListScope("test_customer"),
                 canonical_filters={"delivery_state": "Open"},
             )
-        url = captured["url"]
-        # OData $filter should reference the SP column name, not canonical.
-        # httpx URL-encodes spaces as '+' for query params.
-        assert any(s in url for s in ("Status+eq", "Status%20eq", "Status eq"))
-        assert "delivery_state" not in url
+        assert len(items) == 1
+        assert items[0]["item_name"] == "a"
+
+    @pytest.mark.asyncio
+    async def test_delete_item(self, tmp_path: Path) -> None:
+        _write_customer(
+            tmp_path,
+            "test_customer",
+            {
+                "delivery_items": {
+                    "name": "Deliverables_test_customer",
+                    "columns": {"item_name": "Title"},
+                },
+            },
+        )
+        app = build_app()
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(site_url="http://mock-sp", auth_type="none")
+        client = SpClient(cfg, session=session)
+        provider = FileBasedListProvider(tmp_path)
+        crud = SpCrud(client, provider)
+        async with client:
+            item_id = await crud.create_item(
+                "delivery_items",
+                ListScope("test_customer"),
+                {"item_name": "x"},
+            )
+            await crud.delete_item(
+                "delivery_items", ListScope("test_customer"), item_id
+            )
+            items = await crud.get_items(
+                "delivery_items", ListScope("test_customer")
+            )
+            assert items == []
+
+
+class TestSpClientErrorPaths:
+    @pytest.mark.asyncio
+    async def test_4xx_on_get_raises_shp_e001(self, tmp_path: Path) -> None:
+        _write_customer(
+            tmp_path,
+            "test_customer",
+            {
+                "delivery_items": {
+                    "name": "Missing_list",
+                    "columns": {"item_name": "Title"},
+                },
+            },
+        )
+        app = build_app()
+        session = MockSpSession(app)
+        cfg = GlobalSharePointConfig(
+            site_url="http://mock-sp", auth_type="none", max_retries=0
+        )
+        client = SpClient(cfg, session=session)
+        provider = FileBasedListProvider(tmp_path)
+        crud = SpCrud(client, provider)
+        async with client:
+            with pytest.raises(PipelineError) as ei:
+                await crud.get_items(
+                    "delivery_items", ListScope("test_customer")
+                )
+        assert ei.value.code_id == "SHP-E001"
+        assert ei.value.context["status"] == 404
+
+    @pytest.mark.asyncio
+    async def test_ntlm_missing_creds_raises_shp_e004(self) -> None:
+        cfg = GlobalSharePointConfig(
+            site_url="https://sp.corp/sp/tg/x", auth_type="ntlm"
+        )
+        with pytest.raises(PipelineError) as ei:
+            SpClient(cfg)
+        assert ei.value.code_id == "SHP-E004"
 
 
 class TestNoProprietaryContent:
@@ -591,9 +724,14 @@ class TestNoProprietaryContent:
             context={"entity": "delivery_items", "customer": "test_customer", "device": ""},
         )
         text = str(err)
-        # Should contain the code and the canonical entity name; should NOT
-        # contain proprietary content (item names, customer doc fragments).
         assert "SHP-E002" in text
-        # The customer slug + entity name are tokens, not proprietary content.
-        # We don't include SP column names or list names by construction.
         assert "delivery_items" in text
+
+    def test_sp_session_repr_omits_password_and_cookie(self) -> None:
+        rec = _RecordingSession()
+        sess = _make_session_with_fake(rec, "https://sp.corp/sp/tg/x")
+        sess._cookie = "WSSAUTH=should-not-appear"  # pragma: no mutate
+        sess._digest = "secret-digest"
+        text = repr(sess)
+        assert "should-not-appear" not in text
+        assert "secret-digest" not in text

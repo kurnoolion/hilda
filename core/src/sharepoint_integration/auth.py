@@ -1,15 +1,16 @@
 """SP auth handlers: NoAuth (mock), NTLM, Kerberos.
 
-NTLM/Kerberos handlers wrap the sync `requests-ntlm` / `requests-kerberos`
-libraries; httpx hooks adapt them via _AuthHandler.apply(). For v1 dev against
-the mock server, NoAuthHandler is the active path; NTLM/Kerberos are exercised
-in integration testing against real SP 2017 (deferred until corp AD lab access).
+NTLM is the production path per architect lock 2026-06-25 (Q1-Q4 thread):
+`requests-ntlm`'s `HttpNtlmAuth` is the validated transport. Username is
+the FULL `corp\\<user>` literal per architect Q1 — no separate domain
+field on `GlobalSharePointConfig`.
+
+Kerberos remains a placeholder (deferred until corp AD lab access).
+NoAuth is the active path for mock-server dev + unit tests.
 """
 from __future__ import annotations
 
-from typing import Protocol
-
-import httpx
+from typing import Any, Protocol
 
 from core.src.diagnostics import PipelineError
 from core.src.sharepoint_integration.config import GlobalSharePointConfig
@@ -18,16 +19,10 @@ from core.src.sharepoint_integration.config import GlobalSharePointConfig
 class _AuthHandler(Protocol):
     """Internal protocol — not part of public surface."""
 
-    def apply(self, request: httpx.Request) -> None:
-        """Mutate the request to add auth (headers, cookies, etc.).
+    auth_type: str
 
-        Some auth schemes (NTLM) require a challenge-response handshake handled
-        at the transport layer. For those, apply() is a no-op and the auth lives
-        in the httpx.Auth object returned by as_httpx_auth().
-        """
-
-    def as_httpx_auth(self) -> httpx.Auth | None:
-        """Return an httpx.Auth implementation, or None if apply() suffices."""
+    def as_requests_auth(self) -> Any | None:
+        """Return a `requests`-compatible auth object, or None for no-auth."""
 
 
 class NoAuthHandler:
@@ -35,78 +30,53 @@ class NoAuthHandler:
 
     auth_type = "none"
 
-    def apply(self, request: httpx.Request) -> None:
-        return None
-
-    def as_httpx_auth(self) -> httpx.Auth | None:
+    def as_requests_auth(self) -> Any | None:
         return None
 
 
 class NtlmAuthHandler:
-    """NTLM via requests-ntlm / httpx-ntlm. Sync library wrapped at httpx auth layer.
+    """NTLM via `requests-ntlm` per architect lock 2026-06-25 (Q1-Q4).
 
-    TODO(architect 2026-06-25): NTLM code snippets pending architect delivery.
-    The current implementation is Ph-1 placeholder shape; revise to match the
-    architect's reference once received (per MODULE.md Architecture D6 cascade
-    note + Q4-adjacent thread).  Do NOT redesign without those snippets — wait.
-    """
+    `username` is the FULL `corp\\<user>` literal — architect Q1: HILDA's
+    `GlobalSharePointConfig.username` stores the entire domain-prefixed
+    string; there is no separate domain field. Password is never logged
+    (NFR-2)."""
 
     auth_type = "ntlm"
 
     def __init__(self, username: str, password: str) -> None:
         self.username = username
-        self.password = password
+        self._password = password
 
-    def apply(self, request: httpx.Request) -> None:
-        return None
-
-    def as_httpx_auth(self) -> httpx.Auth | None:
+    def as_requests_auth(self) -> Any | None:
         try:
-            from httpx_ntlm import HttpNtlmAuth  # type: ignore[import-not-found]
-        except ImportError:
-            try:
-                from requests_ntlm import HttpNtlmAuth as _RNAuth  # type: ignore[import-not-found]
-            except ImportError as e:
-                raise PipelineError(
-                    "SHP-E004", context={"auth_type": "ntlm"}, cause=e
-                ) from e
-            # requests-ntlm targets the requests library, not httpx; in this
-            # case we'd need a transport-layer adapter. v1 prefers httpx-ntlm
-            # when available; fall back is documented as a known gap.
+            from requests_ntlm import HttpNtlmAuth
+        except ImportError as e:  # pragma: no cover — dependency guard
             raise PipelineError(
-                "SHP-E004",
-                context={
-                    "auth_type": "ntlm-no-httpx-adapter",
-                },
-            )
-        return HttpNtlmAuth(self.username, self.password)
+                "SHP-E004", context={"auth_type": "ntlm"}, cause=e
+            ) from e
+        return HttpNtlmAuth(self.username, self._password)
 
 
 class KerberosAuthHandler:
-    """Kerberos / SPNEGO. Requires libkrb5-dev + valid ticket cache."""
+    """Kerberos / SPNEGO. Requires libkrb5-dev + valid ticket cache.
+
+    Placeholder — corp AD lab access deferred. Raises SHP-E004 with detail
+    until ratified."""
 
     auth_type = "kerberos"
 
     def __init__(self, keytab_path: object | None = None) -> None:
         self.keytab_path = keytab_path
 
-    def apply(self, request: httpx.Request) -> None:
-        return None
-
-    def as_httpx_auth(self) -> httpx.Auth | None:
+    def as_requests_auth(self) -> Any | None:
         try:
             from requests_kerberos import HTTPKerberosAuth  # type: ignore[import-not-found]
         except ImportError as e:
             raise PipelineError(
                 "SHP-E004", context={"auth_type": "kerberos"}, cause=e
             ) from e
-        # Same caveat: requests-kerberos targets requests, not httpx. v1 stops
-        # here and surfaces SHP-E004 with detail until an httpx-native adapter
-        # is wired in (or until ops provides corp AD lab + a tested handler).
-        raise PipelineError(
-            "SHP-E004",
-            context={"auth_type": "kerberos-no-httpx-adapter"},
-        )
+        return HTTPKerberosAuth()
 
 
 def make_handler(config: GlobalSharePointConfig) -> _AuthHandler:

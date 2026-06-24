@@ -1,13 +1,27 @@
 """FastAPI app: SP 2017 REST stub + HTML browser UI.
 
-The same FastAPI app object can be extended with additional routes (e.g. by
-the dashboard mock) — pass the desired InMemoryStore in to share state.
+Implements the architect-validated NTLM + digest-dance + MERGE protocol
+locked 2026-06-25 (Q1-Q4 thread):
+
+  * GET on the site URL returns a `Set-Cookie: WSSAUTH=mock-cookie` header
+    (digest dance step 1).
+  * POST `/_api/contextinfo` returns `{"d":{"GetContextWebInformation":
+    {"FormDigestValue":"<digest>"}}}` (step 2).
+  * Item POST honours the SP 2017 pseudo-verb header `X-Http-Method:
+    MERGE` (partial update) and `X-Http-Method: DELETE`; standard POST
+    (no header) creates.
+  * Writes require `X-RequestDigest`; the `store.digest_403_count` test
+    knob (per-store, decrement-on-use) forces 403 responses to exercise
+    the SpSession refresh-on-403 path.
+
+The same FastAPI app object can be extended with additional routes (e.g.
+by the dashboard mock) — pass the desired InMemoryStore in to share state.
 """
 from __future__ import annotations
 
 import html
+import json
 import re
-from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Path as FPath, Query, Request
@@ -20,9 +34,9 @@ from core.src.sharepoint_integration.mock_server.store import (
 
 _GETBYTITLE_RE = re.compile(r"getbytitle\('(?P<name>(?:[^']|'')*)'\)", re.IGNORECASE)
 
-
-def _decode_list_name(quoted: str) -> str:
-    return quoted.replace("''", "'")
+# Stable mock-side values — never used outside tests, so they're public-safe.
+_MOCK_COOKIE_VALUE = "WSSAUTH=mock-cookie"
+_MOCK_DIGEST = "mock-digest-1"
 
 
 def build_app(store: InMemoryStore | None = None) -> FastAPI:
@@ -34,6 +48,32 @@ def build_app(store: InMemoryStore | None = None) -> FastAPI:
     """
     app = FastAPI(title="HILDA Mock SharePoint", openapi_url=None, docs_url=None)
     app.state.store = store if store is not None else InMemoryStore()
+
+    # ---- Architect digest-dance endpoints ----
+
+    @app.get("/")
+    async def site_root_or_index(request: Request) -> Response:
+        """Dual-purpose root: when called with the SP digest-dance Accept
+        header (`application/json;odata=verbose`), returns the `Set-Cookie`
+        + JSON site stub for step 1 of the dance. Otherwise renders the
+        HTML browser UI."""
+        accept = request.headers.get("accept", "")
+        if "odata" in accept or "json" in accept and "html" not in accept:
+            resp = JSONResponse({"d": {"Title": "Mock SP site"}})
+            resp.headers["Set-Cookie"] = f"{_MOCK_COOKIE_VALUE}; Path=/"
+            return resp
+        return HTMLResponse(_render_index(request.app.state.store))
+
+    @app.post("/_api/contextinfo")
+    async def contextinfo(request: Request) -> JSONResponse:
+        """Digest dance step 2 — return FormDigestValue."""
+        store_: InMemoryStore = request.app.state.store
+        digest = store_.next_digest(_MOCK_DIGEST)
+        return JSONResponse(
+            {"d": {"GetContextWebInformation": {"FormDigestValue": digest}}}
+        )
+
+    # ---- REST surface ----
 
     @app.get("/_api/web/lists/getbytitle('{list_name}')/items")
     async def get_items(
@@ -67,11 +107,72 @@ def build_app(store: InMemoryStore | None = None) -> FastAPI:
         request: Request,
         list_name: str = FPath(...),
         body: dict[str, Any] = Body(...),
-    ) -> JSONResponse:
+    ) -> Response:
         store_: InMemoryStore = request.app.state.store
         decoded = _decode_list_name(list_name)
-        item_id = store_.create_item(decoded, body)
-        return JSONResponse({"Id": int(item_id), **body}, status_code=201)
+        x_http_method = request.headers.get("x-http-method")
+        digest = request.headers.get("x-requestdigest")
+
+        # All writes require the digest token + must satisfy the configurable
+        # 403 simulation knob.
+        digest_ok = _check_digest(store_, digest)
+        if not digest_ok:
+            return _403_digest_invalid()
+
+        fields = _unwrap_metadata(body)
+
+        if x_http_method == "MERGE":
+            # MERGE on POST-to-collection isn't standard SP but defensive:
+            # callers should target items({id}). Reject loudly.
+            return JSONResponse(
+                {"error": {"code": "-1, BadRequest", "message": "MERGE requires items({id})"}},
+                status_code=400,
+            )
+        if x_http_method == "DELETE":
+            return JSONResponse(
+                {"error": {"code": "-1, BadRequest", "message": "DELETE requires items({id})"}},
+                status_code=400,
+            )
+
+        item_id = store_.create_item(decoded, fields)
+        # SP 2017 odata=verbose returns wrapped body; tests + SpClient both handle.
+        return JSONResponse(
+            {"d": {"Id": int(item_id), **fields}}, status_code=201
+        )
+
+    @app.post("/_api/web/lists/getbytitle('{list_name}')/items({item_id})")
+    async def post_item(
+        request: Request,
+        list_name: str = FPath(...),
+        item_id: str = FPath(...),
+        body: dict[str, Any] | None = Body(default=None),
+    ) -> Response:
+        """Architect MERGE/DELETE pseudo-verb dispatcher on POST."""
+        store_: InMemoryStore = request.app.state.store
+        decoded = _decode_list_name(list_name)
+        x_http_method = (request.headers.get("x-http-method") or "").upper()
+        digest = request.headers.get("x-requestdigest")
+
+        digest_ok = _check_digest(store_, digest)
+        if not digest_ok:
+            return _403_digest_invalid()
+
+        if x_http_method == "MERGE":
+            fields = _unwrap_metadata(body or {})
+            try:
+                store_.update_item(decoded, item_id, fields)
+            except ListNotFoundError as e:
+                raise HTTPException(404, detail=str(e))
+            return Response(status_code=204)
+        if x_http_method == "DELETE":
+            try:
+                store_.delete_item(decoded, item_id)
+            except ListNotFoundError as e:
+                raise HTTPException(404, detail=str(e))
+            return Response(status_code=204)
+        raise HTTPException(
+            400, detail=f"unsupported X-Http-Method on items({item_id}): {x_http_method!r}"
+        )
 
     @app.patch("/_api/web/lists/getbytitle('{list_name}')/items({item_id})")
     async def update_item(
@@ -80,10 +181,12 @@ def build_app(store: InMemoryStore | None = None) -> FastAPI:
         item_id: str = FPath(...),
         body: dict[str, Any] = Body(...),
     ) -> Response:
+        """Legacy PATCH path — retained for the mock UI / direct REST callers
+        that don't speak the SP 2017 MERGE pseudo-verb."""
         store_: InMemoryStore = request.app.state.store
         decoded = _decode_list_name(list_name)
         try:
-            store_.update_item(decoded, item_id, body)
+            store_.update_item(decoded, item_id, _unwrap_metadata(body))
         except ListNotFoundError as e:
             raise HTTPException(404, detail=str(e))
         return Response(status_code=204)
@@ -103,30 +206,6 @@ def build_app(store: InMemoryStore | None = None) -> FastAPI:
         return Response(status_code=204)
 
     # ---- Web UI ----
-
-    @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request) -> str:
-        store_: InMemoryStore = request.app.state.store
-        names = store_.list_names()
-        rows = (
-            "".join(
-                f'<tr><td><a href="/lists/{html.escape(n)}">{html.escape(n)}</a></td>'
-                f"<td>{len(store_.get_list(n))}</td></tr>"
-                for n in names
-            )
-            or '<tr><td colspan="2"><i>no lists yet — POST to '
-            "<code>/_api/web/lists/getbytitle(&#x27;X&#x27;)/items</code> "
-            "to create one</i></td></tr>"
-        )
-        return _render(
-            "Mock SharePoint",
-            f"""
-            <h2>Lists</h2>
-            <table><thead><tr><th>Name</th><th>Items</th></tr></thead>
-            <tbody>{rows}</tbody></table>
-            <p><a href="/audit">Audit log</a> · <a href="/health">Health</a></p>
-            """,
-        )
 
     @app.get("/lists/{list_name}", response_class=HTMLResponse)
     async def list_detail(request: Request, list_name: str) -> str:
@@ -201,7 +280,72 @@ def build_app(store: InMemoryStore | None = None) -> FastAPI:
         request.app.state.store.reset()
         return {"ok": True}
 
+    @app.post("/__force_403_next_writes__")
+    async def force_403(request: Request, n: int = Query(default=1)) -> dict[str, int]:
+        """Test-only: cause the next N writes to return 403 to exercise the
+        SpSession refresh-on-403 path."""
+        request.app.state.store.digest_403_count = n
+        return {"queued_403": n}
+
     return app
+
+
+# ---- helpers ----
+
+
+def _decode_list_name(quoted: str) -> str:
+    return quoted.replace("''", "'")
+
+
+def _check_digest(store: InMemoryStore, digest: str | None) -> bool:
+    """Validate the X-RequestDigest header; if the test-only `digest_403_count`
+    counter is positive, consume one and fail the request."""
+    if store.digest_403_count > 0:
+        store.digest_403_count -= 1
+        return False
+    return bool(digest)
+
+
+def _403_digest_invalid() -> JSONResponse:
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error": {
+                "code": "-2130575251, Microsoft.SharePoint.SPException",
+                "message": {"lang": "en-US", "value": "The security validation for this page is invalid."},
+            }
+        },
+    )
+
+
+def _unwrap_metadata(body: dict[str, Any]) -> dict[str, Any]:
+    """Strip the SP 2017 `__metadata` wrapper; pass through if absent."""
+    if not isinstance(body, dict):
+        return body
+    return {k: v for k, v in body.items() if k != "__metadata"}
+
+
+def _render_index(store: InMemoryStore) -> str:
+    names = store.list_names()
+    rows = (
+        "".join(
+            f'<tr><td><a href="/lists/{html.escape(n)}">{html.escape(n)}</a></td>'
+            f"<td>{len(store.get_list(n))}</td></tr>"
+            for n in names
+        )
+        or '<tr><td colspan="2"><i>no lists yet — POST to '
+        "<code>/_api/web/lists/getbytitle(&#x27;X&#x27;)/items</code> "
+        "to create one</i></td></tr>"
+    )
+    return _render(
+        "Mock SharePoint",
+        f"""
+        <h2>Lists</h2>
+        <table><thead><tr><th>Name</th><th>Items</th></tr></thead>
+        <tbody>{rows}</tbody></table>
+        <p><a href="/audit">Audit log</a> · <a href="/health">Health</a></p>
+        """,
+    )
 
 
 def _match_filter(item: dict[str, Any], odata_filter: str) -> bool:
@@ -258,3 +402,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
 def _render(title: str, body: str) -> str:
     return _TEMPLATE.format(title=html.escape(title), body=body)
+
+
+# Keep for downstream import-compat (tests may import json):
+_json = json

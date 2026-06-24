@@ -1,64 +1,74 @@
-"""SpClient: async SP 2017 REST HTTP client.
+"""SpClient: async SP 2017 REST client over a sync `SpSession` transport.
 
-No HILDA model knowledge — takes SP-native list names and SP internal column
-names. List name → SP REST URL conversion happens here. Pagination, retry,
-auth all handled at this layer.
+The async public surface is preserved per the existing key choice; sync
+`requests-ntlm` + digest-dance calls live in `SpSession` and are wrapped
+via `asyncio.to_thread` here.
 
-Anchors [D-006] (SP REST + AD auth), NFR-8 (Lists + classic web parts only).
+Architect lock 2026-06-25 (Q1-Q4):
+    - NTLM via `requests-ntlm` with full `corp\\<user>` literal (Q1).
+    - Lazy digest acquisition; refresh + retry on 403 (Q2).
+    - HILDA's 3-list scope (Milestones/Projects/Deliverables per-customer)
+      is enforced upstream by `FileBasedListProvider` (Q3); SpClient is
+      list-agnostic per `[D-020]`.
+    - One SpSession per Celery task; no session pool (Q4).
 
-Auth: NTLM (`requests-ntlm` / `httpx-ntlm`) and Kerberos (`requests-kerberos`)
-both wrap sync libs at the httpx auth layer.  NTLM **code snippets pending
-architect delivery** (per architect Q4-adjacent thread 2026-06-25); the
-`NtlmAuthHandler` shape here is the Ph-1 placeholder and may be revised to
-match the architect's reference once received.  Do NOT redesign without
-those snippets in hand — see `auth.py` for the matching TODO(architect)
-markers.
+Anchors `[D-006]` (SP REST + AD auth), NFR-8 (Lists + classic web parts).
+Pagination kept as `$top + __next` auto-follow continuation pending architect
+Q4 follow-up (marked OPEN in MODULE.md).
 """
 from __future__ import annotations
 
 import asyncio
 from typing import Any, Iterable
 
-import httpx
+import requests
 
 from core.src.diagnostics import PipelineError
-from core.src.sharepoint_integration.auth import make_handler
 from core.src.sharepoint_integration.config import GlobalSharePointConfig
-
-
-def _quote_list_name(name: str) -> str:
-    """SP `getbytitle('X')` requires single-quote escaping."""
-    return name.replace("'", "''")
+from core.src.sharepoint_integration.sp_session import SpSession
 
 
 class SpClient:
-    """Async SP REST client. Construct once per process; reuse the underlying httpx client."""
+    """Async SP REST client. Construct one per Celery task per architect Q4."""
 
     def __init__(
         self,
         config: GlobalSharePointConfig,
         *,
-        transport: httpx.AsyncBaseTransport | None = None,
+        session: SpSession | None = None,
     ) -> None:
+        """Build a client; an explicit `session` overrides the default
+        NTLM-credential-driven build path (used by tests + the mock-server
+        in-process driver)."""
         self.config = config
-        self._auth_handler = make_handler(config)
-        kwargs: dict[str, Any] = dict(
-            base_url=config.site_url.rstrip("/"),
-            timeout=config.timeout_seconds,
-            headers={
-                "Accept": "application/json;odata=nometadata",
-                "Content-Type": "application/json;odata=nometadata",
-            },
+        if session is not None:
+            self._session = session
+        else:
+            self._session = self._make_session_from_config(config)
+
+    @staticmethod
+    def _make_session_from_config(config: GlobalSharePointConfig) -> SpSession:
+        if config.auth_type == "ntlm":
+            if not config.username or not config.password:
+                raise PipelineError(
+                    "SHP-E004",
+                    context={"auth_type": "ntlm-missing-creds"},
+                )
+            return SpSession(
+                site_url=config.site_url,
+                ntlm_user=config.username,
+                ntlm_pass=config.password,
+            )
+        # `none` / `kerberos` paths require an externally injected session
+        # — see test fixtures + mock-server driver (Kerberos handler stays
+        # placeholder until corp AD lab access).
+        raise PipelineError(
+            "SHP-E004",
+            context={"auth_type": f"requires-explicit-session:{config.auth_type}"},
         )
-        if transport is not None:
-            kwargs["transport"] = transport
-        auth_obj = self._auth_handler.as_httpx_auth()
-        if auth_obj is not None:
-            kwargs["auth"] = auth_obj
-        self._client = httpx.AsyncClient(**kwargs)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await asyncio.to_thread(self._session.close)
 
     async def __aenter__(self) -> "SpClient":
         return self
@@ -74,7 +84,7 @@ class SpClient:
         select: list[str] | None = None,
         filter_expr: str | None = None,
     ) -> list[dict[str, Any]]:
-        # Pagination: standard SP `$top + odata.nextLink` continuation pattern.
+        # Pagination: standard SP `$top + __next` continuation pattern.
         # TODO(architect Q4 2026-06-25): architect comment "every element accessed
         # individually as far as I know" leaves this OPEN — confirm pattern when
         # NTLM code snippets land. Ph-1 ships with auto-follow continuation as
@@ -90,94 +100,152 @@ class SpClient:
         first = True
         while next_url is not None:
             if first:
-                resp = await self._request("GET", next_url, params=params)
+                resp = await self._sp_get(next_url, params=params)
                 first = False
             else:
-                resp = await self._request("GET", next_url)
-            payload = resp.json()
-            items.extend(payload.get("value", []))
-            # SP 2017 returns the continuation under `odata.nextLink` (nometadata)
-            # or `@odata.nextLink` (verbose). Both surfaces handled defensively.
-            next_url = payload.get("odata.nextLink") or payload.get("@odata.nextLink")
+                resp = await self._sp_get(next_url)
+            payload = self._json_or_raise(resp, list_name)
+            # SP 2017 odata=verbose wraps results in {"d": {"results": [...]}};
+            # nometadata returns {"value": [...]} flat. Handle both.
+            d = payload.get("d")
+            if isinstance(d, dict) and "results" in d:
+                items.extend(d["results"])
+                next_url = d.get("__next") or payload.get("@odata.nextLink")
+            else:
+                items.extend(payload.get("value", []))
+                next_url = payload.get("odata.nextLink") or payload.get(
+                    "@odata.nextLink"
+                )
         return items
 
     async def create_list_item(
-        self, list_name: str, fields: dict[str, Any]
+        self,
+        list_name: str,
+        fields: dict[str, Any],
+        *,
+        customer_id: str,
     ) -> str:
-        url = self._items_url(list_name)
-        resp = await self._request("POST", url, json=fields)
-        body = resp.json()
-        # SP returns the created item; ID is "Id" or "ID" depending on endpoint config
-        item_id = body.get("Id") or body.get("ID") or body.get("id")
+        status, body = await asyncio.to_thread(
+            self._session.create, list_name, customer_id, fields
+        )
+        if status >= 400:
+            sp_code = _extract_sp_code_from_payload(body, status)
+            if status == 401:
+                raise PipelineError(
+                    "SHP-E004",
+                    context={"auth_type": "ntlm", "list": list_name},
+                )
+            raise PipelineError(
+                "SHP-E001",
+                context={
+                    "list": list_name,
+                    "status": status,
+                    "sp_error_code": sp_code,
+                },
+            )
+        # SP 2017 odata=verbose: {"d": {"Id": N, ...}}; nometadata: {"Id": N}.
+        d = body.get("d") if isinstance(body, dict) else None
+        source = d if isinstance(d, dict) else body
+        item_id = (
+            source.get("Id") or source.get("ID") or source.get("id")
+            if isinstance(source, dict)
+            else None
+        )
         if item_id is None:
             raise PipelineError(
                 "SHP-E001",
                 context={
                     "list": list_name,
-                    "status": resp.status_code,
+                    "status": status,
                     "sp_error_code": "missing-id-in-response",
                 },
             )
         return str(item_id)
 
     async def update_list_item(
-        self, list_name: str, item_id: str, fields: dict[str, Any]
+        self,
+        list_name: str,
+        item_id: str,
+        fields: dict[str, Any],
+        *,
+        customer_id: str,
     ) -> None:
-        url = self._item_url(list_name, item_id)
-        await self._request(
-            "PATCH",
-            url,
-            json=fields,
-            headers={"IF-MATCH": "*"},
+        status = await asyncio.to_thread(
+            self._session.merge, list_name, customer_id, item_id, fields
         )
+        if status >= 400:
+            if status == 401:
+                raise PipelineError(
+                    "SHP-E004",
+                    context={"auth_type": "ntlm", "list": list_name},
+                )
+            raise PipelineError(
+                "SHP-E001",
+                context={
+                    "list": list_name,
+                    "status": status,
+                    "sp_error_code": f"http-{status}",
+                },
+            )
 
     async def delete_list_item(self, list_name: str, item_id: str) -> None:
-        url = self._item_url(list_name, item_id)
-        await self._request("DELETE", url, headers={"IF-MATCH": "*"})
+        status = await asyncio.to_thread(self._session.delete, list_name, item_id)
+        if status >= 400:
+            if status == 401:
+                raise PipelineError(
+                    "SHP-E004",
+                    context={"auth_type": "ntlm", "list": list_name},
+                )
+            raise PipelineError(
+                "SHP-E001",
+                context={
+                    "list": list_name,
+                    "status": status,
+                    "sp_error_code": f"http-{status}",
+                },
+            )
 
     async def batch_create(
-        self, list_name: str, items: Iterable[dict[str, Any]]
+        self,
+        list_name: str,
+        items: Iterable[dict[str, Any]],
+        *,
+        customer_id: str,
     ) -> list[str]:
         # v1: simple sequential — switch to SP $batch if perf demands it.
         out: list[str] = []
         for fields in items:
-            out.append(await self.create_list_item(list_name, fields))
+            out.append(
+                await self.create_list_item(list_name, fields, customer_id=customer_id)
+            )
         return out
 
     async def batch_update(
-        self, list_name: str, updates: Iterable[tuple[str, dict[str, Any]]]
+        self,
+        list_name: str,
+        updates: Iterable[tuple[str, dict[str, Any]]],
+        *,
+        customer_id: str,
     ) -> None:
         for item_id, fields in updates:
-            await self.update_list_item(list_name, item_id, fields)
+            await self.update_list_item(
+                list_name, item_id, fields, customer_id=customer_id
+            )
 
     # ---- internals ----
 
     def _items_url(self, list_name: str) -> str:
-        quoted = _quote_list_name(list_name)
-        return f"/_api/web/lists/getbytitle('{quoted}')/items"
+        return self._session._items_url(list_name)  # noqa: SLF001 — internal helper
 
-    def _item_url(self, list_name: str, item_id: str) -> str:
-        return f"{self._items_url(list_name)}({item_id})"
-
-    async def _request(
+    async def _sp_get(
         self,
-        method: str,
         url: str,
-        *,
         params: dict[str, str] | None = None,
-        json: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> requests.Response:
         last_exc: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
             try:
-                resp = await self._client.request(
-                    method,
-                    url,
-                    params=params,
-                    json=json,
-                    headers=headers,
-                )
+                resp = await asyncio.to_thread(self._session.get, url, params)
                 if resp.status_code in (429, 503) and attempt < self.config.max_retries:
                     await asyncio.sleep(
                         self.config.retry_backoff_seconds * (2**attempt)
@@ -186,7 +254,7 @@ class SpClient:
                 if resp.status_code == 401:
                     raise PipelineError(
                         "SHP-E004",
-                        context={"auth_type": self._auth_handler.auth_type},
+                        context={"auth_type": self.config.auth_type},
                     )
                 if resp.status_code >= 400:
                     sp_code = _extract_sp_code(resp)
@@ -199,7 +267,7 @@ class SpClient:
                         },
                     )
                 return resp
-            except httpx.HTTPError as e:
+            except requests.RequestException as e:
                 last_exc = e
                 if attempt < self.config.max_retries:
                     await asyncio.sleep(
@@ -215,7 +283,6 @@ class SpClient:
                     },
                     cause=e,
                 ) from e
-        # Should not reach here; the loop exits via return or raise.
         raise PipelineError(
             "SHP-E001",
             context={
@@ -226,19 +293,44 @@ class SpClient:
             cause=last_exc,
         )
 
+    def _json_or_raise(
+        self, resp: requests.Response, list_name: str
+    ) -> dict[str, Any]:
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise PipelineError(
+                "SHP-E001",
+                context={
+                    "list": list_name,
+                    "status": resp.status_code,
+                    "sp_error_code": "invalid-json",
+                },
+                cause=e,
+            ) from e
 
-def _extract_sp_code(resp: httpx.Response) -> str:
+
+def _extract_sp_code(resp: requests.Response) -> str:
     try:
         body = resp.json()
-        if isinstance(body, dict):
-            err = body.get("error") or body.get("odata.error")
-            if isinstance(err, dict):
-                code = err.get("code") or err.get("@code")
-                if isinstance(code, str):
-                    return code.split(",", 1)[0]
-    except (ValueError, KeyError):
-        pass
-    return f"http-{resp.status_code}"
+    except ValueError:
+        return f"http-{resp.status_code}"
+    return _extract_sp_code_from_payload(body, resp.status_code)
+
+
+def _extract_sp_code_from_payload(body: Any, status: int) -> str:
+    if isinstance(body, dict):
+        err = body.get("error") or body.get("odata.error")
+        if isinstance(err, dict):
+            code = err.get("code") or err.get("@code")
+            if isinstance(code, str):
+                return code.split(",", 1)[0]
+            message = err.get("message")
+            if isinstance(message, dict):
+                value = message.get("value")
+                if isinstance(value, str):
+                    return value.split(",", 1)[0]
+    return f"http-{status}"
 
 
 def _list_from_url(url: str) -> str:

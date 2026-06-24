@@ -33,6 +33,19 @@ class InMemoryStore:
     _next_id: dict[str, int] = field(default_factory=dict)
     _audit: list[_AuditEntry] = field(default_factory=list)
     _lock: RLock = field(default_factory=RLock)
+    # Test-only knob: number of upcoming writes that should be forced to 403
+    # to exercise the SpSession digest-refresh path per architect Q2
+    # 2026-06-25. Decrements on each consumed write.
+    digest_403_count: int = 0
+    _digest_counter: int = 0
+
+    def next_digest(self, base: str) -> str:
+        """Return a fresh digest token. Each call returns a uniquely
+        suffixed value so tests can assert that a refresh actually issued
+        a new digest."""
+        with self._lock:
+            self._digest_counter += 1
+            return f"{base}-{self._digest_counter}"
 
     def ensure_list(self, list_name: str) -> None:
         with self._lock:
@@ -91,6 +104,8 @@ class InMemoryStore:
             self._lists.clear()
             self._next_id.clear()
             self._audit.clear()
+            self.digest_403_count = 0
+            self._digest_counter = 0
 
     def _record(
         self,

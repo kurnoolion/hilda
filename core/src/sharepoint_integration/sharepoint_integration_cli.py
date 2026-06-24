@@ -14,8 +14,6 @@ import sys
 import uuid
 from pathlib import Path
 
-import httpx
-
 from core.src.diagnostics import PipelineError, ReportType, ReportWriter
 from core.src.sharepoint_integration import (
     FileBasedListProvider,
@@ -24,7 +22,7 @@ from core.src.sharepoint_integration import (
     SpClient,
     SpCrud,
 )
-from core.src.sharepoint_integration.mock_server import build_app
+from core.src.sharepoint_integration.mock_server import MockSpSession, build_app
 
 DEFAULT_CONFIG = Path("config/sharepoint_integration.json")
 DEFAULT_BASE = Path("customizations/sharepoint_config")
@@ -81,10 +79,10 @@ async def _mock(args: argparse.Namespace) -> int:
     """In-process round trip against the mock server."""
     writer = ReportWriter("SHP", args.run_id)
     app = build_app()
-    transport = httpx.ASGITransport(app=app)
     cfg = GlobalSharePointConfig(
         site_url="http://mock-sp", auth_type="none", page_size=10
     )
+    session = MockSpSession(app, site_url=cfg.site_url)
 
     if not (args.base_path / "customers").exists():
         writer.make(
@@ -108,7 +106,7 @@ async def _mock(args: argparse.Namespace) -> int:
         for entity, entry in cfg_obj.lists.items():
             app.state.store.ensure_list(entry.name)
 
-    client = SpClient(cfg, transport=transport)
+    client = SpClient(cfg, session=session)
     crud = SpCrud(client, provider)
     customers_configured = len(provider._customers)  # noqa: SLF001
     reachable = 0

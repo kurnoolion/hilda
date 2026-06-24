@@ -23,6 +23,14 @@ Two orthogonal concerns, composed by `list_crud.py`:
 
 **SP REST URL pattern** (architect-confirmed via VS Code sample 2026-06-25): site URL = `<corp-sp-root>/sp/tg/<TG_SITE_NAME>` (one TG site per team-group); list URL = `<site>/_api/web/lists/getbytitle('<list_name>')/items?$top=N&$filter=...&$select=...`; request header = `Accept: application/json;odata=verbose`. The architect's sample is a browser-context XMLHttpRequest with implicit cookie auth (SP same-origin web part); HILDA's server-side `SpClient` uses NTLM/Kerberos via service account per `[D-006]`. **Pagination — OPEN**: architect Q4 2026-06-25 ambiguous ("every element accessed individually"). Ph-1 documents standard SP `$top + __next` auto-follow continuation; flag for confirmation when NTLM code snippets land. **TODO**: confirm pagination pattern with architect on NTLM snippet delivery.
 
+**NTLM auth + digest-dance lifecycle** (architect Q1-Q4 lock 2026-06-25; TODO(D-117 candidate) to ratify as ADR): the production transport is `requests` + `requests-ntlm` wrapped in `asyncio.to_thread` per the existing "NTLM sync-wrapped vs. native async" key choice. Encapsulated in `sp_session.py:SpSession`. Per architect:
+  * **Q1** — `GlobalSharePointConfig.username` stores the FULL `corp\<user>` literal (NT4-style domain prefix included); there is no separate domain field.
+  * **Q2** — Lazy digest acquisition. On the first write, run the 3-step dance: (1) NTLM-authed `GET <site_url>` to capture the `WSSAUTH` cookie from `Set-Cookie`; (2) `POST <site_url>/_api/contextinfo` to retrieve `d.GetContextWebInformation.FormDigestValue`. Cache cookie + digest in-session. On a 403 from any subsequent write, re-run steps 1-2 and retry the write exactly once. No time-based expiry tracking.
+  * **Q3** — HILDA writes ONLY `Milestones_<customer_id>` / `Projects_<customer_id>` / `Deliverables_<customer_id>` (3-list per-customer scope per `[D-104]`). `SpSession` itself is list-agnostic per `[D-020]`; scope enforcement is upstream in `FileBasedListProvider`.
+  * **Q4** — One `SpSession` per Celery task instance; no session pool. Sessions are short-lived per task.
+
+**SP 2017 MERGE protocol for partial updates**: writes use POST with the pseudo-verb header `X-Http-Method: MERGE` plus `IF-MATCH: *` plus `X-RequestDigest: <digest>` plus body wrapped in `{"__metadata": {"type": "SP.Data.<list>_x005f_<customer_id>ListItem"}, ...fields}`. The type discriminator is built by `sp_session.list_item_type(list_display_name)` — encoding underscores as `_x005f_` and spaces as `_x0020_`. `customer_id` flows from `SpCrud.update_item(scope=...)` through `SpClient.update_list_item(customer_id=...)` to `SpSession.merge` so the `__metadata.type` can be composed correctly.
+
 **Sub-module: `mock_server/`** — local FastAPI-backed SP stub for SP-less dev + integration tests. `mock_server/store.py:InMemoryStore` (thread-safe, list-addressed by display name, monotonic per-list item IDs, audit log) + `mock_server/app.py:build_app(store)` expose the SP 2017 REST surface that `SpClient` consumes + an HTML browser UI for manual data inspection. Started via `sharepoint_integration_cli --serve --port <N>`. Not used in production; not under the `[D-006]` SP-2017-only invariant — the mock surface is a test-time convenience that the real SP 2017 box also supports.
 
 **Two halves of the same conversation**: SP UI engineer (corp-side server work — SP List definitions, classic web-parts, JS forms, SP-alert email config, FR-87 TPM resolution buttons) + this module (HILDA-side client over SP REST + customer-deployment-specific list/column maps in `customizations/`). Neither half stands alone; column-map YAML changes here must be matched by SP UI engineer's SP-side list-schema work and vice versa.
@@ -47,23 +55,23 @@ class SpClient:
     ) -> list[dict[str, Any]]: ...
 
     async def create_list_item(
-        self, list_name: str, fields: dict[str, Any]
+        self, list_name: str, fields: dict[str, Any], *, customer_id: str
     ) -> str: ...  # returns SP item ID
 
     async def update_list_item(
-        self, list_name: str, item_id: str, fields: dict[str, Any]
+        self, list_name: str, item_id: str, fields: dict[str, Any], *, customer_id: str
     ) -> None: ...
 
     async def batch_create(
-        self, list_name: str, items: list[dict[str, Any]]
+        self, list_name: str, items: list[dict[str, Any]], *, customer_id: str
     ) -> list[str]: ...  # returns list of SP item IDs
 
     async def batch_update(
-        self, list_name: str, updates: list[tuple[str, dict[str, Any]]]
+        self, list_name: str, updates: list[tuple[str, dict[str, Any]]], *, customer_id: str
     ) -> None: ...
 ```
 
-Auth: NTLM via `requests-ntlm` (sync wrapped in `asyncio.to_thread`) or Kerberos (`requests-kerberos`) — both adapters behind an `_AuthHandler` internal protocol. Selected by `config.auth_type`. Retry: exponential backoff on 429/503, configurable via `config.max_retries` + `config.retry_backoff_seconds`.
+Auth: NTLM via `requests-ntlm` `HttpNtlmAuth` (architect lock 2026-06-25) — username is the full `corp\<user>` literal per architect Q1. The sync `requests.Session` lives inside `SpSession`; `SpClient` wraps each call in `asyncio.to_thread` per the existing key choice. Kerberos remains a placeholder (deferred until corp AD lab access). Selected by `config.auth_type`. Retry: exponential backoff on 429/503 for reads (configurable via `config.max_retries` + `config.retry_backoff_seconds`); writes use the dedicated 403→refresh-digest→retry-once path per architect Q2.
 
 ### SharePointListProvider Protocol
 
@@ -214,6 +222,7 @@ Customer-specific SP list names and SP internal column names live in `customizat
 - **Column maps are append-only** (added 2026-06-10) — when HILDA adds canonical fields (e.g., the 2026-06-08 cascade added `target_folder`, `no_customer_upload`, FR-87 TPM-resolution fields on `DeliveryItems`; `rules_paused` per `[D-108]` for FR-31 sub-1), the SP UI engineer adds the corresponding SP columns + the customer YAML extends the `columns:` block. No code change in this module — list-agnosticism per `[D-020]` makes the addition mechanical. TGGroups-side fields DROPPED per `[D-106]` (TGGroupBase Pydantic model removed; TG denormalization onto delivery_items lives in customer YAML, not SP-side TG list).
 - **3-list per-customer scope per architect Q1 lock 2026-06-25 + `[D-104]`** — HILDA reads/writes ONLY `Milestones_<customer_id>` + `Projects_<customer_id>` + `Deliverables_<customer_id>`. Adding a 4th list to HILDA's runtime SP scope requires an ADR. SP UI engineer's TG site contains additional SP lists (`TasksTemplate`, `Tasks`, `Trials`, `Activities`, `Email`, `CommunicationLog`) — HILDA does not read or write those; they are SP UI engineer's display surface only.
 - **Per-customer SP list naming `<base>_<customer_id>`** per architect Q1 confirmed pattern 2026-06-25 + `[D-104]`. List names embed the customer identifier (e.g., `Projects_<customer_id>`); HILDA resolves the name via `SharePointListProvider.get_list_name(entity, scope)` — never hardcoded.
+- **NTLM digest-dance lifecycle per architect Q1-Q4 lock 2026-06-25** (TODO(D-117 candidate) to ratify as ADR) — production writes go through `SpSession` which (1) NTLM-auths with the FULL `corp\<user>` literal (Q1, no separate domain field), (2) lazily acquires the WSSAUTH cookie + FormDigestValue on first write via the GET-site + POST-contextinfo dance (Q2), (3) on 403 refreshes the digest and retries the write exactly once (Q2), and (4) is constructed per Celery task (Q4, no session pool). The MERGE protocol for partial updates posts to `items({id})` with `X-Http-Method: MERGE`, `IF-MATCH: *`, `X-RequestDigest`, and a body wrapped in `{"__metadata": {"type": "SP.Data.<list>_x005f_<customer_id>ListItem"}, ...}`. The type discriminator is built by `sp_session.list_item_type()` with `_` → `_x005f_` and ` ` → `_x0020_` encoding. `customer_id` flows through every write path (`SpCrud.create_item/update_item` → `SpClient.create_list_item/update_list_item(customer_id=...)` → `SpSession.create/merge`) so the `__metadata.type` can be composed per-customer.
 - **Field-name authority** per architect Q5 2026-06-25: `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (3 worksheets: Milestones / Deliverables / Projects) is the AUTHORITATIVE source for SP internal column names. Stale `HILDA_SP_Schema.xlsx` and `DeliveryItem_visibility_review.xlsx` were renamed `_DEPRECATED_2026-06-15.xlsx` in the same directory; do not reference them.
 
 ---
@@ -312,9 +321,9 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 
 <!-- BEGIN:STRUCTURE -->
 ### `auth.py`
-- `KerberosAuthHandler` — class — pub — Kerberos/SPNEGO handler; raises SHP-E004 until corp AD lab + httpx-native adapter wired.
+- `KerberosAuthHandler` — class — pub — Kerberos/SPNEGO placeholder; raises SHP-E004 until corp AD lab access.
 - `NoAuthHandler` — class — pub — Pass-through handler for mock-server dev.
-- `NtlmAuthHandler` — class — pub — NTLM handler via httpx-ntlm; falls back to SHP-E004 when no httpx adapter available.
+- `NtlmAuthHandler` — class — pub — NTLM handler via `requests-ntlm` `HttpNtlmAuth`; username is full `corp\<user>` literal per architect Q1 2026-06-25.
 - `make_handler(config) -> _AuthHandler` — function — pub — Factory: picks NoAuth/Ntlm/Kerberos from `config.auth_type`; raises SHP-E004 on misconfig.
 
 ### `config.py`
@@ -332,10 +341,13 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 - `SharePointListProvider` — Protocol — pub (via `__all__`) — Pure lookup: `get_list_name`, `get_column_map`, `to_sp_fields`, `from_sp_fields`.
 
 ### `mock_server/app.py`
-- `build_app(store=None) -> FastAPI` — function — pub — Builds the mock SP FastAPI app exposing SP 2017 REST + HTML browser UI over a shared `InMemoryStore`.
+- `build_app(store=None) -> FastAPI` — function — pub — Builds the mock SP FastAPI app exposing SP 2017 REST + the architect digest-dance endpoints (`GET /` Set-Cookie + `POST /_api/contextinfo` FormDigestValue) + MERGE/DELETE pseudo-verb dispatch on POST + HTML browser UI over a shared `InMemoryStore`.
+
+### `mock_server/client.py`
+- `MockSpSession` — class — pub (via `mock_server.__init__`) — `SpSession` subclass that drives an in-process FastAPI `mock_server` app via `TestClient`; runs the full digest dance against the mock to exercise `SpClient` end-to-end without NTLM or real network.
 
 ### `mock_server/store.py`
-- `InMemoryStore` — dataclass — pub — Thread-safe in-memory list store backing the mock server; lists addressed by display name; monotonic per-list item IDs; audit log.
+- `InMemoryStore` — dataclass — pub — Thread-safe in-memory list store backing the mock server; lists addressed by display name; monotonic per-list item IDs; audit log; `digest_403_count` test knob to force 403s; `next_digest(base)` issues unique tokens per call.
 - `ListNotFoundError` — class (KeyError) — pub — Raised when a list referenced by name does not exist.
 
 ### `sharepoint_integration_cli.py`
@@ -344,5 +356,9 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 - `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` / `--mock` / `--dry-run --customer` / `--serve --port` modes.
 
 ### `sp_client.py`
-- `SpClient` — class — pub (via `__all__`) — Async SP 2017 REST HTTP client (httpx); list-item GET/POST/PATCH/DELETE + batch + pagination; retry on 429/503; OData $select/$filter/$top; SP error → SHP-E001/E004 mapping.
+- `SpClient` — class — pub (via `__all__`) — Async SP 2017 REST client over an injected sync `SpSession` transport (architect lock 2026-06-25); list-item GET/POST(MERGE)/POST(DELETE)/PATCH + batch + pagination; retry on 429/503 for reads; per-call `customer_id` flows to `SpSession` for `__metadata.type` composition; SP error → SHP-E001/E004 mapping.
+
+### `sp_session.py`
+- `SpSession` — class — pub (via `__all__`) — Sync SP 2017 NTLM session encapsulating `requests-ntlm` auth + digest dance (lazy WSSAUTH-cookie + FormDigestValue acquisition; 403→refresh→retry-once per architect Q2 2026-06-25) + SP 2017 MERGE protocol for partial updates (`__metadata` wrapper + `X-Http-Method: MERGE` + `IF-MATCH: *`).
+- `list_item_type(list_display_name) -> str` — function — pub (via `__all__`) — Encode the SP 2017 `__metadata.type` discriminator: `_` → `_x005f_`, ` ` → `_x0020_`; returns `SP.Data.<encoded>ListItem`.
 <!-- END:STRUCTURE -->
