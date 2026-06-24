@@ -83,17 +83,27 @@ class SpClient:
         list_name: str,
         select: list[str] | None = None,
         filter_expr: str | None = None,
+        expand: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         # Pagination: standard SP `$top + __next` continuation pattern.
         # TODO(architect Q4 2026-06-25): architect comment "every element accessed
         # individually as far as I know" leaves this OPEN — confirm pattern when
         # NTLM code snippets land. Ph-1 ships with auto-follow continuation as
         # documented in MODULE.md Architecture / `[D-006]`.
+        #
+        # `expand` per architect lock 2026-06-26 (Q9): User-type Person/Group fields
+        # like `Projects.TPM` return only a LookupId by default; HILDA needs the
+        # nested EMail to derive tpm_corp_id per [D-088] 3-tuple. Caller passes
+        # expand=["TPM"] + select=["Id", "Title", "TPM/EMail", "TPM/Title"] so the
+        # response carries the nested object: {"TPM": {"EMail": "abc@corp.com",
+        # "Title": "Abc Xyz"}}. Standard SP REST OData $expand syntax.
         params: dict[str, str] = {"$top": str(self.config.page_size)}
         if select:
             params["$select"] = ",".join(select)
         if filter_expr:
             params["$filter"] = filter_expr
+        if expand:
+            params["$expand"] = ",".join(expand)
         url = self._items_url(list_name)
         items: list[dict[str, Any]] = []
         next_url: str | None = url

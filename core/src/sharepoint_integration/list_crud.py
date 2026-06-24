@@ -25,6 +25,8 @@ class SpCrud:
         entity: str,
         scope: ListScope,
         item_id: int | str,
+        expand: list[str] | None = None,
+        extra_select: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """Single-row fetch by SP Id per architect lock 2026-06-26.
 
@@ -33,14 +35,25 @@ class SpCrud:
         SP row on every page load (no caching Ph-1). The `<sp_id>` IS SP's `Id`
         (auto-counter PK) per architect lock 2026-06-26. Returns None when the
         SP row does not exist (404-equivalent at dashboard handler).
+
+        `expand` + `extra_select` per architect Q9 lock 2026-06-26 -- for
+        User/Person fields like `Projects.TPM`, caller passes
+        expand=["TPM"] + extra_select=["TPM/EMail", "TPM/Title"] to get the
+        nested object: `row["TPM"] = {"EMail": "abc@corp.com", "Title": ...}`.
+        HILDA derives tpm_corp_id via `row["TPM"]["EMail"].split("@")[0]` per
+        [D-088] 3-tuple.
         """
         list_name = self._provider.get_list_name(entity, scope)
         col_map = self._provider.get_column_map(entity, scope)
-        select = list(col_map.values()) or None
+        select_list = list(col_map.values())
+        if extra_select:
+            select_list.extend(extra_select)
+        select = select_list or None
         items_sp = await self._client.get_list_items(
             list_name,
             select=select,
             filter_expr=f"Id eq {int(item_id)}",
+            expand=expand,
         )
         if not items_sp:
             return None

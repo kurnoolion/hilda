@@ -1,6 +1,17 @@
 # =====================================================================================
-# HILDA SharePoint configuration -- mock_customer (privacy-clean Ph-1 testing scope)
+# HILDA SharePoint configuration -- placeholder sample for github (Ph-1 reference)
 # =====================================================================================
+#
+# IMPORTANT -- Point 3 architect policy 2026-06-26: production customer.yaml lives
+# LOCALLY only (not on public github). Architect maintains the corp-SP-derived
+# column-name mappings on the Linux deployment box. This github copy is a
+# privacy-clean SAMPLE / RUNTIME PLACEHOLDER showing the YAML SHAPE -- field maps
+# below use placeholder identifiers and may be partly out-of-date with the real
+# SP schema. To test against your live SP, replace this file's content with the
+# production version maintained locally.
+#
+# (Filename rename 2026-06-26: was mock_customer.yaml; renamed customer.yaml per
+# architect Q1 lock -- single file per deployment.)
 #
 # Status: 3-list per-customer scope per Module #11 architect Q1 lock 2026-06-25
 # (commit 9810e33) + [D-104] Projects per-customer.
