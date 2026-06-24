@@ -2455,3 +2455,119 @@ NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `wo
 - (f) dashboard now owns FR-87 lifecycle end-to-end -- read (FR-57 + FR-87 button info display) + write (3 new POST endpoints). Single-module responsibility.
 
 **Anchors**: FR-57, FR-58, FR-60, FR-61, FR-74 per `[D-068]` / `[D-077]`, FR-87 (A->B->C strict ordering), `[D-047]` SP alert email channel (sp_alert_parser ORIGINAL scope), `[D-064]` HILDA -> SP REST writeback, `[D-068]` audit-only SP fields for TPM resolutions, `[D-074]` HILDA-rendered link-out + per-load READ, `[D-117]` SP NTLM digest-dance for FR-87 POST writeback, `[D-119]` tpm_resolved_doc_type 4-value, `dashboard/MODULE.md` (will be updated next session), `email_service/MODULE.md` (will drop FR-87 refs next session), `automation_rules.yaml` (3 FR-87 rules to be removed next session), commit `0dfb1d4` (FR-87 handlers to be removed), commit `1caa106` (FR-87 rules to be removed).
+
+---
+
+## D-123: Dashboard `/docs/<customer_id>/<sp_id>` URL + per-load SP READ + no caching + no per-PM auth Ph-1
+
+**Date**: 2026-06-26
+**Status**: Ratified
+
+**Context**: The dashboard module's "View Documents" page (FR-57/61) is the TPM-facing surface that opens in a new browser tab when TPM clicks the SP UI engineer's `<a href>` link per `[D-074]` link-out architecture. The original dashboard Ph-1 dev (commit `dc31949`) used a single-segment `/docs/<delivery_item_id>` route + read documents only from HILDA storage + no SP READ at page-load. Yesterday's compliance review surfaced 5 gaps in this design vs the SP UI engineer's actual link convention + per-load READ requirement per `[D-074]`. Architect Q1-Q3 + Q9 locks 2026-06-26 (after running live SP REST probe) resolved all gaps.
+
+**Decision**: Dashboard's "View Documents" flow bundles 4 sub-decisions:
+- (a) **URL pattern**: `GET /docs/{customer_id}/{sp_id}` -- 2-segment (was single-segment). `<customer_id>` resolves the SP list name (`Deliverables_<customer_id>`); `<sp_id>` IS SP's `Id` auto-counter PK = HILDA's `delivery_item_id` (same integer, same key). SP UI engineer emits links as `https://proxy-hilda.net/docs/<customer_id>/<sp_id>`.
+- (b) **Per-load SP READ**: every `GET /docs/...` call fetches the canonical Deliverables row fresh from SP via `SpCrud.get_item(entity="delivery_items", scope=ListScope(customer_id), item_id=sp_id)` per `[D-074]` Variant A. Returns sp_row that drives: FR-58 Confirmation skip (`item_type == "Confirmation"`); FR-60 review findings rendering; FR-87 button surface (when staged); freshness indicator (`Modified` timestamp).
+- (c) **No caching Ph-1**: every page load triggers 1 SP REST call. SP handles ~20/min during a TPM's busy day fine. Caching Ph-3+ if telemetry justifies.
+- (d) **No per-PM authorization Ph-1**: all authenticated TPMs (via Kerberos through corp reverse proxy + `X-Authenticated-User` header per `[D-114]` + `[D-115]`) can read all customers. Per-PM access narrowing is Ph-2/Ph-3+ via Vault per `[D-019]` v2.
+- (e) **`Projects.TPM` User-field via `$expand`** per Q9: HILDA fetches `?$expand=TPM&$select=Id,Title,TPM/EMail,TPM/Title` -> response carries nested `{"TPM": {"EMail": "abc@corp.com", "Title": "..."}}`. HILDA derives `tpm_corp_id = row["TPM"]["EMail"].split("@")[0]` per `[D-088]` 3-tuple. `SpClient.get_list_items` + `SpCrud.get_item` got `expand` + `extra_select` kwargs (commit `2f791d6`).
+
+**Why**:
+- (a) URL pattern matches SP UI engineer's link convention -- single-segment route would 404 against the natural `<a href="/docs/<customer_id>/<sp_id>">` rendering. Plus `<customer_id>` in the URL gives HILDA the list-scope it needs without round-trip lookups.
+- (b) Per-load READ over local-cache -- TPM expects fresh state (e.g., another TPM just updated `delivery_state`; the row's audit fields just changed). HILDA storage doesn't necessarily reflect SP-side TPM edits (e.g., owner-status note edits go through email_service's sp_alert_parser asynchronously). The authoritative state is SP at click time.
+- (c) No caching Ph-1 -- under Ph-1 single mock customer + modest TPM concurrency, the SP load is negligible. Caching adds correctness risk (stale-while-edit windows) for marginal perf gain.
+- (d) No per-PM auth Ph-1 -- Ph-1 has a single mock customer; per-PM access is operationally unnecessary. Adds DB schema + cross-cutting permission middleware for Ph-1 marginal value. Vault-backed per-PM ACL lands Ph-3+ per `[D-019]` v2.
+- (e) `$expand` for User fields over `/_api/web/siteusers(<id>)` two-step -- single REST request; OData-native; no extra round-trips. `SpClient` kwarg-additive change (backward-compatible).
+
+**Consequences**:
+- (a) `core/src/dashboard/app.py` `GET /docs/{customer_id}/{sp_id}` (2-segment) per commit `f8289f2`.
+- (b) `SpCrud.get_item` added in same commit; called by `get_document_section`.
+- (c) `build_app` takes `sp_crud=None` for test mode (falls back to `app.state.mock_sp_rows`) -- production deploy injects real `SpCrud`.
+- (d) Dashboard `_fetch_sp_row()` raises HTTP 404 if SpCrud returns None (row doesn't exist in SP).
+- (e) FR-58 Confirmation detection now authoritative via `sp_row["item_type"]` (was heuristic "no docs -> Confirmation"; commit `f8289f2` Gap 6).
+- (f) Pagination `$top + __next` continuation works (resolves `[D-117]` Q4 OPEN architectural question -- confirmed by architect's live probe).
+- (g) SP cookie capture returns None in this corp SP deployment -- NTLM auth flows through `requests.Session` per-request anyway; SpSession tolerates gracefully.
+- (h) `[D-122]` FR-87 POST endpoints (step A reassign + step B doc_type) wire to SP audit-field writeback via SpCrud per `[D-064]` + `[D-117]` digest dance. Step C (revision resolution) explicitly NOT routed Ph-1 per `[D-039]` Step 2 + architect direction.
+- (i) Dashboard test count 20 -> 37 (+17 new tests covering Gap 1+2+6+7+8).
+
+**Anchors**: FR-57, FR-58, FR-60, FR-61, FR-87, `[D-019]`, `[D-039]`, `[D-064]`, `[D-074]`, `[D-088]`, `[D-114]`, `[D-115]`, `[D-117]`, `[D-119]`, `[D-122]`, `dashboard/MODULE.md`, `sharepoint_integration/sp_client.py` + `list_crud.py`, commit `f8289f2` + commit `2f791d6`.
+
+---
+
+## D-124: `DeliveryState` enum value strings match SP display (PascalCase + spaces) -- direction (α)
+
+**Date**: 2026-06-26
+**Status**: Ratified
+
+**Context**: HILDA's canonical `DeliveryState` enum (in `core/src/template_schema/enums.py`) originally used SCREAMING_SNAKE_CASE Python attribute names + various value-string conventions (e.g., `OUTREACH_SENT = "OutreachSent"` no-space PascalCase). The SP UI engineer's actual SP Choice column values are PascalCase WITH spaces (e.g., `"Not Started"`, `"Outreach Sent"`, `"Owner Closed"`) per architect's live SP REST probe 2026-06-26 (showed `delivery_state = "Not Started"`). The mismatch meant HILDA's runtime evaluator (rule_engine condition matching) would never fire against real SP data.
+
+**Decision**: Update `DeliveryState` enum **value strings** to match SP display verbatim -- PascalCase + spaces. Python attribute names stay SCREAMING_SNAKE_CASE (Python convention). Direction (α):
+
+```python
+class DeliveryState(str, Enum):
+    NOT_STARTED            = "Not Started"
+    OPEN                   = "Open"
+    OUTREACH_SENT          = "Outreach Sent"
+    DOCUMENT_RECEIVED      = "Document Received"
+    OWNER_CLOSED           = "Owner Closed"
+    UNDER_PM_REVIEW        = "Under PM Review"
+    READY_FOR_SUBMISSION   = "Ready For Submission"
+    SUBMITTED_TO_CUSTOMER  = "Submitted To Customer"
+    CLOSED                 = "Closed"
+    DELAYED                = "Delayed"
+    BLOCKED                = "Blocked"
+```
+
+Cascade: `customizations/rules/global/automation_rules.yaml` condition values updated to match. 4 test files updated to match.
+
+**Why**:
+- (a) Single source of truth -- SP UI engineer's Choice column values are the operational truth (TPMs see + edit them in SP UI). HILDA's enum should mirror, not diverge.
+- (b) Matches the same pattern as `[D-094]` SUPERSEDED 2026-06-23 item_type lock -- short-label categories Confirmation/Default PascalCase; long names snake_case. DeliveryState extends the same discipline: enum value strings = SP display strings.
+- (c) Direction (α) over (β) translation layer -- a translation layer (`SP_TO_CANONICAL_STATE = {"Not Started": "OPEN", ...}`) at the SP-READ boundary adds an indirection HILDA developers must remember + maintain. Direction (α) removes the indirection entirely.
+- (d) rule_engine condition matching works out of the box -- rules can reference `delivery_state in ["Outreach Sent", "Document Received"]` and match runtime events directly.
+- (e) Avoids future drift between HILDA enum values + SP Choice values -- when SP UI engineer adds a new state (e.g., "Awaiting Approval"), HILDA enum mirrors verbatim; no mapping table sync.
+
+**Consequences**:
+- (a) `core/src/template_schema/enums.py` `DeliveryState` value strings updated (commit `f8289f2`).
+- (b) `customizations/rules/global/automation_rules.yaml` condition values updated to PascalCase-with-spaces; orphan values OwnerResponseReceived / OutreachReminded / AIReviewed removed in same cascade (commit `057b33d`).
+- (c) 4 test files updated for new string values: `test_template_schema.py` + `test_tracker.py` + `test_workflow_engine_tasks.py` + `test_dashboard.py`.
+- (d) String values containing spaces require quoting in YAML (`value: "Outreach Sent"` not `value: Outreach Sent`) -- caught + fixed during cascade.
+- (e) `[D-094]` SUPERSEDED + `[D-119]` `tpm_resolved_doc_type` (4-value lowercase snake_case for HILDA-owned page) precedents both confirm: enum value strings = SP-display strings where SP UI is the authoritative surface; canonical lowercase snake_case where HILDA owns full read+write (FR-87 page).
+- (f) No translation layer at SP-READ boundary -- HILDA's evaluator reads `row["delivery_state"]` and matches enum values directly.
+- (g) Future SP-side Choice value addition: HILDA architect adds the new enum member with matching value string; no broader cascade.
+
+**Anchors**: FR-7, FR-28, `[D-094]` SUPERSEDED, `[D-119]`, `template_schema/enums.py`, `automation_rules.yaml`, commit `f8289f2` + commit `057b33d`.
+
+---
+
+## D-125: Point 3 policy -- corp-SP-derived YAML mappings stay LOCAL; public github gets sanitized placeholder
+
+**Date**: 2026-06-26
+**Status**: Ratified
+
+**Context**: The customer.yaml (was mock_customer.yaml) file in `customizations/sharepoint_config/customers/` is the SP-integration column-name translation table (HILDA canonical -> SP internal). Per `[D-027]` Teacher/Student precedent, corp-proprietary content (binding code) stays out of public github. Architect raised 2026-06-26 that this principle also applies to YAML files containing SP column mappings derived from the corp SP probe -- column names + structure derived from the architect's live corp environment shouldn't go to public github even if values use placeholder identifiers, because the column-name set itself reflects corp design decisions.
+
+**Decision**: Three-tier policy for `customizations/` content boundary:
+- (a) **Architecture YAML / rule_engine YAML** (HILDA logic; no corp data) -> safe for public github. Examples: `automation_rules.yaml`, `defaults.yaml`. Architect-written.
+- (b) **Corp-SP-derived YAML mappings** (e.g., `customer.yaml` SP column maps, future per-customer template overrides reflecting real customer schemas) -> stay LOCAL. Architect maintains the production version on the Linux deployment box. Public github copy is a privacy-clean SAMPLE / RUNTIME PLACEHOLDER with placeholder identifiers (`mock_customer` / MODEL-A / etc.) + header note documenting Point 3 policy.
+- (c) **HILDA Python code** (`SpClient` enhancements, dashboard handlers, etc.) -> safe for public github. Corp-API binding bodies filled in by Cline on Work PC per `[D-027]`.
+
+For (b) workflow: Claude generates corrected YAML content in chat -> architect copies/pastes to local + deploys -> Claude does NOT commit corp-derived content to public github. Public github customer.yaml stays as sanitized placeholder showing the YAML SHAPE with placeholder identifiers + header policy note.
+
+**Why**:
+- (a) Defense-in-depth on NFR-2 + `[D-027]` -- even sanitized placeholder values can leak corp design through column names + structure (which fields exist, which are Required, what types). Corp SP UI engineer's design choices are reflected in the column inventory.
+- (b) Architect-controlled deployment gate -- production YAML lives on the architect's Linux box; architect controls when SP UI engineer changes flow into HILDA runtime. Public github customer.yaml is a Ph-1 reference sample, not a deployment artifact.
+- (c) Distinct from architecture YAML -- rule_engine `automation_rules.yaml` is HILDA-architectural (state machine + outreach cadence + escalation logic); not derived from corp data. Stays in github for ADR-style traceability.
+- (d) Workflow cleanliness over git-side ACL -- alternative would be a private fork of `customizations/` or `.gitignore` patterns. Both add operational complexity + drift risk. Chat-generation + manual deploy is simpler + already aligns with `[D-027]` Teacher/Student pattern.
+
+**Consequences**:
+- (a) `customizations/sharepoint_config/customers/mock_customer.yaml` renamed -> `customer.yaml` (single file per deployment per architect Q1 lock 2026-06-26).
+- (b) Header note added: "production customer.yaml lives LOCALLY only (not on public github); architect maintains the corp-SP-derived column-name mappings on the Linux deployment box".
+- (c) v1 of customer.yaml (yesterday's Tier 1 P0 YAML batch) had `_x0020_` encoding bugs from Claude's guessing -- left in github as a runtime placeholder; corrected v2 generated in chat for architect's local deployment per Point 3.
+- (d) Production customer.yaml on Linux deployment box: incorporates architect's live SP probe column inventory + the post-2026-06-26 corrections (form-factor flags dropped, customer_delivery_credential_id removed, customer_delivery_info added per-row, milestone_id dropped pending SP UI engineer correction, etc.).
+- (e) Future corp-derived YAML files (e.g., per-customer `customizations/template_schemas/<customer_id>/template.yaml` with real customer data) follow the same pattern: Claude generates in chat -> architect maintains locally -> public github gets sanitized placeholder.
+- (f) Test fixtures stay in public github -- `core/tests/fixtures/sharepoint_config/customers/test_customer.yaml` uses placeholder identifiers; doesn't derive from corp SP; safe for github.
+- (g) `[D-027]` precedent honored -- Teacher/Student split extended from Python binding bodies (corp PLM / corp messenger / Google Drive adapters) to corp-SP-derived YAML mappings.
+- (h) `customer_adapter/MODULE.md` D13 cascade follow-up (per-row `customer_delivery_info` per architect 2026-06-26) tracked via STATUS Flag -- when applied, the corrected YAML mapping for `customer_delivery_info` column lives on architect's Linux box, not in github.
+
+**Anchors**: NFR-2, `[D-027]`, `[D-038]`, `[D-091]`, `[D-104]`, `[D-122]`, `customizations/sharepoint_config/customers/customer.yaml`, commit `2f791d6`.
