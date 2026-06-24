@@ -64,7 +64,7 @@ milestones:
         rmr: true
         hmr_smr: true
         # TG-denormalized fields (per [D-051]):
-        tg_name: MNO-TPM
+        tg_name: TG-TPM
         ingress_nsd: None                         # Ph-1 lock — no NSD ingress for early drop
         folder_routing_enabled: false
         tg_email_group_alias: null                # null in template; TPM types before Start Collection
@@ -85,8 +85,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["Sustainability"]]
-        item_path_id: mno_cpm_item
-        tg_path_id: mno_cpm
+        item_path_id: tg_cpm_item
+        tg_path_id: tg_cpm
         customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Sustainability"
         handset: true
@@ -181,8 +181,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["Power"]]
-        item_path_id: mno_etm_item
-        tg_path_id: mno_etm
+        item_path_id: tg_etm_item
+        tg_path_id: tg_etm
         customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Power"
         handset: true
@@ -192,7 +192,7 @@ milestones:
         osmr: false
         rmr: false
         hmr_smr: false
-        tg_name: MNO-ETM
+        tg_name: TG-ETM
         ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
@@ -213,8 +213,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["5G", "LC"]]
-        item_path_id: mno_cp_item
-        tg_path_id: mno_cp
+        item_path_id: tg_cp_item
+        tg_path_id: tg_cp
         customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/5G_WEA"
         handset: true
@@ -224,7 +224,7 @@ milestones:
         osmr: false
         rmr: false
         hmr_smr: false
-        tg_name: MNO-CP
+        tg_name: TG-CP
         ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
@@ -277,8 +277,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["Motive"]]
-        item_path_id: mno_omadm_item
-        tg_path_id: mno_omadm
+        item_path_id: tg_omadm_item
+        tg_path_id: tg_omadm
         customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Motive_IOT"
         handset: true
@@ -288,7 +288,7 @@ milestones:
         osmr: false
         rmr: false
         hmr_smr: false
-        tg_name: MNO-OMADM
+        tg_name: TG-OMADM
         ingress_nsd: None
         folder_routing_enabled: false
         tg_email_group_alias: null
@@ -309,8 +309,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["MMS"]]
-        item_path_id: mno_mql_mms
-        tg_path_id: mno_mql
+        item_path_id: tg_mql_mms
+        tg_path_id: tg_mql
         customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/MMS"
         handset: true
@@ -341,8 +341,8 @@ milestones:
         force_tracking_enabled: true
         milestone_gating: true
         item_description: [["LTE", "OMADM"]]
-        item_path_id: mno_mql_lteotadm
-        tg_path_id: mno_mql
+        item_path_id: tg_mql_lteotadm
+        tg_path_id: tg_mql
         customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/LTEOTADM"
         handset: true

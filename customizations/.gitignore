@@ -1,0 +1,115 @@
+# =====================================================================================
+# customizations/.gitignore -- Point 3 policy [D-125] enforcement
+# =====================================================================================
+#
+# Purpose: ensure corp-derived production content NEVER reaches public github
+# from any HILDA developer's workstation (architect's office PC, personal
+# laptop, future deployer PCs).
+#
+# Policy ([D-125] 2026-06-26): all corp-SP-derived YAML / config / credentials
+# stay LOCALLY on the architect's Linux deployment box. Public github keeps
+# sanitized SAMPLE files (with placeholder identifiers: mock_customer / MMK /
+# MODEL-A / null owners / drive.google.com / etc.) as deployment references.
+#
+# Convention for NEW LOCAL-only files: name them with `.local.<ext>` suffix
+# (e.g. `customer.local.yaml`). These are universally ignored below.
+#
+# IMPORTANT: this .gitignore does NOT untrack already-committed sanitized
+# samples. To fully isolate a tracked path: `git rm --cached <path>` first,
+# then move real content to `<path>.local.<ext>` (covered below).
+# =====================================================================================
+
+
+# -------------------------------------------------------------------------------------
+# Universal LOCAL convention -- any file matching `*.local.*` is invisible to git.
+# Use this for production overrides where the sanitized sample stays tracked
+# (e.g., `customer.yaml` tracked as sanitized; `customer.local.yaml` LOCAL only).
+# -------------------------------------------------------------------------------------
+*.local.yaml
+*.local.yml
+*.local.json
+*.local.env
+*.local.toml
+
+
+# -------------------------------------------------------------------------------------
+# Credentials -- sops-encrypted on office PC per [D-038]; NEVER in github.
+# Covers SystemType.* credential bundles (corp PLM / corp messenger / google drive /
+# customer carrier portals / etc.).
+# -------------------------------------------------------------------------------------
+credentials/*.env
+credentials/*.json
+credentials/*.yaml
+credentials/*.yml
+credentials/*.sops.yaml
+credentials/*.sops.yml
+credentials/*.gpg
+credentials/*.key
+credentials/*.pem
+credentials/*.p12
+credentials/*.pfx
+
+# Allow the directory's MODULE.md + __init__.py + sample envelopes
+!credentials/MODULE.md
+!credentials/*.example
+!credentials/*.example.*
+
+
+# -------------------------------------------------------------------------------------
+# Per-customer ops_alerts recipients -- corp_ids never in github per [D-127] + [D-125].
+# Sanitized `recipients.yaml` (placeholder ops_bot_email + mock corp_ids) stays
+# tracked as sample; LOCAL production override uses `recipients.local.yaml`.
+# -------------------------------------------------------------------------------------
+ops_alerts/recipients.production.yaml
+ops_alerts/*.local.yaml
+
+
+# -------------------------------------------------------------------------------------
+# Per-customer template overrides -- production lives LOCALLY.
+# Tracked: `MMK/template.yaml` (sanitized v1 sample) + `mock_customer/template.yaml`
+# (sample); for LOCAL production overrides use `MMK/template.local.yaml` etc.
+# -------------------------------------------------------------------------------------
+template_schemas/**/*.local.yaml
+template_schemas/**/*.local.yml
+template_schemas/**/*.production.yaml
+template_schemas/**/secrets.yaml
+
+
+# -------------------------------------------------------------------------------------
+# Per-deployment sharepoint_config customer mappings -- production stays LOCAL.
+# Tracked: `customers/customer.yaml` (sanitized sample with `mock_customer`
+# placeholder). For real per-deployment overrides use `customer.local.yaml` or
+# put under `customers/local/`.
+# -------------------------------------------------------------------------------------
+sharepoint_config/**/*.local.yaml
+sharepoint_config/**/*.production.yaml
+sharepoint_config/**/local/
+
+
+# -------------------------------------------------------------------------------------
+# Per-customer adapter scaffolds with proprietary binding bodies (per [D-027]
+# Teacher/Student split) -- LOCAL on office PC per Cline. Tracked: `example_adapter.py`
+# (sanitized scaffold); LOCAL real bindings live alongside with `_adapter.py` suffix.
+# -------------------------------------------------------------------------------------
+customer_adapter/*_adapter.py
+!customer_adapter/example_adapter.py
+customer_adapter/*_adapter_config.yaml
+customer_adapter/*.production.yaml
+
+
+# -------------------------------------------------------------------------------------
+# Universal escape hatch -- anything in a `local/` subfolder is invisible to git.
+# Use this when you need a directory's-worth of LOCAL files without naming each.
+# -------------------------------------------------------------------------------------
+**/local/
+
+
+# -------------------------------------------------------------------------------------
+# General environment + cache noise (in case anything lands here)
+# -------------------------------------------------------------------------------------
+__pycache__/
+*.pyc
+.env
+.env.local
+*.swp
+.DS_Store
