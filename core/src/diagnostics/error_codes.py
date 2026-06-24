@@ -405,6 +405,26 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "EML-W007": ErrorCode(
         "EML-W007", "Attachment over-routed per FR-79 -- N={n} matches on file_hash='{file_hash}' exceeds route_attachment_max_matches_threshold={threshold}; all matches committed per [D-055] symmetric M:M contract but flagged for ops review", True
     ),
+    # --- messenger (MSG) -- registered 2026-06-25 per messenger MODULE.md Ph-1 dev phase ---
+    # Per architect Q-M1..Q-M6 lock 2026-06-25 (FR-10 cross-channel escalation).
+    "MSG-E001": ErrorCode(
+        "MSG-E001", "sendMessage failed: {reason_token}", False
+    ),
+    "MSG-E002": ErrorCode(
+        "MSG-E002", "Composer template rendering failed for owner '{owner_id}'", False
+    ),
+    "MSG-E003": ErrorCode(
+        "MSG-E003", "CorpMessengerAdapter binding not configured for deployment (subclass missing or stub)", False
+    ),
+    "MSG-W001": ErrorCode(
+        "MSG-W001", "Daily limit reached ({daily_limit_per_owner}/day) for owner_corp_id='{redacted}'", True
+    ),
+    "MSG-W002": ErrorCode(
+        "MSG-W002", "Message truncated: rendered '{n}' bytes exceeds max_message_bytes='{max}'", True
+    ),
+    "MSG-W003": ErrorCode(
+        "MSG-W003", "Retry attempt {attempt}/{max_attempts} for owner_corp_id='{redacted}'", True
+    ),
 }
 
 
