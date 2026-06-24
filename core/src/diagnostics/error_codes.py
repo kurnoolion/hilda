@@ -90,6 +90,16 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "ITR-E007": ErrorCode(
         "ITR-E007", "Operation '{operation}' not supported by adapter '{adapter}'", False
     ),
+    # Added 2026-06-25 (Module #13 cascade D15) per architect Q5 / Q6 / [D-098] locks:
+    "ITR-W003": ErrorCode(
+        "ITR-W003", "PLM download in-flight for ('{plm_id}', '{file_id}'); skipping duplicate", True
+    ),
+    "ITR-W004": ErrorCode(
+        "ITR-W004", "PLM API N-retries-exhausted for '{plm_id}' op '{operation}' -- HILDA OPS alert mechanism TBD", True
+    ),
+    "ITR-W005": ErrorCode(
+        "ITR-W005", "PLM upload verification failure for '{plm_id}' / '{file_name}'", True
+    ),
     # --- credential_service (CRD) ---
     "CRD-E001": ErrorCode(
         "CRD-E001", "No credential for pm_id='{pm_id}' system_type='{system}' customer_id='{customer_id}'", False
