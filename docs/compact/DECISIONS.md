@@ -2240,3 +2240,94 @@ Per `[D-027]` Teacher/Student: HILDA-side Protocol scaffold + thin wrapper autho
 - (h) Operational documentation: HILDA host requires NTP-synced clock + binding's Google account requires MFA via TOTP authenticator app (seed captured during MFA setup + stored in sops vault).
 
 **Anchors**: FR-19, FR-42, FR-57, FR-77, NFR-2, `[D-019]` (shared ops-team identity Ph-1/Ph-2), `[D-027]` (Teacher/Student LLM scaffold split — load-bearing for ownership boundary), `[D-038]` (sops-encrypted credential vault), `[D-054]` (selenium amendment; this ADR supersedes the 2026-06-05 impl note for Ph-1), `[D-107]` (credential_service scope-aware routing), `customer_adapter/MODULE.md` (D5 + 2026-06-25 revisit), commit `a833b85`.
+
+---
+
+## D-117: SP 2017 REST write pattern — requests-ntlm + lazy digest dance + MERGE pseudo-verb + `__metadata` wrapper
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: SP 2017 REST writes require (a) NTLM authentication; (b) per-session CSRF token (`X-RequestDigest`); (c) `__metadata` type wrapper on bodies (`SP.Data.<ListName>_x005f_<customer_id>ListItem` discriminator); (d) `X-Http-Method: MERGE` + `IF-MATCH: *` pseudo-verb for updates. No async-native NTLM library handles this end-to-end. During Module #11 dev 2026-06-25, the architect shared production-validated `requests-ntlm`-based snippets (per-Celery-task session + 3-step digest dance + MERGE pattern); placeholder `httpx-async` SpClient was replaced with the validated pattern (commit `cb4e182`).
+
+**Decision**: SP 2017 REST writes use a bundle of 6 sub-locks:
+- (a) `requests-ntlm` (sync) wrapped in `asyncio.to_thread` per `[D-008]` sync-API-wrapping convention.
+- (b) `GlobalSharePointConfig.username` stores the FULL `corp\<user>` NT4-style literal — no separate domain field.
+- (c) Lazy digest acquisition: first call triggers the 3-step dance (GET site URL → capture `Set-Cookie` → POST `/_api/contextinfo` → cache `FormDigestValue`). Subsequent calls reuse the cached digest until a 403 response triggers a single regen + retry-once.
+- (d) One `SpSession` instance per Celery task — no session pool keyed by `pm_id`, no shared session across workers.
+- (e) `__metadata` wrapper + `_x005f_` (underscores) / `_x0020_` (spaces) encoding for SP 2017 OData type discriminator owned by `SpSession.list_item_type()` helper.
+- (f) `customer_id` flows as explicit kw-only param through `SpClient.create_list_item` / `update_list_item` / `batch_*` (not parsed from list_name) to compose the `__metadata.type` string `SP.Data.<base>_x005f_<customer_id>ListItem`.
+
+**Why**:
+- (a) `requests-ntlm` over async-native — multiple async-native NTLM approaches were tried during pre-2026-06-25 dev; none worked reliably end-to-end, particularly for the `FormDigestValue` acquisition step. `requests-ntlm` is the only validated production path.
+- (b) Full `corp\<user>` literal — only SP requires the `corp\\` NT4 prefix; corp PLM consumes raw `owner_corp_id` (no prefix); corp messenger doesn't use `owner_corp_id`; email service uses USA-domain emails. Carrying the literal in the config simplifies SP's single requirement without leaking the prefix discipline to other modules.
+- (c) Lazy + 403-refresh over proactive expiry tracking — `FormDigestValue` lifetime varies by SP server config (typically 30 min but configurable); proactive tracking would need server-config inspection. 403-refresh is "always correct regardless of server config" + simpler code.
+- (d) Per-Celery-task session over pool — under Ph-1/Ph-2 load (single mock customer + modest milestone count + maybe 10-50 writes per beat tick), the per-task digest dance overhead (~2 extra HTTP round-trips per session) is negligible vs the operational simplicity of stateless task execution. Pooling would introduce shared-state-across-workers concerns (lock contention, digest expiry race conditions).
+- (e)(f) `__metadata` wrapper + `customer_id` explicit param — composing the type discriminator string requires both the list base name + customer_id; parsing list_name to extract customer_id would be fragile (per-customer naming pattern `<base>_<customer_id>` couples HILDA to a string convention vs an explicit data contract).
+
+**Consequences**:
+- (a) New 3rd-party dependency: `requests-ntlm` (pure-Python, MIT-licensed).
+- (b) Async-native rewrite is a non-trivial future refactor — defer until Ph-3+ or until a maintained httpx-NTLM library emerges that handles the full SP 2017 lifecycle.
+- (c) Per-task sessions amplify under burst load — set Celery `worker_prefetch_multiplier=1` (or similar throttle) so N concurrent tasks don't trigger N concurrent digest dances against the same SP host within seconds.
+- (d) `MERGE` + `IF-MATCH: *` means unconditional overwrites — concurrent TPM edits to the same SP row + concurrent HILDA writes will silently last-write-wins. No optimistic-concurrency safety; acceptable given low-contention Ph-1/Ph-2 ops profile.
+- (e) `core/src/sharepoint_integration/sp_session.py` (251 lines) + `mock_server/client.py` `MockSpSession` (70 lines) implement the pattern + tests; `MockSpSession` drives the REAL digest dance against in-process FastAPI mock endpoints (no production-vs-test divergence in session lifecycle).
+- (f) NTLM auth + cookie + `FormDigestValue` never logged / `__repr__`-d / emitted to compact reports per NFR-2; test asserts password absence from audit rows.
+- (g) `mock_server/app.py` extended with `POST /_api/contextinfo` endpoint + Set-Cookie issuance + 403-on-missing-digest test path + `/__force_403_next_writes__` test knob for digest-refresh path coverage.
+
+**Anchors**: FR-30, FR-84 (`[D-064]` writeback channel), `[D-006]` (SP REST + NTLM/Kerberos on-prem), `[D-008]` (sync-API wrapping), `[D-051]` (was 8-list, superseded by Module #11 architect Q1 2026-06-25 -> 3-list per-customer), `[D-091]` (slug -> id rename), `[D-104]` (Projects per-customer), `sharepoint_integration/MODULE.md` 2026-06-25 cascade, commit `cb4e182`.
+
+---
+
+## D-118: SP list/column provisioning is SP UI engineer's manual responsibility — HILDA does NOT call REST to create lists (formerly D-DRAFT-X)
+
+**Date**: 2026-06-25 (decision originally surfaced 2026-06-12 SP UI engineer review; ratified 2026-06-25 architect Q&A confirmation)
+**Status**: Ratified
+
+**Context**: During the 2026-06-12 SP UI engineer review absorption (commits `4da9900` + `48f884c`), the question of who provisions SP lists + columns surfaced: HILDA's `tracker` module reading customer YAML + calling SP REST to create lists, vs SP UI engineer manually creating them via SP UI from the customer YAML as input. Held as `D-DRAFT-X` pending close-session ratification across multiple sessions. Architect Q&A 2026-06-25 confirmed the decision + provided the missing **Why** + **Consequences** + **Rejected alternative** fields.
+
+**Decision**: SP UI engineer manually creates SP lists + columns from the per-customer `customizations/sharepoint_config/customers/<customer_id>.yaml` (canonical -> SP internal name mapping) during the customer-deployment ceremony — including SP-alert email subscriptions and any custom SP-side workflows. HILDA does NOT call REST to create lists or columns. `tracker` module assumes SP lists pre-exist at runtime; SP REST writes per `[D-064]` target only existing rows in already-provisioned lists.
+
+**Why**:
+- (a) Corp SP-2017 SP-alert email triggers + custom SP tasks (workflows, custom field types) cannot be expressed via REST API. SP UI engineer must use SP UI for those anyway.
+- (b) "Owner of SP module is SP UI engineer; HILDA uses SP services" — clean responsibility boundary. Hybrid (REST for lists + SP UI for alerts/workflows) would split ownership across two integration paths + risk column-name drift between REST-created and SP-UI-created columns.
+- (c) Customer YAML serves as the shared comm artifact between HILDA architect and SP UI engineer (alongside `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` per architect Q5 lock 2026-06-25 + D-117).
+
+**Rejected alternative**: HILDA provisions every milestone of every carrier — `tracker` would auto-create rows in `Milestones_<customer_id>` + `Deliverables_<customer_id>` lists at HILDA startup; TPM would then choose from those pre-populated milestones during the SP UI setup workflow. Rejected on single-responsibility principle: HILDA-owns-runtime + SP-UI-engineer-owns-creation is cleaner than dual-ownership of row creation.
+
+**Consequences**:
+- (a) Customer onboarding requires explicit SP UI engineer ceremony step — not "deploy-and-run". Onboarding cadence is bottlenecked on SP UI engineer availability.
+- (b) YAML changes are 2-step coordination: HILDA architect updates `customizations/sharepoint_config/customers/<customer_id>.yaml`; SP UI engineer adds the corresponding SP column. Release ordering is HILDA-architect -> SP-UI-engineer -> HILDA-deploy. No atomic deploy.
+- (c) `docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx` (per Module #11 architect Q5 2026-06-25) is the load-bearing canonical-name-to-SP-internal-column comm channel.
+- (d) HILDA's `tracker` module fails fast with `SHP-E001` (HTTP 400 from SP) when SP columns are missing — easier debugging than silent dropped data.
+- (e) `customizations/sharepoint_config/customers/<customer_id>.yaml` is the SP UI engineer's READ input; HILDA never writes to it at runtime.
+- (f) The 6 SP lists outside HILDA's 3-list scope (TasksTemplate / Tasks / Trials / Activities / Email / SP-side CommunicationLog per Module #11 Q1 lock 2026-06-25) are also SP UI engineer's domain — neither HILDA nor `customizations/sharepoint_config/` map them.
+
+**Anchors**: `[D-020]` (SharePointListProvider Protocol — FileBasedListProvider serves canonical -> SP-internal mapping), `[D-064]` (HILDA -> SP REST writeback channel; uses already-provisioned lists), `[D-065]` (SP UI engineer owns SP Choice values), `[D-073]` (HILDA doesn't provision via REST — earlier impl note), `[D-077]` (4-list reversal; HILDA reads customer/device data from SP rows the SP UI engineer pre-populates), `sharepoint_config/MODULE.md` 2026-06-12 rollback log (D-DRAFT-X), `sharepoint_integration/MODULE.md` Invariants 2026-06-25.
+
+---
+
+## D-119: `tpm_resolved_doc_type` is HILDA-managed 4-value Choice column — DocType enum minus `unresolved`
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: Module #11 cascade 2026-06-25 surfaced an unclear relationship between `item_type` (deliverable categorization, 4 values per `[D-094]` SUPERSEDED 2026-06-23 SP UI engineer mixed-case lock) and `tpm_resolved_doc_type` (TPM's manual override for a document's classification per FR-87 step B). Both reference `[D-053]` 5-value `DocType` enum in places but the field-by-field semantics were not explicit. Code already aligned with the architect's intent (`enums.py:79-96` has the 5-value DocType lowercase snake_case enum); ADR was missing to capture the field-vs-enum semantics.
+
+**Decision**: `DocType` and `tpm_resolved_doc_type` are SEPARATE concepts:
+- **`DocType` enum** (5 values, lowercase snake_case per `[D-053]` impl note 2026-06-08): `{test_report, tech_report, waiver, compliance_certification_release_notes, unresolved}`. Classifies a specific document file. `unresolved` is the residual state HILDA's service layer assigns when (a) FR-85 Step 1 filename-regex classification fails AND (b) FR-85 Step 2 LLM CLASSIFY_DOC_TYPE returns low-confidence (per FR-86 storage matrix Default-routed-undetermined path).
+- **`tpm_resolved_doc_type` field** (on `DeliveryItemBase`; SP Choice column with 4 allowed values, lowercase snake_case): `{test_report, tech_report, waiver, compliance_certification_release_notes}` — `DocType` MINUS `unresolved`. TPM uses FR-87 step (B) HILDA-rendered web page button to resolve an `unresolved` doc into one of the 4 concrete values. TPM cannot select `unresolved` (that is HILDA's classifier-failure marker, not a TPM-meaningful choice).
+- **HILDA owns the full lifecycle** of `tpm_resolved_doc_type` — both write (`[D-064]` REST writeback after FR-87 step B button click) AND read (FR-87 page re-render). Therefore the values are HILDA-canonical lowercase snake_case (NOT SP UI engineer mixed-case per `[D-094]` SUPERSEDED).
+- **`item_type` is unrelated** — `item_type` classifies the work item / deliverable row (4 values per `[D-094]` SUPERSEDED 2026-06-23 mixed-case: `{Confirmation, test_tech_waiver_report, compliance_certification_release_notes, Default}`); `tpm_resolved_doc_type` classifies a specific document attached to the deliverable. They happen to share `compliance_certification_release_notes` as a value name but otherwise different value sets + different semantic levels.
+
+**Why**:
+- (a) `unresolved` is meaningful in HILDA's classifier output but meaningless as a TPM choice — exposing it would let TPM "resolve" a doc to "I do not know what it is", defeating the purpose of FR-87 step (B).
+- (b) HILDA owns the read+write lifecycle, so the values are HILDA-canonical (lowercase snake_case per `[D-053]`) — SP UI engineer's PascalCase preference (per `[D-094]` SUPERSEDED for item_type short labels) does not apply here because the SP UI engineer is not the rendering or editing party. SP Choice column allowed values still owned by SP UI engineer per `[D-065]` but they are populated to match HILDA's 4 lowercase values per the comm artifact.
+- (c) Separating from `item_type` keeps the work-item-categorization concern (which SP UI engineer renders on the SP milestone view per FR-56) distinct from the document-resolution concern (which HILDA renders on the FR-87 web page per `[D-074]`).
+
+**Consequences**:
+- (a) SP Choice column `TPM_x0020_Resolved_x0020_DocType` (per `customizations/sharepoint_config/customers/<customer_id>.yaml` `delivery_items.columns.tpm_resolved_doc_type`) has 4 allowed values: `{test_report, tech_report, waiver, compliance_certification_release_notes}`. SP UI engineer provisions per `[D-065]` from HILDA's spec via the `milestones_workitems_fields_values.xlsx` comm channel.
+- (b) HILDA's FR-87 step (B) button submit handler writes one of the 4 values via `[D-064]` REST writeback; HILDA's FR-87 page renderer reads it back via SP REST GET on per-page-refresh per `[D-074]` link-out + per-load READ.
+- (c) `template_schema/enums.py` `DocType` enum stays the 5-value source-of-truth; a `TpmResolvedDocType` enum could be added for type-safety on the HILDA writer side (4-value subset), OR HILDA can validate the value at write time (DocType.UNRESOLVED rejected). Either implementation path is acceptable; current `template_schema/models.py:362` uses `str | None`.
+- (d) FR-86 storage matrix continues to route Default-routed-undetermined docs into `_staged_revision/` with `doc_type = unresolved` for TPM resolution per FR-87.
+
+**Anchors**: FR-85 (doc_type classification 2-step ladder), FR-86 (storage matrix + alignment-mismatch routing), FR-87 step (B) (Resolve doc_type TPM button + HILDA-rendered web page per `[D-074]`), `[D-053]` (5-value DocType impl note 2026-06-08), `[D-064]` (HILDA -> SP REST writeback), `[D-065]` (SP UI engineer owns Choice values), `[D-074]` (HILDA-rendered link-out for FR-87 surfaces), `[D-094]` SUPERSEDED (item_type SP UI engineer mixed-case 2026-06-23 — UNRELATED to tpm_resolved_doc_type), `template_schema/enums.py:79-96` (DocType 5-value enum already correct), `template_schema/MODULE.md:362` (tpm_resolved_doc_type field declaration).
