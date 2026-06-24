@@ -1,15 +1,16 @@
-"""SpAlertParser per [D-047] + FR-84 + FR-87 + 2026-06-25 cascade locks.
+"""SpAlertParser per [D-047] + 2026-06-26 cascade locks.
 
 Scope per Module #11 architect Q1 lock 2026-06-25: alerts ONLY from the 3-list
 per-customer scope -- Milestones_<customer_id>, Projects_<customer_id>,
 Deliverables_<customer_id>. Out-of-scope subjects (TasksTemplate / Tasks /
 Trials / Activities / Email / CommunicationLog) silently dropped per [D-118].
 
-FR-87 strict A->B->C TPM resolution action handlers route by action verb in
-the alert body's action_type field:
-- tpm_reassign_to_workitem   -> storage.reassign_document_to_workitem (FR-83 / FR-87 A)
-- tpm_resolve_doc_type       -> storage.tpm_resolve_doc_type           (FR-87 B; validates [D-119] 4-value)
-- tpm_resolve_revision       -> storage.tpm_resolve_revision           (FR-87 C)
+FR-87 step A/B/C TPM resolution handlers were REMOVED 2026-06-26 per [D-122]
+direct-POST architecture cascade. FR-87 resolution flows now go directly from
+TPM browser to HILDA's dashboard module via POST /docs/<customer_id>/<sp_id>/
+resolve_reassign + resolve_doc_type endpoints (step C still Ph-2 deferred).
+This module retains ONLY [D-047] entity-change SP-alert routing -- parses
+the alert, emits TriggerEvent for rule_engine matching.
 
 email_service is a TRIGGER SOURCE per [D-113] -- it emits TriggerEvent
 (with item_snapshot when applicable) via workflow_engine.TriggerDispatcher.dispatch(...).
@@ -28,7 +29,6 @@ from typing import Any, Protocol
 from core.src.diagnostics.error_codes import PipelineError
 from core.src.email_service.protocol import InboundMessage
 from core.src.email_service.sp_alert_parser.routing_key import extract_routing_key
-from core.src.template_schema.enums import DocType
 
 __all__ = [
     "ALERT_SCOPE_LISTS",
@@ -47,15 +47,6 @@ logger = logging.getLogger(__name__)
 ALERT_SCOPE_LISTS = frozenset({"Milestones", "Projects", "Deliverables"})
 
 
-# [D-119] tpm_resolved_doc_type SP field is 4-value (DocType minus UNRESOLVED).
-TPM_RESOLVED_DOC_TYPE_VALID = frozenset({
-    DocType.TEST_REPORT.value,
-    DocType.TECH_REPORT.value,
-    DocType.WAIVER.value,
-    DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
-})
-
-
 @dataclass(frozen=True)
 class AlertRoutingKey:
     list_name: str             # base list (Milestones / Projects / Deliverables)
@@ -68,10 +59,10 @@ class AlertRoutingKey:
 @dataclass(frozen=True)
 class ParsedSpAlert:
     routing_key: AlertRoutingKey
-    action_type: str | None              # FR-87 verb (tpm_reassign_to_workitem etc.)
+    action_type: str | None              # entity-change action verb (post-2026-06-26: no FR-87 verbs)
     raw_subject: str
     item_title: str
-    body_kvs: dict[str, str]             # all body key:value pairs (for handler use)
+    body_kvs: dict[str, str]             # all body key:value pairs
 
 
 class TriggerDispatcherLike(Protocol):
@@ -81,20 +72,13 @@ class TriggerDispatcherLike(Protocol):
 
 
 class SpStorageLike(Protocol):
-    """Minimal storage surface used by FR-87 handlers."""
+    """Minimal storage surface for SP-alert audit logging.
 
-    async def reassign_document_to_workitem(
-        self, file_hash: str, source_delivery_item_id: str,
-        target_delivery_item_id: str, pm_id: str, **kwargs: Any,
-    ) -> None: ...
-
-    async def tpm_resolve_doc_type(
-        self, file_hash: str, target_doc_type: Any, pm_id: str, **kwargs: Any,
-    ) -> None: ...
-
-    async def tpm_resolve_revision(
-        self, file_hash: str, verdict: Any, pm_id: str, **kwargs: Any,
-    ) -> None: ...
+    Per [D-122] cascade 2026-06-26: FR-87 action handlers (reassign / resolve_doc_type
+    / resolve_revision) REMOVED -- FR-87 now flows TPM browser -> dashboard direct
+    POST. This protocol retains only log_communication for [D-047] entity-change
+    audit trail.
+    """
 
     async def log_communication(self, row: Any) -> None: ...
 
@@ -186,70 +170,18 @@ class SpAlertParser:
         return out
 
     # ------------------------------------------------------------------
-    # FR-87 handler dispatch + TriggerEvent emission
+    # TriggerEvent emission per [D-047]
     # ------------------------------------------------------------------
 
     async def handle(self, parsed: ParsedSpAlert, *, pm_id: str = "tpm_unknown") -> None:
-        """Dispatch FR-87 handler based on action_type. Idempotent per
-        storage-side semantics; emits CommunicationLog audit row + TriggerEvent
-        per [D-113]."""
-        if parsed.action_type == "tpm_reassign_to_workitem":
-            await self._handle_reassign(parsed, pm_id=pm_id)
-        elif parsed.action_type == "tpm_resolve_doc_type":
-            await self._handle_resolve_doc_type(parsed, pm_id=pm_id)
-        elif parsed.action_type == "tpm_resolve_revision":
-            await self._handle_resolve_revision(parsed, pm_id=pm_id)
-        # Other action_types (sentinel button presses, plain status edits) emit
-        # only the TriggerEvent below.
+        """Emit TriggerEvent for the SP-alert per [D-113].
+
+        Per [D-122] cascade 2026-06-26: FR-87 action handlers (tpm_reassign_to_workitem
+        / tpm_resolve_doc_type / tpm_resolve_revision) REMOVED -- those flows now go
+        directly via dashboard POST endpoints. This method now only emits the
+        TriggerEvent so rule_engine matches on entity-change SP alerts.
+        """
         self._emit_trigger_event(parsed)
-
-    async def _handle_reassign(self, parsed: ParsedSpAlert, *, pm_id: str) -> None:
-        file_hash = parsed.body_kvs.get("file_hash")
-        source = parsed.body_kvs.get("source_delivery_item_id")
-        target = parsed.body_kvs.get("target_delivery_item_id")
-        if not (file_hash and source and target):
-            return
-        await self._storage.reassign_document_to_workitem(
-            file_hash=file_hash,
-            source_delivery_item_id=source,
-            target_delivery_item_id=target,
-            pm_id=pm_id,
-        )
-
-    async def _handle_resolve_doc_type(
-        self, parsed: ParsedSpAlert, *, pm_id: str
-    ) -> None:
-        file_hash = parsed.body_kvs.get("file_hash")
-        target_doc_type = parsed.body_kvs.get("target_doc_type")
-        if not (file_hash and target_doc_type):
-            return
-        # [D-119] tpm_resolved_doc_type SP field accepts only 4 values
-        if target_doc_type not in TPM_RESOLVED_DOC_TYPE_VALID:
-            logger.warning(
-                "FR-87 step (B) rejected: target_doc_type='%s' not in 4-value [D-119] subset",
-                target_doc_type,
-            )
-            return
-        await self._storage.tpm_resolve_doc_type(
-            file_hash=file_hash,
-            target_doc_type=DocType(target_doc_type),
-            pm_id=pm_id,
-        )
-
-    async def _handle_resolve_revision(
-        self, parsed: ParsedSpAlert, *, pm_id: str
-    ) -> None:
-        file_hash = parsed.body_kvs.get("file_hash")
-        verdict = parsed.body_kvs.get("verdict")
-        target_slug = parsed.body_kvs.get("target_doc_id_slug")
-        if not (file_hash and verdict):
-            return
-        await self._storage.tpm_resolve_revision(
-            file_hash=file_hash,
-            verdict=verdict,
-            target_doc_id_slug=target_slug,
-            pm_id=pm_id,
-        )
 
     def _emit_trigger_event(self, parsed: ParsedSpAlert) -> None:
         """Emit TriggerEvent via workflow_engine.TriggerDispatcher per [D-113].

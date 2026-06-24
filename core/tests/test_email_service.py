@@ -32,7 +32,6 @@ from core.src.email_service import (
     SmtpSender,
     SpAlertParser,
     classify,
-    compose_escalation_for_messenger,
     compose_outreach,
     compose_reminder,
     extract_routing_key,
@@ -522,44 +521,10 @@ class TestSpAlertParser:
         body = "project_id: P1\nMinorMilestone: P2\nitem_no: 7\n"
         assert extract_routing_key(body) == ("P1", "P2", 7)
 
-    async def test_fr87_resolve_doc_type_handler(self):
-        storage = _make_fake_sp_storage()
-        parser = SpAlertParser(storage=storage)
-        msg = _msg(
-            subject="Alert_Deliverables_acme - Item changed",
-            body=(
-                "ProjectID: P1\nMinorMilestone: M1\nItemNumber: 5\n"
-                "action_type: tpm_resolve_doc_type\n"
-                "file_hash: hash1\n"
-                "target_doc_type: test_report\n"
-            ),
-        )
-        parsed = parser.parse(msg)
-        assert parsed is not None
-        await parser.handle(parsed, pm_id="tpm_001")
-        assert len(storage.resolve_doc_type_calls) == 1
-        call = storage.resolve_doc_type_calls[0]
-        assert call["file_hash"] == "hash1"
-        assert call["target_doc_type"] == DocType.TEST_REPORT
-        assert call["pm_id"] == "tpm_001"
-
-    async def test_fr87_rejects_invalid_doc_type_per_d119(self):
-        """[D-119]: tpm_resolved_doc_type SP field accepts only 4 values;
-        'unresolved' is HILDA's classifier-failure sentinel and not selectable."""
-        storage = _make_fake_sp_storage()
-        parser = SpAlertParser(storage=storage)
-        msg = _msg(
-            subject="Alert_Deliverables_acme - Item changed",
-            body=(
-                "ProjectID: P1\nMinorMilestone: M1\nItemNumber: 5\n"
-                "action_type: tpm_resolve_doc_type\n"
-                "file_hash: hash1\n"
-                "target_doc_type: unresolved\n"
-            ),
-        )
-        parsed = parser.parse(msg)
-        await parser.handle(parsed, pm_id="tpm_001")
-        assert len(storage.resolve_doc_type_calls) == 0  # rejected
+    # FR-87 handler tests REMOVED 2026-06-26 per [D-122] cascade
+    # (FR-87 step A/B handlers removed from sp_alert_parser; flow now via
+    # dashboard direct POST endpoints -- see test_dashboard.py
+    # TestFr87ResolveReassign + TestFr87ResolveDocType).
 
 
 def _make_fake_sp_storage():
@@ -730,20 +695,9 @@ class TestEmailServiceCli:
 
 
 # ===========================================================================
-# TestComposeEscalation (Ph-1 stub shape)
+# TestComposeEscalation -- REMOVED 2026-06-26 per architect Q-M6 lock 2026-06-25
+# (messenger module owns escalation composition; composer_escalation.py deleted).
 # ===========================================================================
-
-
-class TestComposeEscalation:
-    def test_returns_messenger_enqueue_dict(self):
-        item = _candidate_test_item()
-        payload = compose_escalation_for_messenger(item, reminder_count=3)
-        assert payload["messenger_action"] == "owner_escalation"
-        assert payload["reminder_count"] == 3
-        assert payload["delivery_item_id"] == "ITEM-1"
-        # Owner identity per [D-105] 4-field
-        assert "owner_corp_usa_email" in payload["owner_identity"]
-        assert "owner_corp_id" in payload["owner_identity"]
 
 
 # ===========================================================================

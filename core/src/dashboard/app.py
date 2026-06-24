@@ -1,15 +1,29 @@
 """FastAPI application for HILDA dashboard.
 
-Routes per dashboard MODULE.md Public surface (post 2026-06-23 cascade):
-- GET  /docs/{delivery_item_id}              -- FR-57 document section (HTML or JSON via Accept)
+Routes per dashboard MODULE.md Public surface (post 2026-06-26 cascade):
+- GET  /docs/{customer_id}/{sp_id}            -- FR-57 document section (HTML or JSON via Accept)
+- POST /docs/{customer_id}/{sp_id}/resolve_reassign      -- FR-87 step (A) TPM reassign
+- POST /docs/{customer_id}/{sp_id}/resolve_doc_type      -- FR-87 step (B) TPM doc_type resolve
 - GET  /dl/{scoped_token}                    -- FR-61 HILDA-mediated download
 - POST /milestone/{milestone_id}/refresh     -- FR-56 soft-poll trigger
 - GET  /milestone/{milestone_id}/refresh/status -- FR-56 status check
 - GET  /admin/overrides                      -- FR-31 admin view (Ph-1 empty per D1 cascade)
 
-Variant A per D-074: server-side HTML rendering via Jinja2; SP UI engineer
+Variant A per [D-074]: server-side HTML rendering via Jinja2; SP UI engineer
 renders bare link-out anchors; browser top-level navigation. JSON only on
 Accept: application/json.
+
+2026-06-26 cascade gaps fixed (Gap 1/2/6/7/8 + bonus):
+- Gap 1: URL pattern reshape /docs/<delivery_item_id> -> /docs/<customer_id>/<sp_id>
+  per architect lock 2026-06-26 (sp_id IS SP's Id auto-counter PK; HILDA's
+  delivery_item_id IS sp_id).
+- Gap 2: FR-87 step (A) + step (B) POST endpoints landed (step C deferred Ph-2
+  per [D-039] Step 2 + [D-122]).
+- Gap 6: FR-58 Confirmation detection is now AUTHORITATIVE via item_type
+  from freshly-fetched SP row (NOT the prior no-docs heuristic).
+- Gap 7: Per-load SP READ via SpCrud.get_item per [D-074] (no caching Ph-1).
+- Gap 8: build_app accepts sp_crud injection; falls back to mock_sp_rows in
+  request.app.state for test/dev modes.
 """
 from __future__ import annotations
 
@@ -18,9 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Header, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Header, Request, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from core.src.diagnostics import format_code
 from core.src.storage import (
@@ -29,9 +44,11 @@ from core.src.storage import (
     list_associations_for_item,
     make_download_token,
     read_file,
+    reassign_document_to_workitem,
     resolve_download_token,
+    tpm_resolve_doc_type as storage_tpm_resolve_doc_type,
 )
-from core.src.template_schema import ItemType
+from core.src.template_schema import DocType, ItemType
 
 from .auth import AuthPrincipal, require_authenticated_principal
 from .config import DashboardConfig
@@ -49,6 +66,28 @@ _INLINE_MIME = {
     ".jpeg": "image/jpeg",
     ".gif":  "image/gif",
 }
+
+
+# [D-119] tpm_resolved_doc_type SP field is 4-value (DocType minus UNRESOLVED).
+# Mirror the same set used by sp_alert_parser so the direct-POST channel
+# enforces the identical validation per [D-122] FR-87 direct-POST architecture.
+_TPM_RESOLVED_DOC_TYPE_VALID = frozenset({
+    DocType.TEST_REPORT.value,
+    DocType.TECH_REPORT.value,
+    DocType.WAIVER.value,
+    DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+})
+
+
+# FR-87 POST body schemas per [D-122] direct-POST architecture.
+class _Fr87ReassignBody(BaseModel):
+    target_item_id: int
+    file_hash:      str
+
+
+class _Fr87ResolveDocTypeBody(BaseModel):
+    file_hash:       str
+    target_doc_type: str
 
 
 class MilestoneRefreshState:
@@ -85,10 +124,37 @@ def _content_disposition(filename: str) -> tuple[str, str]:
     return f'attachment; filename="{filename}"', "application/octet-stream"
 
 
+async def _fetch_sp_row(
+    app: FastAPI,
+    sp_crud: Any | None,
+    customer_id: str,
+    sp_id: int,
+) -> dict[str, Any] | None:
+    """Per-load SP READ per [D-074] Gap 7 (no caching Ph-1).
+
+    Production path: sp_crud is wired; we call SpCrud.get_item with the SP Id.
+    Test/dev path: sp_crud is None; we look up the row in
+    request.app.state.mock_sp_rows (a dict keyed by (customer_id, sp_id)).
+    """
+    if sp_crud is not None:
+        from core.src.sharepoint_integration.config import ListScope
+        return await sp_crud.get_item(
+            entity="delivery_items",
+            scope=ListScope(customer_id=customer_id),
+            item_id=sp_id,
+        )
+    # Test/dev path: mock_sp_rows on app.state. Missing state -> None (404).
+    mock_rows: dict[tuple[str, int], dict[str, Any]] = getattr(
+        app.state, "mock_sp_rows", {}
+    )
+    return mock_rows.get((customer_id, int(sp_id)))
+
+
 def build_app(
     config: DashboardConfig | None = None,
     refresh_state: MilestoneRefreshState | None = None,
-    dispatcher: Any = None,                       # workflow_engine.TriggerDispatcher; None ok for Ph-1 dev without broker
+    dispatcher: Any = None,                       # workflow_engine.TriggerDispatcher
+    sp_crud: Any | None = None,                   # SpCrud per Gap 8 (None = mock_sp_rows fallback)
 ) -> FastAPI:
     """Construct the dashboard FastAPI app.
 
@@ -97,34 +163,60 @@ def build_app(
         instance per test.
     `dispatcher`: optional workflow_engine.TriggerDispatcher for FR-56 dispatch.
         If None, refresh endpoint returns 503 (workflow_engine not wired yet).
+    `sp_crud`: optional SpCrud instance for per-load SP READ per Gap 8. If None,
+        the /docs/<customer_id>/<sp_id> handler falls back to
+        request.app.state.mock_sp_rows (dict keyed by (customer_id, sp_id)).
     """
     cfg = config or DashboardConfig.from_sources()
     state = refresh_state or MilestoneRefreshState()
     templates = Jinja2Templates(directory=str(cfg.jinja_templates_dir))
 
     app = FastAPI(title="HILDA Dashboard", version="0.1.0")
+    # Stash sp_crud on app.state so route handlers + tests can introspect.
+    app.state.sp_crud = sp_crud
+    if not hasattr(app.state, "mock_sp_rows"):
+        app.state.mock_sp_rows = {}
 
     def _auth(request: Request) -> AuthPrincipal:
         return require_authenticated_principal(request, cfg)
 
     # ---- Document enumeration / rendering (FR-57 / FR-59 / FR-60) ----
 
-    @app.get("/docs/{delivery_item_id}", response_class=HTMLResponse, response_model=None)
+    @app.get(
+        "/docs/{customer_id}/{sp_id}",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
     async def get_document_section(
-        delivery_item_id: str,
+        customer_id: str,
+        sp_id: int,
         request: Request,
         accept: str | None = Header(None),
         principal: AuthPrincipal = Depends(_auth),
     ):
-        """FR-57 -- Document section. HTML default; JSON if Accept: application/json."""
+        """FR-57 -- Document section. HTML default; JSON if Accept: application/json.
+
+        Per architect lock 2026-06-26: URL is 2-segment `/docs/<customer_id>/<sp_id>`
+        where `<sp_id>` IS SP's `Id` (auto-counter PK) AND HILDA's `delivery_item_id`
+        (same integer, same key per [D-074]). HILDA does direct pattern-(a) SP fetch
+        via SpCrud per Gap 7; no caching Ph-1.
+        """
+        # Gap 7: per-load SP READ via SpCrud per [D-074]
+        sp_row = await _fetch_sp_row(app, sp_crud, customer_id, sp_id)
+        if sp_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=format_code("DSH-E001", item_id=f"{customer_id}/{sp_id}"),
+            )
+
+        # delivery_item_id IS the SP Id per architect lock 2026-06-26
+        delivery_item_id = str(sp_id)
+
         # Storage Protocol: get_documents_for_item returns list[DocumentIndexRow]
         try:
             docs = await get_documents_for_item(delivery_item_id)
         except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=format_code("DSH-E001", item_id=delivery_item_id),
-            )
+            docs = []
 
         # Resolve associations for nsd_path_type + inferred_tg_name surfacing
         try:
@@ -145,10 +237,6 @@ def build_app(
                 "rev_number":            doc.rev_number,
                 "original_filename":     doc.original_filename,
                 "download_url":          f"/dl/{token}",
-                # Per D7 cascade 2026-06-23: llm_review_findings is None in Ph-1 early drop
-                # (review_required=false on all items per architect lock 2026-06-19 + llm
-                # Ph-1 phasing per architect direction 2026-06-22 -- REVIEW_DOCUMENT is
-                # Ph-1 next pass + runtime-dormant). Template renders placeholder when None.
                 "parser_result":         getattr(doc, "parser_result", None),
                 "llm_review_findings":   getattr(doc, "llm_review_findings", None),
                 "inferred_tg_name":      getattr(assoc, "inferred_tg_name", None) if assoc else None,
@@ -160,31 +248,212 @@ def build_app(
         if accept and "application/json" in accept.lower():
             return JSONResponse(content=rendered_docs)
 
-        # HTML path -- FR-58 Confirmation skip per item_type="Confirmation" PascalCase
-        # (per SP UI engineer lock 2026-06-23 + D2 cascade). The delivery item's
-        # item_type is read via storage; if no item exists OR item_type=Confirmation,
-        # render empty doc_section per FR-58.
-        is_confirmation = False
-        # Inspect first doc's owning item via list_associations and an out-of-band item_type
-        # lookup -- production has a get_delivery_item helper; Ph-1 dashboard inspects
-        # the first association's parent item shape if present.
-        # For Ph-1: render empty section when no docs (typical for Confirmation items)
-        # since the SP-side item_type isn't on DocumentIndexRow; production dashboard
-        # would query storage.get_delivery_item(delivery_item_id) here.
-        if not rendered_docs:
-            is_confirmation = True   # Likely Confirmation; render empty per FR-58
+        # Gap 6: FR-58 Confirmation detection is AUTHORITATIVE via item_type from
+        # the freshly-fetched SP row (NOT the prior no-docs heuristic). When the
+        # SP row's item_type == "Confirmation" (PascalCase per SP UI engineer lock
+        # 2026-06-23 + dashboard D2 cascade) -> render no-doc-section template.
+        sp_item_type = sp_row.get("item_type")
+        is_confirmation = sp_item_type == ItemType.CONFIRMATION.value
 
         return templates.TemplateResponse(
             request=request,
             name="doc_section.html",
             context={
-                "delivery_item_id": delivery_item_id,
-                "docs":             rendered_docs,
-                "is_confirmation":  is_confirmation,
-                "principal":        principal,
-                "confirmation_value": ItemType.CONFIRMATION.value,    # "Confirmation"
+                "delivery_item_id":   delivery_item_id,
+                "customer_id":        customer_id,
+                "sp_id":              sp_id,
+                "sp_row":             sp_row,
+                "docs":               rendered_docs,
+                "is_confirmation":    is_confirmation,
+                "principal":          principal,
+                "confirmation_value": ItemType.CONFIRMATION.value,
             },
         )
+
+    # ---- FR-87 step (A) -- TPM reassign per [D-122] direct-POST architecture ----
+
+    @app.post(
+        "/docs/{customer_id}/{sp_id}/resolve_reassign",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def fr87_step_a_reassign(
+        customer_id: str,
+        sp_id: int,
+        request: Request,
+        body: _Fr87ReassignBody = Body(...),
+        principal: AuthPrincipal = Depends(_auth),
+    ):
+        target_item_id = body.target_item_id
+        file_hash = body.file_hash
+        """FR-87 step (A) -- TPM reassigns the document to a different work-item.
+
+        Per [D-122] direct-POST architecture 2026-06-26 (was [D-047] SP-alert email
+        round-trip). Body: target_item_id (int = SP Id of target) + file_hash.
+        Validates target exists in the same customer's Deliverables list.
+        Writes via storage.reassign_document_to_workitem + SP audit field
+        tpm_reassignment_target_item_id via SpCrud per [D-064] + [D-117]
+        digest dance. Returns 303 redirect to the GET page.
+
+        A->B->C strict ordering enforced at storage layer: storage raises STR-E009
+        if the item's nsd_path_type is not in {staged_not_classified,
+        staged_not_revision, unrouted}. We surface that as HTTP 409 Conflict.
+        """
+        # Validate source SP row exists
+        sp_row = await _fetch_sp_row(app, sp_crud, customer_id, sp_id)
+        if sp_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=format_code("DSH-E001", item_id=f"{customer_id}/{sp_id}"),
+            )
+        # Validate target SP row exists in the same customer's Deliverables list
+        target_row = await _fetch_sp_row(app, sp_crud, customer_id, target_item_id)
+        if target_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"target item not in customer's Deliverables list: "
+                       f"{customer_id}/{target_item_id}",
+            )
+
+        source_id = str(sp_id)
+        target_id = str(target_item_id)
+        pm_id = principal.user_name
+
+        # Caller-resolves discipline: dashboard passes target identity from the
+        # freshly-fetched target_row (4-field owner identity + tg_name + plm_id).
+        try:
+            await reassign_document_to_workitem(
+                file_hash=file_hash,
+                source_delivery_item_id=source_id,
+                target_delivery_item_id=target_id,
+                pm_id=pm_id,
+                target_tg_name=target_row.get("tg_name"),
+                target_owner_corp_id=target_row.get("owner_corp_id", ""),
+                target_owner_corp_usa_email=target_row.get("owner_corp_usa_email"),
+                target_owner_corp_email=target_row.get("owner_corp_email"),
+                target_owner_name=target_row.get("owner_name"),
+                target_plm_id=target_row.get("plm_id"),
+            )
+        except Exception as exc:
+            # Surface STR-E009 (state mismatch) as 409 Conflict per A->B->C ordering
+            msg = str(exc)
+            if "STR-E009" in msg or "state" in msg.lower():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"FR-87 step (A) rejected: item not in reassign-eligible state ({msg})",
+                )
+            raise
+
+        # SP audit writeback per [D-064] + [D-117] digest dance.
+        # Best-effort: when sp_crud is wired, write tpm_reassignment_target_item_id.
+        if sp_crud is not None:
+            from core.src.sharepoint_integration.config import ListScope
+            try:
+                await sp_crud.update_item(
+                    entity="delivery_items",
+                    scope=ListScope(customer_id=customer_id),
+                    item_id=str(sp_id),
+                    canonical_fields={"tpm_reassignment_target_item_id": target_item_id},
+                )
+            except Exception:
+                # SP audit writeback is best-effort; storage state already committed.
+                pass
+
+        return RedirectResponse(
+            url=f"/docs/{customer_id}/{sp_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # ---- FR-87 step (B) -- TPM doc_type resolve per [D-122] ----
+
+    @app.post(
+        "/docs/{customer_id}/{sp_id}/resolve_doc_type",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    async def fr87_step_b_resolve_doc_type(
+        customer_id: str,
+        sp_id: int,
+        request: Request,
+        body: _Fr87ResolveDocTypeBody = Body(...),
+        principal: AuthPrincipal = Depends(_auth),
+    ):
+        file_hash = body.file_hash
+        target_doc_type = body.target_doc_type
+        """FR-87 step (B) -- TPM resolves doc_type for a specific document.
+
+        Per [D-122] direct-POST architecture 2026-06-26. Body: file_hash +
+        target_doc_type. Validates target_doc_type in [D-119] 4-value set:
+            {test_report, tech_report, waiver, compliance_certification_release_notes}
+        (UNRESOLVED is NOT a valid TPM choice per [D-119]).
+
+        A->B->C ordering: step B requires step A to be complete OR the item
+        was never in staged_not_classified state (i.e. it was directly staged
+        with a known target item). Storage's STR-E009 enforces the state check
+        and is surfaced as HTTP 409 Conflict.
+        """
+        # Validate SP row exists
+        sp_row = await _fetch_sp_row(app, sp_crud, customer_id, sp_id)
+        if sp_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=format_code("DSH-E001", item_id=f"{customer_id}/{sp_id}"),
+            )
+
+        # [D-119] 4-value validation: reject UNRESOLVED + anything off-list.
+        if target_doc_type not in _TPM_RESOLVED_DOC_TYPE_VALID:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"FR-87 step (B) rejected: target_doc_type='{target_doc_type}' "
+                       f"not in [D-119] 4-value subset",
+            )
+
+        # A->B->C ordering check at handler level (defensive, complements storage):
+        # step A is complete when sp_row.tpm_reassignment_target_item_id is set
+        # OR the item was never staged_not_classified (which storage's STR-E009
+        # also catches via state mismatch).
+        # NOTE: this is a soft check -- the authoritative check is storage's
+        # state validation. We pass the call through.
+
+        delivery_item_id = str(sp_id)
+        pm_id = principal.user_name
+
+        try:
+            await storage_tpm_resolve_doc_type(
+                file_hash=file_hash,
+                delivery_item_id=delivery_item_id,
+                new_doc_type=DocType(target_doc_type),
+                pm_id=pm_id,
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "STR-E009" in msg or "state" in msg.lower():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"FR-87 step (B) rejected: item not in resolve-eligible state ({msg})",
+                )
+            raise
+
+        # SP audit writeback per [D-064] best-effort
+        if sp_crud is not None:
+            from core.src.sharepoint_integration.config import ListScope
+            try:
+                await sp_crud.update_item(
+                    entity="delivery_items",
+                    scope=ListScope(customer_id=customer_id),
+                    item_id=str(sp_id),
+                    canonical_fields={"tpm_resolved_doc_type": target_doc_type},
+                )
+            except Exception:
+                pass
+
+        return RedirectResponse(
+            url=f"/docs/{customer_id}/{sp_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # NOTE: FR-87 step (C) revision resolution POST is Ph-2 per [D-039] Step 2
+    # + architect direction. doc_row_staged.html shows step (C) as Ph-2 placeholder.
 
     # ---- Mediated download (FR-61) ----
 
@@ -196,7 +465,6 @@ def build_app(
         try:
             file_hash, delivery_item_id, nsd_path = await resolve_download_token(scoped_token)
         except Exception:
-            # Render friendly expired-token page
             html = """
             <!DOCTYPE html>
             <html lang="en"><head><meta charset="utf-8"><title>Link expired</title></head>
@@ -206,7 +474,6 @@ def build_app(
             """.strip()
             return HTMLResponse(content=html, status_code=status.HTTP_410_GONE)
 
-        # Resolve filename from association/index
         try:
             docs = await get_documents_for_item(delivery_item_id)
             doc = next((d for d in docs if d.file_hash == file_hash), None)
@@ -239,7 +506,6 @@ def build_app(
         TriggerEvent (item-less, milestone-scoped). Rate-limited per FR-56;
         returns 202 with task_ids on dispatch or existing task_ids on dedup.
         """
-        # Rate limit / dedup check
         existing = state.get(milestone_id)
         if existing is not None and not state.can_dispatch(milestone_id, cfg.refresh_rate_limit_seconds):
             return {
@@ -249,17 +515,12 @@ def build_app(
                 "rate_limited": True,
             }
 
-        # Without a workflow_engine.TriggerDispatcher injected, return 503
         if dispatcher is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Dispatcher not wired (workflow_engine TriggerDispatcher unavailable)",
             )
 
-        # Construct the RefreshRequested TriggerEvent. Since rule_engine doesn't have
-        # a RefreshRequested TriggerKind, we use STATE_CHANGE (no entity_ref state delta)
-        # as a Ph-1 placeholder; concrete production wiring may introduce a dedicated
-        # TriggerKind.MILESTONE_REFRESH when sp_alert_parser landed.
         from core.src.rule_engine import EntityRef, TriggerEvent, TriggerKind
         event = TriggerEvent(
             trigger=TriggerKind.STATE_CHANGE,

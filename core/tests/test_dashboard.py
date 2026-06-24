@@ -1,12 +1,13 @@
-"""dashboard test suite -- 5 routes + auth + Confirmation skip + token expiry +
-admin overrides Ph-1 empty + content negotiation + error codes.
+"""dashboard test suite -- routes + auth + Confirmation skip + token expiry +
+admin overrides Ph-1 empty + content negotiation + error codes + FR-87 POST
+endpoints + per-load SP READ via SpCrud + SpCrud wiring per 2026-06-26 cascade.
 
 Uses httpx.TestClient against build_app with mocked storage helpers.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +43,40 @@ class FakeAssoc:
         self.inferred_tg_name = inferred_tg_name
 
 
+class FakeSpCrud:
+    """In-memory stand-in for SpCrud used by tests. Records get_item +
+    update_item calls so tests can assert per-load fetch + audit writeback."""
+
+    def __init__(self, rows: dict[tuple[str, int], dict[str, Any]] | None = None):
+        self._rows = rows or {}
+        self.get_calls: list[tuple[str, int]] = []
+        self.update_calls: list[dict[str, Any]] = []
+
+    async def get_item(self, entity, scope, item_id):
+        self.get_calls.append((scope.customer_id, int(item_id)))
+        return self._rows.get((scope.customer_id, int(item_id)))
+
+    async def update_item(self, entity, scope, item_id, canonical_fields):
+        self.update_calls.append({
+            "entity": entity,
+            "customer_id": scope.customer_id,
+            "item_id": item_id,
+            "canonical_fields": canonical_fields,
+        })
+
+
+def _mk_sp_row(item_type=None, **extra):
+    """Build a minimal SP row dict for a delivery_items entity."""
+    return {
+        "item_type":      item_type or "Default",
+        "item_no":        1,
+        "delivery_state": "Open",
+        "tg_name":        "TG-A",
+        "owner_corp_id":  "owner-001",
+        **extra,
+    }
+
+
 @pytest.fixture
 def cfg_mock():
     """Config with mock_auth enabled so tests skip header validation."""
@@ -60,10 +95,12 @@ def patched_storage(monkeypatch):
     state = {
         "docs":       [],
         "assocs":     [],
-        "tokens":     {},  # token -> (file_hash, item_id, NSDPath)
+        "tokens":     {},
         "overrides":  [],
-        "files":      {},  # NSDPath -> bytes
+        "files":      {},
         "token_counter": 0,
+        "reassign_calls": [],
+        "resolve_doc_type_calls": [],
     }
 
     async def fake_get_documents_for_item(item_id):
@@ -75,7 +112,6 @@ def patched_storage(monkeypatch):
     async def fake_make_download_token(file_hash, delivery_item_id, ttl_seconds=300):
         state["token_counter"] += 1
         token = f"tok-{state['token_counter']}"
-        # Find the doc for filename look-up via resolve_download_token
         state["tokens"][token] = (file_hash, delivery_item_id, SimpleNamespace())
         return token
 
@@ -92,6 +128,12 @@ def patched_storage(monkeypatch):
             yield b"mock file content"
         return _gen()
 
+    async def fake_reassign_document_to_workitem(**kwargs):
+        state["reassign_calls"].append(kwargs)
+
+    async def fake_tpm_resolve_doc_type(**kwargs):
+        state["resolve_doc_type_calls"].append(kwargs)
+
     monkeypatch.setattr("core.src.dashboard.app.get_documents_for_item",
                         fake_get_documents_for_item)
     monkeypatch.setattr("core.src.dashboard.app.list_associations_for_item",
@@ -103,11 +145,23 @@ def patched_storage(monkeypatch):
     monkeypatch.setattr("core.src.dashboard.app.list_active_overrides",
                         fake_list_active_overrides)
     monkeypatch.setattr("core.src.dashboard.app.read_file", fake_read_file)
+    monkeypatch.setattr("core.src.dashboard.app.reassign_document_to_workitem",
+                        fake_reassign_document_to_workitem)
+    monkeypatch.setattr("core.src.dashboard.app.storage_tpm_resolve_doc_type",
+                        fake_tpm_resolve_doc_type)
     return state
 
 
+def _build_with_sp(cfg, sp_crud=None, mock_sp_rows=None, **kwargs):
+    """Build app + (when no sp_crud provided) seed mock_sp_rows on app.state."""
+    app = build_app(cfg, sp_crud=sp_crud, **kwargs)
+    if mock_sp_rows is not None and sp_crud is None:
+        app.state.mock_sp_rows.update(mock_sp_rows)
+    return app
+
+
 # ---------------------------------------------------------------------------
-# /docs/{delivery_item_id} tests
+# /docs/{customer_id}/{sp_id} tests (Gap 1 + Gap 6 + Gap 7 + Gap 8)
 # ---------------------------------------------------------------------------
 
 
@@ -117,8 +171,10 @@ class TestGetDocumentSection:
             FakeDoc("h1", DocType.TEST_REPORT, "power_report", 1, "report.pdf"),
         ]
         patched_storage["assocs"] = [FakeAssoc("h1", "classified")]
-        client = TestClient(build_app(cfg_mock))
-        r = client.get("/docs/I-1234")
+        mock_rows = {("mock_customer", 1234): _mk_sp_row(item_type="Default")}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert "power_report" in r.text
@@ -129,8 +185,11 @@ class TestGetDocumentSection:
             FakeDoc("h1", DocType.TEST_REPORT, "power_report", 1, "report.pdf"),
         ]
         patched_storage["assocs"] = [FakeAssoc("h1", "classified")]
-        client = TestClient(build_app(cfg_mock))
-        r = client.get("/docs/I-1234", headers={"Accept": "application/json"})
+        mock_rows = {("mock_customer", 1234): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234",
+                       headers={"Accept": "application/json"})
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/json")
         data = r.json()
@@ -138,26 +197,17 @@ class TestGetDocumentSection:
         assert data[0]["doc_id_slug"] == "power_report"
         assert data[0]["download_url"].startswith("/dl/")
 
-    def test_confirmation_skip_per_fr58(self, cfg_mock, patched_storage):
-        """Per D2 cascade: item_type='Confirmation' renders empty doc section."""
-        patched_storage["docs"] = []                 # No docs -> rendered as Confirmation per Ph-1 heuristic
-        patched_storage["assocs"] = []
-        client = TestClient(build_app(cfg_mock))
-        r = client.get("/docs/I-confirmation")
-        assert r.status_code == 200
-        # FR-58: confirmation message is present
-        assert "Confirmation item" in r.text or "no document section" in r.text.lower()
-
     def test_llm_review_placeholder_per_d7_cascade(self, cfg_mock, patched_storage):
-        """Per D7 cascade 2026-06-23: llm_review_findings=None renders placeholder
-        'AI review not enabled for this item (Ph-1 early drop)'."""
+        """Per D7 cascade 2026-06-23: llm_review_findings=None renders placeholder."""
         patched_storage["docs"] = [
             FakeDoc("h1", DocType.TEST_REPORT, "report", 1, "x.pdf",
                     parser_result=None, llm_review_findings=None),
         ]
         patched_storage["assocs"] = [FakeAssoc("h1", "classified")]
-        client = TestClient(build_app(cfg_mock))
-        r = client.get("/docs/I-1234")
+        mock_rows = {("mock_customer", 1234): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234")
         assert "AI review not enabled" in r.text
 
     def test_staged_doc_renders_fr87_button_info(self, cfg_mock, patched_storage):
@@ -166,25 +216,289 @@ class TestGetDocumentSection:
             FakeDoc("h1", DocType.TEST_REPORT, "staged", 1, "x.pdf"),
         ]
         patched_storage["assocs"] = [FakeAssoc("h1", "staged_not_classified")]
-        client = TestClient(build_app(cfg_mock))
-        r = client.get("/docs/I-1234")
+        mock_rows = {("mock_customer", 1234): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234")
         assert "step (B)" in r.text or "doc_type re-classification" in r.text
 
     def test_unauth_request_rejected_in_production_mode(self, cfg_prod, patched_storage):
-        """Per Invariant: production reverse-proxy mode rejects requests without
-        Negotiate / X-Authenticated-User header."""
         client = TestClient(build_app(cfg_prod))
-        r = client.get("/docs/I-1234")
+        r = client.get("/docs/mock_customer/1234")
         assert r.status_code == 401
         assert "DSH-E003" in r.text or r.headers.get("www-authenticate") == "Negotiate"
 
     def test_proxy_forwarded_identity_accepted(self, cfg_prod, patched_storage):
-        """Per Invariant: trusted proxy-forwarded X-Authenticated-User header is accepted."""
+        mock_rows = {("mock_customer", 1234): _mk_sp_row()}
+        app = _build_with_sp(cfg_prod, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234",
+                       headers={PROXY_USER_HEADER: "y.vasilyev"})
+        assert r.status_code == 200
+
+    def test_404_when_sp_row_missing(self, cfg_mock, patched_storage):
+        """Per Gap 7: when SpCrud returns None / mock_sp_rows lacks key, 404."""
+        app = _build_with_sp(cfg_mock, mock_sp_rows={})
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/9999")
+        assert r.status_code == 404
+        assert "not found" in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Confirmation detection (Gap 6) -- authoritative item_type check
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationDetection:
+    def test_confirmation_item_type_renders_no_doc_section(self, cfg_mock, patched_storage):
+        """Gap 6: SP row item_type='Confirmation' renders empty doc section per FR-58."""
         patched_storage["docs"] = []
         patched_storage["assocs"] = []
-        client = TestClient(build_app(cfg_prod))
-        r = client.get("/docs/I-1234", headers={PROXY_USER_HEADER: "y.vasilyev"})
+        mock_rows = {
+            ("mock_customer", 1234): _mk_sp_row(item_type=ItemType.CONFIRMATION.value),
+        }
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234")
         assert r.status_code == 200
+        assert "Confirmation item" in r.text or "no document section" in r.text.lower()
+
+    def test_non_confirmation_with_no_docs_renders_empty_section(
+        self, cfg_mock, patched_storage
+    ):
+        """Gap 6: item_type='Default' with NO docs renders 'no documents yet'
+        (NOT 'Confirmation' message) -- the authoritative check beats the old
+        no-docs heuristic."""
+        patched_storage["docs"] = []
+        patched_storage["assocs"] = []
+        mock_rows = {("mock_customer", 1234): _mk_sp_row(item_type="Default")}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/1234")
+        assert r.status_code == 200
+        # Must NOT show the Confirmation message
+        assert "Confirmation item" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Per-load SP READ via SpCrud (Gap 7)
+# ---------------------------------------------------------------------------
+
+
+class TestPerLoadSpRead:
+    def test_sp_crud_get_item_called_every_get(self, cfg_mock, patched_storage):
+        sp_crud = FakeSpCrud(rows={
+            ("mock_customer", 1234): _mk_sp_row(item_type="Default"),
+        })
+        client = TestClient(build_app(cfg_mock, sp_crud=sp_crud))
+        r1 = client.get("/docs/mock_customer/1234")
+        r2 = client.get("/docs/mock_customer/1234")
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        # Two GETs -> two SpCrud.get_item calls (no caching Ph-1)
+        assert len(sp_crud.get_calls) == 2
+
+    def test_sp_crud_404_when_get_item_returns_none(self, cfg_mock, patched_storage):
+        sp_crud = FakeSpCrud(rows={})   # nothing
+        client = TestClient(build_app(cfg_mock, sp_crud=sp_crud))
+        r = client.get("/docs/mock_customer/1234")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# SpCrud wiring + mock_sp_rows fallback (Gap 8)
+# ---------------------------------------------------------------------------
+
+
+class TestSpCrudWiring:
+    def test_build_app_accepts_sp_crud(self, cfg_mock, patched_storage):
+        sp_crud = FakeSpCrud(rows={("mock_customer", 1): _mk_sp_row()})
+        app = build_app(cfg_mock, sp_crud=sp_crud)
+        assert app.state.sp_crud is sp_crud
+
+    def test_build_app_falls_back_to_mock_sp_rows_when_sp_crud_none(
+        self, cfg_mock, patched_storage
+    ):
+        """Gap 8 (b): when sp_crud=None, the handler reads
+        request.app.state.mock_sp_rows."""
+        app = build_app(cfg_mock, sp_crud=None)
+        app.state.mock_sp_rows[("mock_customer", 99)] = _mk_sp_row()
+        client = TestClient(app)
+        r = client.get("/docs/mock_customer/99")
+        assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# FR-87 step (A) -- POST /docs/{customer_id}/{sp_id}/resolve_reassign
+# ---------------------------------------------------------------------------
+
+
+class TestFr87ResolveReassign:
+    def test_happy_path_returns_303_redirect(self, cfg_mock, patched_storage):
+        mock_rows = {
+            ("mock_customer", 100): _mk_sp_row(item_type="Default", tg_name="TG-src"),
+            ("mock_customer", 200): _mk_sp_row(item_type="Default", tg_name="TG-tgt"),
+        }
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 200, "file_hash": "h-xyz"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/docs/mock_customer/100"
+        # Storage layer called
+        assert len(patched_storage["reassign_calls"]) == 1
+        call = patched_storage["reassign_calls"][0]
+        assert call["file_hash"] == "h-xyz"
+        assert call["source_delivery_item_id"] == "100"
+        assert call["target_delivery_item_id"] == "200"
+
+    def test_rejects_nonexistent_target_item_400(self, cfg_mock, patched_storage):
+        mock_rows = {("mock_customer", 100): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 99999, "file_hash": "h-xyz"},
+        )
+        assert r.status_code == 400
+        assert "target item" in r.text.lower()
+
+    def test_rejects_nonexistent_source_item_404(self, cfg_mock, patched_storage):
+        app = _build_with_sp(cfg_mock, mock_sp_rows={})
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 200, "file_hash": "h-xyz"},
+        )
+        assert r.status_code == 404
+
+    def test_state_mismatch_surfaces_409_conflict(self, cfg_mock, patched_storage, monkeypatch):
+        """A->B->C ordering: storage's STR-E009 (state mismatch) -> 409 Conflict."""
+        async def fail_with_state_mismatch(**kwargs):
+            raise Exception("STR-E009: state mismatch -- item not in staged_not_classified")
+        monkeypatch.setattr("core.src.dashboard.app.reassign_document_to_workitem",
+                            fail_with_state_mismatch)
+        mock_rows = {
+            ("mock_customer", 100): _mk_sp_row(),
+            ("mock_customer", 200): _mk_sp_row(),
+        }
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 200, "file_hash": "h-xyz"},
+        )
+        assert r.status_code == 409
+        assert "step (A)" in r.text
+
+    def test_sp_audit_writeback_called_when_sp_crud_wired(self, cfg_mock, patched_storage):
+        sp_crud = FakeSpCrud(rows={
+            ("mock_customer", 100): _mk_sp_row(),
+            ("mock_customer", 200): _mk_sp_row(),
+        })
+        client = TestClient(build_app(cfg_mock, sp_crud=sp_crud))
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 200, "file_hash": "h-xyz"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        # SP audit writeback per [D-064]
+        update_calls = [c for c in sp_crud.update_calls if c["item_id"] == "100"]
+        assert len(update_calls) == 1
+        assert update_calls[0]["canonical_fields"]["tpm_reassignment_target_item_id"] == 200
+
+    def test_auth_required_in_production_mode(self, cfg_prod, patched_storage):
+        app = _build_with_sp(cfg_prod, mock_sp_rows={
+            ("mock_customer", 100): _mk_sp_row(),
+        })
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_reassign",
+            json={"target_item_id": 200, "file_hash": "h-xyz"},
+        )
+        assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# FR-87 step (B) -- POST /docs/{customer_id}/{sp_id}/resolve_doc_type
+# ---------------------------------------------------------------------------
+
+
+class TestFr87ResolveDocType:
+    def test_happy_path_returns_303_redirect(self, cfg_mock, patched_storage):
+        mock_rows = {("mock_customer", 100): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_doc_type",
+            json={"file_hash": "h-xyz", "target_doc_type": "test_report"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/docs/mock_customer/100"
+        # storage_tpm_resolve_doc_type called
+        assert len(patched_storage["resolve_doc_type_calls"]) == 1
+        call = patched_storage["resolve_doc_type_calls"][0]
+        assert call["file_hash"] == "h-xyz"
+        assert call["new_doc_type"] == DocType.TEST_REPORT
+
+    def test_rejects_invalid_doc_type_per_d119(self, cfg_mock, patched_storage):
+        """[D-119] 4-value validation: UNRESOLVED + anything off-list rejected."""
+        mock_rows = {("mock_customer", 100): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_doc_type",
+            json={"file_hash": "h-xyz", "target_doc_type": "unresolved"},
+        )
+        assert r.status_code == 400
+        assert "D-119" in r.text or "4-value" in r.text
+        assert len(patched_storage["resolve_doc_type_calls"]) == 0
+
+    def test_rejects_state_mismatch_409_conflict(self, cfg_mock, patched_storage, monkeypatch):
+        """A->B->C ordering enforced by storage; STR-E009 -> 409."""
+        async def fail_with_state_mismatch(**kwargs):
+            raise Exception("STR-E009: state mismatch")
+        monkeypatch.setattr("core.src.dashboard.app.storage_tpm_resolve_doc_type",
+                            fail_with_state_mismatch)
+        mock_rows = {("mock_customer", 100): _mk_sp_row()}
+        app = _build_with_sp(cfg_mock, mock_sp_rows=mock_rows)
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_doc_type",
+            json={"file_hash": "h-xyz", "target_doc_type": "tech_report"},
+        )
+        assert r.status_code == 409
+        assert "step (B)" in r.text
+
+    def test_sp_audit_writeback_called_when_sp_crud_wired(self, cfg_mock, patched_storage):
+        sp_crud = FakeSpCrud(rows={("mock_customer", 100): _mk_sp_row()})
+        client = TestClient(build_app(cfg_mock, sp_crud=sp_crud))
+        r = client.post(
+            "/docs/mock_customer/100/resolve_doc_type",
+            json={"file_hash": "h-xyz", "target_doc_type": "waiver"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        update_calls = [c for c in sp_crud.update_calls if c["item_id"] == "100"]
+        assert len(update_calls) == 1
+        assert update_calls[0]["canonical_fields"]["tpm_resolved_doc_type"] == "waiver"
+
+    def test_auth_required_in_production_mode(self, cfg_prod, patched_storage):
+        app = _build_with_sp(cfg_prod, mock_sp_rows={
+            ("mock_customer", 100): _mk_sp_row(),
+        })
+        client = TestClient(app)
+        r = client.post(
+            "/docs/mock_customer/100/resolve_doc_type",
+            json={"file_hash": "h-xyz", "target_doc_type": "test_report"},
+        )
+        assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +516,6 @@ class TestDownloadFile:
         r = client.get("/dl/validtoken")
         assert r.status_code == 200
         assert "mock file content" in r.text
-        # PDF -> inline disposition per FR-61
         assert "inline" in r.headers["content-disposition"]
         assert 'filename="report.pdf"' in r.headers["content-disposition"]
 
@@ -217,8 +530,6 @@ class TestDownloadFile:
         assert "attachment" in r.headers["content-disposition"]
 
     def test_expired_token_renders_dsh_e002_page(self, cfg_mock, patched_storage):
-        """Per D2 cascade: expired/invalid token renders DSH-E002 friendly HTML
-        with HTTP 410 (Gone), not 500."""
         client = TestClient(build_app(cfg_mock))
         r = client.get("/dl/notarealtoken")
         assert r.status_code == 410
@@ -232,14 +543,11 @@ class TestDownloadFile:
 
 class TestMilestoneRefresh:
     def test_refresh_without_dispatcher_returns_503(self, cfg_mock, patched_storage):
-        """Per Ph-1 wiring: without workflow_engine.TriggerDispatcher injected,
-        the endpoint returns 503."""
         client = TestClient(build_app(cfg_mock))
         r = client.post("/milestone/M-1/refresh")
         assert r.status_code == 503
 
     def test_refresh_with_dispatcher_dispatches(self, cfg_mock, patched_storage):
-        """Per D3 cascade: dispatches via TriggerDispatcher; returns 202 with task_ids."""
         from unittest.mock import MagicMock
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = SimpleNamespace(
@@ -294,8 +602,6 @@ class TestMilestoneRefresh:
 
 class TestAdminOverrides:
     def test_overrides_empty_in_ph1_per_d1_cascade(self, cfg_mock, patched_storage):
-        """Per D1 cascade 2026-06-23: AutomationRuleOverride Postgres consumption
-        Ph-2 deferred; Ph-1 endpoint renders empty table with Ph-1 note."""
         patched_storage["overrides"] = []
         client = TestClient(build_app(cfg_mock))
         r = client.get("/admin/overrides")

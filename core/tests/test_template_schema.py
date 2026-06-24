@@ -645,12 +645,14 @@ class TestEnums:
         }
 
     def test_delivery_state_11_values_per_fr7(self) -> None:
-        """Per FR-7 — 11-value canonical enum (Not Started + 8 happy-path + Delayed + Blocked)."""
+        """Per FR-7 — 11-value canonical enum (Not Started + 8 happy-path + Delayed + Blocked).
+        Per architect lock 2026-06-26 direction (α): value strings match SP display
+        (PascalCase with spaces)."""
         assert len(DeliveryState) == 11
         assert {s.value for s in DeliveryState} == {
-            "Not Started", "Open", "OutreachSent", "DocumentReceived",
-            "OwnerClosed", "UnderPMReview", "ReadyForSubmission",
-            "SubmittedToCustomer", "Closed", "Delayed", "Blocked",
+            "Not Started", "Open", "Outreach Sent", "Document Received",
+            "Owner Closed", "Under PM Review", "Ready For Submission",
+            "Submitted To Customer", "Closed", "Delayed", "Blocked",
         }
 
     def test_item_type_4_values_per_d053(self) -> None:

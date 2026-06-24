@@ -1,8 +1,9 @@
 # Module: dashboard
 
-> **Status:** Skeleton draft 2026-06-12 + **2026-06-23 architect cascade revisit applied (8 drift items D1-D8 against locks since 2026-06-12)**. Sections curated; pending section-by-section user review during the architecture session that opens the `dashboard-v1` strand. Code implementation begins after MODULE.md is signed off + decisions captured.
+> **Status:** Skeleton draft 2026-06-12 + 2026-06-23 architect cascade revisit + **2026-06-26 architect-lock cascade (5 gaps + bonuses applied)**. Sections curated; pending section-by-section user review during the architecture session that opens the `dashboard-v1` strand. Code implementation begins after MODULE.md is signed off + decisions captured.
 >
 > **Rollback log:**
+> - **2026-06-26 (architect-lock cascade — 5 gaps + bonus fixes applied)** — **Gap 1 (URL reshape)**: URL pattern is now 2-segment `/docs/<customer_id>/<sp_id>` per architect lock 2026-06-26 (`<sp_id>` IS SP's `Id` auto-counter PK; HILDA's `delivery_item_id` IS SP Id — same integer, same key per `[D-074]` Variant A). **Gap 2 (FR-87 direct POST per [D-122])**: 2 new endpoints landed -- `POST /docs/<customer_id>/<sp_id>/resolve_reassign` (step A) + `POST /docs/<customer_id>/<sp_id>/resolve_doc_type` (step B); step C deferred Ph-2 per `[D-039]` Step 2 + architect direction. Body is JSON; validates [D-119] 4-value set on step B; returns 303 redirect on success; A→B→C strict ordering enforced at storage state-check level (STR-E009 → HTTP 409 Conflict). **Gap 6 (FR-58 authoritative)**: Confirmation skip is now driven by the freshly-fetched SP row's `item_type == "Confirmation"` (PascalCase per SP UI engineer lock 2026-06-23) — was a no-docs heuristic in prior cascade; now authoritative. **Gap 7 (per-load SP READ)**: `GET /docs/<customer_id>/<sp_id>` calls `SpCrud.get_item(entity="delivery_items", scope=ListScope(customer_id), item_id=sp_id)` on EVERY page load per `[D-074]` (no caching Ph-1 — typical use ~20/min during a TPM's busy day; SP handles fine). **Gap 8 (SpCrud wiring)**: `build_app(config, refresh_state, dispatcher, sp_crud)` — `sp_crud=None` falls back to `request.app.state.mock_sp_rows` dict for test/dev mode. **Bonus -- mock_customer.yaml cleanup**: SP internal column names confirmed bare (no `_x0020_`) by yesterday's live SP test; cleaned up `item_no`, `item_type`, `delivery_state`, `project_id`, `project_model`. **Bonus -- DeliveryState enum direction (α)**: value strings now match SP display PascalCase-with-spaces ("Outreach Sent" / "Document Received" / "Owner Closed" / "Under PM Review" / "Ready For Submission" / "Submitted To Customer") -- same pattern as `[D-094]` SUPERSEDED 2026-06-23 item_type mixed-case. Anchors added: `[D-119]` 4-value validation, `[D-122]` FR-87 direct-POST architecture, `[D-064]` SP writeback channel, `[D-117]` SpSession digest dance for FR-87 audit writeback.
 > - **2026-06-23 (architect cascade revisit — 8 drift items applied)** — strict-order module-by-module sweep Module #9 of 13. **D1 — `/admin/overrides` Ph-2 forward-looking**: per rule_engine D4 cascade 2026-06-23, `AutomationRuleOverride` Postgres consumption is deferred to Ph-2 (early drop has single mock customer; no per-customer/device runtime tuning needed; YAML edit + service restart sufficient). In Ph-1, `storage.list_active_overrides()` returns empty list — `/admin/overrides` renders empty table with "No active overrides (Ph-1 — overrides Ph-2 per rule_engine D4 cascade)" message; endpoint stays in code for Ph-2 activation without surface change. **D2 — `item_type="Confirmation"` → `item_type=Confirmation`** per SP UI engineer lock 2026-06-23 (mixed-case: short-label categories Confirmation/Default PascalCase; long-named categories test_tech_waiver_report/compliance_certification_release_notes snake_case). **D3 — workflow_engine integration**: `FR-56 /milestone/<id>/refresh` POST endpoint now references `workflow_engine.TriggerDispatcher.dispatch(event)` with a constructed `RefreshRequested` TriggerEvent OR directly enqueues a soft-poll Celery task via the workflow_engine task registry — implementation choice in dashboard dev phase. **D4 — FR-87 step (A)(B)(C) clarification**: `doc_row_staged.html` variant surfaces FR-87 step (A) TPM reassignment button (per tracker MODULE.md cascade 2026-06-23 D18) + step (B) doc_type re-classification + step (C) `[D-039]` revision resolution (Ph-1 Steps 0+1 deterministic; Step 2 LLM Ph-2 per CLASSIFY_DOC demotion). **D5 — Status header refresh (this entry)**. **D6 — Anchors update**: adds `[D-080]` (4-field owner identity for outreach display), `[D-083]` (Projects-per-customer architecture; 3-tuple PM resolution rendering), `[D-085]` (Milestone.target_date sole authoritative deadline; deadline rendering), `[D-086]` (free-form text owner identity discipline), `[D-091]` (slug → id rename throughout — dashboard URL params use `<delivery_item_id>` / `<milestone_id>` already, no slug references to rename). **D7 — llm Ph-1 phasing acknowledgment**: per architect direction 2026-06-22 llm Ph-1 phasing, `llm_review_findings` field is NULL/empty in Ph-1 early drop (review_required=false on all items per architect lock 2026-06-19 — REVIEW_DOCUMENT TaskKind is Ph-1 next pass + runtime-dormant). doc_section.html template renders "AI review not enabled for this item (Ph-1 early drop)" placeholder when `llm_review_findings is None`. **D8 — Architectural decisions partial resolution**: decisions 1 (Jinja2 chosen, line 171 ✓), 4 (HTML+JSON content negotiation, line 32 implements ✓), 5 (token-expiry friendly UX, line 65 ✓), 6 (CORS allowlist empty Ph-1, line 148 Invariant ✓) softly locked. Decisions 2 (reverse-proxy identity forwarding mechanism) + 3 (cross-cutting `core/src/auth/` module split) remain OPEN — to be ratified when dashboard dev begins or when FR-62 upload endpoint Ph-2 forces the question.
 > - **2026-06-12 (skeleton draft)** — initial MODULE.md created as part of the `dashboard-v1` strand seed; anchors `D-074` (Variant A SP↔HILDA integration — link-out architecture), `D-073` (SP UI engineer manually provisions SP lists), `[D-006]` (Kerberos auth), `[D-064]` (HILDA→SP REST writeback — unchanged; dashboard reads SP via sharepoint_integration but does not writeback itself), NFR-16 (HILDA-mediated download with AD auth), and serves FR-31 (admin overrides view), FR-56 (milestone soft-refresh), FR-57 (document enumeration), FR-58 (Confirmation no-doc-section), FR-59 (document section markup), FR-60 (review-results display), FR-61 (HILDA-mediated download). **OPEN ARCHITECTURAL DECISIONS** below — to be locked during architecture review pass; see `## Architectural decisions to lock`.
 
@@ -25,9 +26,12 @@ Serves NFR-5 (UI confirmation gates — surfaced in the rendered HTML), NFR-16 (
 
 ```python
 # ---- Document enumeration / rendering (FR-57 / FR-59 / FR-60) ----
-@app.get("/docs/{delivery_item_id}", response_class=HTMLResponse)
+# Per architect lock 2026-06-26 (Gap 1): URL is 2-segment /docs/<customer_id>/<sp_id>;
+# <sp_id> IS SP's Id auto-counter PK AND HILDA's delivery_item_id (same integer).
+@app.get("/docs/{customer_id}/{sp_id}", response_class=HTMLResponse)
 async def get_document_section(
-    delivery_item_id: str,
+    customer_id: str,
+    sp_id: int,
     request: Request,
     accept: str | None = Header(None),
 ) -> HTMLResponse | JSONResponse:
@@ -50,6 +54,34 @@ async def get_document_section(
     authenticated corp AD user per NFR-16 (per-DI ACL deferred per DEF-18).
 
     Raises: DSH-E001 if delivery_item_id not found; DSH-E003 on auth failure."""
+
+# ---- FR-87 direct-POST resolution endpoints per [D-122] cascade 2026-06-26 ----
+# Step A (TPM reassign) + Step B (TPM doc_type resolve). Step C (revision) is Ph-2
+# deferred per [D-039] Step 2 + architect direction. Body is JSON; validation in
+# handler; A->B->C strict ordering enforced via storage STR-E009 -> HTTP 409 Conflict.
+@app.post("/docs/{customer_id}/{sp_id}/resolve_reassign", response_class=HTMLResponse)
+async def fr87_step_a_reassign(
+    customer_id: str, sp_id: int, request: Request,
+    body: _Fr87ReassignBody,    # {target_item_id: int, file_hash: str}
+) -> RedirectResponse:
+    """FR-87 step (A) -- TPM reassigns the document to a different work-item.
+    Validates source + target SP rows exist; calls
+    storage.reassign_document_to_workitem with 4-field owner identity + plm_id +
+    tg_name from the freshly-fetched target_row; writes SP audit field
+    tpm_reassignment_target_item_id via SpCrud per [D-064] + [D-117] digest
+    dance. Returns 303 redirect to GET /docs/<customer_id>/<sp_id>."""
+
+@app.post("/docs/{customer_id}/{sp_id}/resolve_doc_type", response_class=HTMLResponse)
+async def fr87_step_b_resolve_doc_type(
+    customer_id: str, sp_id: int, request: Request,
+    body: _Fr87ResolveDocTypeBody,   # {file_hash: str, target_doc_type: str}
+) -> RedirectResponse:
+    """FR-87 step (B) -- TPM resolves doc_type for a specific document.
+    Validates target_doc_type in [D-119] 4-value set:
+    {test_report, tech_report, waiver, compliance_certification_release_notes}
+    (UNRESOLVED is NOT a valid TPM choice). Calls
+    storage.tpm_resolve_doc_type; writes SP audit field
+    tpm_resolved_doc_type via SpCrud per [D-064]. Returns 303 redirect."""
 
 @app.get("/dl/{scoped_token}")
 async def download_file(scoped_token: str) -> StreamingResponse:
@@ -153,7 +185,9 @@ DSH-W002  Static-asset cache miss (Ph-2 cold-cache warning)
 - **Reverse proxy is trusted; client identity headers are NOT** — dashboard MUST validate Kerberos from the proxy-forwarded Negotiate, and MUST NOT trust client-supplied `X-Authenticated-User` / `X-User-Email` headers. Reverse-proxy origin allowlist on source IP enforced.
 - **No writeback to SP from dashboard** — all SP state writes go through `sharepoint_integration` per `D-064`. Dashboard is read-side only (renders + downloads + admin views); the POST endpoints write to HILDA-local state (`workflow_engine.enqueue_soft_poll`), not to SP.
 - **No NSD path leakage in responses** — token URLs are opaque; NSD paths never appear in HTML or JSON. The 4 FR-86 path types (`classified` / `staged_*` / `unrouted`) are surfaced as `nsd_path_type` badge labels, not raw paths.
-- **Confirmation items render with NO document section** per FR-58 — `item_type="Confirmation"` short-circuits the document fetch + Jinja partial.
+- **Confirmation items render with NO document section** per FR-58 — `item_type="Confirmation"` short-circuits the document fetch + Jinja partial. **Per Gap 6 cascade 2026-06-26**: Confirmation detection is AUTHORITATIVE via the freshly-fetched SP row's `item_type` field (not a no-docs heuristic).
+- **Per-load SP READ via SpCrud per [D-074] (Gap 7 cascade 2026-06-26)** — every `GET /docs/<customer_id>/<sp_id>` page load calls `SpCrud.get_item(entity="delivery_items", scope=ListScope(customer_id), item_id=sp_id)` and renders against the fresh SP row. No caching Ph-1; typical use ~20/min during a TPM's busy day. 404 raises DSH-E001 when the SP row does not exist.
+- **FR-87 A→B→C strict ordering enforced at POST handler + storage layer** per Gap 2 cascade 2026-06-26 + `[D-122]`. POST handlers validate input + source/target existence; storage's `reassign_document_to_workitem` + `tpm_resolve_doc_type` enforce state preconditions (must be in `staged_not_classified` / `staged_not_revision` / `unrouted` per step). Storage's STR-E009 (state mismatch) is surfaced as HTTP 409 Conflict with an explanatory body. Trust-the-state-machine, not the UI.
 - **CORS allowlist is empty in Ph-1** — no cross-origin XHR consumers per `D-074`. Future JSON consumers (HILDA-internal admin tools) require an explicit allowlist add via `DashboardConfig.cors_origins` (not in Ph-1 config).
 - **Server-side rendered HTML only — no SPA, no client-side framework** — Ph-1 + Ph-2; SPA reconsideration deferred to Ph-3+.
 - **Error-code contract**: all module errors raised as `PipelineError` with `DSH-E001..` codes registered in `core/src/diagnostics/error_codes.py` per `[D-002]` + `[D-017]`. Compact reports (RPT/MET/QC) emitted per `[D-002]` use only counts, status flags, and bounded enum tokens — never file content or proprietary identifiers.

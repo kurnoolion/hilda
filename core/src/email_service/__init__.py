@@ -20,7 +20,6 @@ from core.src.email_service.inbound import (
 )
 from core.src.email_service.outbound import (
     SmtpSender,
-    compose_escalation_for_messenger,
     compose_outreach,
     compose_reminder,
     get_template_env,
@@ -72,7 +71,6 @@ __all__ = [
     "SpAlertParser",
     "StructuredReplyBlock",
     "classify",
-    "compose_escalation_for_messenger",
     "compose_outreach",
     "compose_reminder",
     "extract_routing_key",

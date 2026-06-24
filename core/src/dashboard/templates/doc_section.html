@@ -1,9 +1,19 @@
 {% extends "base.html" %}
-{% block title %}HILDA — Documents for {{ delivery_item_id }}{% endblock %}
+{% block title %}HILDA — Documents for {{ customer_id }}/{{ sp_id }}{% endblock %}
 {% block content %}
-<h1>Documents for {{ delivery_item_id }}</h1>
+<h1>Documents for {{ customer_id }} / item {{ sp_id }}</h1>
 
-{# FR-58 Confirmation skip: item_type="Confirmation" (PascalCase per SP UI engineer lock 2026-06-23 + dashboard D2 cascade) renders NO document section. #}
+{# SP row metadata header per Gap 7 architect lock 2026-06-26 (per-load fresh fetch via SpCrud). #}
+{% if sp_row %}
+<div class="sp-row-meta">
+    <strong>Item Type:</strong> {{ sp_row.get("item_type", "&mdash;") }}
+    | <strong>Delivery State:</strong> {{ sp_row.get("delivery_state", "&mdash;") }}
+    | <strong>Modified:</strong> {{ sp_row.get("Modified", "&mdash;") }}
+</div>
+{% endif %}
+
+{# FR-58 Confirmation skip: item_type="Confirmation" AUTHORITATIVE per Gap 6 cascade 2026-06-26
+   (was no-docs heuristic; now driven by freshly-fetched SP row item_type). #}
 {% if is_confirmation %}
 <p class="placeholder">No documents -- this is a Confirmation item (no document section per FR-58).</p>
 {% elif not docs %}

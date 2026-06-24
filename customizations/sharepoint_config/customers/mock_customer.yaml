@@ -39,13 +39,13 @@ lists:                                    # 3 lists per Module #11 lock 2026-06-
 
     columns:
       # ---- Item-identity fields ----
-      item_no: "Item_x0020_No"                                                # IMMUTABLE per item lifetime
+      item_no: "item_no"                                                      # IMMUTABLE per item lifetime; bare per architect lock 2026-06-26 (yesterday's live SP test)
       item_name: "Title"
       item_description: "Item_x0020_Description"                              # JSON list-of-lists per FR-82
 
       # ---- Item type + state ----
-      item_type: "Item_x0020_Type"                                            # Choice; mixed-case values per [D-094] SUPERSEDED 2026-06-23
-      delivery_state: "Delivery_x0020_State"                                  # Choice; state machine values
+      item_type: "item_type"                                                  # Choice; mixed-case values per [D-094] SUPERSEDED 2026-06-23; bare per arch lock 2026-06-26
+      delivery_state: "delivery_state"                                        # Choice; state machine values; bare per arch lock 2026-06-26
       prior_delivery_state: "Prior_x0020_Delivery_x0020_State"                # FR-7 Delayed/Blocked exit paths
       milestone_gating: "Milestone_x0020_Gating"                              # Boolean; FR-64 enablement gate
       item_completion_pct: "Item_x0020_Completion_x0020_Pct"                  # Integer; HILDA-managed
@@ -134,8 +134,8 @@ lists:                                    # 3 lists per Module #11 lock 2026-06-
     columns:
       # ---- Composite-key fields ----
       carrier: "Carrier"                                                      # = customer_id; denormalized
-      project_id: "Project_x0020_Id"                                          # Integer; FK to Projects_<customer_id>.Title
-      project_model: "Project_x0020_Model"                                    # = device_id; denormalized
+      project_id: "project_id"                                                # Integer; FK to Projects_<customer_id>.Title; bare per arch lock 2026-06-26
+      project_model: "project_model"                                          # = device_id; denormalized; bare per arch lock 2026-06-26
       milestone_name: "Title"                                                 # STR per [D-090] (NOT integer milestone_id)
       milestone_status: "Status"                                              # Choice: Not Started / In Progress / Completed / Delayed
       target_date: "Target_x0020_Date"                                        # DateTime; SOLE authoritative deadline per [D-085]
@@ -167,7 +167,7 @@ lists:                                    # 3 lists per Module #11 lock 2026-06-
 
     columns:
       project_id: "Title"                                                     # PK (SP intrinsic Title for the Project row)
-      project_model: "Project_x0020_Model"                                    # device model class (e.g. MODEL-A)
+      project_model: "project_model"                                          # device model class (e.g. MODEL-A); bare per arch lock 2026-06-26
       tpm_email: "TPM_x0020_Email"                                            # TPM's email per [D-088] 3-tuple
 
 # =====================================================================================

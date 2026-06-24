@@ -392,7 +392,7 @@ class TestTransitions:
                                   storage, sp, audit)
         assert r.outcome == "transitioned"
         assert r.dispatch_signal is not None
-        assert any(w[0] == "state" and w[2] == "OutreachSent" for w in storage.writes)
+        assert any(w[0] == "state" and w[2] == "Outreach Sent" for w in storage.writes)
 
     def test_idempotent_noop(self, writers):
         storage, sp, audit = writers
@@ -424,14 +424,14 @@ class TestTransitions:
         assert r.outcome == "transitioned"
         assert r.to_state == DeliveryState.UNDER_PM_REVIEW
         state_writes = [w for w in storage.writes if w[0] == "state"]
-        assert [w[2] for w in state_writes] == ["OwnerClosed", "UnderPMReview"]
+        assert [w[2] for w in state_writes] == ["Owner Closed", "Under PM Review"]
 
     def test_prior_delivery_state_set_on_delayed_entry(self, writers):
         storage, sp, audit = writers
         storage.items["I-5"] = mk_item(DeliveryState.OUTREACH_SENT)
         update_delivery_state("I-5", DeliveryState.DELAYED, {}, ctx(), storage, sp, audit)
         update_writes = [w for w in storage.writes if w[0] == "update"]
-        assert any(w[2].get("prior_delivery_state") == "OutreachSent" for w in update_writes)
+        assert any(w[2].get("prior_delivery_state") == "Outreach Sent" for w in update_writes)
 
     def test_prior_delivery_state_cleared_on_resume(self, writers):
         storage, sp, audit = writers
@@ -459,7 +459,7 @@ class TestTransitions:
         update_delivery_state("I-7", DeliveryState.OWNER_CLOSED, {}, ctx(),
                               storage, sp, audit)
         update_writes = [w for w in storage.writes if w[0] == "update"]
-        upm_writes = [w for w in update_writes if w[2].get("delivery_state") == "UnderPMReview"]
+        upm_writes = [w for w in update_writes if w[2].get("delivery_state") == "Under PM Review"]
         assert upm_writes
         assert upm_writes[0][2].get("pm_approval_at") is None
         assert upm_writes[0][2].get("pm_approval_pm_id") is None

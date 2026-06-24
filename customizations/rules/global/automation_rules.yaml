@@ -49,7 +49,7 @@ rules:
           template: initial_outreach_per_owner
           channel: email
       - kind: UpdateState
-        params: { target_state: OutreachSent }
+        params: { target_state: Outreach Sent }
 
   # =====================================================================================
   # 2. REMINDERS -- FR-10 cadence; reminder_count increments by SendReminder action.
@@ -61,7 +61,7 @@ rules:
     condition:
       and:
         - { field: reminder_count, op: lt, value: 1 }
-        - { field: delivery_state, op: in, value: [OutreachSent, OwnerResponseReceived] }
+        - { field: delivery_state, op: in, value: [Outreach Sent, OwnerResponseReceived] }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_1, channel: email }
@@ -74,7 +74,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 1 }
         - { field: reminder_count, op: lt, value: 2 }
-        - { field: delivery_state, op: in, value: [OutreachSent, OutreachReminded] }
+        - { field: delivery_state, op: in, value: [Outreach Sent, OutreachReminded] }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_2, channel: email }
@@ -90,7 +90,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 2 }
         - { field: days_to_deadline, op: lte, value: 3 }
-        - { field: delivery_state, op: in, value: [OutreachSent, OutreachReminded] }
+        - { field: delivery_state, op: in, value: [Outreach Sent, OutreachReminded] }
     actions:
       - kind: Escalate
         params:
@@ -105,7 +105,7 @@ rules:
     condition:
       and:
         - { field: days_to_deadline, op: lte, value: 0 }
-        - { field: delivery_state, op: neq, value: OwnerClosed }
+        - { field: delivery_state, op: neq, value: Owner Closed }
         - { field: delivery_state, op: neq, value: Closed }
     actions:
       - kind: NotifyPM
@@ -133,7 +133,7 @@ rules:
     trigger: StateChange
     condition:
       and:
-        - { field: target_state, op: eq, value: DocumentReceived }
+        - { field: target_state, op: eq, value: Document Received }
         - { field: review_required, op: eq, value: true }
         - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
     actions:
@@ -164,18 +164,18 @@ rules:
     trigger: OwnerStatusConfirmed
     condition:
       and:
-        - { field: doc_count_reached, op: eq, value: true }                 # FR-7 OwnerClosed 2-condition guard
-        - { field: delivery_state, op: in, value: [DocumentReceived, AIReviewed] }
+        - { field: doc_count_reached, op: eq, value: true }                 # FR-7 Owner Closed 2-condition guard
+        - { field: delivery_state, op: in, value: [Document Received, AIReviewed] }
     actions:
       - kind: UpdateState
-        params: { target_state: OwnerClosed }
+        params: { target_state: Owner Closed }
 
   - rule_id: advance_to_ready_for_submission_on_pm_approval
     trigger: PMApproval
     condition:
       field: delivery_state
       op: eq
-      value: OwnerClosed
+      value: Owner Closed
     actions:
       - kind: UpdateState
         params: { target_state: ReadyForSubmission }
@@ -237,45 +237,15 @@ rules:
         params: {}
 
   # =====================================================================================
-  # 7. FR-87 TPM RESOLUTION -- strict A -> B -> C ordering (audit-only fields on row).
-  # Three rules, one per resolution step. Triggers fire when TPM clicks the matching
-  # HILDA-rendered button per [D-074] Variant A and the form-POST writes the audit
-  # column on the Deliverables row.
+  # 7. FR-87 TPM RESOLUTION rules INTENTIONALLY OMITTED per [D-122] 2026-06-25.
+  # FR-87 step A (Reassign), B (Resolve doc_type), C (Resolve revision -- Ph-2 scope) is
+  # HILDA-rendered-page direct POST -- NOT SP-alert mediated, NOT rule_engine triggered.
+  # POST handlers live in core/src/dashboard/app.py per architect Q3 clarification
+  # 2026-06-25; flow is: TPM clicks button on HILDA-rendered FR-57 page per [D-074]
+  # link-out -> POST to hilda-api -> dashboard handler updates storage + writes audit
+  # fields back to SP via SpCrud digest dance per [D-064] + [D-117]. No rule_engine
+  # trigger involved at any step. See [D-122] Consequences for full correction history.
   # =====================================================================================
-
-  - rule_id: fr87_step_a_reassign_to_target_item
-    trigger: ItemModified
-    sub_trigger: TagsModified                             # we model FR-87 step A as an item-modification on the audit column
-    condition:
-      field: tpm_reassignment_target_item_id
-      op: neq
-      value: null
-    actions:
-      - kind: ReassignDocumentToWorkItem                  # FR-83 / FR-87 reassign
-        params: { resolution_step: A }
-
-  - rule_id: fr87_step_b_resolve_doc_type
-    trigger: ItemModified
-    sub_trigger: TagsModified
-    condition:
-      and:
-        - { field: tpm_reassignment_target_item_id, op: eq, value: null }   # step A NOT applied
-        - { field: tpm_resolved_doc_type, op: neq, value: null }
-    actions:
-      - kind: TriggerParser                               # re-run parser with TPM-resolved doc_type
-        params: { resolution_step: B }
-
-  - rule_id: fr87_step_c_resolve_revision
-    trigger: ItemModified
-    sub_trigger: TagsModified
-    condition:
-      and:
-        - { field: tpm_reassignment_target_item_id, op: eq, value: null }
-        - { field: tpm_resolved_doc_type, op: eq, value: null }
-        - { field: tpm_revision_resolution, op: neq, value: null }
-    actions:
-      - kind: TriggerParser                               # re-run parser with TPM-resolved revision picker
-        params: { resolution_step: C }
 
   # =====================================================================================
   # 8. CREDENTIAL HEALTH -- FR-20 background credential expiry.

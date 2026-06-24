@@ -183,10 +183,10 @@ class TestStateTasks:
         deps.storage.items["I-1234"] = mk_item(DeliveryState.OPEN)
         with override_task_deps(deps):
             result = update_state_task.apply_async(
-                args=({"target_state": "OutreachSent"}, ctx())
+                args=({"target_state": "Outreach Sent"}, ctx())
             ).get()
         assert result["outcome"] == "transitioned"
-        assert result["to_state"] == "OutreachSent"
+        assert result["to_state"] == "Outreach Sent"
 
     def test_update_state_idempotent_noop(self, deps):
         deps.storage.items["I-1234"] = mk_item(DeliveryState.OPEN)

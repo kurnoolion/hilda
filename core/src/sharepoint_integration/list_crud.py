@@ -20,6 +20,38 @@ class SpCrud:
         self._client = client
         self._provider = provider
 
+    async def get_item(
+        self,
+        entity: str,
+        scope: ListScope,
+        item_id: int | str,
+    ) -> dict[str, Any] | None:
+        """Single-row fetch by SP Id per architect lock 2026-06-26.
+
+        Per `[D-074]` Variant A + dashboard cascade 2026-06-26 Gap 7: dashboard
+        GET /docs/{customer_id}/{sp_id} calls this to fetch the freshly-current
+        SP row on every page load (no caching Ph-1). The `<sp_id>` IS SP's `Id`
+        (auto-counter PK) per architect lock 2026-06-26. Returns None when the
+        SP row does not exist (404-equivalent at dashboard handler).
+        """
+        list_name = self._provider.get_list_name(entity, scope)
+        col_map = self._provider.get_column_map(entity, scope)
+        select = list(col_map.values()) or None
+        items_sp = await self._client.get_list_items(
+            list_name,
+            select=select,
+            filter_expr=f"Id eq {int(item_id)}",
+        )
+        if not items_sp:
+            return None
+        item = items_sp[0]
+        result = self._provider.from_sp_fields(entity, scope, item)
+        if "Id" in item:
+            result["_sp_id"] = item["Id"]
+        elif "ID" in item:
+            result["_sp_id"] = item["ID"]
+        return result
+
     async def get_items(
         self,
         entity: str,
