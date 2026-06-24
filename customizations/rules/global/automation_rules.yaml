@@ -1,0 +1,318 @@
+# =====================================================================================
+# customizations/rules/global/automation_rules.yaml
+# =====================================================================================
+# Global (Ph-1: only-tier) AutomationRules covering the Ph-1 lifecycle for HILDA's
+# core/src/rule_engine module. Co-resident with defaults.yaml; rule_engine loads
+# every *.yaml under customizations/rules/global/ at startup per D7 cascade
+# 2026-06-23. Per-customer + per-device YAML tiers deferred to Ph-2.
+#
+# Conforms to:
+#   - rule_engine.Rule discriminated model (trigger-action vs polling-schedule)
+#   - rule_engine.TriggerKind enum (13-member Ph-1 set per FR-28)
+#   - rule_engine.ActionKind enum (18-member Ph-1 set per FR-29)
+#   - intra-rule action order = YAML declaration order (only ordering guarantee)
+#
+# NOTE on pause: FR-31 sub-1 per-item pause is read DIRECTLY by the evaluator from
+# `item.rules_paused` on the Deliverables row per D5 cascade 2026-06-23. NOT a rule
+# condition -- the evaluator short-circuits paused items. No rule needed here.
+#
+# NOTE on FR-31 sub-3 manual triggers: these BYPASS rule_engine entirely -- the SP
+# UI's Trigger Action dropdown enqueues a Celery task directly via workflow_engine.
+# NOT modeled here.
+#
+# Privacy convention: no real carrier names; only `mock_customer` / MODEL-A / MODEL-B
+# references where any customer-specific value appears (almost never -- Global tier
+# rules are customer-agnostic by definition).
+#
+# Anchors: FR-9 (outreach), FR-10 (reminder cadence), FR-23 (email IMAP polling),
+# FR-26 (PLM polling), FR-28 (state machine triggers), FR-31 (manual + pause),
+# FR-50 (cross-channel escalation), FR-64 (Close All Items per [D-100]),
+# FR-87 (TPM resolution A->B->C), Q-M4 (escalation lock 2026-06-25),
+# [D-094] (item_type mixed-case lock).
+# =====================================================================================
+
+rules:
+
+  # =====================================================================================
+  # 1. OUTREACH -- FR-9 initial outreach when collection starts.
+  # =====================================================================================
+
+  - rule_id: send_initial_outreach_on_collection_start
+    trigger: ItemCreated                                  # fires when setup_milestone / Start Collection creates a tracker per FR-8
+    condition:
+      and:
+        - { field: force_tracking_enabled, op: eq, value: true }
+        - { field: item_type, op: neq, value: "Confirmation" }   # Confirmations skip outreach per FR-58
+    actions:
+      - kind: SendInitialOutreach                         # per FR-9: honors tg_email_group_alias batching
+        params:
+          template: initial_outreach_per_owner
+          channel: email
+      - kind: UpdateState
+        params: { target_state: OutreachSent }
+
+  # =====================================================================================
+  # 2. REMINDERS -- FR-10 cadence; reminder_count increments by SendReminder action.
+  # Tiered cadence: 1st reminder under count<2; 2nd under <3; escalation handled below.
+  # =====================================================================================
+
+  - rule_id: send_first_reminder_on_no_contact
+    trigger: LastContactThreshold
+    condition:
+      and:
+        - { field: reminder_count, op: lt, value: 1 }
+        - { field: delivery_state, op: in, value: [OutreachSent, OwnerResponseReceived] }
+    actions:
+      - kind: SendReminder
+        params: { template: standard_owner_reminder_1, channel: email }
+      - kind: UpdateState
+        params: { target_state: OutreachReminded }
+
+  - rule_id: send_second_reminder_on_no_contact
+    trigger: LastContactThreshold
+    condition:
+      and:
+        - { field: reminder_count, op: gte, value: 1 }
+        - { field: reminder_count, op: lt, value: 2 }
+        - { field: delivery_state, op: in, value: [OutreachSent, OutreachReminded] }
+    actions:
+      - kind: SendReminder
+        params: { template: standard_owner_reminder_2, channel: email }
+
+  # =====================================================================================
+  # 3. ESCALATION -- Q-M4 architect lock 2026-06-25.
+  # After 2 reminders AND deadline approaching, escalate to corp_messenger.
+  # =====================================================================================
+
+  - rule_id: escalate_to_messenger_after_2_reminders
+    trigger: LastContactThreshold                         # re-evaluated at each cadence tick
+    condition:
+      and:
+        - { field: reminder_count, op: gte, value: 2 }
+        - { field: days_to_deadline, op: lte, value: 3 }
+        - { field: delivery_state, op: in, value: [OutreachSent, OutreachReminded] }
+    actions:
+      - kind: Escalate
+        params:
+          channel: corp_messenger
+          reason: post_reminder
+          escalation_template: tg_lead_escalation
+      - kind: NotifyPM
+        params: { urgency: high, reason: cross_channel_escalation }
+
+  - rule_id: escalate_pm_on_deadline_breach
+    trigger: DeadlineProximity                            # FR-11 deadline-near re-arm
+    condition:
+      and:
+        - { field: days_to_deadline, op: lte, value: 0 }
+        - { field: delivery_state, op: neq, value: OwnerClosed }
+        - { field: delivery_state, op: neq, value: Closed }
+    actions:
+      - kind: NotifyPM
+        params: { urgency: critical, reason: deadline_breach }
+
+  # =====================================================================================
+  # 4. STATE MACHINE -- FR-28 + FR-7 transition rules.
+  # =====================================================================================
+
+  # NOTE: `advance_state_on_doc_count_reached` is defined in defaults.yaml (seeded from
+  # rule_engine MODULE.md Worked Example 3). Not redefined here -- single rule_id per
+  # scope per RUL-E001.
+
+  - rule_id: advance_to_document_received_with_parser
+    trigger: AttachmentReceived
+    condition:
+      and:
+        - { field: doc_count_reached, op: eq, value: true }
+        - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
+    actions:
+      - kind: TriggerParser                               # FR-16 rule-based parser; runs AFTER defaults.yaml UpdateState chain
+        params: {}
+
+  - rule_id: trigger_ai_review_on_review_required
+    trigger: StateChange
+    condition:
+      and:
+        - { field: target_state, op: eq, value: DocumentReceived }
+        - { field: review_required, op: eq, value: true }
+        - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
+    actions:
+      - kind: TriggerAIReview
+        params: {}
+
+  - rule_id: advance_to_ai_reviewed_on_pass
+    trigger: AIReviewResult
+    condition:
+      field: review_result
+      op: eq
+      value: passed
+    actions:
+      - kind: UpdateState
+        params: { target_state: AIReviewed }
+
+  - rule_id: notify_pm_on_ai_review_fail
+    trigger: AIReviewResult
+    condition:
+      field: review_result
+      op: eq
+      value: failed
+    actions:
+      - kind: NotifyPM
+        params: { urgency: medium, reason: ai_review_failed }
+
+  - rule_id: advance_to_owner_closed_on_status_confirmed
+    trigger: OwnerStatusConfirmed
+    condition:
+      and:
+        - { field: doc_count_reached, op: eq, value: true }                 # FR-7 OwnerClosed 2-condition guard
+        - { field: delivery_state, op: in, value: [DocumentReceived, AIReviewed] }
+    actions:
+      - kind: UpdateState
+        params: { target_state: OwnerClosed }
+
+  - rule_id: advance_to_ready_for_submission_on_pm_approval
+    trigger: PMApproval
+    condition:
+      field: delivery_state
+      op: eq
+      value: OwnerClosed
+    actions:
+      - kind: UpdateState
+        params: { target_state: ReadyForSubmission }
+      - kind: QueueSubmission
+        params: { channel: customer_adapter }
+
+  # NOTE: `handle_owner_reassignment` is defined in defaults.yaml (seeded from
+  # rule_engine MODULE.md Worked Example 1). Not redefined here per RUL-E001.
+
+  - rule_id: rearm_deadline_on_milestone_target_moved
+    trigger: ItemModified
+    sub_trigger: DeadlineMoved                            # fires on Milestone.target_date edit per [D-085] cascade
+    condition: null
+    actions:
+      - kind: RearmDeadlineProximity                      # internal re-arm; workflow_engine reschedules FR-11
+        params: {}
+
+  - rule_id: propagate_tags_on_modification
+    trigger: ItemModified
+    sub_trigger: TagsModified                             # FR-82 nested tag-set lock
+    condition: null
+    actions:
+      - kind: PropagateTagsToActiveTrackers
+        params: {}
+
+  # =====================================================================================
+  # 5. TRACKER CREATION -- FR-78 default work-item auto-instantiation.
+  # =====================================================================================
+
+  - rule_id: instantiate_default_work_item_on_tracker_created
+    trigger: TrackerCreated
+    condition: null
+    actions:
+      - kind: InstantiateDefaultWorkItem                  # FR-78 per [D-053] -- default-item shape
+        params: {}
+
+  # =====================================================================================
+  # 6. CLOSE ALL ITEMS -- FR-64 Option (b) per [D-100] HILDA-owned per-item cascade.
+  # The milestone-level "Close All Items" button writes closed_all_items_triggered_at;
+  # workflow_engine task body iterates per-item AND fires MilestoneAllClosed downstream
+  # once every gating item is in {SubmittedToCustomer, Closed}. This rule fires the
+  # cleanup chain.
+  # =====================================================================================
+
+  - rule_id: milestone_storage_cleanup_on_all_closed
+    trigger: MilestoneAllClosed
+    condition: null
+    actions:
+      - kind: MilestoneStorageCleanup                     # FR-76 NSD1 subtree delete
+        params: { scope: nsd1_internal }
+
+  - rule_id: halt_polling_at_collection_phase_closure
+    trigger: CollectionPhaseClosureReached                # FR-74 collection-phase end
+    condition: null
+    actions:
+      - kind: FinalSweep                                  # one final FR-23 + FR-26 + FR-55 poll across all channels
+        params: {}
+      - kind: HaltMilestonePolling                        # then stop scheduled polling per FR-74
+        params: {}
+
+  # =====================================================================================
+  # 7. FR-87 TPM RESOLUTION -- strict A -> B -> C ordering (audit-only fields on row).
+  # Three rules, one per resolution step. Triggers fire when TPM clicks the matching
+  # HILDA-rendered button per [D-074] Variant A and the form-POST writes the audit
+  # column on the Deliverables row.
+  # =====================================================================================
+
+  - rule_id: fr87_step_a_reassign_to_target_item
+    trigger: ItemModified
+    sub_trigger: TagsModified                             # we model FR-87 step A as an item-modification on the audit column
+    condition:
+      field: tpm_reassignment_target_item_id
+      op: neq
+      value: null
+    actions:
+      - kind: ReassignDocumentToWorkItem                  # FR-83 / FR-87 reassign
+        params: { resolution_step: A }
+
+  - rule_id: fr87_step_b_resolve_doc_type
+    trigger: ItemModified
+    sub_trigger: TagsModified
+    condition:
+      and:
+        - { field: tpm_reassignment_target_item_id, op: eq, value: null }   # step A NOT applied
+        - { field: tpm_resolved_doc_type, op: neq, value: null }
+    actions:
+      - kind: TriggerParser                               # re-run parser with TPM-resolved doc_type
+        params: { resolution_step: B }
+
+  - rule_id: fr87_step_c_resolve_revision
+    trigger: ItemModified
+    sub_trigger: TagsModified
+    condition:
+      and:
+        - { field: tpm_reassignment_target_item_id, op: eq, value: null }
+        - { field: tpm_resolved_doc_type, op: eq, value: null }
+        - { field: tpm_revision_resolution, op: neq, value: null }
+    actions:
+      - kind: TriggerParser                               # re-run parser with TPM-resolved revision picker
+        params: { resolution_step: C }
+
+  # =====================================================================================
+  # 8. CREDENTIAL HEALTH -- FR-20 background credential expiry.
+  # =====================================================================================
+
+  - rule_id: notify_ops_on_credential_expired
+    trigger: CredentialExpired
+    condition: null
+    actions:
+      - kind: NotifyHildaOps                              # FR-75 -- routes to HildaOpsAlert (NOT NotifyPM)
+        params: { urgency: high, reason: credential_expired }
+
+# =====================================================================================
+# POLLING SCHEDULES -- FR-23 (email IMAP) + FR-26 (corp PLM) deadline-tiered.
+# Consumed on-demand by workflow_engine via resolve_polling_schedule_for_item();
+# NOT event-fired. Per polling_schedule.evaluate_polling_schedule: tiers in
+# ascending days_before_deadline; baseline (null) required per RUL-W004 fallback.
+# =====================================================================================
+
+polling_schedules:
+
+  # FR-23 -- email IMAP fallback polling deadline-tiered
+  - rule_id: email_imap_polling_schedule
+    tiers:
+      - { days_before_deadline: null, interval_minutes: 60 }   # baseline -- 60min hourly
+      - { days_before_deadline: 7,    interval_minutes: 30 }   # 7d out -- 30min
+      - { days_before_deadline: 3,    interval_minutes: 15 }   # 3d out -- 15min
+      - { days_before_deadline: 1,    interval_minutes: 5  }   # 1d out -- 5min tight cadence
+
+  # FR-26 -- corp PLM polling deadline-tiered (faster baseline than email per
+  # PLM-as-canonical-source design)
+  - rule_id: plm_polling_schedule
+    tiers:
+      - { days_before_deadline: null, interval_minutes: 30 }   # baseline -- 30min
+      - { days_before_deadline: 7,    interval_minutes: 15 }
+      - { days_before_deadline: 3,    interval_minutes: 10 }
+      - { days_before_deadline: 1,    interval_minutes: 3  }
+
+  # NOTE: `default_polling_schedule` is defined in defaults.yaml (seeded from
+  # rule_engine MODULE.md Worked Example 3). Not redefined here per RUL-E001.

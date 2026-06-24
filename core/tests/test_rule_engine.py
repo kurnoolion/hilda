@@ -414,7 +414,11 @@ class TestLoader:
 
     def test_repo_sample_global_defaults_loads(self):
         rs = RuleSet.load(REPO_ROOT / "customizations" / "rules")
-        assert len(rs.all_rules()) == 6
+        # 6 rules from defaults.yaml (Worked Examples 1-3) + 22 rules from
+        # automation_rules.yaml (Ph-1 end-to-end test scaffold added 2026-06-26 --
+        # outreach + reminders + Q-M4 escalation + state machine + tracker create +
+        # close-all + FR-87 + credential + 2 polling schedules) = 28 total.
+        assert len(rs.all_rules()) == 28
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):

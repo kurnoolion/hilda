@@ -1,0 +1,619 @@
+# =====================================================================================
+# customizations/template_schemas/mock_customer/template.yaml
+# =====================================================================================
+# Privacy-clean per-customer canonical template for HILDA Ph-1 end-to-end testing.
+# Conforms to template_schema.CustomerTemplateBase Pydantic model.
+#
+# Field-name authority: docs/sp_ui_engineer/milestones_workitems_fields_values.xlsx
+# (Milestones / Deliverables / Projects worksheets) per architect Q5 lock 2026-06-25.
+#
+# Privacy convention: customer_id=mock_customer; device models MODEL-A / MODEL-B;
+# project_id=1001; vendor=Carrier; mock owners (John Smith / Jane Doe). NEVER carry
+# real carrier names (VZW / TMO / Samsung / Galaxy / etc.) in committed YAML.
+#
+# Per-item value notes:
+#   - item_type per [D-094] SUPERSEDED 2026-06-23 SP UI engineer mixed-case lock:
+#       Confirmation (PascalCase)
+#       test_tech_waiver_report (snake_case)
+#       compliance_certification_release_notes (snake_case)
+#       Default (PascalCase) -- the FR-78 default work-item is AUTO-CREATED by
+#       setup_milestone; NOT enumerated here.
+#   - 4-field owner identity per [D-080] + [D-086]: owners block below seeds template-time
+#     placeholders; TPM types final values in SP UI between setup_milestone and Start
+#     Collection per Ph-1 setup-window lock 2026-06-20.
+#   - TG fields denormalized per [D-051] onto each work_item row at HILDA runtime;
+#     YAML still groups them here for ops readability + template-author convenience.
+#   - item_description per FR-82 nested tag-set lock: list-of-lists, length must equal
+#     doc_count (TSC-W008); null/empty allowed only for Confirmation + Default items.
+#   - Form-factor flags per [D-084]: handset/tablet/wearable/ir/osmr/rmr/hmr_smr.
+#
+# Path composition for FR-77 carrier-portal upload:
+#   <customer_delivery_info>/<delivery_path_template expanded>/<per-item target_folder>
+#   = drive.google.com/Carrier/Submissions/{device_id}/{milestone_name}/<target_folder>
+# Composition is done internally by customer_adapter per [D-116] B-alpha lock.
+# =====================================================================================
+
+# ============================================================
+# Customer-level
+# ============================================================
+customer_id: mock_customer
+customer_jira_url: https://jira.example.com/projects/MOCK   # Ph-2 informational only per [D-092]
+
+# Customer-level carrier-portal delivery config (per architect lock 2026-06-21):
+customer_delivery_info: drive.google.com                    # base URL; denormalized per-item at setup_milestone
+delivery_path_template: "Carrier/Submissions/{project_model}/{milestone_name}"
+
+# ============================================================
+# Devices (per [D-091] YAML key = device_id; work-items live under milestones per FR-40)
+# ============================================================
+devices:
+  MODEL-A:
+    device_name: Mock Device A
+    project_id: 1001                                        # Projects_<customer_id> row PK per [D-104]
+    project_model: MODEL-A                                  # equals device_id; denormalized for composite-key lookups
+    assigned_pm_id: pm_a@mock.example.com                   # template-time PM; runtime resolves via Projects list per [D-088]
+    target_launch_date: 2026-09-01
+
+  MODEL-B:
+    device_name: Mock Device B
+    project_id: 1002
+    project_model: MODEL-B
+    assigned_pm_id: pm_b@mock.example.com
+    target_launch_date: 2026-10-15
+
+# ============================================================
+# Milestones (per-customer; same set instantiated for every device at setup_milestone)
+# `target_date` is the SOLE authoritative deadline per [D-085]; TPM types if absent.
+# `collection_start_offset_days` = days BEFORE target_date for FR-8 StartCollection auto-fire.
+# ============================================================
+milestones:
+  P1:
+    target_date: 2026-07-15
+    collection_start_offset_days: 30                        # auto-StartCollection 30 days before target
+    devices: [MODEL-A, MODEL-B]                             # multi-device milestone scope
+    # status hardcoded "Not Started" by setup_milestone per FR-6
+
+    # ----------------------------------------
+    # Work items per [D-051] denormalization (TG fields flat per row).
+    # Default work-item is AUTO-CREATED by setup_milestone per FR-78 (NOT listed here).
+    # 10 work items P1 -- exercises FR-52 routing pipeline (substring + fuzzy + over-route).
+    # ----------------------------------------
+    work_items:
+
+      # ---- 1. Confirmation item (FR-58: doc_count=0, no_customer_upload=true) ----
+      - item_no: 1
+        item_name: Device Readiness Review
+        item_type: Confirmation                             # PascalCase per [D-094] SUPERSEDED 2026-06-23
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 0                                        # Confirmation invariant per TSC-W004
+        review_required: false
+        no_customer_upload: true                            # confirmation never ships to carrier
+        force_tracking_enabled: true
+        item_description: null                              # null allowed for Confirmation per FR-82
+        item_path_id: null
+        tg_path_id: null
+        customer_delivery_modality: None
+        target_folder: null                                 # confirmation -- no upload
+        # Form-factor (handset/tablet/wearable/ir/osmr/rmr/hmr_smr) per [D-084]:
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        # TG denormalization per [D-051]:
+        tg_name: GENERAL
+        ingress_nsd: None                                   # Ph-1 lock -- no NSD ingress for early drop
+        folder_routing_enabled: false
+        tg_email_group_alias: null                          # TPM fills before Start Collection
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      # ---- 2-3: compliance_certification_release_notes items ----
+      - item_no: 2
+        item_name: Sustainability Certification
+        item_type: compliance_certification_release_notes
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["Sustainability"]]
+        item_path_id: sustainability_cert
+        tg_path_id: sustainability
+        customer_delivery_modality: GoogleDrive
+        target_folder: "Compliance/Sustainability"
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: SUSTAINABILITY
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 3
+        item_name: Bluetooth SIG Certification
+        item_type: compliance_certification_release_notes
+        milestone_gating: true
+        tracking_modality: [CorporatePLM]
+        doc_count: 2                                        # 2 docs -- tag-sets length must equal 2 per TSC-W008
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["SDoc"], ["Qualification", "Product"]]
+        item_path_id: bluetooth_sig_cert
+        tg_path_id: bluetooth
+        customer_delivery_modality: GoogleDrive
+        target_folder: "Compliance/Bluetooth"
+        handset: true
+        tablet: true
+        wearable: true
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: BLUETOOTH
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      # ---- 4-9: test_tech_waiver_report items (review_required=true on a few to
+      #          exercise the Ph-1-next-pass LLM review hook -- runtime-dormant) ----
+      - item_no: 4
+        item_name: 5G Performance Test Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false                             # non-gating: exercises FR-64 close-all guard
+        tracking_modality: [Email]
+        doc_count: 2
+        review_required: true                               # FR-53 LLM review hook (Ph-1 dormant)
+        no_customer_upload: false
+        force_tracking_enabled: true
+        # FR-82 nested per-document tag-sets -- 2 documents expected
+        item_description:
+          - [5G, performance, test]
+          - [NR, Sub6, mmWave]
+        item_path_id: perf_5g
+        tg_path_id: performance
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Performance/5G"
+        handset: true
+        tablet: false
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: PERFORMANCE
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 5
+        item_name: WiFi 6 Performance Test Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: true
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["WiFi6", "performance", "test"]]
+        item_path_id: perf_wifi6
+        tg_path_id: performance
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Performance/WiFi"
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: PERFORMANCE
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 6
+        item_name: LTE OTA Test Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["LTE", "OTA"]]
+        item_path_id: perf_lte_ota
+        tg_path_id: performance
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Performance/LTE"
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: PERFORMANCE
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 7
+        item_name: Bluetooth Audio Test Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["BluetoothAudio", "test"]]    # exercises substring overlap with BLUETOOTH TG
+        item_path_id: bluetooth_audio_test
+        tg_path_id: bluetooth
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Bluetooth/Audio"
+        handset: true
+        tablet: true
+        wearable: true
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: BLUETOOTH
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 8
+        item_name: Carbon Footprint Disclosure
+        item_type: compliance_certification_release_notes
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["Sustainability", "Carbon"]]    # subset of item_no=2 SUSTAINABILITY -- exercises TSC-W007
+        item_path_id: carbon_footprint
+        tg_path_id: sustainability
+        customer_delivery_modality: GoogleDrive
+        target_folder: "Compliance/Sustainability/Carbon"
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: SUSTAINABILITY
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 9
+        item_name: General Compliance Attestation
+        item_type: Confirmation                             # second Confirmation item
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 0
+        review_required: false
+        no_customer_upload: true
+        force_tracking_enabled: true
+        item_description: null
+        item_path_id: null
+        tg_path_id: null
+        customer_delivery_modality: None
+        target_folder: null
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: GENERAL
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 10
+        item_name: Thermal Performance Test Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: true
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["Thermal", "performance"]]
+        item_path_id: thermal_perf
+        tg_path_id: performance
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Thermal"
+        handset: true
+        tablet: false
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: PERFORMANCE
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+  P2:
+    target_date: 2026-08-15
+    collection_start_offset_days: 21
+    devices: [MODEL-A, MODEL-B]
+    # P2 smaller set for now -- 4 items exercising state transitions across milestones
+    work_items:
+
+      - item_no: 1
+        item_name: P2 Device Readiness Review
+        item_type: Confirmation
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 0
+        review_required: false
+        no_customer_upload: true
+        force_tracking_enabled: true
+        item_description: null
+        item_path_id: null
+        tg_path_id: null
+        customer_delivery_modality: None
+        target_folder: null
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: GENERAL
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 2
+        item_name: P2 Sustainability Recertification
+        item_type: compliance_certification_release_notes
+        milestone_gating: true
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["Sustainability"]]
+        item_path_id: p2_sustainability_recert
+        tg_path_id: sustainability
+        customer_delivery_modality: GoogleDrive
+        target_folder: "Compliance/Sustainability"
+        handset: true
+        tablet: true
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: SUSTAINABILITY
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 3
+        item_name: P2 5G Final Performance Report
+        item_type: test_tech_waiver_report
+        milestone_gating: false
+        tracking_modality: [Email]
+        doc_count: 1
+        review_required: true
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["5G", "performance", "final"]]
+        item_path_id: p2_perf_5g_final
+        tg_path_id: performance
+        customer_delivery_modality: GoogleDrive
+        target_folder: "TestReports/Performance/5G_Final"
+        handset: true
+        tablet: false
+        wearable: false
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: PERFORMANCE
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+      - item_no: 4
+        item_name: P2 Bluetooth Final Certification
+        item_type: compliance_certification_release_notes
+        milestone_gating: true
+        tracking_modality: [CorporatePLM]
+        doc_count: 1
+        review_required: false
+        no_customer_upload: false
+        force_tracking_enabled: true
+        item_description: [["Bluetooth", "final"]]
+        item_path_id: p2_bluetooth_final
+        tg_path_id: bluetooth
+        customer_delivery_modality: GoogleDrive
+        target_folder: "Compliance/Bluetooth_Final"
+        handset: true
+        tablet: true
+        wearable: true
+        ir: false
+        osmr: false
+        rmr: false
+        hmr_smr: false
+        tg_name: BLUETOOTH
+        ingress_nsd: None
+        folder_routing_enabled: false
+        tg_email_group_alias: null
+        tg_owner_name: null
+        tg_owner_corp_usa_email: null
+        tg_owner_corp_email: null
+        tg_owner_corp_id: null
+        corp_id_list: null
+        email_cc_list: null
+
+# ============================================================
+# Owner identities (Ph-1: representative owners across the TGs)
+# Per [D-105] 4-field owner identity; template-time defaults that TPM may override
+# in SP UI between setup_milestone and Start Collection per Ph-1 setup-window lock.
+# ============================================================
+owners:
+  - owner_corp_id: john_smith
+    owner_corp_usa_email: john.smith@mock-corp.example.com
+    owner_corp_email: john.smith@mock-corp.example.com     # same as USA for mock
+    owner_name: "John Smith"
+    assigned_tg_names: [GENERAL, SUSTAINABILITY]
+
+  - owner_corp_id: jane_doe
+    owner_corp_usa_email: jane.doe@mock-corp.example.com
+    owner_corp_email: jane.doe@mock-corp.example.com
+    owner_name: "Jane Doe"
+    assigned_tg_names: [BLUETOOTH, PERFORMANCE]            # FR-9 outreach routing demo
+
+  - owner_corp_id: alex_admin
+    owner_corp_usa_email: alex.admin@mock-corp.example.com
+    owner_corp_email: alex.admin@mock-corp.example.com
+    owner_name: "Alex Admin"
+    assigned_tg_names: []                                  # un-assigned -- default work-item handler
+
+# ============================================================
+# TG-level config (per [D-106] -- denormalized onto DeliveryItemBase at HILDA runtime;
+# YAML groups here for ops readability + template-author convenience).
+# ============================================================
+tg_groups:
+  - tg_name: GENERAL
+    tracking_modality: Email
+    ingress_nsd: ""                                        # not used Ph-1
+    email_group_alias: ""
+    folder_routing_enabled: false                          # Ph-1 basic flow disables Type-2 folder routing
+    tracking_enabled: true                                 # superseded by per-item force_tracking_enabled per FR-81
+    tg_owner_corp_id: john_smith
+    default_cc_list: ""
+
+  - tg_name: SUSTAINABILITY
+    tracking_modality: Email
+    ingress_nsd: ""
+    email_group_alias: ""
+    folder_routing_enabled: false
+    tracking_enabled: true
+    tg_owner_corp_id: john_smith
+    default_cc_list: ""
+
+  - tg_name: BLUETOOTH
+    tracking_modality: Email
+    ingress_nsd: ""
+    email_group_alias: ""
+    folder_routing_enabled: false
+    tracking_enabled: true
+    tg_owner_corp_id: jane_doe
+    default_cc_list: ""
+
+  - tg_name: PERFORMANCE
+    tracking_modality: Email
+    ingress_nsd: ""
+    email_group_alias: ""
+    folder_routing_enabled: false
+    tracking_enabled: true
+    tg_owner_corp_id: jane_doe
+    default_cc_list: ""
+
+# ============================================================
+# Customer delivery info per FR-77 / FR-69 / [D-097]
+# Per [D-116] B-alpha: customer_adapter internally composes
+#   <base_url>/<delivery_path_template>/<target_folder>/<filename>
+# ============================================================
+customer_delivery:
+  base_url: "drive.google.com"
+  delivery_path_template: "Carrier/Submissions/{device_id}/{milestone_name}"
