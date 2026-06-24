@@ -2331,3 +2331,127 @@ Per `[D-027]` Teacher/Student: HILDA-side Protocol scaffold + thin wrapper autho
 - (d) FR-86 storage matrix continues to route Default-routed-undetermined docs into `_staged_revision/` with `doc_type = unresolved` for TPM resolution per FR-87.
 
 **Anchors**: FR-85 (doc_type classification 2-step ladder), FR-86 (storage matrix + alignment-mismatch routing), FR-87 step (B) (Resolve doc_type TPM button + HILDA-rendered web page per `[D-074]`), `[D-053]` (5-value DocType impl note 2026-06-08), `[D-064]` (HILDA -> SP REST writeback), `[D-065]` (SP UI engineer owns Choice values), `[D-074]` (HILDA-rendered link-out for FR-87 surfaces), `[D-094]` SUPERSEDED (item_type SP UI engineer mixed-case 2026-06-23 — UNRELATED to tpm_resolved_doc_type), `template_schema/enums.py:79-96` (DocType 5-value enum already correct), `template_schema/MODULE.md:362` (tpm_resolved_doc_type field declaration).
+
+---
+
+## D-120: Corp PLM 5-API thin-wrapper + tpm_corp_id-as-attribution + in-flight (plm_id, fileID) tracking
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: HILDA's `issue_tracker` module needs a corp PLM integration for FR-26 polling (HILDA polls corp PLM for owner-uploaded documents) + FR-77 fan-out (HILDA uploads owner-ingested docs back to corp PLM) + createPLM at tracker provisioning + closePLM at milestone closure. The architect shared via screenshot 2026-06-25 the 5 corp PLM APIs available as already-existing corp services: `createPLM`, `closePLM`, `getdocumentslist`, `downloadFile`, `uploadFile` (uploadFile added in correction after initial 4-API spec). These services are corp-proprietary; HILDA cannot land the concrete binding-call code on public github per NFR-2 and `[D-027]` Teacher/Student split.
+
+**Decision**: `issue_tracker.corp_plm.CorpPlmAdapter` is a Protocol-conformant thin wrapper around the 5 already-available corp PLM APIs. HILDA-side scaffold provides abstract `_invoke_create_plm` / `_invoke_close_plm` / `_invoke_get_documents_list` / `_invoke_download_file` / `_invoke_upload_file` methods that raise `ITR-E001` by default. Per-customer subclass at `customizations/issue_tracker/<customer_id>_corp_plm_adapter.py` filled in by Cline on Work PC per `[D-027]`. Bundle of 7 architect-Q-locked sub-decisions:
+- (Q1) `createPLM` fires from `workflow_engine.tasks.lifecycle.PROVISION_TRACKER` ActionKind on tracker creation OR `START_ITEM_COLLECTION` ActionKind on Start Collection (FR-8). Returned `plm_id` written back to `Deliverables_<customer_id>` SP row via `SpClient` digest dance per `[D-117]`.
+- (Q2) `closePLM` fires from `workflow_engine.tasks.milestone.FINAL_SWEEP` ActionKind.
+- (Q3) PLM polling cadence is deadline-tiered per FR-23-style pattern. Default ladder: >14 days = 60 min; 7-14 days = 30 min; 3-7 days = 15 min; <3 days = 5 min; deadline-day = 1 min. Applied per active DeliveryItem with plm_id set + delivery_state ∈ {Open, OutreachSent, DocumentReceived, OwnerClosed}.
+- (Q4) `tpm_corp_id` is the local part of `Projects.TPM` work email (read from `Projects_<customer_id>` SP row per `[D-088]` 3-tuple). PER-CUSTOMER (NOT shared HILDA ops-team identity per `[D-019]`); attribution parameter only, not credential. e.g., `abc@corp.com` -> `abc`. Actual auth flows via corp_plm_gateway PC per FR-25 (a) no-credential pattern.
+- (Q5) Error handling Ph-1: retry with exponential backoff + log `ITR-W004` opaquely. After N=5 failed retries: notify HILDA OPS alert -- mechanism TBD architect discussion. Ph-2: detailed error code mapping.
+- (Q6) HILDA tracks in-flight downloads per `(plm_id, file_id)` to prevent duplicate concurrent calls. Per `InFlightDownloadTracker` asyncio.Lock-guarded dict Ph-1 (Postgres-backed Ph-2).
+- (Q7) BOTH `document_id` AND `file_id` required for `downloadFile`. Both persist on `DocumentIndexRow`.
+
+**Why**:
+- (a) Thin wrapper over reimplement -- corp PLM client services are already available + battle-tested; rewriting in HILDA is redundant + duplicates auth complexity.
+- (b) `[D-027]` Teacher/Student boundary preserved -- proprietary API binding details stay on Work PC; HILDA's public scaffold carries only abstract Protocol contract + standard discipline (retry / in-flight / CommunicationLog audit).
+- (c) tpm_corp_id as attribution-not-credential -- corp PLM API accepts tpm_corp_id as ACTION ATTRIBUTION (recorded in PLM as actor); HILDA's actual auth flows via corp_plm_gateway PC per `[D-019]` no-credential pattern. Decouples HILDA's identity model from corp PLM's auth scheme; per-customer TPM identity flows naturally through Projects.TPM column.
+- (d) In-flight tracking per Q6 -- with 5-min polling cadence on near-deadline items + occasional slow downloads (500MB+ files), two concurrent polls can both kick off download for same file. HILDA-side file_hash dedup is the *eventual* safety net; in-flight tracking is the *concurrent* safety net.
+- (e) Bundle vs separate ADRs -- the 7 sub-decisions are tightly coupled (Q1+Q2 share workflow_engine + SP write-back; Q3+Q6 share polling architecture; Q4+Q5 share gateway + error-handling). Splitting fragments operational story.
+
+**Consequences**:
+- (a) `issue_tracker/corp_plm/adapter.py` raises `ITR-E001` by default; production deployment REQUIRES Cline to land concrete subclass on Work PC with 5 binding calls. Tests use `MockCorpPlmAdapter` end-to-end.
+- (b) `tpm_corp_id` derivation lives in `issue_tracker.utils.derive_tpm_corp_id(projects_tpm_email)`. Used by workflow_engine.tasks.lifecycle.PROVISION_TRACKER body + corp_plm_poller.
+- (c) HILDA OPS alert mechanism is TBD -- `ITR-W004` is emitted but the OPS notification channel (email? messenger? dashboard alert pane?) is pending architect discussion.
+- (d) `InFlightDownloadTracker` is in-memory Ph-1 -- not restart-resilient. If HILDA restarts mid-download, second poll's downloadFile may double-download. Ph-2 Postgres-backed `download_in_progress_at` timestamp solves this.
+- (e) Deadline-tiered polling cadence amplifies near-deadline -- ~1 poll/min on deadline-day means up to 1 binding call/min per active item. Combined with Ph-1 expected load (single mock customer + modest milestone count), this is fine.
+- (f) `getdocumentslist` returns FULL list every poll -- no "documents since timestamp" filter. HILDA computes new docs as `current_set - DocumentIndexRow_set`; O(N) per poll but fine for Ph-1 (typical milestone has <50 docs).
+- (g) `customizations/issue_tracker/example_corp_plm_adapter.py` ships as per-customer scaffold with `# TODO(cline)` markers.
+
+**Anchors**: FR-25 (a), FR-26, FR-77, FR-68 (per `[D-098]` narrowing), `[D-019]` (shared ops-team identity Ph-1/Ph-2; corp PLM differs per Q4), `[D-027]` Teacher/Student, `[D-088]` 3-tuple PM resolution, `[D-091]` slug -> id, `[D-092]` customer JIRA Ph-1 informational, `[D-098]` hash-match dropped, `[D-117]` SP NTLM digest-dance for plm_id writeback, `[D-118]` SP UI engineer provisioning boundary, `issue_tracker/MODULE.md` 2026-06-25 cascade, commit `5c1ab7e`.
+
+---
+
+## D-121: Messenger module ownership boundary -- composition + send + daily-limit in messenger NOT email_service
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: HILDA's FR-10 cross-channel escalation reaches owners via corp messenger when email reminders don't yield response. Pre-2026-06-25 design had `email_service/outbound/composer_escalation.py` composing the message + a future `messenger` module just sending it. Architect Q-M6 lock 2026-06-25 redirected: messenger module OWNS its own composition + send + daily-limit; email_service stays focused on the email channel only. Plus the architect locked sendMessage's operational constraints (Q-M1..M5) via the screenshot of the `bool sendMessage(owner_corp_id, message)` API.
+
+**Decision**: Messenger is its own module (separate from email_service) owning the corp messenger channel end-to-end:
+- `core/src/messenger/protocol.py` -- MessengerAdapter Protocol (1 method: `send(owner_corp_id, message) -> bool`).
+- `core/src/messenger/corp_messenger/adapter.py` -- CorpMessengerAdapter thin wrapper around the gateway's `sendMessage` API per `[D-027]` (abstract `_invoke_send_message` raises `MSG-E003` by default; Cline fills binding on Work PC).
+- `core/src/messenger/composer.py` -- compose_escalation renders Jinja2 templates + 4K-byte truncation per Q-M2.
+- `core/src/messenger/daily_limit.py` -- DailyLimitChecker enforces ≤3 messages per owner_corp_id per day per Q-M2; queries CommunicationLog + blocks 4th send with `MSG-W001`.
+- `core/src/messenger/service.py` -- MessengerService is the orchestrator (composes + daily-limit-checks + invokes adapter + audits + retries) -- the ESCALATE ActionKind's task body entry point.
+
+Plus architect Q&A locks bundled here:
+- (Q-M1) `sendMessage` returns true when owner RECEIVES (stronger than gateway-accepted).
+- (Q-M2) `message` ≤ 4000 bytes (composer truncates with `MSG-W002`). Per owner_corp_id: ≤ 3 messages per day (blocked with `MSG-W001`).
+- (Q-M3) Sender appears as "anonymous HILDA BOT" -- no TPM identity prepended; template signs as `— HILDA BOT`.
+- (Q-M4) Escalation trigger is rule-driven via AutomationRules + YAML config. Rule: trigger=ReminderSent; conditions=[reminder_count>=2, days_to_deadline<=3]; actions=[ESCALATE]. Flow: rule_engine evaluates -> workflow_engine ESCALATE ActionKind -> messenger.send_escalation.
+- (Q-M5) CommunicationLog audit per FR-42 with bool-only outcome; no message_id thread continuity Ph-1.
+- (Q-M6) Messenger module OWNS composition + send + daily-limit -- NOT email_service.
+
+**Why**:
+- (a) Single-responsibility -- messenger as channel ≠ email as channel. Composing prose for corp messenger uses different tone/length/template surface vs email (4K cap vs no cap; no subject vs subject; no thread vs threaded). Mixing in email_service muddies both modules' purposes.
+- (b) Composition near the channel -- 4K truncation + HILDA BOT signature + Jinja2 template surface live where channel constraints live. If composition lived in email_service, constraints leak across module boundaries.
+- (c) Daily-limit at messenger level -- DailyLimitChecker queries CommunicationLog for SAME channel + SAME owner_corp_id today; logically belongs in channel-owner module.
+- (d) workflow_engine ESCALATE ActionKind has clean caller surface -- task body calls `messenger.send_escalation(item, batch_id, reason, milestone_ctx) -> SendResult`. ESCALATE doesn't know templates or daily-limits.
+- (e) anonymous HILDA BOT over per-TPM identity -- corp messenger gateway doesn't expose per-TPM "from" attribution at gateway layer; messages flow from a single bot account. Per-TPM impersonation would need additional gateway plumbing + auth tokens; out of Ph-1 scope.
+- (f) bool-only return without message_id Ph-1 -- corp messenger gateway returns bool only; no message-id callback. Acceptable Ph-1 because escalation is one-shot.
+
+**Consequences**:
+- (a) `core/src/email_service/outbound/composer_escalation.py` is now VESTIGIAL -- Ph-1 stub kept compatible until messenger landed; **remove in follow-up next session**.
+- (b) workflow_engine.tasks.escalation.ESCALATE ActionKind task body delegates to `messenger.service.MessengerService.send_escalation`.
+- (c) `customizations/messenger/example_corp_messenger_adapter.py` ships as per-customer scaffold with `# TODO(cline)` markers.
+- (d) `CommunicationLog.channel = 'corp_messenger'` joins existing channel enum; daily-limit check is a SELECT COUNT query gated by this channel value.
+- (e) 4K truncation + 3/day cap are HARD constraints at messenger boundary; never bypassed via config flags. If ops needs to send urgent message beyond limits, ops manually messages out-of-band.
+- (f) **No retry on bool=False from gateway** -- adapter raises if exception occurs, but bool=False means gateway responded with "failure to deliver"; retrying would re-send (could create duplicate notifications). Bool=False is final.
+- (g) Template variables documented in `REQUIRED_TEMPLATE_VARS` and asserted at composition time -- changing template requires updating REQUIRED set.
+
+**Anchors**: FR-9, FR-10 (reminders + cross-channel escalation), FR-31 (rule-driven), FR-42 (CommunicationLog audit), FR-50 (corp messenger outbound -- previously deferred to Ph-2; now Ph-1 per Q-M6 lock), `[D-019]` shared HILDA ops-team identity, `[D-025]` config 3-tier, `[D-027]` Teacher/Student, `messenger/MODULE.md`, commit `04d3e8d`.
+
+---
+
+## D-122: FR-87 step A/B/C TPM resolution is HILDA-rendered-page direct POST -- NOT SP-alert mediated, NOT rule_engine triggered
+
+**Date**: 2026-06-25
+**Status**: Ratified (correction applied; cascade pending next session per STATUS Flag)
+
+**Context**: FR-87 has 3 TPM resolution steps: (A) Reassign work-item; (B) Resolve doc_type; (C) Resolve revision. Multiple sessions of MODULE.md design + this session's email_service + automation_rules.yaml work assumed the flow was: TPM clicks SP UI button -> SP alert email lands -> `sp_alert_parser` extracts the change -> rule_engine fires a trigger -> workflow_engine dispatches action. The email_service `sp_alert_parser/parser.py` was built with `tpm_reassign_to_workitem` / `tpm_resolve_doc_type` / `tpm_resolve_revision` action handlers; automation_rules.yaml had 3 FR-87 rules using `ItemModified.TagsModified` as a workaround trigger sub-type. Architect Q3 clarification 2026-06-25 corrected this fundamentally: **FR-87 step A/B/C occurs within HILDA's INTERNAL TAB BROWSER PAGE (the dashboard FR-57 page that opens in a new tab from SP via `[D-074]` link-out), NOT in SP context.**
+
+**Decision**: FR-87 step A/B/C TPM resolution buttons live on `dashboard`'s HILDA-rendered page. Flow:
+1. TPM opens HILDA's dashboard page via SP link-out: `hilda.corp/docs/<delivery_item_id>` per FR-57.
+2. HILDA-rendered page shows document section + 3 FR-87 resolution buttons when applicable.
+3. TPM clicks button -> POST to hilda-api endpoint (NOT SP write, NOT SP alert email).
+4. Dashboard POST handler updates storage (DocumentIndexRow + DocumentItemAssociation + DeliveryItemBase as applicable) AND writes resolution fields back to SP `Deliverables_<customer_id>` row via SpCrud digest dance per `[D-064]` + `[D-117]`.
+
+NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `workflow_engine` ActionKind for FR-87 specifically.
+
+**Why**:
+- (a) HILDA-rendered page already exists per `[D-074]` link-out -- FR-57 document section page is HILDA's own surface; adding 3 POST endpoints is the minimum-surface-area path.
+- (b) TPM ergonomics -- TPM is already on HILDA page when reviewing doc; round-tripping the resolution through SP + SP-alert + email-poll adds 60-300s latency + multiple network hops + brittle parsing. Direct POST is instant.
+- (c) No SP write necessary for the action itself -- SP fields `tpm_reassignment_target_item_id` / `tpm_resolved_doc_type` / `tpm_revision_resolution` are *audit-only* per `[D-068]` impl note. HILDA's own storage is source of truth; SP writeback is for SP UI visibility.
+- (d) rule_engine doesn't need new trigger sub-types -- workaround `ItemModified.TagsModified` had loose semantics (would fire on any tag edit). Avoiding rule_engine trigger entirely is cleaner than adding `TpmReassigned` / `TpmResolvedDocType` / `TpmResolvedRevision` sub-triggers.
+- (e) email_service / sp_alert_parser stays simpler -- removing 3 FR-87 action handlers shrinks sp_alert_parser's responsibility surface to original `[D-047]` scope.
+- (f) dashboard module already owns FR-57 / FR-61 / FR-87 button info display -- placing POST handlers there keeps FR-87 ownership in one module.
+
+**Consequences**:
+- (a) **CORRECTION CASCADE PENDING NEXT SESSION** (~1-2 hr; TOP PRIORITY in STATUS Next):
+  1. Remove 3 FR-87 rules from `customizations/rules/global/automation_rules.yaml`.
+  2. Remove FR-87 handlers from `core/src/email_service/sp_alert_parser/parser.py`.
+  3. Update `core/src/email_service/MODULE.md` to drop FR-87 references in sp_alert_parser narrative.
+  4. Add 3 POST endpoints to `core/src/dashboard/app.py`:
+     - `POST /docs/<delivery_item_id>/resolve_reassign` (step A)
+     - `POST /docs/<delivery_item_id>/resolve_doc_type` (step B)
+     - `POST /docs/<delivery_item_id>/resolve_revision` (step C)
+  5. Handlers validate inputs (step B value MUST be in 4-value `tpm_resolved_doc_type` set per `[D-119]`) -> update storage -> SP writeback via SpCrud per `[D-064]` + `[D-117]`.
+  6. Update `core/src/dashboard/MODULE.md` to document FR-87 POST routes as part of dashboard Public surface.
+  7. Update tests (`test_email_service.py` removes FR-87 handler tests; `test_dashboard.py` adds 6+ FR-87 POST tests).
+- (b) A->B->C strict ordering invariant preserved -- enforced at dashboard POST handler level via storage state checks, not via SP-alert ordering.
+- (c) `[D-119]` `tpm_resolved_doc_type` 4-value validation lives in POST handler -- HILDA-rendered page already constrains TPM choice; POST handler validates as defense-in-depth.
+- (d) No new rule_engine trigger sub-types or ActionKinds -- avoids trigger-taxonomy churn that `ItemModified.TpmResolved*` route would have caused.
+- (e) **Backward-incompatible removal** -- FR-87 handlers shipped in commit `0dfb1d4`. Removing is technically a Public surface contraction but no caller exists yet (SP-alert FR-87 path was never wired into workflow_engine), so removal is safe pre-production.
+- (f) dashboard now owns FR-87 lifecycle end-to-end -- read (FR-57 + FR-87 button info display) + write (3 new POST endpoints). Single-module responsibility.
+
+**Anchors**: FR-57, FR-58, FR-60, FR-61, FR-74 per `[D-068]` / `[D-077]`, FR-87 (A->B->C strict ordering), `[D-047]` SP alert email channel (sp_alert_parser ORIGINAL scope), `[D-064]` HILDA -> SP REST writeback, `[D-068]` audit-only SP fields for TPM resolutions, `[D-074]` HILDA-rendered link-out + per-load READ, `[D-117]` SP NTLM digest-dance for FR-87 POST writeback, `[D-119]` tpm_resolved_doc_type 4-value, `dashboard/MODULE.md` (will be updated next session), `email_service/MODULE.md` (will drop FR-87 refs next session), `automation_rules.yaml` (3 FR-87 rules to be removed next session), commit `0dfb1d4` (FR-87 handlers to be removed), commit `1caa106` (FR-87 rules to be removed).
