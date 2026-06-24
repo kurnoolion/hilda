@@ -44,6 +44,7 @@ class ExampleCustomerAdapter(GoogleDriveBaseAdapter):
         pm_id: str,
         pm_password: str,
         totp_code: str,
+        customer_delivery_info: str,
     ) -> bool:
         """Invoke the user's pre-existing Google Drive binding.
 
@@ -52,19 +53,21 @@ class ExampleCustomerAdapter(GoogleDriveBaseAdapter):
             from <binding_module> import uploadAttachment  # noqa: N802
             return await asyncio.to_thread(
                 uploadAttachment,
-                device_id,           # Model_No
-                milestone_name,      # milestone YAML key
-                str(source_dir),     # LOCAL NSD path
-                target_dir,          # Drive subdirectory (per-item target_folder)
-                filename,            # basename only
-                pm_id,               # cred.username (shared ops-team Google id)
-                pm_password,         # cred.password
-                totp_code,           # ephemeral 6-digit code from pyotp
+                device_id,                # Model_No
+                milestone_name,           # milestone YAML key
+                str(source_dir),          # LOCAL NSD path
+                target_dir,               # Drive subdirectory (per-item target_folder)
+                filename,                 # basename only
+                pm_id,                    # cred.username (shared ops-team Google id)
+                pm_password,              # cred.password
+                totp_code,                # ephemeral 6-digit code from pyotp
+                customer_delivery_info,   # per-row Drive root from Deliverables SP list
             )
 
-        Per the 8-arg binding signature locked in [D-116] D12. The binding
-        composes the full Drive path internally per
-        `<customer-baked-root>/<Model_No>/<milestone_name>/<target_dir>/<filename>`.
+        9-arg binding signature per D-126 cascade 2026-06-26 (closes [D-116]
+        D13 follow-up). The binding composes the full Drive path internally per
+        `<customer_delivery_info>/<Model_No>/<milestone_name>/<target_dir>/<filename>`
+        (was binding-baked customer-root pre-D-126).
 
         Until the real binding is wired in, the base class raises
         NotImplementedError (CAD-E009) -- that's the Ph-1 expected behavior on
@@ -73,7 +76,7 @@ class ExampleCustomerAdapter(GoogleDriveBaseAdapter):
         # Stub body: defer to base class which raises NotImplementedError (CAD-E009).
         # When wiring in the real binding on Work PC, replace this entire body.
         _ = (device_id, milestone_name, source_dir, target_dir, filename,
-             pm_id, pm_password, totp_code, asyncio)  # silence unused-arg lints
+             pm_id, pm_password, totp_code, customer_delivery_info, asyncio)  # silence unused-arg lints
         return await super()._invoke_binding(
             device_id=device_id,
             milestone_name=milestone_name,
@@ -83,4 +86,5 @@ class ExampleCustomerAdapter(GoogleDriveBaseAdapter):
             pm_id=pm_id,
             pm_password=pm_password,
             totp_code=totp_code,
+            customer_delivery_info=customer_delivery_info,
         )

@@ -267,8 +267,9 @@ class DeliveryItemBase(_Base):
     osmr:                            bool        = False
     rmr:                             bool        = False
     hmr_smr:                         bool        = False
-    # Carrier-portal delivery:
-    customer_delivery_modality:      str
+    # Carrier-portal delivery (customer_delivery_modality moved to CustomerTemplateBase
+    # per D-126 architect Q2 lock 2026-06-26 -- one modality per customer; no_customer_upload
+    # is the sole upload gate per FR-80):
     customer_delivery_info:          str | None = None   # base URL denormalized per-item from CustomerTemplateBase
     customer_delivery_credential_id: str | None = None
     # Outreach / status tracking:
@@ -347,15 +348,6 @@ class DeliveryItemBase(_Base):
             )
         return v
 
-    @field_validator("customer_delivery_modality")
-    @classmethod
-    def _v_cust(cls, v: str) -> str:
-        return validate_in_registry(
-            CustomerDeliveryModalityRegistry,
-            v,
-            registry_name="CustomerDeliveryModality",
-        )
-
     @field_validator("review_status")
     @classmethod
     def _v_review_status(cls, v: str) -> str:
@@ -423,7 +415,8 @@ class CustomerTemplateBase(_Base):
     template_name:    str
     template_version: int
     # HILDA-config-only fields (NOT in SP per [D-083]):
-    customer_jira_url:        str | None = None   # read at startup per FR-25 (b)
+    customer_jira_url:           str | None = None   # read at startup per FR-25 (b)
+    customer_delivery_modality:  str | None = None   # MOVED here from DeliveryItemBase per D-126 architect Q2 lock 2026-06-26; one modality per customer (e.g., "GoogleDrive"); subclass-implicit at runtime; validated against CustomerDeliveryModalityRegistry
     # Customer-level carrier-portal delivery config (added 2026-06-21 per FR-77 + NFR-21 §6):
     customer_delivery_info:   str | None = None   # base URL (e.g. "drive.google.com"); denormalized per-item at setup_milestone
     delivery_path_template:   str | None = None   # template producing milestone HOME path; literal segments + {placeholders}
@@ -431,6 +424,17 @@ class CustomerTemplateBase(_Base):
     devices:    dict[str, DeviceBase] = {}    # YAML key = device_id per [D-091]
     milestones: list[MilestoneBase]   = []
     is_active:  bool                  = True
+
+    @field_validator("customer_delivery_modality")
+    @classmethod
+    def _v_cust_modality(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return validate_in_registry(
+            CustomerDeliveryModalityRegistry,
+            v,
+            registry_name="CustomerDeliveryModality",
+        )
 
 
 class AutomationRuleBase(_Base):

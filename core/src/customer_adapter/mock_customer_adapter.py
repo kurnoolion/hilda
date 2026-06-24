@@ -57,7 +57,23 @@ class MockCustomerAdapter:
         source_dir: Path,        # accepted but unused
         target_dir: str,
         filename: str,
+        customer_delivery_info: str = "drive.google.com",  # default for tests; D-126
     ) -> CarrierUploadResult:
+        # Per D-126 cascade 2026-06-26: mock validates customer_delivery_info
+        # non-empty (matches GoogleDriveBaseAdapter behavior).
+        if not customer_delivery_info:
+            now = _utc_now()
+            return CarrierUploadResult(
+                success=False,
+                uploaded_filename=filename,
+                device_id=device_id,
+                milestone_name=milestone_name,
+                target_dir=target_dir,
+                upload_started_at=now,
+                upload_completed_at=now,
+                error_code="CAD-E010",
+                error_detail="customer_delivery_info_missing",
+            )
         key = (device_id, milestone_name, target_dir, filename)
         self.calls.append(key)
         registered = self._registered.get(key)

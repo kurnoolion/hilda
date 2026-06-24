@@ -76,8 +76,9 @@ lists:                                    # 3 lists per Module #11 lock 2026-06-
       target_folder: "Target_x0020_Folder"                                    # FR-77 outbound carrier-folder per-item content
       no_customer_upload: "No_x0020_Customer_x0020_Upload"                    # FR-80 boolean skip gate
       force_tracking_enabled: "Force_x0020_Tracking_x0020_Enabled"            # FR-81 sole per-item tracking gate per architect lock 2026-06-20
-      customer_delivery_modality: "Customer_x0020_Delivery_x0020_Modality"    # FR-77 routing modality
-      customer_delivery_info: "Customer_x0020_Delivery_x0020_Info"            # FR-77 base URL denormalized
+      # customer_delivery_modality: MOVED to template.yaml per D-126 architect Q2 lock 2026-06-26
+      # (one modality per customer; subclass-implicit; HILDA reads from template.yaml at deployment-config time)
+      customer_delivery_info: "Customer_x0020_Delivery_x0020_Info"            # per-row per D-126 architect Q1 lock 2026-06-26; passed as 9th arg to binding
       ingress_nsd: "Ingress_x0020_NSD"                                        # Ph-1=None; Ph-2 NSD ingress path
       ingress_folder: "Ingress_x0020_Folder"                                  # NSD ingress folder
       folder_routing_enabled: "Folder_x0020_Routing_x0020_Enabled"            # Type-2 folder routing flag

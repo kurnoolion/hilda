@@ -120,7 +120,7 @@ class _SuccessAdapter(GoogleDriveBaseAdapter):
     async def _invoke_binding(  # type: ignore[override]
         self, *, device_id: str, milestone_name: str, source_dir: Path,
         target_dir: str, filename: str, pm_id: str, pm_password: str,
-        totp_code: str,
+        totp_code: str, customer_delivery_info: str,
     ) -> bool:
         self.invoke_calls.append({
             "device_id":      device_id,
@@ -129,6 +129,7 @@ class _SuccessAdapter(GoogleDriveBaseAdapter):
             "target_dir":     target_dir,
             "filename":       filename,
             "pm_id":          pm_id,
+            "customer_delivery_info": customer_delivery_info,
             # Intentionally NOT capturing pm_password / totp_code in fields we
             # might dump; but the test still verifies their shape via separate
             # local assertions in tests.
@@ -247,6 +248,7 @@ class TestGoogleDriveBaseAdapter:
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="TestReports/Power",
             filename="abc.report",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is True
         assert result.error_code is None
@@ -281,6 +283,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E005"
@@ -295,6 +298,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E008"
@@ -310,6 +314,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E004"
@@ -326,6 +331,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E005"
@@ -346,6 +352,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E009"
@@ -359,6 +366,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is True
 
@@ -373,6 +381,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is True
 
@@ -392,6 +401,7 @@ class TestGoogleDriveBaseAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="x.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E008"
@@ -429,6 +439,7 @@ class TestMockCustomerAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="abc.report",
+            customer_delivery_info="drive.google.com",
         )
         assert result is canned
 
@@ -438,6 +449,7 @@ class TestMockCustomerAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="unknown.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is False
         assert result.error_code == "CAD-E004"
@@ -449,6 +461,7 @@ class TestMockCustomerAdapter:
         result = await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="unknown.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert result.success is True
         assert result.error_code is None
@@ -459,10 +472,12 @@ class TestMockCustomerAdapter:
         await adapter.upload_attachment(
             device_id="MODEL-A", milestone_name="P1",
             source_dir=Path("/tmp"), target_dir="X", filename="a.pdf",
+            customer_delivery_info="drive.google.com",
         )
         await adapter.upload_attachment(
             device_id="MODEL-B", milestone_name="P2",
             source_dir=Path("/tmp"), target_dir="Y", filename="b.pdf",
+            customer_delivery_info="drive.google.com",
         )
         assert adapter.calls == [
             ("MODEL-A", "P1", "X", "a.pdf"),
@@ -489,7 +504,7 @@ class TestErrorCodes:
     def test_all_cad_codes_present(self) -> None:
         expected = {
             "CAD-E001", "CAD-E002", "CAD-E003", "CAD-E004", "CAD-E005",
-            "CAD-E006", "CAD-E007", "CAD-E008", "CAD-E009",
+            "CAD-E006", "CAD-E007", "CAD-E008", "CAD-E009", "CAD-E010",
             "CAD-W001", "CAD-W002", "CAD-W003", "CAD-W004", "CAD-W005",
         }
         for code in expected:

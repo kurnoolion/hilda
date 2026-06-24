@@ -169,7 +169,7 @@ def _make_delivery_item(**overrides: object) -> DeliveryItemBase:
         delivery_state=DeliveryState.OPEN.value,
         item_type=ItemType.CONFIRMATION.value,
         tracking_modality=["Email"],              # MULTI-VALUE per [D-037]
-        customer_delivery_modality="None",
+        # customer_delivery_modality REMOVED from per-item per D-126 Q2 lock 2026-06-26 (now CustomerTemplateBase-level)
         last_updated=datetime.now(timezone.utc),
         sort_order=1,
         path_id="i1-slug",
@@ -234,7 +234,7 @@ class TestEntityModels:
         assert di.delivery_state == "Open"
         assert di.item_type == "Confirmation"   # PascalCase per SP UI engineer lock 2026-06-23
         assert di.tracking_modality == ["Email"]   # MULTI-VALUE per [D-037] Phase 5
-        assert di.customer_delivery_modality == "None"
+        # customer_delivery_modality assertion REMOVED per D-126 Q2 lock 2026-06-26 (field now CustomerTemplateBase-level)
 
     def test_delivery_item_rejects_bad_modality(self) -> None:
         with pytest.raises(ValidationError):

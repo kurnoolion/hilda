@@ -156,7 +156,8 @@ _BOUNDED_FIELDS: frozenset[str] = frozenset({
     "manual_triage_required",
     "review_status",
     "ingress_nsd",
-    "customer_delivery_modality",
+    # customer_delivery_modality REMOVED per D-126 architect Q2 lock 2026-06-26
+    # (moved to CustomerTemplateBase per-customer; no longer per-item overridable)
     "item_type",
     "tracking_modality",
     "delivery_state",

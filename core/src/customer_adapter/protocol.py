@@ -52,21 +52,31 @@ class CustomerAdapter(Protocol):
 
     Per [D-116] D13 (B-α) lock 2026-06-25 -- HILDA passes IDENTIFIER COMPONENTS
     for the Drive target side; binding composes the full Drive path internally
-    per customer-baked root + (Model_No, milestone_name, target_dir, filename).
-    customer_id is implicit via the per-customer subclass instance. Credentials
-    (pm_id, pm_password, totp_code) are resolved + injected by the adapter from
+    per (customer_delivery_info, Model_No, milestone_name, target_dir, filename)
+    -- per architect lock 2026-06-26 (D-126 cascade closing [D-116] D13 follow-up):
+    customer_delivery_info is per-row on the Deliverables SP list (e.g.,
+    "drive.google.com"), passed as 9th arg; replaces the previous binding-baked
+    customer-root framing. customer_id is implicit via the per-customer subclass
+    instance. customer_delivery_modality (e.g., "GoogleDrive") moved to
+    template.yaml per-customer config (no longer per-row). Credentials (pm_id,
+    pm_password, totp_code) are resolved + injected by the adapter from
     credential_service per call; NEVER passed to Protocol-level callers.
+
+    Raises CAD-E010 when customer_delivery_info is None/empty AND
+    no_customer_upload=False (data-config error -- SP UI engineer must
+    provision the field when upload is expected).
     """
 
     source_system: str          # immutable; equals customer_id
 
     async def upload_attachment(
         self,
-        device_id: str,         # Model_No; e.g., "MODEL-A"
-        milestone_name: str,    # milestone YAML key; e.g., "P1"
-        source_dir: Path,       # LOCAL NSD directory holding the file
-        target_dir: str,        # Drive subdirectory under <customer-baked-root>/<Model_No>/<milestone_name>/
-        filename: str,          # basename only; e.g., "abc.report"
+        device_id: str,                  # Model_No; e.g., "MODEL-A"
+        milestone_name: str,             # milestone YAML key; e.g., "P1"
+        source_dir: Path,                # LOCAL NSD directory holding the file
+        target_dir: str,                 # Drive subdirectory under <customer_delivery_info>/<Model_No>/<milestone_name>/
+        filename: str,                   # basename only; e.g., "abc.report"
+        customer_delivery_info: str,     # per-row from Deliverables SP list per D-126; e.g., "drive.google.com"
     ) -> CarrierUploadResult:
         """Upload one file to the customer's Drive folder. See class docstring."""
         ...

@@ -344,6 +344,9 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "CAD-E009": ErrorCode(
         "CAD-E009", "Binding _invoke_binding method not implemented for customer '{customer_id}' -- per-customer subclass missing or stub (per [D-027] Teacher/Student split)", False
     ),
+    "CAD-E010": ErrorCode(
+        "CAD-E010", "customer_delivery_info required for upload (no_customer_upload=False) but missing/empty on Deliverables row for customer '{customer_id}' -- SP UI engineer must provision the per-row value per D-126 cascade 2026-06-26", False
+    ),
     "CAD-W001": ErrorCode(
         "CAD-W001", "Capability flag '{flag}' is False for carrier '{customer_id}' -- operation '{op}' not supported (Ph-2 forward-looking)", True
     ),

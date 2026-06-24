@@ -47,7 +47,8 @@ _DEFAULT_WORKITEM_FIELDS: dict[str, Any] = {
     "pm_approval_at":         None,                       # never set on default WI Ph-1
     "pm_approval_pm_id":      None,
     "target_folder":          None,                       # no carrier-portal upload destination
-    "customer_delivery_modality": None,                   # no carrier upload
+    # customer_delivery_modality REMOVED from per-item per D-126 architect Q2 lock 2026-06-26
+    # (one modality per customer at CustomerTemplateBase level; no_customer_upload=True is sole upload gate)
     "review_status":          "not_required",             # per template_schema review_status enum
     "item_description":       None,                       # nested tag-set null on default WI per FR-82
     "manual_triage_required": False,

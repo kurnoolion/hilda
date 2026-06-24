@@ -83,15 +83,20 @@ class GoogleDriveBaseAdapter:
         source_dir: Path,
         target_dir: str,
         filename: str,
+        customer_delivery_info: str,
     ) -> CarrierUploadResult:
         """Upload one file to the customer's Google Drive folder.
 
-        Flow per [D-116] D12 + D13 (B-α):
+        Flow per [D-116] D12 + D13 (B-α) + D-126 cascade 2026-06-26:
+        0. Validate customer_delivery_info non-empty -- raises CAD-E010 if missing
+           (data-config error per architect Q3 lock 2026-06-26).
         1. Resolve `Credential` (auth_type=basic_totp) via credential_service.
         2. Generate `totp_code` via pyotp.TOTP(cred.totp_seed).now().
         3. Best-effort NTP skew check (if config.diagnostic_ntp_check); CAD-W005 on drift.
-        4. Invoke binding's `uploadAttachment(...)` via `_invoke_binding` (wrapped in
-           asyncio.to_thread by the subclass since binding's selenium is sync).
+        4. Invoke binding's `uploadAttachment(...)` via `_invoke_binding` with 9th arg
+           customer_delivery_info per D-126 -- binding composes
+           <customer_delivery_info>/<device_id>/<milestone_name>/<target_dir>/<filename>
+           internally per (B-α).
         5. Wrap bool return into CarrierUploadResult.
         6. Emit CommunicationLog row per FR-42 (best-effort; non-blocking).
         7. Return result.
@@ -103,6 +108,23 @@ class GoogleDriveBaseAdapter:
         NEVER logs cred.password, cred.totp_seed, or totp_code.
         """
         started = _utc_now()
+
+        # -- Step 0: validate customer_delivery_info per D-126 + architect Q3 lock --
+        if not customer_delivery_info:
+            completed = _utc_now()
+            result = CarrierUploadResult(
+                success=False,
+                uploaded_filename=filename,
+                device_id=device_id,
+                milestone_name=milestone_name,
+                target_dir=target_dir,
+                upload_started_at=started,
+                upload_completed_at=completed,
+                error_code="CAD-E010",
+                error_detail="customer_delivery_info_missing",
+            )
+            self._emit_log(result, latency_ms=_latency_ms(started, completed))
+            return result
 
         # -- Step 1: resolve credentials --
         try:
@@ -162,6 +184,7 @@ class GoogleDriveBaseAdapter:
                 pm_id=cred.username or self.pm_id,
                 pm_password=cred.password or "",
                 totp_code=totp_code,
+                customer_delivery_info=customer_delivery_info,
             )
             # Don't keep credential material in local frame longer than needed.
             del totp_code
@@ -227,24 +250,34 @@ class GoogleDriveBaseAdapter:
         pm_id: str,
         pm_password: str,
         totp_code: str,
+        customer_delivery_info: str,
     ) -> bool:
         """Invoke the per-customer Google Drive binding.
+
+        9th arg `customer_delivery_info` added per D-126 cascade 2026-06-26
+        (closes [D-116] D13 follow-up) -- per-row value from Deliverables SP
+        list (e.g., "drive.google.com"); binding composes full URL
+        `<customer_delivery_info>/<device_id>/<milestone_name>/<target_dir>/<filename>`
+        internally per (B-α). Replaces the previous binding-baked customer-root
+        framing.
 
         ABSTRACT in the base class -- per-customer subclass at
         `customizations/customer_adapter/<customer_id>_adapter.py` MUST override
         this to import + call the concrete binding (the user's pre-existing
         selenium-backed module per [D-116] D11/D12).
 
-        Subclass implementation pattern:
+        Subclass implementation pattern (9-arg signature per D-126):
         ```python
         async def _invoke_binding(self, *, device_id, milestone_name,
                                   source_dir, target_dir, filename,
-                                  pm_id, pm_password, totp_code) -> bool:
+                                  pm_id, pm_password, totp_code,
+                                  customer_delivery_info) -> bool:
             from <binding_module> import uploadAttachment  # noqa: N802
             return await asyncio.to_thread(
                 uploadAttachment,
                 device_id, milestone_name, str(source_dir),
                 target_dir, filename, pm_id, pm_password, totp_code,
+                customer_delivery_info,
             )
         ```
 

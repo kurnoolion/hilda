@@ -2571,3 +2571,50 @@ For (b) workflow: Claude generates corrected YAML content in chat -> architect c
 - (h) `customer_adapter/MODULE.md` D13 cascade follow-up (per-row `customer_delivery_info` per architect 2026-06-26) tracked via STATUS Flag -- when applied, the corrected YAML mapping for `customer_delivery_info` column lives on architect's Linux box, not in github.
 
 **Anchors**: NFR-2, `[D-027]`, `[D-038]`, `[D-091]`, `[D-104]`, `[D-122]`, `customizations/sharepoint_config/customers/customer.yaml`, commit `2f791d6`.
+
+---
+
+## D-126: customer_delivery_info per-row + customer_delivery_modality per-customer + CAD-E010 -- closes [D-116] D13 cascade follow-up
+
+**Date**: 2026-06-26
+**Status**: Ratified
+
+**Context**: `[D-116]` D13 (2026-06-25) locked the customer_adapter binding API at 8 args with the "Drive root baked in per-customer subclass" pattern (B-α). Architect's live SP REST probe 2026-06-26 surfaced that `customer_delivery_info` (e.g., "drive.google.com") is actually a **per-row column on the Deliverables SP list** -- different items for the same customer can ship to different Drive roots (e.g., per project). The original "binding-baked customer-root" framing therefore needed to be relaxed. `customer_delivery_modality` (e.g., "GoogleDrive") was ALSO modeled per-item in template.yaml + as a required field on `DeliveryItemBase` Pydantic model -- with `"None"` doubling as an upload-gate signal, redundant with FR-80's `no_customer_upload` flag. Architect Q1+Q2+Q3 locks 2026-06-26 (afternoon) resolved both.
+
+**Decision**: Three-part cascade closing `[D-116]` D13 follow-up:
+
+- **(Q1) Binding API: 9th positional arg `customer_delivery_info`** -- per-row value flows through from SP Deliverables row → workflow_engine submission task → `CustomerAdapter.upload_attachment(...)` → `GoogleDriveBaseAdapter._invoke_binding(...)` → user's pre-existing binding. Binding composes the full Drive URL internally per (B-α) preserved: `<customer_delivery_info>/<device_id>/<milestone_name>/<target_dir>/<filename>`. Customer-baked-root framing relaxed -- the per-customer subclass no longer hard-codes the Drive root; it flows in per call. `customer_delivery_credential_id` REMOVED entirely per `[D-019]` shared HILDA ops-team identity (no per-row credential needed). `MockCustomerAdapter.upload_attachment` accepts the kwarg with `"drive.google.com"` default for test ergonomics.
+
+- **(Q2) `customer_delivery_modality` moved from `DeliveryItemBase` (per-item) to `CustomerTemplateBase` (per-customer top-level)** -- one modality per customer (matches the per-customer subclass pattern at `customizations/customer_adapter/<customer_id>_adapter.py`; modality is subclass-implicit at runtime). Field on `CustomerTemplateBase` is `str | None = None`, validated against `CustomerDeliveryModalityRegistry`. Removed from: `DeliveryItemBase` model + validator; `DefaultWorkItemConfig` dict in `tracker/default_workitem.py`; `manual_override.py` overridable field list; template.yaml per-item entries (14 dropped in mock_customer.yaml; equivalent local-paste for MMK per `[D-125]` Point 3). The `customer_delivery_modality = "None"` value was redundant with `no_customer_upload=True` per FR-80; consolidated -- `no_customer_upload` is now sole upload gate.
+
+- **(Q3) `CAD-E010 "customer_delivery_info_missing"`** -- validation in `GoogleDriveBaseAdapter.upload_attachment` step 0: if `customer_delivery_info` is None/empty AND the upload is attempted (i.e., callers passed `no_customer_upload=False` upstream), surface `CAD-E010` with `error_detail="customer_delivery_info_missing"`, emit CommunicationLog row, return. Data-config error -- SP UI engineer must provision the field when upload is expected.
+
+**Why**:
+- (a) **Per-row `customer_delivery_info` over baked-in subclass root** -- real-world Drive routing varies per project/milestone within a customer (live SP probe confirmed); baking customer-root in the subclass would lose that flexibility + force re-deployment to add a project.
+- (b) **Per-customer `customer_delivery_modality` over per-item** -- modality is bound to which adapter Python class runs (per `[D-116]` D11 per-customer subclass); a single customer never ships SOME items via Google Drive + OTHERS via a different modality in Ph-1. Per-item entries were redundant noise; consolidating saves 14+ YAML lines per template + removes a misleading per-item validation surface.
+- (c) **Direction (α): binding 9th arg, NOT HILDA pre-composing the full URL** -- preserves the (B-α) lock from `[D-116]` D13: binding owns Drive-side conventions (folder auto-creation, naming idiosyncrasies, etc.). HILDA flows COMPONENTS; binding composes. Adding a kwarg is the minimum-disruption shape; HILDA pre-composing would require collapsing Model_No + milestone_name + target_dir into a single resolved string + lose the binding's auto-mkdir-on-missing semantics.
+- (d) **CAD-E010 strict over silent skip** -- per FR-80, `no_customer_upload=False` means we EXPECT to upload. Missing `customer_delivery_info` at that point is a data-config bug, not "carrier didn't provide destination yet" (use `no_customer_upload=True` for that). Strict error surfaces to ops; silent skip would be invisible.
+- (e) **`no_customer_upload` over `customer_delivery_modality = "None"` as upload gate** -- two signals for the same predicate creates dual-truth risk (one says skip, the other says upload). FR-80 names `no_customer_upload` as the gate; modality being null was an accident-of-history. Consolidating removes the dual-truth.
+- (f) **Point 3 policy applied to template.yaml cascade** -- `customizations/template_schemas/mock_customer/template.yaml` is sanitized placeholder, safe for public github (14 per-item line deletions + 1 top-level addition committed). `customizations/template_schemas/MMK/template.yaml` is corp-derived; matching transformation generated in chat for architect's local Linux box per `[D-125]` Point 3 policy.
+
+**Consequences**:
+- (a) `core/src/customer_adapter/protocol.py` `CustomerAdapter.upload_attachment` Protocol signature: 9 positional args (added `customer_delivery_info`).
+- (b) `core/src/customer_adapter/google_drive_base.py` `GoogleDriveBaseAdapter.upload_attachment` + `_invoke_binding` extended; Step 0 CAD-E010 validation added.
+- (c) `core/src/customer_adapter/mock_customer_adapter.py` `MockCustomerAdapter.upload_attachment` accepts `customer_delivery_info: str = "drive.google.com"` default + emits CAD-E010 on empty.
+- (d) `core/src/customer_adapter/diagnostics_cli.py` `--mock` invocation passes the kwarg.
+- (e) `customizations/customer_adapter/example_adapter.py` scaffold subclass `_invoke_binding` updated to 9-arg signature + TODO(cline) docs.
+- (f) `core/src/diagnostics/error_codes.py` `CAD-E010` registered (14 CAD codes → 15).
+- (g) `core/tests/test_customer_adapter.py` updated for 9-arg + `_SuccessAdapter._invoke_binding` signature + CAD count assertion 14 → 15. 30/30 customer_adapter tests pass.
+- (h) `core/src/template_schema/models.py` `customer_delivery_modality` REMOVED from `DeliveryItemBase` + validator; ADDED to `CustomerTemplateBase` as `str | None = None` + validator.
+- (i) `core/src/tracker/default_workitem.py` `customer_delivery_modality` key REMOVED from `_DEFAULT_WI_VALUES` dict.
+- (j) `core/src/tracker/manual_override.py` `customer_delivery_modality` REMOVED from overridable field list.
+- (k) `core/tests/test_template_schema.py` per-item fixture + assertion REMOVED (field no longer schema-enforced on DeliveryItemBase); the `test_customer_delivery_modality_4_values_per_d054` enum value test STAYS (enum unchanged).
+- (l) `customizations/template_schemas/mock_customer/template.yaml` -- 14 per-item lines deleted; 1 top-level `customer_delivery_modality: GoogleDrive` added.
+- (m) `customizations/template_schemas/MMK/template.yaml` -- matching transformation generated in chat for architect's local paste per `[D-125]` Point 3 (10 per-item lines to delete; 1 top-level to add).
+- (n) `customizations/sharepoint_config/customers/customer.yaml` -- `customer_delivery_modality` SP column mapping commented out (no longer per-row on SP; HILDA reads from template.yaml).
+- (o) `core/src/customer_adapter/MODULE.md` rollback log: D-126 cascade CLOSED entry.
+- (p) `[D-116]` D13 follow-up flag in STATUS.md cleared.
+- (q) Test suite 755 → 755 (unchanged net; additive 9th arg + field removal where present + new CAD-E010 test cell + adjusted CAD count assertion).
+- (r) **Net code size**: ~80 lines code + ~30 lines MODULE.md + 14 YAML deletions in mock_customer.yaml + 1 YAML addition. Well within architect's original "small ~50-100 lines" estimate from 2026-06-26 morning D13 flag.
+
+**Anchors**: FR-77 (carrier-portal path composition), FR-80 (`no_customer_upload` upload gate), `[D-019]` (shared HILDA ops-team identity Ph-1/Ph-2), `[D-027]` (Teacher/Student split — binding bodies stay local), `[D-085]` (target_date authoritative deadline -- unrelated but in same neighborhood), `[D-088]` (3-tuple PM resolution), `[D-094]` SUPERSEDED (mixed-case enum precedent), `[D-104]` (Projects per-customer), `[D-116]` D11 + D12 + D13 (binding API + B-α lock), `[D-117]` (SpSession digest dance), `[D-119]` (4-value `tpm_resolved_doc_type`), `[D-123]` (dashboard `/docs/{customer_id}/{sp_id}` URL + `$expand` for User fields), `[D-125]` (Point 3 policy -- corp-derived YAML stays LOCAL), `customer_adapter/MODULE.md`, `template_schema/MODULE.md`, `tracker/MODULE.md`, `email_service/MODULE.md`, `customizations/customer_adapter/example_adapter.py`, `customizations/template_schemas/mock_customer/template.yaml`, `customizations/sharepoint_config/customers/customer.yaml`, this commit.

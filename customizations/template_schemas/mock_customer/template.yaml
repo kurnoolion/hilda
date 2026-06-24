@@ -38,6 +38,7 @@
 # ============================================================
 customer_id: mock_customer
 customer_jira_url: https://jira.example.com/projects/MOCK   # Ph-2 informational only per [D-092]
+customer_delivery_modality: GoogleDrive                     # per-customer per D-126 Q2 lock 2026-06-26 (MOVED from per-item; one modality per customer); subclass-implicit at runtime
 
 # Customer-level carrier-portal delivery config (per architect lock 2026-06-21):
 customer_delivery_info: drive.google.com                    # base URL; denormalized per-item at setup_milestone
@@ -93,7 +94,6 @@ milestones:
         item_description: null                              # null allowed for Confirmation per FR-82
         item_path_id: null
         tg_path_id: null
-        customer_delivery_modality: None
         target_folder: null                                 # confirmation -- no upload
         # Form-factor (handset/tablet/wearable/ir/osmr/rmr/hmr_smr) per [D-084]:
         handset: true
@@ -128,7 +128,6 @@ milestones:
         item_description: [["Sustainability"]]
         item_path_id: sustainability_cert
         tg_path_id: sustainability
-        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Sustainability"
         handset: true
         tablet: true
@@ -160,7 +159,6 @@ milestones:
         item_description: [["SDoc"], ["Qualification", "Product"]]
         item_path_id: bluetooth_sig_cert
         tg_path_id: bluetooth
-        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Bluetooth"
         handset: true
         tablet: true
@@ -197,7 +195,6 @@ milestones:
           - [NR, Sub6, mmWave]
         item_path_id: perf_5g
         tg_path_id: performance
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Performance/5G"
         handset: true
         tablet: false
@@ -229,7 +226,6 @@ milestones:
         item_description: [["WiFi6", "performance", "test"]]
         item_path_id: perf_wifi6
         tg_path_id: performance
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Performance/WiFi"
         handset: true
         tablet: true
@@ -261,7 +257,6 @@ milestones:
         item_description: [["LTE", "OTA"]]
         item_path_id: perf_lte_ota
         tg_path_id: performance
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Performance/LTE"
         handset: true
         tablet: true
@@ -293,7 +288,6 @@ milestones:
         item_description: [["BluetoothAudio", "test"]]    # exercises substring overlap with BLUETOOTH TG
         item_path_id: bluetooth_audio_test
         tg_path_id: bluetooth
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Bluetooth/Audio"
         handset: true
         tablet: true
@@ -325,7 +319,6 @@ milestones:
         item_description: [["Sustainability", "Carbon"]]    # subset of item_no=2 SUSTAINABILITY -- exercises TSC-W007
         item_path_id: carbon_footprint
         tg_path_id: sustainability
-        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Sustainability/Carbon"
         handset: true
         tablet: true
@@ -357,7 +350,6 @@ milestones:
         item_description: null
         item_path_id: null
         tg_path_id: null
-        customer_delivery_modality: None
         target_folder: null
         handset: true
         tablet: true
@@ -389,7 +381,6 @@ milestones:
         item_description: [["Thermal", "performance"]]
         item_path_id: thermal_perf
         tg_path_id: performance
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Thermal"
         handset: true
         tablet: false
@@ -428,7 +419,6 @@ milestones:
         item_description: null
         item_path_id: null
         tg_path_id: null
-        customer_delivery_modality: None
         target_folder: null
         handset: true
         tablet: true
@@ -460,7 +450,6 @@ milestones:
         item_description: [["Sustainability"]]
         item_path_id: p2_sustainability_recert
         tg_path_id: sustainability
-        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Sustainability"
         handset: true
         tablet: true
@@ -492,7 +481,6 @@ milestones:
         item_description: [["5G", "performance", "final"]]
         item_path_id: p2_perf_5g_final
         tg_path_id: performance
-        customer_delivery_modality: GoogleDrive
         target_folder: "TestReports/Performance/5G_Final"
         handset: true
         tablet: false
@@ -524,7 +512,6 @@ milestones:
         item_description: [["Bluetooth", "final"]]
         item_path_id: p2_bluetooth_final
         tg_path_id: bluetooth
-        customer_delivery_modality: GoogleDrive
         target_folder: "Compliance/Bluetooth_Final"
         handset: true
         tablet: true

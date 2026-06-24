@@ -115,6 +115,7 @@ async def _run_mock(run_id: str) -> int:
         source_dir=Path("/tmp"),
         target_dir="TestReports/Power",
         filename="abc.report",
+        customer_delivery_info="drive.google.com",
     )
     _emit(writer, ReportType.RPT, {
         "mode":           "mock",
