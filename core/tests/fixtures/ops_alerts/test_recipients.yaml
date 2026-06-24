@@ -1,0 +1,5 @@
+ops_bot_email: test-ops@example.com
+broadcast_corp_ids:
+  - alice_test
+  - bob_test
+rate_limit_per_minute: null

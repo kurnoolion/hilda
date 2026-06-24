@@ -24,12 +24,12 @@ from core.src.diagnostics.error_codes import ErrorCode
 
 
 class TestErrorCodes:
-    def test_all_22_prefixes_registered(self) -> None:
-        # 22 prefixes: 21 per 2026-06-21 expansion (18 + CMG/CPG/STATUS) + CAD
-        # re-added 2026-06-25 per [D-116] customer_adapter dev (CAD-W005 etc.).
+    def test_all_23_prefixes_registered(self) -> None:
+        # 23 prefixes: 22 prior (21 per 2026-06-21 + CAD re-added 2026-06-25)
+        # + OPS added 2026-06-26 per [D-127] ops_alerts module Ph-1 dev.
         # CSA remains as the credential_service env-var prefix for customer_adapter;
         # CAD is the diagnostics error-code prefix per customer_adapter MODULE.md.
-        assert len(PREFIX_REGISTRY) == 22
+        assert len(PREFIX_REGISTRY) == 23
         assert PREFIX_REGISTRY["DGN"] == "diagnostics"
         assert PREFIX_REGISTRY["SHP"] == "sharepoint_integration"
         assert PREFIX_REGISTRY["CSA"] == "customer_adapter"   # env-var prefix
@@ -37,6 +37,7 @@ class TestErrorCodes:
         assert PREFIX_REGISTRY["STATUS"] == "diagnostics"     # meta-prefix added 2026-06-21
         assert PREFIX_REGISTRY["CMG"] == "corp_messenger_gateway"
         assert PREFIX_REGISTRY["CPG"] == "corp_plm_gateway"
+        assert PREFIX_REGISTRY["OPS"] == "ops_alerts"         # added 2026-06-26 per [D-127]
 
     def test_get_code_returns_definition(self) -> None:
         c = get_code("DGN-E001")

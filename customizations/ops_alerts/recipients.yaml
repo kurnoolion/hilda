@@ -1,0 +1,28 @@
+# =====================================================================================
+# customizations/ops_alerts/recipients.yaml -- sanitized SAMPLE for github
+# =====================================================================================
+# IMPORTANT -- Point 3 architect policy 2026-06-26 (per [D-125] + [D-127]):
+#   The production recipients.yaml lives LOCALLY only (not on public github).
+#   Architect maintains it on the Linux deployment box.
+#   This file is a placeholder showing the SHAPE; values are placeholder
+#   identifiers (do not represent real corp_ids).
+#
+# Conforms to core/src/ops_alerts/recipients_loader.Recipients dataclass.
+# =====================================================================================
+
+# Single email destination -- the HILDA OPS BOT alias.
+# Receives ONE email per ops_alerts.emit_alert(...) call.
+ops_bot_email: hilda-ops-bot@mock-corp.com
+
+# N messenger DM destinations -- each corp_id receives ONE message per alert.
+# Order doesn't matter; failures on individual corp_ids are best-effort
+# (OPS-E003 partial / OPS-E004 total fan-out failure logged via diagnostics).
+broadcast_corp_ids:
+  - mock_ops_a
+  - mock_ops_b
+
+# Rate limit per-(source, error_code) per rolling 60-second window.
+#   null = no rate limit (Ph-1 default; every call fans out)
+#   N    = at most N alerts per (source, error_code) tuple per 60s window
+# Excess alerts: OpsAlertResult.suppressed_by_rate_limit=True, no fan-out.
+rate_limit_per_minute: null

@@ -45,6 +45,9 @@ PREFIX_REGISTRY: dict[str, str] = {
     # Added 2026-06-21 — meta-prefix for cross-cutting HildaOpsAlert codes per FR-75 + [D-002];
     # owned by diagnostics as the chat-mediated collaboration infra anchor (not a runtime module):
     "STATUS": "diagnostics",
+    # Added 2026-06-26 per [D-127] -- HILDA OPS alert mechanism (single-ingress alert fan-out
+    # to email + messenger). Distinct from STATUS meta-prefix above (which is for chat reports):
+    "OPS": "ops_alerts",
 }
 
 
@@ -427,6 +430,28 @@ ERROR_CODES: dict[str, ErrorCode] = {
     ),
     "MSG-W003": ErrorCode(
         "MSG-W003", "Retry attempt {attempt}/{max_attempts} for owner_corp_id='{redacted}'", True
+    ),
+    # OPS prefix added 2026-06-26 per [D-127] -- ops_alerts module Ph-1 dev:
+    "OPS-E001": ErrorCode(
+        "OPS-E001", "recipients.yaml load failure at '{path}' -- reason='{reason}' (LOCAL config per [D-125] Point 3)", False
+    ),
+    "OPS-E002": ErrorCode(
+        "OPS-E002", "ops_alert email send failed (best-effort; signal site not disrupted per [D-127] Invariant 4)", False
+    ),
+    "OPS-E003": ErrorCode(
+        "OPS-E003", "ops_alert messenger DM fan-out partial -- some corp_ids landed, others failed (best-effort)", False
+    ),
+    "OPS-E004": ErrorCode(
+        "OPS-E004", "ops_alert messenger DM fan-out total failure -- no corp_ids landed (best-effort; local-log fallback may have written)", False
+    ),
+    "OPS-E005": ErrorCode(
+        "OPS-E005", "ops_alert context payload exceeded NFR-2 bound -- value at key='{key}' truncated to {max_chars} chars", False
+    ),
+    "OPS-W001": ErrorCode(
+        "OPS-W001", "ops_alert suppressed by rate limit: source='{source}' error_code='{error_code}' (rate_limit_per_minute={rate})", True
+    ),
+    "OPS-W002": ErrorCode(
+        "OPS-W002", "ops_alert context payload contained credential key='{key}' -- redacted to <REDACTED> per NFR-2", True
     ),
 }
 
