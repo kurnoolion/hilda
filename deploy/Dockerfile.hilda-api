@@ -32,7 +32,7 @@ WORKDIR /app
 # Install Python deps first (cacheable layer)
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir psycopg[binary] asyncpg
+    pip install --no-cache-dir psycopg[binary] psycopg2-binary asyncpg
 
 # Copy HILDA code
 COPY core /app/core

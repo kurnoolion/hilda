@@ -27,7 +27,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir \
-        psycopg[binary] asyncpg \
+        psycopg[binary] psycopg2-binary asyncpg \
         celery[redis]>=5.3
 
 COPY core /app/core
