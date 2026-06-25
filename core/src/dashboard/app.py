@@ -177,6 +177,17 @@ def build_app(
     if not hasattr(app.state, "mock_sp_rows"):
         app.state.mock_sp_rows = {}
 
+    # ---- Liveness probe for container orchestration ----
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        """Unauthenticated liveness probe used by podman/k8s healthchecks.
+
+        Returns 200 OK if the FastAPI app is alive. Intentionally does NOT
+        check downstream deps (DB/Redis/SP) -- those are observed via their
+        own container healthchecks per deploy/docker-compose.yml.
+        """
+        return {"status": "ok", "service": "hilda-api"}
+
     def _auth(request: Request) -> AuthPrincipal:
         return require_authenticated_principal(request, cfg)
 
