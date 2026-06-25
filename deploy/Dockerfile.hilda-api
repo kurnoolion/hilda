@@ -23,8 +23,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # - curl: healthchecks
 # - libpq5: psycopg2 runtime dep (Postgres client)
 # - tini: PID 1 signal handling (uvicorn graceful shutdown)
+# - sops: Go binary; credential_service runs `sops --decrypt` on startup per [D-038]
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl libpq5 tini \
+    && curl -fsSL "https://github.com/getsops/sops/releases/download/v3.9.1/sops-v3.9.1.linux.amd64" \
+       -o /usr/local/bin/sops \
+    && chmod 0755 /usr/local/bin/sops \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

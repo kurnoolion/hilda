@@ -34,9 +34,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # - libpq5 + libpq-dev: psycopg2 Postgres client
 # - fonts-liberation: Chromium font rendering for headless mode
 # - tini: PID 1 signal handling
+# - sops: Go binary installed from getsops release per [D-038] + [D-132];
+#         runtime decrypts customizations/credentials/*.enc.env at startup.
+#         pip-installed "sops" is the wrong package -- the real sops is a Go binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium chromium-driver \
     cifs-utils ca-certificates curl libpq5 fonts-liberation tini \
+    && curl -fsSL "https://github.com/getsops/sops/releases/download/v3.9.1/sops-v3.9.1.linux.amd64" \
+       -o /usr/local/bin/sops \
+    && chmod 0755 /usr/local/bin/sops \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -47,8 +53,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
         psycopg[binary] psycopg2-binary asyncpg \
         celery[redis]>=5.3 \
         selenium>=4.15 \
-        pyotp \
-        sops
+        pyotp
 
 COPY core /app/core
 COPY customizations /app/customizations
