@@ -145,4 +145,7 @@ The `--mock` mode bypasses this drop-zone entirely (uses `MockCredentialService`
 ---
 
 <!-- BEGIN:STRUCTURE -->
+
+_No public surface detected (module is empty or all-internal)._
+
 <!-- END:STRUCTURE -->

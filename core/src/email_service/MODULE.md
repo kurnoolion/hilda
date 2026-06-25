@@ -628,5 +628,22 @@ Fields: messages_fetched (int), owner_reply (int), sp_alert (int), other (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+
+- `AttachmentItemMatch` — class — pub — One (item_id, confidence) match per FR-79 multi-item association.
+- `AttachmentRouter` — class — pub
+- `ClassificationResolution` — class — pub — Per FR-85 2-step doc_type classification ladder -- records which step
+- `EmailKind` — class — pub — Discriminator output of inbound/classifier.py.
+- `EmailReceiver` — class — pub — All callers depend on this Protocol, not on a concrete implementation.
+- `EmailSender` — class — pub
+- `EmailServiceConfig` — class — pub — Top-level email_service config -- bundles the three sub-configs.
+- `Fr52Config` — class — pub — FR-52 5-step routing + FR-85 2-step classification + FR-86 4-path storage
+- `ImapConfig` — class — pub — IMAP receiver config per FR-23 + [D-016] + MODULE.md.
+- `InboundAttachment` — class — pub
+- `InboundMessage` — class — pub — One inbound email after IMAP fetch, before parsing.
+- `ParsedSubject` — class — pub — FR-24 output. ITEM-n / status optional (Ph-2 mailto tap-link subjects).
+- `PerItemReplyUpdate` — class — pub
+- `RoutedAttachment` — class — pub — FR-52 5-step routing + FR-85 doc_type classification + FR-86 storage matrix
+- `SmtpConfig` — class — pub — SMTP sender config per FR-9 / FR-10.
+- `StructuredReplyBlock` — class — pub — FR-12 path (a) parse output.
+
 <!-- END:STRUCTURE -->

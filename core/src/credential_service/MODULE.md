@@ -312,23 +312,11 @@ Fields: present (bool), auth_type (enum: api_token|basic|ntlm|kerberos|oauth2_be
 ---
 
 <!-- BEGIN:STRUCTURE -->
-### `credential_service_cli.py`
-- `main() -> None` — function — pub — CLI entrypoint: `--diagnostic` (decrypt + validate every .enc.env, CRD-RPT), `--mock` (MockCredentialService round-trip per SystemType), `--validate --system <type>` (CRD-QC); `--env-dir` / `--age-key` path overrides.
 
-### `mock_service.py`
-- `MockCredentialService` — class — pub (via `__all__`) — In-memory exact-match credential store for tests; `register(cred, customer_id=None)` + `get_credential(pm_id, system_type, customer_id=None)` (signature aligned with Protocol 2026-06-21); CRD-E001 on unknown tuple, CRD-E003 on unknown system; `with_all_system_types()` fixture factory.
+- `Credential` — class — pub — One credential as served to adapters.
+- `CredentialService` — class — pub — All adapters depend on this Protocol, not on the concrete implementation.
+- `MockCredentialService` — class — pub — In-memory credential store for tests. Pre-populated by test fixtures via
+- `SopsCredentialService` — class — pub — Ph-1/Ph-2 implementation. Reads sops-encrypted `.env` files at startup,
+- `SystemType` — class — pub — Bounded set of external system kinds credential_service serves credentials for.
 
-### `protocol.py`
-- `AuthType` — type alias — pub (via `__all__`) — Literal of the five auth types (api_token | basic | ntlm | kerberos | oauth2_bearer).
-- `Credential` — frozen dataclass — pub (via `__all__`) — One credential as served to adapters; secret-free `__repr__`/`__str__`; `value_carriers_consistent()` consistency check.
-- `SYSTEM_ENV_PREFIX` — module constant (dict) — pub (via `__all__`) — SystemType → env-var prefix map for decrypted .enc.env entries (`HILDA_<PREFIX>_*`); CUSTOMER prefix renamed CAD→CSA on 2026-06-21 aligning with diagnostics PREFIX_REGISTRY.
-- `SystemType` — Enum — pub (via `__all__`) — 8-value closed enum of external system kinds (5 systems + 3 LLM backends per [D-052]); ISSUE_TRACKER + MESSENGER kept as forward-compat enum values but have no HILDA-credential in Ph-1/Ph-2 per FR-25 (a) + architect lock 2026-06-21.
-
-### `qc_templates.py`
-- `CREDENTIAL_COMPLETENESS` — module constant — pub (via `__all__`) — `CRD:credential_completeness` QCTemplate (present / auth_type / value_carriers_consistent / result); registered into the central QC registry at import.
-
-### `service.py`
-- `CredentialService` — Protocol — pub (via `__all__`) — Async credential-retrieval contract per [D-019]: `get_credential(pm_id, system_type, customer_id=None) -> Credential` (signature extended 2026-06-21 per FR-25 (b) per-(account, customer) JIRA + FR-19/77 per-customer Google Drive).
-- `OPS_TEAM_PM_ID` — module constant — pub (via `__all__`) — Ph-1/Ph-2 shared ops-team attribution token ("ops-team") per [D-019] impl note 2026-05-24.
-- `SopsCredentialService` — class — pub (via `__all__`) — sops-backed implementation: idempotent decrypt-once `load()`, process-lifetime cache, exact → ops-team fallback → CRD-E001 resolution, ops-triggered `reload()`, Windows-safe `install_sighup_handler() -> bool`; per-(account, customer) + per-customer routing logic deferred to development phase (TODO marker in service.py).
 <!-- END:STRUCTURE -->

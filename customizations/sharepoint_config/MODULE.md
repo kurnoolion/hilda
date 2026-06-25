@@ -196,5 +196,7 @@ Both modes are documented under `core/src/sharepoint_integration/MODULE.md`'s Te
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+
+_No public surface detected (module is empty or all-internal)._
+
 <!-- END:STRUCTURE -->

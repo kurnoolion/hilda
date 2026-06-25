@@ -515,38 +515,26 @@ Fields: task (enum: TaskKind values), schema_valid (bool), latency_ms (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-### `app.py`
-- `make_app(gateway) -> FastAPI` — function — pub (via `__all__`) — thin gateway HTTP surface: `POST /invoke` + `GET /health`; maps PipelineError (LLG-*) to a JSON error body.
 
-### `backends.py`
-- `BackendResult` — frozendataclass — pub (via `__all__`) — (text, tokens_in, tokens_out) from a backend call.
-- `call_backend(client, backend_name, endpoint_url, model, prompt, *, ...) -> BackendResult` — function — pub (via `__all__`) — dispatch to Ollama (`/api/generate`) or OpenAI-compatible (`/chat/completions`); transport error → LLG-E001.
+- `BackendConfig` — class — pub — One backend = one LLM serving endpoint. Three Ph-1 backends per [D-052].
+- `ClassifyDocInput` — class — pub
+- `ClassifyDocOutput` — class — pub
+- `ClassifyDocTypeInput` — class — pub — FR-85 Step 2 — fires only when Step 1 filename regex fails or multi-matches.
+- `ClassifyDocTypeOutput` — class — pub — Below-threshold confidence (default 0.85) → caller sets DocType.UNRESOLVED sentinel.
+- `ClassifyMessageInput` — class — pub
+- `ClassifyMessageOutput` — class — pub
+- `ExistingDocCandidate` — class — pub
+- `LLMGatewayServer` — class — pub — Egress-side implementation. __init__ does synchronous config validation; `start()`
+- `LLMProvider` — class — pub — All callers depend on this Protocol, not on a concrete implementation.
+- `LLMRequest` — class — pub
+- `LLMResponse` — class — pub
+- `MockLLM` — class — pub — Full LLMProvider surface, deterministic. Used in unit + integration tests
+- `OnPremLLMClient` — class — pub
+- `ReviewDocumentInput` — class — pub
+- `ReviewDocumentOutput` — class — pub
+- `RouteAttachmentInput` — class — pub
+- `RouteAttachmentMatch` — class — pub — One above-threshold (item_id, confidence) match. Per FR-79 a document may land on
+- `RouteAttachmentOutput` — class — pub — LIST of above-threshold matches. EMPTY → caller falls through to FR-52 step 5
+- `TaskKind` — class — pub — Bounded set of runtime LLM tasks. Each value maps 1:1 to a prompt template in
 
-### `client.py`
-- `OnPremLLMClient` — class — pub (via `__all__`) — caller-side LLMProvider; proxies to gateway `/invoke` over HTTP; NO credential param (per [D-052] addendum); retries transport errors; reconstructs structured LLG errors.
-
-### `gateway_server.py`
-- `BackendConfig` — frozendataclass — pub (via `__all__`) — one backend endpoint (name, endpoint_url, credential_key, rate limits, cold_load/batching flags).
-- `LLMGatewayServer` — class — pub (via `__all__`) — egress LLMProvider; sync `__init__` (on-prem/map/template validation) + async `start()` (conditional per-backend creds) + `invoke()` pipeline + `health()`; `set_http_client`, `backend_for`, `model_for`, `confidence_bucket` helpers.
-
-### `llm_cli.py`
-- `main() -> None` — function — pub — CLI: `--diagnostic` / `--mock` / `--contract` / `--invoke` per [D-005].
-
-### `mock.py`
-- `MockLLM` — class — pub (via `__all__`) — deterministic in-memory LLMProvider for tests; `register()` subset-match; unregistered → LLG-E001.
-
-### `protocol.py`
-- `LLMProvider` — Protocol — pub (via `__all__`) — async `invoke` + `health`; runtime_checkable.
-- `LLMRequest` / `LLMResponse` — frozendataclass — pub (via `__all__`) — request (task, inputs, opts) / response (task, output, model, latency, tokens).
-- `TaskKind` — Enum — pub (via `__all__`) — 5 Ph-1 tasks (route_attachment / classify_doc / classify_doc_type / review_document / classify_message).
-
-### `qc_templates.py`
-- `TASK_CONTRACT` — QCTemplate — pub (via `__all__`) — `LLG:task_contract`; registered at import.
-
-### `rate_limit.py`
-- `BackendRateLimiter` — class — pub (via `__all__`) — per-backend fixed-window limiter; LLG-W006 on exhaustion (no spillover), LLG-W005 approaching; unlimited when no rate_limit_* set.
-
-### `schemas.py`
-- `ClassifyDocTypeInput` / `Output`, `ClassifyDocInput` / `Output`, `ExistingDocCandidate`, `RouteAttachmentInput` / `Match` / `Output`, `ReviewDocumentInput` / `Output`, `ClassifyMessageInput` / `Output` — Pydantic BaseModel (ExistingDocCandidate frozendataclass) — pub (via `__all__`) — per-TaskKind structured I/O.
-- `INPUT_SCHEMAS` / `OUTPUT_SCHEMAS` — module constant — pub (via `__all__`) — TaskKind → schema registries.
 <!-- END:STRUCTURE -->

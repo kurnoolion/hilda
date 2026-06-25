@@ -257,5 +257,11 @@ These 6 decisions need to be locked during the architecture session that opens `
 - Pytest: `core/tests/test_dashboard.py` — Starlette `httpx.TestClient` against the app; mocks Kerberos middleware via dependency-injection seam (DI principal pre-set in test fixture). Covers FR-57 HTML render, FR-61 token resolve, FR-56 enqueue, FR-31 admin view, FR-58 confirmation no-doc-section, expired-token UX.
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only this MODULE.md skeleton) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first `/switch-phase development` pass.
+
+- `AuthPrincipal` — class — pub — The authenticated corp AD principal forwarded by the corp reverse proxy.
+- `DashboardConfig` — class — pub — Operational config -- environment-switching values only.
+- `MilestoneRefreshState` — class — pub — In-memory per-milestone refresh rate-limit + dedup state.
+- `build_app` — func — pub — Construct the dashboard FastAPI app.
+- `require_authenticated_principal` — func — pub — Extract + validate the proxy-forwarded identity.
+
 <!-- END:STRUCTURE -->

@@ -556,5 +556,23 @@ Fields: trigger_source (enum: sp_alert / email_ingest / nsd_watch / plm_watch / 
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+
+- `DispatchResult` — class — pub — Outcome of one TriggerDispatcher.dispatch() call.
+- `RetryPolicy` — class — pub — Per-task retry policy. workflow_engine sets sensible defaults; tasks can
+- `StorageLike` — class — pub — Minimal storage Protocol for TriggerDispatcher -- fetches item snapshot for
+- `TaskBinding` — class — pub — Maps one ActionKind to its Celery task callable + queue + retry policy.
+- `TaskDeps` — class — pub — Bundle of runtime dependencies task bodies need. Constructed once at worker
+- `TriggerDispatcher` — class — pub — Receives TriggerEvent from any of the 6 trigger sources; resolves matches
+- `WorkflowEngineConfig` — class — pub — Operational values per workflow_engine/MODULE.md. Per Ph-1 D3 + D4 cascade
+- `build_celery_app` — func — pub — Build a Celery app from a WorkflowEngineConfig. Default singleton constructed
+- `build_chain_from_rule_match` — func — pub — Per [D-066]: build one Celery chain from a RuleMatch's ordered actions list.
+- `expected_action_kinds_ph1` — func — pub — The full Ph-1 ActionKind set per rule_engine.ActionKind enum. Used by
+- `get_task_deps` — func — pub — Return the current TaskDeps. Raises if not initialised -- production worker
+- `handle_manual_trigger` — func — pub — Per FR-31 sub-3: TPM SP UI manual trigger dispatch bypasses rule_engine.
+- `lookup_for_manual_trigger` — func — pub — Per FR-31 sub-3 TPM SP UI manual trigger dispatch -- bypasses rule_engine.
+- `override_task_deps` — func — pub — Context manager for tests -- swap deps, restore on exit.
+- `register_task_binding` — func — pub — Register a TaskBinding. Idempotent for identical re-registration; raises
+- `registry_complete` — func — pub — True iff every ActionKind in rule_engine.ActionKind has a TaskBinding.
+- `set_task_deps` — func — pub — Install the runtime TaskDeps bundle. Idempotent re-set is allowed.
+
 <!-- END:STRUCTURE -->

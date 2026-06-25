@@ -320,45 +320,14 @@ Fields: lists_reachable (int), lists_unreachable (int), columns_mapped (int),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-### `auth.py`
-- `KerberosAuthHandler` — class — pub — Kerberos/SPNEGO placeholder; raises SHP-E004 until corp AD lab access.
-- `NoAuthHandler` — class — pub — Pass-through handler for mock-server dev.
-- `NtlmAuthHandler` — class — pub — NTLM handler via `requests-ntlm` `HttpNtlmAuth`; username is full `corp\<user>` literal per architect Q1 2026-06-25.
-- `make_handler(config) -> _AuthHandler` — function — pub — Factory: picks NoAuth/Ntlm/Kerberos from `config.auth_type`; raises SHP-E004 on misconfig.
 
-### `config.py`
-- `GlobalSharePointConfig` — Pydantic BaseModel — pub (via `__all__`) — Operational SP config (site_url, auth_type, creds, timeouts, page_size); secret-redacted `__repr__`; `from_sources(config_path, cli_overrides, env_prefix)` 3-tier loader.
-- `ListScope` — frozendataclass — pub (via `__all__`) — Lookup scope (customer_id, optional device_id for override path per `[D-091]` slug→id rename).
+- `FileBasedListProvider` — class — pub — Reads YAML from customizations/sharepoint_config/.
+- `GlobalSharePointConfig` — class — pub — Operational config — environment-switching values only.
+- `ListScope` — class — pub — Scope for list-name + column-map lookup. customer_id required;
+- `SharePointListProvider` — class — pub — Maps (entity, scope) → SP list name + canonical→SP-column mapping.
+- `SpClient` — class — pub — Async SP REST client. Construct one per Celery task per architect Q4.
+- `SpCrud` — class — pub — Canonical-field-in / canonical-field-out CRUD against SharePoint.
+- `SpSession` — class — pub — Sync SP 2017 NTLM session with lazy digest acquisition + 403 refresh.
+- `list_item_type` — func — pub — Encode the SP 2017 `__metadata.type` discriminator for a list.
 
-### `error_codes.py`
-- (no public top-level names — registers SHP-E001..E004 + SHP-W001 on import via `register_code` side-effect.)
-
-### `list_crud.py`
-- `SpCrud` — class — pub (via `__all__`) — Sole public CRUD compositor over SpClient + SharePointListProvider; canonical-in / canonical-out; `get_items/create_item/update_item/delete_item/batch_create/batch_update`.
-
-### `list_provider.py`
-- `FileBasedListProvider` — class — pub (via `__all__`) — YAML-backed SharePointListProvider; reads customer + device-override files from `customizations/sharepoint_config/`; raises SHP-E002 on scope miss.
-- `SharePointListProvider` — Protocol — pub (via `__all__`) — Pure lookup: `get_list_name`, `get_column_map`, `to_sp_fields`, `from_sp_fields`.
-
-### `mock_server/app.py`
-- `build_app(store=None) -> FastAPI` — function — pub — Builds the mock SP FastAPI app exposing SP 2017 REST + the architect digest-dance endpoints (`GET /` Set-Cookie + `POST /_api/contextinfo` FormDigestValue) + MERGE/DELETE pseudo-verb dispatch on POST + HTML browser UI over a shared `InMemoryStore`.
-
-### `mock_server/client.py`
-- `MockSpSession` — class — pub (via `mock_server.__init__`) — `SpSession` subclass that drives an in-process FastAPI `mock_server` app via `TestClient`; runs the full digest dance against the mock to exercise `SpClient` end-to-end without NTLM or real network.
-
-### `mock_server/store.py`
-- `InMemoryStore` — dataclass — pub — Thread-safe in-memory list store backing the mock server; lists addressed by display name; monotonic per-list item IDs; audit log; `digest_403_count` test knob to force 403s; `next_digest(base)` issues unique tokens per call.
-- `ListNotFoundError` — class (KeyError) — pub — Raised when a list referenced by name does not exist.
-
-### `sharepoint_integration_cli.py`
-- `DEFAULT_BASE` — module constant — pub — Default `customizations/sharepoint_config` path.
-- `DEFAULT_CONFIG` — module constant — pub — Default `config/sharepoint_integration.json` path.
-- `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` / `--mock` / `--dry-run --customer` / `--serve --port` modes.
-
-### `sp_client.py`
-- `SpClient` — class — pub (via `__all__`) — Async SP 2017 REST client over an injected sync `SpSession` transport (architect lock 2026-06-25); list-item GET/POST(MERGE)/POST(DELETE)/PATCH + batch + pagination; retry on 429/503 for reads; per-call `customer_id` flows to `SpSession` for `__metadata.type` composition; SP error → SHP-E001/E004 mapping.
-
-### `sp_session.py`
-- `SpSession` — class — pub (via `__all__`) — Sync SP 2017 NTLM session encapsulating `requests-ntlm` auth + digest dance (lazy WSSAUTH-cookie + FormDigestValue acquisition; 403→refresh→retry-once per architect Q2 2026-06-25) + SP 2017 MERGE protocol for partial updates (`__metadata` wrapper + `X-Http-Method: MERGE` + `IF-MATCH: *`).
-- `list_item_type(list_display_name) -> str` — function — pub (via `__all__`) — Encode the SP 2017 `__metadata.type` discriminator: `_` → `_x005f_`, ` ` → `_x0020_`; returns `SP.Data.<encoded>ListItem`.
 <!-- END:STRUCTURE -->

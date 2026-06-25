@@ -733,5 +733,24 @@ Fields: from_state (enum: DeliveryState values),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+
+- `AuditWriter` — class — pub — Writes CommunicationLog rows per FR-42. Concrete impl: `storage.write_communication_log`.
+- `GuardResult` — class — pub — Outcome of a pre-transition guard check.
+- `ReassignmentResult` — class — pub
+- `SpWriter` — class — pub — Subset of `sharepoint_integration.SpCrud` per [D-064] HILDA->SP REST
+- `StateChangeDispatchSignal` — class — pub — Returned on successful state change. Caller fires the canonical
+- `StorageWriter` — class — pub — Subset of `storage` module's interface that tracker depends on.
+- `TagPropagationResult` — class — pub
+- `TransitionResult` — class — pub — Result of an attempted transition.
+- `advance_on_doc_count_reached` — func — pub — Convenience wrapper for AttachmentReceived task body when doc_count
+- `apply_manual_tpm_override` — func — pub — FR-14 manual TPM field override.
+- `auto_advance_owner_closed_to_under_pm_review` — func — pub — Transient-state auto-advance per FR-7. Called inline by
+- `check_transition_guards` — func — pub — Returns GuardResult indicating whether (item, target_state) transition
+- `instantiate_default_workitem` — func — pub — FR-78 default work-item instantiation.
+- `list_blocking_conditions_for_state` — func — pub — Convenience wrapper for SP UI / dashboard surfacing — returns the
+- `propagate_tags_to_active_trackers` — func — pub — FR-82 propagation. See module docstring.
+- `reassign_document_to_workitem` — func — pub — FR-83 TPM-manual document reassignment via SP UI. See module docstring.
+- `transition_legal` — func — pub — Returns True iff `to_state` is a legal transition target from `from_state`.
+- `update_delivery_state` — func — pub — Canonical state-transition function consumed by workflow_engine
+
 <!-- END:STRUCTURE -->

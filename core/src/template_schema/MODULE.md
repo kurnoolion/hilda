@@ -610,57 +610,35 @@ Fields: entity_count (int), columns_mapped (int), required_fields_covered (bool)
 ---
 
 <!-- BEGIN:STRUCTURE -->
-### `enums.py`
-- `CustomerDeliveryModality` — Enum — pub (via `__all__`) — Per-item delivery modality to carrier (Ph-1/Ph-2 Google Drive per [D-054]; extensible via registry).
-- `DeliveryState` — Enum — pub (via `__all__`) — 11-value DeliveryItem lifecycle (NotStarted..Closed + Delayed/Blocked) per FR-7.
-- `DocType` — Enum — pub (via `__all__`) — 5-value document-type classification per [D-053] / FR-85 (extensible via DocTypeRegistry).
-- `IngestSource` — Enum — pub (via `__all__`) — Document ingest channel (Email / CorporatePLM / NSD / SharePointUI) per FR-13 + [D-039].
-- `ItemType` — Enum — pub (via `__all__`) — 4-value work-item type discriminator per [D-053] (extensible).
-- `MilestoneStatus` — Enum — pub (via `__all__`) — Milestone-status discriminator.
-- `RuleActionType` — Enum — pub (via `__all__`) — AutomationRule action discriminator (18 Ph-1 + 6 Ph-2 = 24 values) per FR-29.
-- `RuleScope` — Enum — pub (via `__all__`) — AutomationRule scoping level (global / customer / device).
-- `RuleSubTriggerType` — Enum — pub (via `__all__`) — Sub-triggers under ItemModified (OwnerReassigned / DeadlineMoved / TagsModified).
-- `RuleTriggerType` — Enum — pub (via `__all__`) — AutomationRule trigger taxonomy (13 Ph-1 + 2 Ph-2 = 15 values) per FR-28.
-- `TestReportClassification` — Enum — pub (via `__all__`) — final / interim classification per [D-011].
-- `TestReportItemStatus` — Enum — pub (via `__all__`) — Per-item status (passed / failed / waived / non-applicable / not-started).
-- `TrackingModality` — Enum — pub (via `__all__`) — Per-item tracking source discriminator (multi-value per [D-037]).
 
-### `error_codes.py`
-- (no public top-level names — registers TSC error codes on import via `register_code` side-effect.)
+- `AutomationRuleBase` — class — pub
+- `ColumnMapping` — class — pub
+- `CustomerDeliveryModality` — class — pub — Per-item delivery modality to the customer/carrier. Phase-scoped values per
+- `CustomerSchema` — class — pub — Output contract of template_schema_ingestor; input contract for runtime modules.
+- `CustomerTemplateBase` — class — pub — Top-level customer template per FR-39/FR-40 + [D-091] YAML structure.
+- `DefaultWorkItemConfig` — class — pub — Per FR-78 + [D-053] — configures the auto-instantiated default work-item
+- `DeliveryItemBase` — class — pub — Per-work-item canonical fields. 2026-06-21 architect cascade applied:
+- `DeliveryState` — class — pub — Canonical 11-value enum per FR-7. The active happy-path 8-state traversal is
+- `DeviceBase` — class — pub — Per-device canonical fields. NOTE: `assigned_pm_id` here is the template-time
+- `DocType` — class — pub — Five doc_type values per [D-053] impl note 2026-06-08 (supersedes the prior
+- `EntitySchemaConfig` — class — pub
+- `FolderRoutingEntry` — class — pub — Per FR-77 Type-2 routing — single (ingress_folder → item_no) mapping.
+- `IngestSource` — class — pub — Per FR-13 + [D-039] — recorded in document index for every classified document.
+- `ItemType` — class — pub — Four core item_types per [D-053] impl note 2026-06-08 (supersedes the prior
+- `MilestoneBase` — class — pub — Per-milestone canonical fields. Milestones SP list is GLOBAL per architect lock
+- `MilestoneStatus` — class — pub — Per FR-2 / FR-7 milestone lifecycle.
+- `RuleActionType` — class — pub — Per FR-28 / FR-29 (rewritten 2026-06-05). Extensible via RuleActionRegistry —
+- `RuleScope` — class — pub — Per FR-30 — AutomationRule scope ladder (Device → Customer → Global).
+- `RuleSubTriggerType` — class — pub — Sub-triggers under ItemModified per FR-28.
+- `RuleTriggerType` — class — pub — Per FR-28 trigger taxonomy (revised 2026-06-05). Extensible via
+- `TGFolderRouting` — class — pub — Per FR-77 — TG-scoped folder routing table. One row per (milestone_id, tg_name).
+- `TagCatalogEntry` — class — pub — Per FR-82 — single tag in the customer's tag catalog.
+- `TestReportClassification` — class — pub — final | interim classifier output. Anchors FR-46.
+- `TestReportItemStatus` — class — pub — Canonical per-item status vocabulary for test reports. Anchors [D-011] FR-16.
+- `TrackingModality` — class — pub — Multi-value per DeliveryItem (stored as a list) per [D-037] (2026-05-13).
+- `extend_registry` — func — pub — Idempotent — duplicates silently ignored.
+- `make_slug` — func — pub — Deterministic: lower-case, replace non-alphanumeric with '-', truncate.
+- `validate_in_registry` — func — pub
+- `validate_slug` — func — pub — Validator for path_slug fields. Raises TSC-E004 if pattern fails.
 
-### `models.py`
-- `AutomationRuleBase` — Pydantic BaseModel — pub (via `__all__`) — AutomationRule canonical fields (id, name, scope, trigger, sub-trigger, action, priority).
-- `ColumnMapping` — Pydantic BaseModel — pub (via `__all__`) — Source-column → canonical-field mapping (col_type, required, format, enum_values).
-- `CustomerSchema` — Pydantic BaseModel — pub (via `__all__`) — Ingestor→runtime contract (customer_slug, schema_version, entity_hierarchy, sp_list_mappings); `load()` / `to_yaml()` round-trip.
-- `CustomerTemplateBase` — Pydantic BaseModel — pub (via `__all__`) — Customer template (template_id, version, milestones list, active flag); no Deliverable level per [D-028].
-- `DefaultWorkItemConfig` — Pydantic BaseModel — pub (via `__all__`) — Configures auto-instantiated default work-item per milestone per FR-78 / [D-053].
-- `DeliveryItemBase` — Pydantic BaseModel — pub (via `__all__`) — Work-item canonical fields parented to `milestone_id` per [D-028]; full Ph-2/Ph-3/Ph-4 field set including pm_approval_at per [D-068]; Confirmation+no_customer_upload model_validator emits TSC-W004.
-- `DeviceBase` — Pydantic BaseModel — pub (via `__all__`) — Device canonical fields (id, name, customer, assigned PM, status, slug, launch date).
-- `EntitySchemaConfig` — Pydantic BaseModel — pub (via `__all__`) — Per-entity ingestor schema config (entity ∈ {device, milestone, delivery_item}, header_row, columns).
-- `FolderRoutingEntry` — Pydantic BaseModel — pub (via `__all__`) — Single (ingress_folder → item_no) mapping per FR-77 Type-2 routing.
-- `MilestoneBase` — Pydantic BaseModel — pub (via `__all__`) — Milestone canonical fields (id, device_id, name, sort, target_date, status, slug, email_cc_list, default_work_item_config).
-- `TGFolderRouting` — Pydantic BaseModel — pub (via `__all__`) — TG-scoped folder routing table — one row per (milestone_id, tg_name) per FR-77.
-- `TGGroupBase` — Pydantic BaseModel — pub (via `__all__`) — Per-TG-group metadata per (milestone_id, tg_name) per [D-049] / [D-051]; includes ingress_nsd / folder_routing_enabled / tracking_enabled.
-- `TagCatalogEntry` — Pydantic BaseModel — pub (via `__all__`) — Single tag in customer tag catalog per FR-82 (validated against item_description).
-
-### `registry.py`
-- `CustomerDeliveryModalityRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `CustomerDeliveryModality`.
-- `DeliveryStateRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `DeliveryState` values for FR-7 extensibility.
-- `DocTypeRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `DocType` per FR-7 amendment.
-- `ItemTypeRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `ItemType`.
-- `RuleActionRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `RuleActionType` per FR-29.
-- `RuleTriggerRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `RuleTriggerType` per FR-28.
-- `TGNameRegistry` — module constant (set) — pub (via `__all__`) — Customer-extensible-from-empty registry of TG names (populated by config loader).
-- `TrackingModalityRegistry` — module constant (set) — pub (via `__all__`) — Mutable registry seeded from `TrackingModality`.
-- `extend_registry(registry, values) -> None` — function — pub (via `__all__`) — Add config-supplied values to a registry at startup.
-- `validate_in_registry(registry, value, registry_name) -> str` — function — pub (via `__all__`) — Field-validator helper; raises ValueError when value absent.
-
-### `slug.py`
-- `SLUG_PATTERN` — module constant (re.Pattern) — pub (via `__all__`) — Canonical slug regex `^[a-zA-Z0-9_-]+$` per [D-013].
-- `make_slug(human_name) -> str` — function — pub (via `__all__`) — Lossy slugifier (alphanum / underscore, length-capped).
-- `validate_slug(value) -> str` — function — pub (via `__all__`) — Validate against `SLUG_PATTERN`; raises ValueError on mismatch.
-
-### `template_schema_cli.py`
-- `DEFAULT_BASE` — module constant — pub — Default `customizations/template_schemas` path.
-- `main(argv=None) -> int` — function — pub — CLI entrypoint: `--diagnostic` (TSC-RPT) / `--validate` (round-trips each customer schema).
 <!-- END:STRUCTURE -->

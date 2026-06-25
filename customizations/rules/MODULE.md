@@ -302,4 +302,7 @@ Synthesizes a `TriggerEvent` + runs `evaluate()` against the loaded RuleSet; emi
 ---
 
 <!-- BEGIN:STRUCTURE -->
+
+_No public surface detected (module is empty or all-internal)._
+
 <!-- END:STRUCTURE -->

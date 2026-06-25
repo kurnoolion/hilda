@@ -1,4 +1,4 @@
-_Generated 2026-06-21 by regen-map. Do not hand-edit._
+_Generated 2026-06-27 by regen-map. Do not hand-edit._
 
 # Module map
 
@@ -13,6 +13,8 @@ _Generated 2026-06-21 by regen-map. Do not hand-edit._
 | [issue_tracker (core)](../../core/src/issue_tracker/MODULE.md) | Implements the `IssueTracker` Protocol per `[D-008]` — issue-tracking integration for DeliveryItems whose `tracking_modality` includes `CorporatePLM` or `CustomerJIRA` per `[D-037]` (multi-value enum). | |
 | [issue_tracker (customizations)](../../customizations/issue_tracker/MODULE.md) | Drop-in directory for proprietary IssueTracker adapters. | |
 | [llm](../../core/src/llm/MODULE.md) | Single Protocol-mediated surface (`LLMProvider`) for every runtime LLM call HILDA makes — doc_type classification (FR-85 Step 2), new-vs-revision classification (`[D-039]` Tier-2), attachment routing (step 4 of FR-52 5-step pipeline per `[D-053]`), document quality review (FR-53), and message classification fallback (FR-12 path c per `[D-034]`). | |
+| [messenger](../../core/src/messenger/MODULE.md) | Corp messenger channel for FR-10 cross-channel escalation — sends DMs to one corp_id at a time via the architect's pre-existing `sendMessage(owner_corp_id, message) -> bool` binding per `[D-027]` Teacher/Student split. | |
+| [ops_alerts](../../core/src/ops_alerts/MODULE.md) | Single ingress point for HILDA-internal anomaly + failure signals; fans out to ONE email (HILDA OPS BOT alias) + N messenger DMs (broadcast_corp_ids) per `[D-127]`. | |
 | [rule_engine](../../core/src/rule_engine/MODULE.md) | Pure evaluator for HILDA's IF/THEN AutomationRules per `[D-022]` — given a `TriggerEvent` plus an `EntityRef`, returns the ordered set of `RuleMatch` tuples that should fire — each carrying an intra-rule-ordered list of `RuleAction`s. Ph-1 narrowed to Global-tier YAML only per architect direction 2026-06-23. | |
 | [rules (customizations)](../../customizations/rules/MODULE.md) | **Per-deployment drop-zone** for HILDA AutomationRules + polling-schedule rules that `core/src/rule_engine.RuleSet.load` consumes at startup (and on SIGHUP `reload()`) per FR-30. | [DRAFT] |
 | [sharepoint_config (customizations)](../../customizations/sharepoint_config/MODULE.md) | **Per-customer-deployment drop-zone** for SP list/column mappings that `core/src/sharepoint_integration/FileBasedListProvider` consumes at startup to translate HILDA's canonical field names to deployment-specific SP internal column names. | [DRAFT] |
@@ -36,6 +38,8 @@ flowchart LR
     m_issue_tracker[issue_tracker]
     m_issue_tracker_cust[issue_tracker · customizations]
     m_llm[llm]
+    m_messenger[messenger]
+    m_ops_alerts[ops_alerts]
     m_rule_engine[rule_engine]
     m_rules_cust[rules · customizations]
     m_sharepoint_config[sharepoint_config · customizations]
@@ -68,6 +72,14 @@ flowchart LR
     m_llm --> m_diagnostics
     m_llm --> m_credential_service
     m_llm --> m_template_schema
+    m_messenger --> m_diagnostics
+    m_messenger --> m_credential_service
+    m_messenger --> m_template_schema
+    m_messenger --> m_storage
+    m_ops_alerts --> m_diagnostics
+    m_ops_alerts --> m_email_service
+    m_ops_alerts --> m_messenger
+    m_ops_alerts --> m_credential_service
     m_rule_engine --> m_diagnostics
     m_rule_engine --> m_template_schema
     m_rule_engine --> m_storage

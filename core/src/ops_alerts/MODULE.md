@@ -188,5 +188,18 @@ class OpsAlerts(Protocol):
 ## Structure
 
 <!-- BEGIN:STRUCTURE -->
-_(Populated by `regen-map` after Ph-1 development)_
+
+- `ComposedAlert` — class — pub — Output of compose_alert -- ready for email + messenger dispatch.
+- `MockOpsAlerts` — class — pub — Test double -- captures + replays.
+- `OpsAlertResult` — class — pub — Per [D-127] -- result reports per-channel outcome (debug aid only).
+- `OpsAlerts` — class — pub — Fire-and-forget alert emitter per [D-127] Invariant 4.
+- `OpsAlertsConfig` — class — pub — Composition-root config.
+- `OpsAlertsService` — class — pub — Fire-and-forget alert emitter. Constructed via build_ops_alerts.
+- `RateLimiter` — class — pub — In-memory rolling-window per-(source, error_code) limiter.
+- `Recipients` — class — pub — Parsed + validated recipients.yaml shape.
+- `Severity` — class — pub — Per [D-127] Q1 lock 2026-06-26 -- visual-only differentiation.
+- `build_ops_alerts` — func — pub — Composition-root helper -- standard wire-up.
+- `compose_alert` — func — pub — Compose an alert payload. Pure function -- no I/O.
+- `load_recipients` — func — pub — Load + validate recipients.yaml; raises PipelineError(OPS-E001) on failure.
+
 <!-- END:STRUCTURE -->

@@ -206,5 +206,21 @@ Fields: reason (enum: post_reminder | deadline_imminent | manual_tpm),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] Structure will be populated from code on first regen-map pass after this module lands.
+
+- `ComposeResult` — class — pub — Composition output -- rendered message + size accounting + truncation flag.
+- `DailyLimitChecker` — class — pub — Pre-check + audit-write helper for the Q-M2 daily-limit invariant.
+- `EscalationReason` — class — pub — Why an escalation message is being sent. Bounded enum tokens per NFR-2.
+- `InMemoryMessengerStorage` — class — pub — Minimal MessengerStorageProtocol impl for tests + --mock CLI.
+- `MessengerAdapter` — class — pub — All callers depend on this Protocol, not on a concrete subclass.
+- `MessengerConfig` — class — pub — Messenger module config per Q-M2 / Q-M3 architect lock 2026-06-25.
+- `MessengerService` — class — pub — Composes + checks daily-limit + invokes adapter + logs. Caller-facing.
+- `MessengerStorageProtocol` — class — pub — Subset of `storage` audit-log interface this module depends on.
+- `MockMessengerAdapter` — class — pub — In-memory MessengerAdapter -- returns canned bool responses.
+- `SendResult` — class — pub — Result shape from MessengerService.send_escalation.
+- `compose_escalation` — func — pub — Render escalation.j2 and enforce the max_message_bytes invariant.
+- `get_template_env` — func — pub — Jinja2 Environment loading from messenger/templates/ by default.
+- `redact_owner_corp_id` — func — pub — Per NFR-2 -- mask owner_corp_id for compact reports + log lines.
+- `truncate_message` — func — pub — Truncate UTF-8 message to fit within `max_bytes`, appending TRUNCATION_MARKER.
+- `validate_message_length` — func — pub — Return (within_limit, byte_count) -- UTF-8 byte size, not char count.
+
 <!-- END:STRUCTURE -->

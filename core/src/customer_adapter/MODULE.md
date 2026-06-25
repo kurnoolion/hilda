@@ -343,5 +343,14 @@ Fields: customer_id (enum: registered carrier slugs), selectors_version (str —
 ---
 
 <!-- BEGIN:STRUCTURE -->
-[DRAFT] No code present yet (only empty `__init__.py`) — architecture-phase doc-first design intent. Structure regeneration skipped per regen-map spec; will populate from code on first /switch-phase development pass.
+
+- `AuditWriter` — class — pub — Subset of `storage` audit-log interface this module depends on.
+- `CarrierUploadResult` — class — pub — Per FR-19 + FR-42 + FR-57 -- return shape from CustomerAdapter.upload_attachment.
+- `CustomerAdapter` — class — pub — All callers depend on this Protocol, not on a concrete subclass.
+- `CustomerAdapterConfig` — class — pub — Operational config -- environment-switching values only.
+- `GoogleDriveBaseAdapter` — class — pub — Thin-wrapper reference class for Google Drive customer submissions.
+- `MockCustomerAdapter` — class — pub — In-process mock honoring the CustomerAdapter Protocol.
+- `current_totp` — func — pub — Returns the current 6-digit TOTP code derived from a base32 seed via pyotp.
+- `ntp_skew_seconds` — func — pub — Best-effort SNTP probe; returns abs(local_time - ntp_time) in seconds.
+
 <!-- END:STRUCTURE -->

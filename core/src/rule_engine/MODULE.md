@@ -801,61 +801,23 @@ Fields: trigger_kind (enum: TriggerKind values),
 ---
 
 <!-- BEGIN:STRUCTURE -->
-### `collision_audit.py`
-- `CollisionFinding` — frozendataclass — pub (via `__all__`) — One RUL-W001 collision pair (rule_id_a/b, trigger, more-specific scope_keys).
-- `collision_audit_update_state(rules_by_trigger) -> list[CollisionFinding]` — function — pub (via `__all__`) — Flags distinct rule_ids both writing UpdateState on one trigger; scope-compatible pairs only; same-rule_id-across-tiers exempt (FR-30 ladder).
 
-### `config.py`
-- `RuleEngineConfig` — Pydantic BaseModel — pub (via `__all__`) — Operational config; `from_sources()` 3-tier CLI > env (HILDA_RULE_ENGINE_*) > config/rule_engine.json per [D-025]/[D-038].
+- `ActionKind` — class — pub — Ph-1 actions per FR-29. Ph-2 actions are in MODULE.md ## Deferred and NOT in this enum.
+- `CollisionFinding` — class — pub
+- `EntityRef` — class — pub — Identifies the entity a TriggerEvent or rule applies to. Not all fields required
+- `PollingScheduleTier` — class — pub — One breakpoint in a deadline-tiered polling_schedule per FR-23 / FR-55.
+- `Rule` — class — pub — A single rule loaded from YAML (or its Postgres-override variant). Two shapes via `kind`
+- `RuleAction` — class — pub — One action within a rule's ordered action list. Action parameters are
+- `RuleEngine` — class — pub — Consumes a RuleSet snapshot. Pure per evaluation.
+- `RuleEngineConfig` — class — pub — Operational values only — rule content lives in customizations/rules/.
+- `RuleKind` — class — pub — Discriminates Rule shape — trigger-action rules fire from TriggerEvents; polling-schedule
+- `RuleMatch` — class — pub — One matched rule + its action list. Multiple RuleMatch instances per TriggerEvent are common
+- `RuleSet` — class — pub — Container for the loaded set of rules across all 3 YAML tiers + item-level overrides.
+- `TriggerEvent` — class — pub — Fired by callers (workflow_engine task bodies, ingest pipelines, etc.) and passed to evaluate().
+- `TriggerKind` — class — pub — All Ph-1 triggers per FR-28 (15 counting the 3 ItemModified sub-triggers).
+- `collision_audit_update_state` — func — pub — For each trigger, find pairs of distinct rule_ids (with overlapping scope) that both
+- `evaluate_polling_schedule` — func — pub — Returns the active interval_minutes for the given days_to_deadline.
+- `resolve_polling_schedule_for_item` — func — pub — Resolved POLLING_SCHEDULE rule for the item per the same FR-30 ladder + FR-31 item
+- `resolve_rules_for_entity` — func — pub — Effective TRIGGER_ACTION rule set for the entity at the trigger per FR-30:
 
-### `diagnostics_cli.py`
-- `main(argv=None) -> int` — function — pub (via `__all__`) — CLI entrypoint: --diagnostic (RUL-RPT) / --validate (RUL-QC; non-zero on RUL-E*) / --explain (MET + JSON resolution trace) / --simulate (Ph-3+ stub, rc=2).
-
-### `error_codes.py`
-- (no public top-level names — registers RUL-E001..E005 / RUL-W001..W008 on import via `register_code` side-effect.)
-
-### `evaluator.py`
-- `RuleEngine` — class — pub (via `__all__`) — Pure evaluator over a RuleSet snapshot + injected PauseStateLookup; `evaluate(event) -> list[RuleMatch]` and `explain(event) -> list[dict]`; closed-DSL conditions (RUL-W005 unsupported op, RUL-W006 unknown field, fail-closed), pause flagging (RUL-W003).
-
-### `loader.py`
-- `RuleSet` — class — pub (via `__all__`) — Loaded 3-tier rule container; `load(rules_dir, override_store)` / `reload()` / `rules_for_scope()` / `all_rule_ids()` / `all_rules()` / `override_for()` / `override_count`; runs orphan + collision audits at load; RUL-W008 dual-kind smell.
-
-### `models.py`
-- `ITEM_MODIFIED_SUB_TRIGGERS_PH1` — module constant — pub (via `__all__`) — The 3 Ph-1 ItemModified sub-triggers (OwnerReassigned / DeadlineMoved / TagsModified).
-- `ActionKind` — Enum — pub (via `__all__`) — 18 Ph-1 actions per FR-29 (Ph-2 actions excluded; see ## Deferred).
-- `EntityRef` — frozendataclass — pub (via `__all__`) — Entity a TriggerEvent or rule applies to (customer/device/milestone/item slugs-ids).
-- `PollingScheduleTier` — frozendataclass — pub (via `__all__`) — One deadline-tiered breakpoint per FR-23/FR-55 (None days = baseline).
-- `Rule` — frozendataclass — pub (via `__all__`) — Discriminated rule (TRIGGER_ACTION vs POLLING_SCHEDULE); shape conformance enforced in `__post_init__`.
-- `RuleAction` — frozendataclass — pub (via `__all__`) — One (kind, params, sequence) action in a rule's ordered list.
-- `RuleKind` — Enum — pub (via `__all__`) — Rule shape discriminator (trigger_action / polling_schedule).
-- `RuleMatch` — frozendataclass — pub (via `__all__`) — Matched rule + verbatim ordered actions + pause_state + override_source + correlation_id.
-- `RuleScope` — re-export — pub (via `__all__`) — Canonical `template_schema.RuleScope` (local lowercase duplicate removed 2026-06-12).
-- `TriggerEvent` — frozendataclass — pub (via `__all__`) — Trigger + sub_trigger + entity_ref + field_deltas + derived_fields + timestamp + correlation_id.
-- `TriggerKind` — Enum — pub (via `__all__`) — 13-member Ph-1 trigger enum (FR-28's 15 counting ItemModified sub-triggers).
-
-### `orphan_audit.py`
-- `OrphanFinding` — frozendataclass — pub (via `__all__`) — One RUL-W002 orphan override (rule_id, delivery_item_id).
-- `orphan_audit_postgres_overrides(yaml_rule_ids, overrides) -> list[OrphanFinding]` — function — pub (via `__all__`) — Flags overrides whose rule_id is absent from every YAML tier per [D-062]; pure set comparison.
-
-### `override_store.py`
-- `InMemoryOverrideStore` — class — pub (via `__all__`) — Fixture/test OverrideStore implementation.
-- `ItemOverride` — frozendataclass — pub (via `__all__`) — FR-31 item-level override (delivery_item_id, rule_id, override_payload, created_by_pm_id, source_tier, created_at) per D-DRAFT-1.
-- `OverrideStore` — Protocol — pub (via `__all__`) — Injected provider of active item-level overrides; consulted at load()/reload() only (pure-evaluator IO discipline).
-
-### `pause_state.py`
-- `NoPauseState` — class — pub (via `__all__`) — Null provider (nothing paused) for the diagnostic CLI / --explain.
-- `PauseStateLookup` — Protocol — pub (via `__all__`) — Injected pause-state provider per FR-31 sub-1 (`is_item_paused` / `is_milestone_paused`); live-flag home TBD per D-DRAFT-2.
-
-### `polling_schedule.py`
-- `evaluate_polling_schedule(tiers, days_to_deadline, *, default_baseline_minutes=60, rule_id="<unknown>") -> int` — function — pub (via `__all__`) — Inclusive-boundary tier resolution (at exactly N days, the N-day tier applies); RUL-W004 + default fallback on missing baseline.
-
-### `qc_templates.py`
-- `RULE_EVALUATION` — QCTemplate — pub (via `__all__`) — `RUL:rule_evaluation` fixed-field QC template registered at import.
-
-### `resolver.py`
-- `resolve_polling_schedule_for_item(rule_set, entity_ref, rule_id="default_polling_schedule") -> Rule` — function — pub (via `__all__`) — FR-30 ladder + FR-31 item override for POLLING_SCHEDULE rules; RUL-E002 if rule_id absent at every tier; RUL-W007 on unsupported payload keys.
-- `resolve_rules_for_entity(rule_set, entity_ref, trigger, sub_trigger=None) -> list[Rule]` — function — pub (via `__all__`) — Effective TRIGGER_ACTION set per FR-30 ladder (per-rule_id tier replacement) + FR-31 overlay.
-
-### `rule_engine_cli.py`
-- `main(argv=None) -> int` — function — pub (via `__all__`) — User-facing wrapper delegating to `diagnostics_cli.main` per [D-005].
 <!-- END:STRUCTURE -->

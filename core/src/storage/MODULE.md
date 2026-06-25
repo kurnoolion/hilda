@@ -907,82 +907,70 @@ python -m core.src.storage.storage_cli --alembic-roundtrip
 - **Default work-item path namespace evolution** — Ph-1 uses the `_unrouted` sentinel under `internal\<milestone>\` per FR-78. If FR-83 TPM-reassignment volume grows or per-TG default work-items become desirable (FR-78 revisit), the path convention may need a TG-scoped variant; would require migration script + `NSDPath` update.
 
 <!-- BEGIN:STRUCTURE -->
-### `audit_ops.py`
-- `clear_override(scope, scope_id, rule_id, parameter_name, *, pm_id) -> None` — function — pub (via `__all__`) — FR-31 override delete + audit row (credential_id=pm_id) + cache evict; idempotent.
-- `deactivate_tag(customer_id, tag) -> None` — function — pub (via `__all__`) — FR-82 soft-deactivate; preserves historical references.
-- `get_active_overrides(scope, scope_id, rule_id) -> list` — function — pub (via `__all__`) — FR-31 hot-path override lookup (expiry-filtered).
-- `get_folder_routing_for_tg(milestone_id, tg_name) -> list` — function — pub (via `__all__`) — FR-77 Type-2 routing rows for a TG.
-- `get_tag_catalog(customer_id) -> set[str]` — function — pub (via `__all__`) — active tag strings (validation hot path).
-- `list_active_overrides(*, scope, scope_id) -> list` — function — pub (via `__all__`) — bulk override load for rule_engine startup.
-- `list_all_override_rule_ids() -> set[str]` — function — pub (via `__all__`) — DISTINCT override rule_ids for STR-W004 orphan audit.
-- `list_tag_catalog_entries(customer_id, include_inactive=False) -> list` — function — pub (via `__all__`) — full tag rows for dashboard.
-- `log_communication(row) -> None` — function — pub (via `__all__`) — append-only CommunicationLog write per NFR-6.
-- `query_communications(*, ...filters, limit=100, offset=0) -> list` — function — pub (via `__all__`) — AND-composed audit query, timestamp DESC, cap 1000.
-- `reactivate_tag(customer_id, tag) -> None` — function — pub (via `__all__`) — undo deactivate_tag.
-- `set_folder_routing_for_tg(milestone_id, tg_name, entries, *, valid_item_nos) -> None` — function — pub (via `__all__`) — FR-77 replace-all; STR-E006 on unknown caller-supplied item_no.
-- `set_override(override) -> None` — function — pub (via `__all__`) — FR-31 insert/replace + audit + cache evict.
-- `upsert_tag(row) -> None` — function — pub (via `__all__`) — FR-82 tag insert/update; cache evict.
 
-### `config.py`
-- `GlobalStorageConfig` — Pydantic BaseModel — pub (via `__all__`) — operational config (nsd_mount_root / db_url / redis_url); 3-tier `from_sources()`.
-- `get_storage_config() -> GlobalStorageConfig` — function — pub (via `__all__`) — process-wide config, lazily resolved.
-- `set_storage_config(config) -> None` — function — pub (via `__all__`) — TEST/CLI-MOCK ONLY config injection/reset.
+- `AutomationRuleOverride` — class — pub — FR-31 runtime override; precedence over YAML rules per FR-30.
+- `BatchIdempotencyKey` — class — pub — Per [D-012]. Stored in Redis (short-TTL), not Postgres.
+- `Channel` — class — pub — Communication channel for CommunicationLogRow per NFR-6.
+- `CommunicationLogRow` — class — pub — Append-only audit trail per NFR-6. No UPDATE/DELETE on this table.
+- `Direction` — class — pub
+- `DocumentIndexRow` — class — pub — One row per physical document (file-centric per FR-79 revised). PK = file_hash.
+- `DocumentItemAssociation` — class — pub — Symmetric M:M between file_hash and DeliveryItem within one milestone per FR-79.
+- `NSDPath` — class — pub — Two-tree NSD path per FR-13. `segments` are relative to the share root.
+- `NSDPathType` — class — pub — Per FR-86 storage matrix — explicit state tracker for which of the 4 NSD path
+- `PLMFanOutTarget` — class — pub — One PLM upload target for a file_hash per FR-79 revised — one per DISTINCT
+- `RevisionResolution` — class — pub — FR-87 step (C) revision discriminator — TPM's NEW vs REVISION_OF choice.
+- `RoutingResolution` — class — pub — Per FR-52 5-step routing pipeline — which step resolved the document's routing.
+- `TGFolderRoutingRow` — class — pub — Per FR-77 Type-2 routing — persisted (ingress_folder → item_no) mapping.
+- `TagCatalogRow` — class — pub — Per FR-82 revised — customer-extensible tag catalog; soft-deactivate only.
+- `add_document_index_row` — func — pub — Idempotent on file_hash — re-ingest of the same physical file is a no-op;
+- `add_document_item_association` — func — pub — Idempotent on (file_hash, delivery_item_id). Raises STR-E005 when the file
+- `cache_delete` — func — pub — Idempotent — deleting a missing key is a no-op.
+- `cache_get` — func — pub
+- `cache_set` — func — pub — Raises STR-E008 when ttl_seconds exceeds the 24h cap — the [D-012] short-TTL
+- `check_batch_idempotency` — func — pub — Existing status when (batch_id, item_index) was already recorded; else None.
+- `clear_override` — func — pub — Removes the override identified by (scope, scope_id, rule_id, parameter_name).
+- `compute_file_hash` — func — pub — SHA-256 per [D-039] Step 0 (exact-duplicate detection).
+- `configure_engine` — func — pub — (Re)configure the module-level engine. Tests pass sqlite+aiosqlite URLs;
+- `deactivate_tag` — func — pub — Soft-deactivate — preserves historical item_description references.
+- `delete_document_item_association` — func — pub — Removes the M:M row; when delete_file=True also removes the per-item NSD copy.
+- `extract_first_page` — func — pub — First-page text for [D-039] Tier-2 LLM comparison.
+- `fan_out_plm_associations` — func — pub — DISTINCT (owner_corp_id, plm_id) pairs across the file's associations — one PLM
+- `find_doc_id_slugs_for_item` — func — pub — [D-039] Step 1 slug match + Step 2 NEW_DOCUMENT short-circuit (empty result).
+- `get_active_overrides` — func — pub
+- `get_celery_broker_url` — func — pub — Ph-1/Ph-2 broker URL for workflow_engine's Celery init; Ph-3+ moves to
+- `get_document_index_row_by_hash` — func — pub
+- `get_document_index_row_by_slug` — func — pub — FR-57 lookup via the secondary unique constraint.
+- `get_documents_for_item` — func — pub
+- `get_engine` — func — pub
+- `get_folder_routing_for_tg` — func — pub
+- `get_session` — func — pub — Plain session iterator — usage: `async for session in get_session(): ...`.
+- `get_tag_catalog` — func — pub — ACTIVE tag strings only — validation hot path.
+- `init_db` — func — pub — Creates schema if missing — dev/test only; deployment uses Alembic.
+- `list_active_overrides` — func — pub
+- `list_all_override_rule_ids` — func — pub — DISTINCT rule_ids across active overrides — rule_engine's STR-W004 orphan audit.
+- `list_associations_for_file` — func — pub
+- `list_associations_for_item` — func — pub
+- `list_documents_for_milestone` — func — pub
+- `list_inbound_drops` — func — pub — FR-55 polling support — files currently present in the item's inbound folder.
+- `list_revisions` — func — pub — All revisions of a (milestone, doc_id_slug) family, ordered by rev_number.
+- `list_tag_catalog_entries` — func — pub
+- `log_communication` — func — pub — Append-only; never updates or deletes existing rows.
+- `make_download_token` — func — pub — Short-lived HMAC token bound to one (file, item) association; never persisted.
+- `query_communications` — func — pub — AND-composed audit query per NFR-6; timestamp DESC; limit capped at 1000.
+- `reactivate_tag` — func — pub — No-op when the row doesn't exist (caller should upsert in that case).
+- `read_file` — func — pub — Streams file from the NSD mount via aiofiles; used by the hilda-api download
+- `reassign_document_to_workitem` — func — pub — FR-83 TPM-manual reassignment. Adds the target association (classified path for
+- `record_batch_idempotency` — func — pub — Idempotent — re-recording the same (batch_id, item_index, status) is a no-op.
+- `resolve_download_token` — func — pub — Verify signature + TTL; resolve to the per-item NSD path. STR-E007 on failure.
+- `set_folder_routing_for_tg` — func — pub — Replace-all semantics; validates every item_no against caller-supplied
+- `set_is_final` — func — pub — FR-66 — setting True auto-clears is_final on all sibling revisions of the
+- `set_override` — func — pub — Insert or replace + audit row (action_type='set_override') + cache eviction.
+- `set_redis_client` — func — pub — Inject a client (tests pass fakeredis.aioredis.FakeRedis).
+- `tpm_resolve_doc_type` — func — pub — FR-87 step (B) — TPM picks doc_type for a file at `staged_not_classification`.
+- `tpm_resolve_revision` — func — pub — FR-87 step (C) — TPM picks revision resolution for a file at `staged_not_revision`.
+- `update_association_plm_attachment` — func — pub — Replicates the upload result across all rows sharing the target row's
+- `update_review_findings` — func — pub
+- `upsert_tag` — func — pub
+- `write_file` — func — pub — Writes via the hilda-svc host mount per [D-013]. Idempotent on (path, content) —
 
-### `db.py`
-- `AutomationRuleOverrideTable` / `CommunicationLogTable` / `DocumentIndexTable` / `DocumentItemAssociationTable` / `TGFolderRoutingTable` / `TagCatalogTable` — ORM table — pub (via `__all__`) — SQLAlchemy mappings of the storage rows (DocumentIndexTable carries the partial unique index).
-- `Base` — DeclarativeBase — pub (via `__all__`) — ORM metadata root for Alembic.
-- `configure_engine(url=None, *, echo=False) -> AsyncEngine` — function — pub (via `__all__`) — (re)configure module engine; StaticPool for in-memory sqlite.
-- `get_engine() -> AsyncEngine` — function — pub (via `__all__`) — lazily-resolved module engine.
-- `get_session() -> AsyncIterator[AsyncSession]` — function — pub (via `__all__`) — plain session iterator.
-- `init_db() -> None` — function — pub (via `__all__`) — create schema (dev/test only).
-- `session_scope() -> AsyncIterator[AsyncSession]` — function — pub (via `__all__`) — session context with STR-E001 error contract; ops modules' session entry.
-
-### `document_ops.py`
-- `add_document_index_row(row) -> None` — function — pub (via `__all__`) — idempotent-on-file_hash index insert (cross-channel first-write-wins).
-- `add_document_item_association(assoc) -> None` — function — pub (via `__all__`) — idempotent M:M insert; STR-E005 cross-milestone guard.
-- `delete_document_item_association(file_hash, delivery_item_id, *, delete_file=True) -> None` — function — pub (via `__all__`) — remove one M:M row + optional per-item NSD copy.
-- `fan_out_plm_associations(file_hash) -> list` — function — pub (via `__all__`) — DISTINCT (owner, plm) PLM upload targets per FR-79.
-- `find_doc_id_slugs_for_item(delivery_item_id, doc_type) -> list[str]` — function — pub (via `__all__`) — [D-039] Step 1 slug match / Step 2 short-circuit.
-- `get_document_index_row_by_hash(file_hash) -> DocumentIndexRow | None` — function — pub (via `__all__`) — primary content-identity lookup.
-- `get_document_index_row_by_slug(milestone_id, doc_id_slug, rev_number) -> DocumentIndexRow | None` — function — pub (via `__all__`) — FR-57 partial-index lookup (resolved rows only).
-- `get_documents_for_item(delivery_item_id) -> list` — function — pub (via `__all__`) — JOIN-through-M:M per-item doc list.
-- `list_associations_for_file(file_hash) -> list` — function — pub (via `__all__`) — all (file, item) associations.
-- `list_associations_for_item(delivery_item_id) -> list` — function — pub (via `__all__`) — FR-67 cleanup support.
-- `list_documents_for_milestone(milestone_id, doc_type=None, is_final_only=False) -> list` — function — pub (via `__all__`) — milestone doc enumeration.
-- `list_revisions(milestone_id, doc_id_slug) -> list` — function — pub (via `__all__`) — resolved revision family (NULL-slug excluded).
-- `make_download_token(file_hash, delivery_item_id, ttl_seconds=300) -> str` — function — pub (via `__all__`) — FR-61 short-lived HMAC token (never persisted).
-- `reassign_document_to_workitem(file_hash, source, target, pm_id, *, target_tg_name, target_owner_corp_id, target_owner_corp_usa_email=None, target_owner_corp_email=None, target_owner_name=None, target_plm_id=None) -> None` — function — pub (via `__all__`) — FR-83 transactional reassign (caller-resolved target attrs; 4-field owner per FR-88 cascade 2026-06-21).
-- `resolve_download_token(token) -> tuple[str, str, NSDPath]` — function — pub (via `__all__`) — verify token; STR-E007 on invalid/expired.
-- `set_is_final(file_hash, is_final) -> None` — function — pub (via `__all__`) — FR-66; auto-clears sibling revisions.
-- `tpm_resolve_doc_type(file_hash, delivery_item_id, new_doc_type, *, doc_id_slug=None, rev_number=None, pm_id) -> None` — function — pub (via `__all__`) — FR-87 step B thin primitive; moves staged_not_classification → classified | staged_not_revision; STR-E009/E010/W008.
-- `tpm_resolve_revision(file_hash, delivery_item_id, resolution, *, pm_id) -> None` — function — pub (via `__all__`) — FR-87 step C thin primitive; assigns doc_id_slug/rev_number, moves staged_not_revision → classified; STR-E009/W008.
-- `update_association_plm_attachment(file_hash, delivery_item_id, plm_attachment_id, upload_timestamp) -> None` — function — pub (via `__all__`) — FR-79 fan-out result replication.
-- `update_review_findings(file_hash, parser_result, llm_review_findings) -> None` — function — pub (via `__all__`) — per-file FR-16/FR-53 result write.
-
-### `models.py`
-- `AutomationRuleOverride` / `BatchIdempotencyKey` / `CommunicationLogRow` / `DocumentIndexRow` / `DocumentItemAssociation` / `PLMFanOutTarget` / `TGFolderRoutingRow` / `TagCatalogRow` — Pydantic BaseModel — pub (via `__all__`) — canonical storage row schemas per `[D-046]`.
-- `Channel` / `Direction` / `NSDPathType` / `RoutingResolution` — Enum — pub (via `__all__`) — storage-side enums (Channel/Direction for CommunicationLog; NSDPathType FR-86 state; RoutingResolution FR-52 step).
-- `RevisionResolution` — frozendataclass — pub (via `__all__`) — FR-87 step C tagged-union (new / revision_of) for `tpm_resolve_revision`.
-
-### `nsd.py`
-- `NSDPath` — frozendataclass — pub (via `__all__`) — two-tree NSD path value object; 9 path constructors, `to_relative`/`from_relative` (persisted form), `to_local` (mount IO), `to_unc`/`from_unc` (diagnostic).
-- `compute_file_hash(path) -> str` — function — pub (via `__all__`) — SHA-256 per [D-039] Step 0.
-- `extract_first_page(path) -> str` — function — pub (via `__all__`) — txt/xlsx first-page text; PDF/DOCX → STR-E004 pending [D-011].
-- `list_inbound_drops(carrier, device, milestone, item) -> list` — function — pub (via `__all__`) — FR-55 inbound-folder poll.
-- `read_file(path) -> AsyncIterator[bytes]` — function — pub (via `__all__`) — aiofiles stream from host mount (FR-61).
-- `write_file(path, content) -> None` — function — pub (via `__all__`) — atomic idempotent write via host mount.
-
-### `qc_templates.py`
-- `SCHEMA_ROUNDTRIP` — QCTemplate — pub (via `__all__`) — `STR:schema_roundtrip` QC template; registered at import.
-
-### `redis_client.py`
-- `MAX_CACHE_TTL_SECONDS` — module constant — pub (via `__all__`) — 24h cap per [D-012].
-- `cache_delete(key) -> None` / `cache_get(key) -> bytes | None` / `cache_set(key, value, ttl_seconds) -> None` — function — pub (via `__all__`) — cache ops; cache_set raises STR-E008 over the cap.
-- `check_batch_idempotency(batch_id, item_index) -> str | None` — function — pub (via `__all__`) — [D-012] BATCH idempotency check.
-- `get_celery_broker_url() -> str` — function — pub (via `__all__`) — Ph-1/Ph-2 Redis broker URL.
-- `record_batch_idempotency(key) -> None` — function — pub (via `__all__`) — idempotent BATCH record.
-- `set_redis_client(client) -> None` — function — pub (via `__all__`) — inject client (tests pass fakeredis).
-
-### `storage_cli.py`
-- `main() -> None` — function — pub — CLI: `--diagnostic` / `--mock` / `--mock-postgres` / `--validate --customer` / `--alembic-roundtrip`.
 <!-- END:STRUCTURE -->
