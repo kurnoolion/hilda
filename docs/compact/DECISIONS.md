@@ -2695,3 +2695,110 @@ Fire-and-forget API: `emit_alert` MUST NOT raise to the caller -- internal failu
 - (l) **Deferred items** (Ph-2+ forward-looking): severity-driven routing; per-source recipient overrides; fingerprint-based dedup; summary alert at rate-limit window end; Slack / PagerDuty / SMS channels; SIGHUP-triggered reload; acknowledge / mute workflow; alert correlation; metrics surface.
 
 **Anchors**: NFR-2 (bounded context payload + no proprietary content), `[D-019]` (shared HILDA ops-team identity Ph-1/Ph-2 -- same SMTP + messenger account for OPS BOT), `[D-027]` (Teacher/Student split -- recipients.yaml LOCAL), `[D-064]` (HILDA → SP REST writeback secondary channel -- failed writebacks emit via ops_alerts), `[D-117]` (SpSession NTLM digest dance -- failed digests emit via ops_alerts), `[D-122]` (FR-87 direct POST -- SP audit writeback silent failures emit via ops_alerts), `[D-125]` (Point 3 policy -- recipients.yaml LOCAL), `core/src/ops_alerts/MODULE.md`, this commit.
+
+---
+
+## D-128: sp_alert_parser real-format cascade — actual SP alert subject + body shape
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: The pre-2026-06-25 sp_alert_parser implementation per `[D-047]` assumed SP alert email subjects matched the pattern `Alert_<List>_<Suffix> - <ItemTitle>` (with a literal `Alert_` prefix + always-present customer-suffix). Architect's 6 real SP alert screenshots 2026-06-25 (Milestone add/change/delete + Deliverable add/change/delete) revealed the assumption was WRONG: SP alerts have NO `Alert_` prefix, and the Milestones list is GLOBAL (no per-customer suffix) per architect lock 2026-06-21. Body shape was also richer than the pre-2026-06-25 parser handled: header line carries action verb (`<Title> has been added/changed/deleted`); modified fields carry an inline `Edited` marker with a leading `- ` separator (e.g. `owner_corp_id: - t.arasu Edited`); empty body fields appear as bare `key:` with no value. Plus: SP can resend the SAME alert (duplicate Message-IDs), and corp SP fires "changed" alerts that contain NO Edited markers (no-op changes) that should be silently dropped.
+
+**Decision**: Comprehensive cascade applied 2026-06-25 (commit `7bf9e4c`):
+
+- **Subject regex rewrite**: drop `Alert_` prefix; make customer suffix OPTIONAL (Milestones is global, no suffix; Deliverables/Projects are per-customer). New pattern:
+  ```python
+  r"^(?P<list>Milestones|Projects|Deliverables)(?:_(?P<suffix>[A-Za-z0-9]+))?\s*-\s*(?P<title>.+)$"
+  ```
+- **Customer_id derivation**: for Deliverables/Projects from subject suffix; for Milestones from body `carrier:` field.
+- **Milestone_name derivation**: for Milestones alerts the Title from subject IS the milestone_name (no separate `milestone_name:` body field).
+- **Action verb extraction**: parse `<Title> has been (added|changed|deleted)` header line → set `action_type`.
+- **Field-delta extraction**: lines with `Edited` suffix marker → populate `TriggerEvent.field_deltas` per `[D-047]` (NEW values only per architect Q5 lock — no extra SP REST roundtrip for OLD values).
+- **Body parser rewrite**: line-by-line via `splitlines()` (was multi-line regex; empty fields caused multi-line bleed); empty fields captured as `""` per architect Q3 lock.
+- **Message-ID LRU dedup**: bounded set (size 1024, TTL 10 min) per architect 2026-06-25 (corp SP can resend alerts).
+- **No-op-change drop**: `changed` action with empty `field_deltas` → silently dropped (no TriggerEvent emitted).
+- **Projects Ph-1 drop**: SP UI engineer has not enabled Projects alerts Ph-1 per architect Q1 lock; if such an alert arrives, drop with INFO log (Ph-2 target).
+
+**Why**:
+- (a) **Real format observed > old assumption** — architect's screenshots are the operational truth; pre-2026-06-25 regex would silently drop EVERY production SP alert as "out-of-scope" → entire FR-84 + NFR-21 dual-writer + rule_engine ItemModified pipeline was non-functional under the wrong assumption.
+- (b) **Field-delta extraction unlocks rule_engine richness** — without per-field deltas, rule_engine rules could only match "an item changed" not "owner_corp_id changed" or "milestone_collection_started_at changed"; with deltas, the NFR-21 dual-writer integration loop works (TPM clicks Start Collection → SP UI engineer writes `milestone_collection_started_at` → SP alert fires with `Edited` marker → HILDA's rule_engine matches `field_deltas_contains: [milestone_collection_started_at]` → fires SEND_INITIAL_OUTREACH). Architect Q4 lock: this is THE point of the alert channel.
+- (c) **NEW values only over OLD+NEW** — old-value capture would require extra SP REST roundtrip per alert; alerts arrive in volume; round-trip latency dominates. Architect Q5: Ph-1 acceptable.
+- (d) **Per-line body parsing over multi-line regex** — original `\s*$` greedy match consumed `\n` for empty fields and bled into next-line content. Demo: empty `owner_status_note:` captured the subsequent `owner_name: - Thendral Arasu Edited` line as its value. Per-line `splitlines()` parsing eliminates the failure mode.
+- (e) **Message-ID dedup over per-alert dedup** — alerts arriving from SP carry RFC 5322 Message-IDs; deduplication on this stable identifier is cheap + effective. Per architect 2026-06-25: corp SP can resend same alert (retry / cluster failover behaviors).
+- (f) **No-op-change drop over emit-anyway** — `changed` alert with no `Edited` markers contains no information rule_engine can match against; emitting a TriggerEvent with empty `field_deltas` wastes downstream cycles + pollutes audit. Silent drop with INFO log preserves observability.
+- (g) **Projects Ph-1 drop over Ph-1 handling** — SP UI engineer hasn't subscribed Projects alerts in Ph-1; if one does arrive, dropping cleanly avoids surprise pipeline behavior. Architect Q1: Ph-2 target — TPM project changes are rare.
+
+**Consequences**:
+- (a) `core/src/email_service/sp_alert_parser/parser.py` rewritten (~280 lines vs original ~140) -- new `_BODY_KV_LINE_RE` per-line parser; `_ALERT_SUBJECT_RE` new pattern; `_ACTION_VERB_RE` header parser; `_EDITED_SUFFIX_RE` + `_LEADING_DASH_RE` value cleanup; `_MessageIdDedup` LRU class.
+- (b) `core/src/email_service/inbound/classifier.py` `SP_ALERT_SUBJECT_RE` updated to match the same new pattern -- classifier dispatch unchanged.
+- (c) `core/src/email_service/MODULE.md` narrative rewritten for real format + Q1-Q5 + 2 operational guards; 3 stale subject-format mentions corrected.
+- (d) 14 new regression test cases in `test_email_service.py::TestSpAlertParserRegression` (exact bodies from architect's 4 screenshots: M-add, M-change, M-delete, D-add, D-change, D-delete; plus dedup + no-op-drop + Projects-drop + edited-value-cleanup + action-verb cases). Plus 4 existing tests updated to new format.
+- (e) `ParsedSpAlert.action_type` now carries `"added"` / `"changed"` / `"deleted"` (was `None` before); `ParsedSpAlert.field_deltas` new field carrying the `Edited`-marker subset of body_kvs.
+- (f) `SpAlertParser` constructor accepts optional `dedup_max_size` + `dedup_ttl` kwargs for test injection.
+- (g) Tests: 797 → 812 (+15 net).
+
+**Anchors**: `[D-047]` (SP alert email channel + TriggerEvent field_deltas), `[D-118]` (SP UI engineer provisioning boundary), `[D-122]` (FR-87 direct POST architecture -- FR-87 step A/B handlers removed earlier today), FR-84 (SP→HILDA inbound email channel), NFR-21 §5 (HILDA + SP UI dual-writer for `milestone_collection_started_at` + similar runtime timestamps -- THIS cascade's primary motivator), `core/src/email_service/sp_alert_parser/parser.py`, `core/src/email_service/MODULE.md`, commit `7bf9e4c`.
+
+---
+
+## D-129: Podman selected over Docker for Ph-1 deployment runtime
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: HILDA Ph-1 deployment per `[D-026]` targets Docker Compose on a single bare-metal Linux PC (6 containers: hilda-api + hilda-worker + hilda-beat + hilda-llm-gateway + postgres + redis). The "Docker" in `[D-026]` was generic shorthand for "OCI-compatible container runtime + compose-syntax orchestration" -- the specific runtime was undetermined pending corp-environment validation. Architect's corp Linux box validation 2026-06-25 (Ubuntu 24.04.4 LTS, omadm-HP-Z640-Workstation) revealed two operationally decisive corp-environment behaviors: (a) **Docker CE was installable AND ran the daemon** but FAILED at `docker run --rm hello-world` with connection-reset-by-peer on `auth.docker.io` (Docker's anonymous token endpoint behind Cloudflare `172.64.144.78`); the corp firewall has TLS-fingerprint-based rules that block Docker's specific request pattern but PERMIT Podman's pattern; (b) **Podman 4.9.3 from Ubuntu noble apt repos installed cleanly without sudo on subsequent ops + completed all 8 smoke tests (hello-world, multi-container compose stack with postgres + redis service-name DNS, outbound HTTPS to corp SP returning expected NTLM challenge, Selenium-controlled Chromium loading example.com + google.com)**. Architect also asked whether other runtimes (containerd+nerdctl, K3s, OpenShift, LXD, native systemd) were viable alternatives -- none preferred over Podman for Ph-1's small 6-container scale per `[D-026]` (K8s is `[D-021]` Ph-3+ target).
+
+**Decision**: Podman 4.9.3 + podman-compose 1.0.6 selected as Ph-1 + Ph-2 deployment runtime. `[D-026]` updated to read "OCI runtime: Podman" in place of generic "Docker". `deploy/docker-compose.yml` syntax stays standard compose v3.x format -- runtime-interchangeable at the file level; Docker remains a fallback if corp firewall policy on `auth.docker.io` is lifted or if alternative image registry is provisioned.
+
+**Why**:
+- (a) **Validated empirically in corp env** -- Docker hits a corp firewall block that Podman doesn't (today's commit `[no commit, post-session validation]`). Production deployments need reliable image pulls; this isn't a "Docker is slower" trade-off, it's a "Docker can't pull images" hard failure.
+- (b) **Rootless by default → IT approval delta** -- Podman's daemon-less rootless model requires no `docker` group membership, no privileged background service, no special user-namespace setup. Corp security teams typically approve Podman faster than Docker for this reason.
+- (c) **systemd-native integration** -- `podman generate systemd` emits unit files directly; matches HILDA's `[D-026]` Ph-1/Ph-2 ops pattern ("`git pull` → `sops --decrypt` → start service"). Docker's `docker-compose` wrapper service is an extra layer.
+- (d) **Same OCI image format + same compose syntax** -- Phase D1 Dockerfile + docker-compose.yml are 100% interchangeable between Podman and Docker. Runtime swap (e.g., Phase D3+ to MicroK8s per `[D-021]`) doesn't require rewriting compose files; only orchestrator binding changes.
+- (e) **Selenium + Chromium validated identically** -- architect's flagged concern about Chromium-sandbox-in-rootless-Podman was retracted today: Selenium-controlled Chromium in rootless Podman works identically to Docker rootful (both need `--no-sandbox` Chromium flag; that's container-paradigm-level, not runtime-specific). See D-130 for Debian-base requirement.
+- (f) **No daemon = no privileged background service** = smaller attack surface in a corp env that's already showing it cares about Docker-specific traffic patterns. If a HILDA worker container is later compromised, blast radius is limited to `omadm` user not root.
+- (g) **`podman-compose` is third-party Python (caveat acknowledged)** -- not Red Hat's own tooling; less battle-tested than Docker Compose v2. Today's smoke test validated the exact pattern HILDA uses (healthcheck-gated startup, service-name DNS, container-to-container TCP); track upstream `podman-compose` issues if encountered. Phase D3+ migration to MicroK8s per `[D-021]` retires this caveat (K8s = native compose-equivalent via Kustomize / Helm).
+- (h) **No alternative runtime was materially better** -- containerd+nerdctl is technically valid but adds no benefit over Podman for HILDA. LXD/Incus is a different paradigm (system containers) requiring HILDA architectural rewrite. K3s/Minikube is skip-ahead Ph-3+ per `[D-021]`. systemd-nspawn is too low-level (no compose ecosystem). Native systemd services (Plan B) is ~30% more ops work + retains all Docker/Podman concerns minus the container isolation benefit.
+
+**Consequences**:
+- (a) `[D-026]` updated: "OCI runtime: Podman (corp-environment validated 2026-06-25)" replaces "Docker Compose".
+- (b) Phase D1 Dockerfile content authoring -- targets either runtime; commit messages + ops runbooks reference Podman commands.
+- (c) `deploy/MODULE.md` (Phase D1) includes operations runbook for `podman build` / `podman-compose up -d` / `podman generate systemd` workflows.
+- (d) sops decryption + bind-mount + systemd integration documented for Podman first; Docker fallback noted.
+- (e) No code change to HILDA modules -- all runtime-agnostic.
+- (f) Corp IT engagement: any future Docker-runtime adoption requires resolving the `auth.docker.io` firewall block first (corp registry mirror OR allowlist rule for Docker traffic pattern).
+- (g) Phase D2 (architect-led integration on Linux box) uses Podman exclusively unless corp policy changes.
+- (h) Phase D3+ migration target per `[D-021]` MicroK8s + Helm -- Podman remains valid bridge runtime; K8s eventually subsumes Podman's role.
+
+**Anchors**: `[D-021]` (MicroK8s Ph-3+ target), `[D-022]` (Celery broker per worker shape), `[D-024]` (CI/CD pipeline shape with Helm chart Ph-3+), `[D-025]` (3-tier config: CLI > env > config/<module>.json), `[D-026]` (Docker Compose 6-container deployment -- now updated: "OCI runtime: Podman"), `[D-038]` (sops-encrypted credentials), `[D-019]` v1 (shared HILDA ops-team identity), `core/src/email_service/MODULE.md` (Ph-1 single-bare-metal-Linux topology assumption), validation logs from corp Linux box (2026-06-25 Ubuntu 24.04 / omadm-HP-Z640-Workstation), this session's smoke-test results.
+
+---
+
+## D-130: HILDA worker container base = Debian (`python:3.11-slim-bookworm`); Chromium binary at `/usr/lib/chromium/chromium`
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: HILDA's `customer_adapter` per `[D-116]` D11-D14 uses the architect's selenium-backed Google Drive binding (Chromium driven via Selenium WebDriver). For the binding to run inside the `hilda-worker` container per `[D-026]` 6-container architecture, the container image must include Chromium + chromedriver. Architect validated container Chromium 2026-06-25 with a Selenium sanity test (sp_alert_parser cascade testing methodology) on the corp Linux box (Ubuntu 24.04.4 LTS). **Two surprising discoveries**: (a) Ubuntu 24.04 noble's `chromium-browser` + `chromium-chromedriver` apt packages are **snap-only transitional stubs** -- they install metapackage stubs that depend on snapd being available in the host, BUT snapd is NOT available inside containers; result: `chromedriver` starts but Chromium binary doesn't actually exist; `SessionNotCreatedException: chromedriver unexpectedly exited`. (b) Switching base image to Debian bookworm (`python:3.11-slim-bookworm`) which ships REAL .deb Chromium fixed the install BUT introduced a second discovery: Debian's `apt install chromium` places the binary as `/usr/bin/chromium` (a 5KB shell wrapper) + `/usr/lib/chromium/chromium` (the 273MB actual ELF binary). chromedriver's binary-existence check rejected the wrapper; explicit `binary_location = "/usr/lib/chromium/chromium"` in Selenium options resolved it. After both fixes, Selenium-controlled Chromium loaded `example.com` (title="Example Domain") + `www.google.com` (title="Google") successfully from inside rootless Podman.
+
+**Decision**: Phase D1 `Dockerfile.hilda-worker` base = `python:3.11-slim-bookworm` (Debian 12). Chromium dependencies via `apt install chromium chromium-driver`. Selenium config in customer_adapter binding sets `opts.binary_location = "/usr/lib/chromium/chromium"` (the real binary, NOT the `/usr/bin/chromium` wrapper). Selenium standard container flags: `--headless=new`, `--no-sandbox`, `--disable-gpu`, `--disable-dev-shm-usage`. Same base applies to `hilda-llm-gateway` if it ships any browser-based component.
+
+**Why**:
+- (a) **Empirically validated** -- the exact two-discovery cascade above was the actual test cycle today; jumping straight to "use Debian + point to real binary" saves a Phase D2 deployment-time surprise.
+- (b) **Ubuntu 24.04 snap-transition is not reversible** -- Canonical's policy for Ubuntu 24.04+ is that desktop apps like Chromium move to snap-only packaging. There is no "real .deb chromium for Ubuntu noble" via official channels; PPA workarounds (e.g., third-party Chromium PPAs) add corp-trust questions. Debian's policy of shipping real .deb is operationally simpler.
+- (c) **Debian bookworm is conservative + stable** -- HILDA's container base should prioritize predictability over OS feature recency. `python:3.11-slim-bookworm` from official Docker Hub library is widely deployed.
+- (d) **Direct path to real binary over wrapper** -- the wrapper at `/usr/bin/chromium` sets up env vars + execs the real binary. Selenium's chromedriver binary-existence check rejected the wrapper as a non-binary. Pointing to `/usr/lib/chromium/chromium` directly bypasses the issue.
+- (e) **Selenium standard flags over Selenium Manager** -- Selenium 4.x's bundled Selenium Manager auto-downloads matching chromedriver but requires outbound network access at runtime (problematic in air-gapped Phase D3+ deploys); explicit apt-installed chromedriver + matching Chromium is reproducible at image-build time.
+
+**Consequences**:
+- (a) `Dockerfile.hilda-worker` Phase D1 base = `python:3.11-slim-bookworm`. apt installs include `chromium chromium-driver ca-certificates fonts-liberation`.
+- (b) `Dockerfile.hilda-api` + `Dockerfile.hilda-beat` Phase D1 -- same base for consistency unless they have NO browser need; for now standardize on bookworm.
+- (c) `customer_adapter/example_adapter.py` scaffold + actual production binding (LOCAL per `[D-027]`) must configure Selenium with `opts.binary_location = "/usr/lib/chromium/chromium"`.
+- (d) Image size: ~400 MB base + ~270 MB Chromium = ~670 MB per worker image. Acceptable Ph-1; revisit Ph-3+ if multi-customer concurrent scaling demands smaller worker images.
+- (e) Selenium WebDriver version pinned via apt -- on each Debian release upgrade, Chromium + chromedriver versions update together (apt guarantees matched pair).
+- (f) No code change to HILDA modules -- this is a Phase D1 Dockerfile concern.
+- (g) When the architect's actual selenium-backed binding code is filled in by Cline per `[D-027]` Teacher/Student on Work PC, the binding's Selenium config must match this binary_location convention.
+- (h) Phase D3+ migration target per `[D-021]` MicroK8s + Helm chart -- container base image choice carries forward unchanged; Helm just orchestrates the same OCI image.
+
+**Anchors**: `[D-021]` (MicroK8s Ph-3+ target -- base image unchanged), `[D-026]` (Docker Compose 6-container deployment), `[D-027]` (Teacher/Student split for proprietary binding code), `[D-038]` (sops-encrypted credentials -- separate path), `[D-054]` (browser automation per [D-054] impl note 2026-06-05 -- Chromium binary requirement; per `[D-116]` D17 now binding-side concern), `[D-116]` D11-D17 (selenium-backed Google Drive binding via thin wrapper), `[D-129]` (Podman runtime -- this decision applies regardless of Podman/Docker choice; runtime-agnostic), validation logs from corp Linux box (2026-06-25 Selenium sanity test).
