@@ -1,0 +1,53 @@
+# =====================================================================================
+# customizations/template_schemas/mock_customer/doc_type_filename_rules.yaml
+# =====================================================================================
+# Per-customer FR-85 Step 1 filename regex overrides for HILDA's doc_type classifier.
+#
+# Path migration 2026-06-27 architect direction: this file moved from
+#   customizations/<customer_id>/doc_type_filename_rules.yaml (old path)
+# to
+#   customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml (new path)
+# for consistency with template.yaml + folder_routing.yaml (Ph-2).
+#
+# Merges with the universal bundled defaults at:
+#   core/src/email_service/default_doc_type_rules.yaml
+#
+# Per FR-85 + Module #12 MODULE.md:
+#   - Per-customer rules are tried FIRST per doc_type (more specific match wins);
+#   - Falls through to bundled defaults if no per-customer rule matches;
+#   - LLM Step 2 (CLASSIFY_DOC_TYPE, restricted candidate set) only fires when
+#     both per-customer AND bundled defaults fail to match the filename;
+#   - UNRESOLVED sentinel when LLM confidence < doc_type_classifier_threshold.
+#
+# Format (per default_doc_type_rules.yaml):
+#   <doc_type>:
+#     - regex: '<python-regex>'
+#       flags: IGNORECASE       # optional; only IGNORECASE supported Ph-1
+#
+# Privacy convention: <customer_id>=mock_customer; placeholder identifiers ONLY.
+# Production overrides live LOCALLY per [D-125] Point 3 (not in public github).
+# =====================================================================================
+
+# Ph-1 stub: empty rules -> falls through to bundled defaults at
+# core/src/email_service/default_doc_type_rules.yaml. Per-customer regex rules
+# added as the customer's filename conventions are observed in real traffic.
+#
+# Sample shapes (commented out -- uncomment + edit when adding rules):
+#
+# test_report:
+#   - regex: '.*MockCustomer.*Test.*Report.*\.pdf$'
+#     flags: IGNORECASE
+#   - regex: '.*MC_TR_.*\.docx$'
+#     flags: IGNORECASE
+#
+# tech_report:
+#   - regex: '.*MockCustomer.*Tech.*Note.*\.(pdf|docx)$'
+#     flags: IGNORECASE
+#
+# waiver:
+#   - regex: '.*WAIVER.*Mock_Customer.*\.pdf$'
+#     flags: IGNORECASE
+#
+# compliance_certification_release_notes:
+#   - regex: '.*CCRN.*Mock_Customer.*\.pdf$'
+#     flags: IGNORECASE

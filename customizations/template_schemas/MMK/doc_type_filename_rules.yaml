@@ -1,0 +1,27 @@
+# =====================================================================================
+# customizations/template_schemas/MMK/doc_type_filename_rules.yaml
+# =====================================================================================
+# Per-customer FR-85 Step 1 filename regex overrides for HILDA's doc_type classifier.
+#
+# IMPORTANT -- Point 3 architect policy [D-125] 2026-06-26: production version of
+# this file lives LOCALLY only (architect's office PC). The public github copy is
+# a SANITIZED PLACEHOLDER / RUNTIME REFERENCE showing the YAML shape with empty
+# rules; real per-customer regex rules are NOT committed to public github.
+#
+# Merges with the universal bundled defaults at:
+#   core/src/email_service/default_doc_type_rules.yaml
+#
+# Path migration 2026-06-27 (architect direction): this file moved from
+#   customizations/<customer_id>/doc_type_filename_rules.yaml (old)
+# to
+#   customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml (new)
+# for consistency with template.yaml + folder_routing.yaml.
+#
+# Format (see default_doc_type_rules.yaml):
+#   <doc_type>:
+#     - regex: '<python-regex>'
+#       flags: IGNORECASE       # optional; only IGNORECASE supported Ph-1
+# =====================================================================================
+
+# Sanitized placeholder -- empty rules fall through to bundled defaults.
+# Architect maintains production version with real regex rules on office PC.

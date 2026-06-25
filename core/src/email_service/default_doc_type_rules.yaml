@@ -1,6 +1,8 @@
 # FR-85 Step 1 -- universal default filename regex rules per email_service/MODULE.md.
-# Per-customer overrides at customizations/<customer_id>/doc_type_filename_rules.yaml
+# Per-customer overrides at customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml
 # (path resolved via Fr52Config.doc_type_filename_rules_path with <customer_id> placeholder).
+# Path migrated 2026-06-27 from customizations/<customer_id>/ -> template_schemas/<customer_id>/
+# for consistency with template.yaml + folder_routing.yaml.
 #
 # Format:
 #   <doc_type>:

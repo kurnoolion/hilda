@@ -54,9 +54,13 @@ class Fr52Config(BaseModel):
     fuzzy_threshold: float = 0.85
     llm_confidence_threshold: float = 0.75
 
-    # FR-85 classification ladder config:
+    # FR-85 classification ladder config.
+    # Path migration 2026-06-27 architect direction: moved from
+    # `customizations/<customer_id>/` -> `customizations/template_schemas/<customer_id>/`
+    # for consistency with template.yaml + folder_routing.yaml (all per-customer
+    # config files now live under template_schemas/<customer_id>/).
     doc_type_filename_rules_path: Path = Path(
-        "customizations/<customer_id>/doc_type_filename_rules.yaml"
+        "customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml"
     )
     doc_type_classifier_threshold: float = 0.85
 
