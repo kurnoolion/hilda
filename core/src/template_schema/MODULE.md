@@ -26,14 +26,14 @@ class DeliveryState(str, Enum):
     per FR-7 + FR-2 R&R lock; was missing in 2026-05-15 rewrite)."""
     NOT_STARTED          = "Not Started"          # initial at setup_milestone per FR-7 + FR-2 R&R; hardcoded by SP UI engineer's web part
     OPEN                 = "Open"                 # transitioned by HILDA at Start Collection per FR-8 step 1
-    OUTREACH_SENT        = "OutreachSent"         # initial outreach dispatched per FR-9
-    DOCUMENT_RECEIVED    = "DocumentReceived"     # document arrived via any ingest channel
-    UNDER_PM_REVIEW      = "UnderPMReview"        # active TPM review gate per FR-56
-    OWNER_CLOSED         = "OwnerClosed"          # owner confirmed done; transient — forks per FR-7 (D-048 multi-rev selection)
+    OUTREACH_SENT        = "Outreach Sent"        # initial outreach dispatched per FR-9 (D-124 α: PascalCase + space)
+    DOCUMENT_RECEIVED    = "Document Received"    # document arrived via any ingest channel
+    UNDER_PM_REVIEW      = "Under PM Review"      # active TPM review gate per FR-56
+    OWNER_CLOSED         = "Owner Closed"         # owner confirmed done; transient — forks per FR-7 (D-048 multi-rev selection)
     DELAYED              = "Delayed"              # owner-reported delay; transient
     BLOCKED              = "Blocked"              # owner-reported blocker; transient
-    READY_FOR_SUBMISSION = "ReadyForSubmission"   # PM approved per FR-28 PMApproval trigger
-    SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer" # submission package dispatched per FR-18
+    READY_FOR_SUBMISSION = "Ready For Submission" # PM approved per FR-28 PMApproval trigger
+    SUBMITTED_TO_CUSTOMER = "Submitted To Customer" # submission package dispatched per FR-18
     CLOSED               = "Closed"               # manually set per FR-14 / FR-64; automated transition deferred per DEF-20
 
 class ItemType(str, Enum):
@@ -311,9 +311,11 @@ class DeliveryItemBase(BaseModel):
     osmr:                            bool = False
     rmr:                             bool = False
     hmr_smr:                         bool = False
-    customer_delivery_modality:      str   # validated against CustomerDeliveryModalityRegistry
-    customer_delivery_info:          str | None  # base URL (e.g. "drive.google.com") — denormalized per-item from CustomerTemplateBase.customer_delivery_info at setup_milestone
-    customer_delivery_credential_id: str | None  # opaque credential reference (Ph-3+ Vault key); Ph-1/Ph-2 unused
+    # customer_delivery_modality REMOVED from DeliveryItemBase per D-126 Q2 lock 2026-06-26
+    # (moved to CustomerTemplateBase as per-customer top-level; subclass-implicit at runtime).
+    # no_customer_upload is sole upload gate per FR-80.
+    customer_delivery_info:          str | None  # PER-ROW value from Deliverables SP list per D-126 Q1 (e.g. "drive.google.com"); passed as 9th arg to customer_adapter binding
+    # customer_delivery_credential_id REMOVED per D-126 + [D-019] shared HILDA ops-team identity
     owner_status_note:               str | None  # latest interim owner update; auto-populated from inbound
     comment:                         str | None
     last_updated:                    datetime

@@ -21,7 +21,7 @@ _Generated 2026-06-21 by regen-map. Do not hand-edit._
 | [template_schema](../../core/src/template_schema/MODULE.md) | Canonical data model for HILDA's entity hierarchy — Device / Milestone / DeliveryItem (grouped by tg_name) + TG-group metadata (per `(milestone_id, tg_name)`) — and the contract types shared across all runtime modules. | |
 | template_schemas (customizations) | Per-customer template.yaml drop-zone — populated 2026-06-21 with MMK template (mock device / milestone P1 / 10 work-items). | **[NEW]** — MODULE.md needed |
 | [tracker](../../core/src/tracker/MODULE.md) | `tracker` is HILDA's **DeliveryItem lifecycle orchestrator**. | |
-| [workflow_engine](../../core/src/workflow_engine/MODULE.md) | HILDA's Celery app + central task dispatcher per `[D-022]`. | foundation + 10/18 tasks |
+| [workflow_engine](../../core/src/workflow_engine/MODULE.md) | HILDA's Celery app + central task dispatcher per `[D-022]`. | foundation + 16/18 tasks |
 
 ## Dependency graph
 
