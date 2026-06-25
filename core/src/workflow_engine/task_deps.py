@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any, Iterator
 
 from core.src.diagnostics import PipelineError
 
@@ -29,11 +29,24 @@ __all__ = ["TaskDeps", "get_task_deps", "set_task_deps", "override_task_deps"]
 @dataclass(frozen=True)
 class TaskDeps:
     """Bundle of runtime dependencies task bodies need. Constructed once at worker
-    startup (production) or per-test (fixtures)."""
+    startup (production) or per-test (fixtures).
+
+    Optional fields added 2026-06-27 per 6-ActionKind wire-up cascade: downstream
+    module adapters (email_sender, messenger, customer_adapter) are None Ph-1 dev
+    setups where the downstream module isn't yet wired into the worker boot. Each
+    task body gracefully degrades to "audit-only" when its required dep is None.
+    """
 
     storage:   StorageWriter
     sp_writer: SpWriter
     audit:     AuditWriter
+
+    # Downstream module adapters (Optional Ph-1 -- task bodies degrade to audit-only
+    # when None). Wired at worker startup in production; injected by tests via
+    # override_task_deps.
+    email_sender:    Any = None        # EmailSender protocol (email_service)
+    messenger:       Any = None        # MessengerAdapter or MessengerService (messenger)
+    customer_adapter: Any = None       # CustomerAdapter protocol (customer_adapter)
 
 
 _deps: TaskDeps | None = None

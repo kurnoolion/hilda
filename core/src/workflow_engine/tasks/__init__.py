@@ -11,6 +11,13 @@ etc.); workflow_engine just coordinates the Celery scheduling.
 # Import-time registration: pulling in each tasks/<name>.py triggers the
 # register_task_binding calls at module load. Order doesn't matter -- each
 # binding is independent.
-from core.src.workflow_engine.tasks import escalation, milestone, routing_resolution, state  # noqa: F401
+from core.src.workflow_engine.tasks import (  # noqa: F401
+    escalation,
+    milestone,
+    outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
+    routing_resolution,
+    state,
+    submission,      # added 2026-06-27: ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION
+)
 
-__all__ = ["escalation", "milestone", "routing_resolution", "state"]
+__all__ = ["escalation", "milestone", "outreach", "routing_resolution", "state", "submission"]

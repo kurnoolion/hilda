@@ -320,6 +320,167 @@ class TestRoutingResolutionTasks:
 # ---------------------------------------------------------------------------
 
 
+class _FakeAsyncEmailSender:
+    def __init__(self):
+        self.sent: list[dict] = []
+    async def send(self, to, cc, subject, body, in_reply_to=None):
+        self.sent.append({"to": to, "subject": subject})
+        return "msg-id-test-001"
+
+
+class _FakeAsyncMessenger:
+    def __init__(self, return_value=True):
+        self._rv = return_value
+        self.sent: list[tuple[str, str]] = []
+    async def send(self, owner_corp_id, message):
+        self.sent.append((owner_corp_id, message))
+        return self._rv
+
+
+class _FakeAsyncCustomerAdapter:
+    def __init__(self, success=True):
+        self._success = success
+        self.calls: list[dict] = []
+    async def upload_attachment(self, *, device_id, milestone_name, source_dir,
+                                target_dir, filename, customer_delivery_info):
+        self.calls.append({
+            "device_id": device_id, "milestone_name": milestone_name,
+            "filename": filename, "target_dir": target_dir,
+            "customer_delivery_info": customer_delivery_info,
+        })
+        return SimpleNamespace(success=self._success, error_code=None if self._success else "CAD-E004")
+
+
+class TestOutreachTasks:
+    """SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER -- Ph-1 wire-up."""
+
+    def test_send_initial_outreach_audit_only_when_no_email_sender(self, deps):
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(deps):
+            result = send_initial_outreach_task.apply_async(
+                args=({"template": "std_outreach"},
+                      ctx(owner_corp_usa_email="alice@corp.example"))
+            ).get()
+        assert result["outcome"] == "audit_only"
+        assert result["message_id"] is None
+        logs = [a for a in deps.audit.logs if a[0] == "send_initial_outreach"]
+        assert len(logs) == 1
+        assert logs[0][3]["send_skipped"] is True
+
+    def test_send_initial_outreach_dispatches_when_email_sender_wired(self):
+        email = _FakeAsyncEmailSender()
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            result = send_initial_outreach_task.apply_async(
+                args=({"template": "std_outreach"},
+                      ctx(owner_corp_usa_email="alice@corp.example"))
+            ).get()
+        assert result["outcome"] == "sent"
+        assert result["message_id"] == "msg-id-test-001"
+        assert len(email.sent) == 1
+        assert email.sent[0]["to"] == ["alice@corp.example"]
+
+    def test_send_reminder_includes_count(self):
+        email = _FakeAsyncEmailSender()
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_reminder_task
+        with override_task_deps(d):
+            result = send_reminder_task.apply_async(
+                args=({"reminder_count": 2},
+                      ctx(owner_corp_usa_email="bob@corp.example"))
+            ).get()
+        assert result["outcome"] == "sent"
+        assert result["reminder_count"] == 2
+        assert "#2" in email.sent[0]["subject"]
+
+    def test_notify_new_owner_audit_only_path(self, deps):
+        from core.src.workflow_engine.tasks.outreach import notify_new_owner_task
+        with override_task_deps(deps):
+            result = notify_new_owner_task.apply_async(
+                args=({}, ctx(owner_corp_usa_email="newowner@corp.example"))
+            ).get()
+        assert result["outcome"] == "audit_only"
+        logs = [a for a in deps.audit.logs if a[0] == "notify_new_owner"]
+        assert len(logs) == 1
+
+
+class TestSubmissionTasks:
+    """ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION -- Ph-1 wire-up."""
+
+    def test_escalate_audit_only_when_no_messenger(self, deps):
+        from core.src.workflow_engine.tasks.submission import escalate_task
+        with override_task_deps(deps):
+            result = escalate_task.apply_async(
+                args=({"escalation_reason": "reminder_cadence_exhausted"},
+                      ctx(owner_corp_id="alice"))
+            ).get()
+        assert result["outcome"] == "audit_only"
+        assert result["delivered"] is False
+
+    def test_escalate_dispatches_when_messenger_wired(self):
+        m = _FakeAsyncMessenger(return_value=True)
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            messenger=m,
+        )
+        from core.src.workflow_engine.tasks.submission import escalate_task
+        with override_task_deps(d):
+            result = escalate_task.apply_async(
+                args=({"escalation_reason": "deadline_proximity"},
+                      ctx(owner_corp_id="alice"))
+            ).get()
+        assert result["outcome"] == "delivered"
+        assert m.sent == [("alice", m.sent[0][1])]
+
+    def test_start_item_collection_writes_audit(self, deps):
+        from core.src.workflow_engine.tasks.submission import start_item_collection_task
+        with override_task_deps(deps):
+            result = start_item_collection_task.apply_async(
+                args=({}, ctx())
+            ).get()
+        assert result["outcome"] == "audit_written"
+        assert result["target_state"] == "Outreach Sent"
+        logs = [a for a in deps.audit.logs if a[0] == "start_item_collection"]
+        assert len(logs) == 1
+
+    def test_queue_submission_audit_only_when_no_customer_adapter(self, deps):
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(deps):
+            result = queue_submission_task.apply_async(
+                args=({"source_dir": "/tmp", "filename": "x.pdf",
+                       "target_dir": "Submissions", "customer_delivery_info": "drive.google.com"},
+                      ctx())
+            ).get()
+        assert result["outcome"] == "audit_only"
+        assert result["upload_success"] is False
+
+    def test_queue_submission_uploads_when_customer_adapter_wired(self):
+        ca = _FakeAsyncCustomerAdapter(success=True)
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            customer_adapter=ca,
+        )
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(d):
+            result = queue_submission_task.apply_async(
+                args=({"source_dir": "/tmp", "filename": "x.pdf",
+                       "target_dir": "Submissions",
+                       "customer_delivery_info": "drive.google.com"},
+                      ctx(device_id="MODEL-A", milestone_name="P1"))
+            ).get()
+        assert result["outcome"] == "uploaded"
+        assert result["upload_success"] is True
+        assert len(ca.calls) == 1
+        assert ca.calls[0]["device_id"] == "MODEL-A"
+
+
 class TestEscalationTasks:
     def test_notify_pm_writes_audit_log(self, deps):
         with override_task_deps(deps):
@@ -366,9 +527,20 @@ class TestRegistryIntegration:
         assert ActionKind.NOTIFY_PM in ACTION_KIND_TO_TASK
         assert ActionKind.NOTIFY_HILDA_OPS in ACTION_KIND_TO_TASK
 
-    def test_10_of_18_action_kinds_registered_now(self):
-        # state(2) + milestone(3) + routing_resolution(3) + escalation(2) = 10
-        # The other 8 (SEND_REMINDER, SEND_INITIAL_OUTREACH, NOTIFY_NEW_OWNER,
-        # ESCALATE, TRIGGER_PARSER, TRIGGER_AI_REVIEW, QUEUE_SUBMISSION,
-        # START_ITEM_COLLECTION) await downstream modules.
-        assert len(ACTION_KIND_TO_TASK) == 10
+    def test_16_of_18_action_kinds_registered_now(self):
+        # state(2) + milestone(3) + routing_resolution(3) + escalation(2) +
+        # outreach(3: SEND_INITIAL_OUTREACH, SEND_REMINDER, NOTIFY_NEW_OWNER) +
+        # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) = 16.
+        # Remaining 2 await downstream module integration:
+        # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
+        assert len(ACTION_KIND_TO_TASK) == 16
+
+    def test_outreach_actions_registered(self):
+        assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK
+        assert ActionKind.SEND_REMINDER in ACTION_KIND_TO_TASK
+        assert ActionKind.NOTIFY_NEW_OWNER in ACTION_KIND_TO_TASK
+
+    def test_submission_actions_registered(self):
+        assert ActionKind.ESCALATE in ACTION_KIND_TO_TASK
+        assert ActionKind.START_ITEM_COLLECTION in ACTION_KIND_TO_TASK
+        assert ActionKind.QUEUE_SUBMISSION in ACTION_KIND_TO_TASK
