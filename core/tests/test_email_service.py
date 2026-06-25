@@ -23,14 +23,20 @@ from core.src.email_service import (
     ClassificationResolution,
     EmailKind,
     EmailServiceConfig,
+    EwsConfig,
+    EwsReceiver,
+    EwsSender,
     Fr52AttachmentRouter,
     Fr52Config,
     ImapConfig,
+    ImapReceiver,
     InboundAttachment,
     InboundMessage,
     SmtpConfig,
     SmtpSender,
     SpAlertParser,
+    build_receiver,
+    build_sender,
     classify,
     compose_outreach,
     compose_reminder,
@@ -46,6 +52,8 @@ from core.src.email_service.inbound.body_parser_structured import resolve_sender
 from core.src.email_service.mocks import (
     FakeCredentialService,
     InMemoryStorage,
+    MockEwsReceiver,
+    MockEwsSender,
     MockImapReceiver,
     MockSmtpSender,
 )
@@ -1035,7 +1043,7 @@ class TestErrorCodes:
     def test_all_eml_codes_registered(self):
         expected = {
             "EML-E001", "EML-E002", "EML-E003", "EML-E004", "EML-E005",
-            "EML-E006", "EML-E007",
+            "EML-E006", "EML-E007", "EML-E008", "EML-E009",
             "EML-W001", "EML-W002", "EML-W003", "EML-W004",
             "EML-W005", "EML-W006", "EML-W007",
         }
@@ -1068,6 +1076,281 @@ class TestConfig:
         assert cfg.imap.use_idle is False
         assert cfg.fr52.fuzzy_threshold == pytest.approx(0.9)
         assert cfg.fr52.plm_upload_enabled is False
+
+    def test_ews_defaults(self):
+        """[D-132] EwsConfig defaults sanity."""
+        cfg = EmailServiceConfig()
+        assert cfg.mode == "imap_smtp"
+        assert cfg.ews.service_endpoint == "https://mail.corp.example/EWS/Exchange.asmx"
+        assert cfg.ews.access_type == "DELEGATE"
+        assert cfg.ews.auth_type == "basic"
+        assert cfg.ews.poll_interval_s == 60
+        assert cfg.ews.fetch_limit == 50
+        assert cfg.ews.timeout_s == 120
+        assert cfg.ews.exchange_build_major is None  # auto-detect
+
+    def test_ews_mode_switch(self):
+        """[D-132] EmailServiceConfig.mode discriminator accepts 'ews'."""
+        cfg = EmailServiceConfig(mode="ews")
+        assert cfg.mode == "ews"
+
+    def test_mode_rejects_unknown_value(self):
+        """[D-132] mode is Literal -- pydantic rejects bogus values."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            EmailServiceConfig(mode="pigeon")  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# TestEwsReceiver -- [D-132]
+# ===========================================================================
+
+
+class TestEwsReceiver:
+    """EwsReceiver Protocol conformance + EML-E008/E009 paths.
+
+    Per [D-132] architect Q1-Q4 lock 2026-06-25: coexist with IMAP/SMTP via
+    EmailServiceConfig.mode discriminator; exchangelib library; polling Ph-1;
+    basic auth + service account.
+
+    Tests stub exchangelib via subclass overrides of _fetch_sync / _mark_sync
+    so they pass even when exchangelib is not installed in CI.
+    """
+
+    async def test_protocol_conformance(self):
+        """EwsReceiver satisfies EmailReceiver Protocol."""
+        from core.src.email_service.protocol import EmailReceiver
+        cred = FakeCredentialService()
+        rx = EwsReceiver(EwsConfig(), cred)
+        assert isinstance(rx, EmailReceiver)
+
+    async def test_fetch_once_calls_credential_service(self):
+        """Per NFR-2: per-call credential resolution."""
+        cred = FakeCredentialService()
+
+        class _Stub(EwsReceiver):
+            def _fetch_sync(self, credential):  # type: ignore[override]
+                return []
+
+        rx = _Stub(EwsConfig(), cred)
+        result = await rx.fetch_once()
+        assert result == []
+        assert len(cred.calls) == 1
+        assert cred.calls[0][1] == "email"
+
+    async def test_fetch_once_converts_raw_dict_to_inbound_message(self):
+        """_to_inbound is wire-format-agnostic; uses the same dict shape as IMAP."""
+        cred = FakeCredentialService()
+
+        sample_raw = {
+            "message_id": "<abc123@corp.example>",
+            "sender": "owner@corp.example",
+            "to_addrs": ("hilda-noreply@corp.example",),
+            "cc_addrs": (),
+            "subject": "Re: BATCH-001",
+            "body_text": "OK closing",
+            "body_html": None,
+            "received_at": datetime(2026, 6, 25, 12, 0, 0, tzinfo=timezone.utc),
+            "attachments": [
+                {"filename": "report.pdf", "content": b"PDF-bytes",
+                 "content_type": "application/pdf"},
+            ],
+        }
+
+        class _Stub(EwsReceiver):
+            def _fetch_sync(self, credential):  # type: ignore[override]
+                return [sample_raw]
+
+        rx = _Stub(EwsConfig(), cred)
+        msgs = await rx.fetch_once()
+        assert len(msgs) == 1
+        m = msgs[0]
+        assert m.message_id == "<abc123@corp.example>"
+        assert m.subject == "Re: BATCH-001"
+        assert m.body_text == "OK closing"
+        assert len(m.attachments) == 1
+        att = m.attachments[0]
+        assert att.filename == "report.pdf"
+        assert att.content == b"PDF-bytes"
+        # file_hash auto-computed for D-039 Step 0 dedup
+        assert len(att.file_hash) == 64  # sha256 hex
+
+    async def test_fetch_once_raises_eml_e008_on_cred_failure(self):
+        """Credential service rejection -> EML-E008."""
+        cred = FakeCredentialService(raise_on_lookup=True)
+        rx = EwsReceiver(EwsConfig(), cred)
+        with pytest.raises(PipelineError) as exc_info:
+            await rx.fetch_once()
+        assert exc_info.value.code_id == "EML-E008"
+
+    async def test_fetch_once_raises_eml_e009_on_transport_failure(self):
+        """exchangelib transport exception -> EML-E009."""
+        cred = FakeCredentialService()
+
+        class _Stub(EwsReceiver):
+            def _fetch_sync(self, credential):  # type: ignore[override]
+                raise RuntimeError("EWS connection refused")
+
+        rx = _Stub(EwsConfig(), cred)
+        with pytest.raises(PipelineError) as exc_info:
+            await rx.fetch_once()
+        assert exc_info.value.code_id == "EML-E009"
+
+    async def test_mark_processed_records_message_id(self):
+        """mark_processed invokes _mark_sync via to_thread."""
+        cred = FakeCredentialService()
+        recorded: list[str] = []
+
+        class _Stub(EwsReceiver):
+            def _mark_sync(self, credential, message_id):  # type: ignore[override]
+                recorded.append(message_id)
+
+        rx = _Stub(EwsConfig(), cred)
+        await rx.mark_processed("<msg-1@corp.example>")
+        assert recorded == ["<msg-1@corp.example>"]
+
+    async def test_mark_processed_raises_eml_e009_on_transport_failure(self):
+        cred = FakeCredentialService()
+
+        class _Stub(EwsReceiver):
+            def _mark_sync(self, credential, message_id):  # type: ignore[override]
+                raise RuntimeError("MOVE failed")
+
+        rx = _Stub(EwsConfig(), cred)
+        with pytest.raises(PipelineError) as exc_info:
+            await rx.mark_processed("<msg-1@corp.example>")
+        assert exc_info.value.code_id == "EML-E009"
+
+    async def test_exchangelib_not_installed_raises_eml_e009(self):
+        """Lazy-import failure surfaces as clean EML-E009 (not bare ImportError).
+
+        We exercise the real _fetch_sync; if exchangelib IS installed in the
+        test env, this assertion is skipped (the lazy-import succeeds and we
+        hit a different path -- exercised by the other tests via stubs).
+        """
+        cred = FakeCredentialService()
+        rx = EwsReceiver(EwsConfig(), cred)
+        try:
+            import exchangelib  # noqa: F401
+            pytest.skip("exchangelib is installed; ImportError path covered by stub tests")
+        except ImportError:
+            with pytest.raises(PipelineError) as exc_info:
+                await rx.fetch_once()
+            assert exc_info.value.code_id == "EML-E009"
+
+
+# ===========================================================================
+# TestEwsSender -- [D-132]
+# ===========================================================================
+
+
+class TestEwsSender:
+    async def test_protocol_conformance(self):
+        from core.src.email_service.protocol import EmailSender
+        cred = FakeCredentialService()
+        tx = EwsSender(EwsConfig(), cred)
+        assert isinstance(tx, EmailSender)
+
+    async def test_send_returns_message_id(self):
+        cred = FakeCredentialService()
+        captured: list[tuple] = []
+
+        class _Stub(EwsSender):
+            def _send_sync(self, credential, message_id, to, cc, subject, body, in_reply_to):  # type: ignore[override]
+                captured.append((message_id, tuple(to), tuple(cc), subject, body, in_reply_to))
+
+        tx = _Stub(EwsConfig(), cred)
+        msg_id = await tx.send(
+            to=["owner@corp.example"], cc=["pm@corp.example"],
+            subject="HILDA outreach", body="hello",
+        )
+        assert msg_id.startswith("<") and msg_id.endswith(">")
+        assert len(captured) == 1
+        assert captured[0][0] == msg_id
+        assert captured[0][1] == ("owner@corp.example",)
+        assert captured[0][2] == ("pm@corp.example",)
+        # NFR-2: credential lookup happened exactly once
+        assert len(cred.calls) == 1
+        assert cred.calls[0][1] == "email"
+
+    async def test_send_raises_eml_e008_on_cred_failure(self):
+        cred = FakeCredentialService(raise_on_lookup=True)
+        tx = EwsSender(EwsConfig(), cred)
+        with pytest.raises(PipelineError) as exc_info:
+            await tx.send(to=["a@b"], cc=[], subject="t", body="b")
+        assert exc_info.value.code_id == "EML-E008"
+
+    async def test_send_raises_eml_e009_on_transport_failure(self):
+        cred = FakeCredentialService()
+
+        class _Stub(EwsSender):
+            def _send_sync(self, credential, message_id, to, cc, subject, body, in_reply_to):  # type: ignore[override]
+                raise RuntimeError("EWS auth failed mid-send")
+
+        tx = _Stub(EwsConfig(), cred)
+        with pytest.raises(PipelineError) as exc_info:
+            await tx.send(to=["a@b"], cc=[], subject="t", body="b")
+        assert exc_info.value.code_id == "EML-E009"
+
+
+# ===========================================================================
+# TestAdapterFactory -- [D-132] mode dispatch
+# ===========================================================================
+
+
+class TestAdapterFactory:
+    def test_imap_smtp_mode_builds_imap_smtp(self):
+        cfg = EmailServiceConfig(mode="imap_smtp")
+        cred = FakeCredentialService()
+        rx = build_receiver(cfg, cred)
+        tx = build_sender(cfg, cred)
+        assert isinstance(rx, ImapReceiver)
+        assert isinstance(tx, SmtpSender)
+
+    def test_ews_mode_builds_ews(self):
+        cfg = EmailServiceConfig(mode="ews")
+        cred = FakeCredentialService()
+        rx = build_receiver(cfg, cred)
+        tx = build_sender(cfg, cred)
+        assert isinstance(rx, EwsReceiver)
+        assert isinstance(tx, EwsSender)
+
+    def test_mock_mode_raises_value_error(self):
+        """Mock harness wires Mock* directly; build_receiver/sender shouldn't
+        be called with mode='mock' -- surface mis-wiring early."""
+        cfg = EmailServiceConfig(mode="mock")
+        with pytest.raises(ValueError) as exc_info:
+            build_receiver(cfg, FakeCredentialService())
+        assert "mock" in str(exc_info.value)
+        with pytest.raises(ValueError):
+            build_sender(cfg, FakeCredentialService())
+
+
+# ===========================================================================
+# TestMockEws -- [D-132] mocks shape parity with MockImap/MockSmtp
+# ===========================================================================
+
+
+class TestMockEws:
+    async def test_mock_ews_receiver_satisfies_protocol(self):
+        from core.src.email_service.protocol import EmailReceiver
+        rx = MockEwsReceiver(messages=[])
+        assert isinstance(rx, EmailReceiver)
+
+    async def test_mock_ews_receiver_yields_fixtures(self):
+        msg = _msg(subject="test")
+        rx = MockEwsReceiver(messages=[msg])
+        out = await rx.fetch_once()
+        assert out == [msg]
+
+    async def test_mock_ews_sender_records_outbound(self):
+        from core.src.email_service.protocol import EmailSender
+        tx = MockEwsSender()
+        assert isinstance(tx, EmailSender)
+        msg_id = await tx.send(to=["a@b"], cc=[], subject="hi", body="x")
+        assert msg_id.startswith("<")
+        assert len(tx.sent) == 1
+        assert tx.sent[0]["subject"] == "hi"
 
 
 # ===========================================================================

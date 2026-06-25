@@ -387,6 +387,13 @@ ERROR_CODES: dict[str, ErrorCode] = {
     "EML-E007": ErrorCode(
         "EML-E007", "SP alert subject matched pattern but routing key not resolvable (D-047)", False
     ),
+    # EML-E008/E009 -- EWS adapter per [D-132] 2026-06-25 EWS adapter for corp Exchange.
+    "EML-E008": ErrorCode(
+        "EML-E008", "EWS authentication rejected (credential_service may need refresh)", False
+    ),
+    "EML-E009": ErrorCode(
+        "EML-E009", "EWS transport failure: {reason}", False
+    ),
     "EML-W001": ErrorCode(
         "EML-W001", "Sender mismatch -- sender '{sender_redacted}' is not owner / tg_alias / cc for BATCH-<id> (FR-12; recoverable, surfaced as PM flag)", True
     ),

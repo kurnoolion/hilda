@@ -5,9 +5,11 @@ deleted; messenger module owns escalation composition (see messenger.composer).
 """
 from core.src.email_service.outbound.composer_outreach import compose_outreach
 from core.src.email_service.outbound.composer_reminder import compose_reminder
+from core.src.email_service.outbound.ews_sender import EwsSender
 from core.src.email_service.outbound.sender import SmtpSender, get_template_env
 
 __all__ = [
+    "EwsSender",
     "SmtpSender",
     "compose_outreach",
     "compose_reminder",

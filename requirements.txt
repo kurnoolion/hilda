@@ -21,6 +21,12 @@ requests-ntlm>=1.2,<2
 # Excel parsing — used by template_schema_ingestor and api_spec_ingestor for xl-format inputs
 openpyxl>=3.1,<4
 
+# email_service — EWS adapter per [D-132] for corp Exchange deployments
+# (replaces IMAP/SMTP path; selected at runtime via EmailServiceConfig.mode).
+# Lazy-imported in ews_receiver/ews_sender so non-EWS deployments don't pay
+# the dependency cost; tests stub exchangelib via MockEwsReceiver/Sender.
+exchangelib>=5.2,<6
+
 # storage module — Postgres ORM + migrations + Redis + NSD mount IO
 # (smbprotocol is diagnostic/fallback only — routine NSD IO is the [D-013] host mount)
 sqlalchemy[asyncio]>=2.0,<3

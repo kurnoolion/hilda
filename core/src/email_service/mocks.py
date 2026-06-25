@@ -20,7 +20,9 @@ from core.src.email_service.protocol import (
 
 __all__ = [
     "MockImapReceiver",
+    "MockEwsReceiver",
     "MockSmtpSender",
+    "MockEwsSender",
     "FakeCredentialService",
     "InMemoryStorage",
 ]
@@ -29,6 +31,28 @@ __all__ = [
 @dataclass
 class MockImapReceiver:
     """In-memory EmailReceiver -- returns pre-loaded fixtures."""
+
+    messages: list[InboundMessage] = field(default_factory=list)
+    processed: list[str] = field(default_factory=list)
+
+    async def fetch_new(self) -> AsyncIterator[InboundMessage]:
+        for m in self.messages:
+            yield m
+
+    async def fetch_once(self) -> list[InboundMessage]:
+        return list(self.messages)
+
+    async def mark_processed(self, message_id: str) -> None:
+        self.processed.append(message_id)
+
+
+@dataclass
+class MockEwsReceiver:
+    """In-memory EmailReceiver -- EWS variant. Shape-identical to MockImapReceiver
+    so the [D-132] mode switch is invisible to downstream test paths.
+    Per architect Q1 lock 2026-06-25: ews/imap_smtp/mock modes share the same
+    EmailReceiver Protocol; only the wire path differs.
+    """
 
     messages: list[InboundMessage] = field(default_factory=list)
     processed: list[str] = field(default_factory=list)
@@ -66,6 +90,35 @@ class MockSmtpSender:
         if self.raise_on_send:
             raise RuntimeError("MockSmtpSender configured to raise")
         message_id = f"<{uuid.uuid4()}@mock.local>"
+        self.sent.append({
+            "message_id":  message_id,
+            "to":          list(to),
+            "cc":          list(cc),
+            "subject":     subject,
+            "body":        body,
+            "in_reply_to": in_reply_to,
+        })
+        return message_id
+
+
+@dataclass
+class MockEwsSender:
+    """In-memory EmailSender -- EWS variant. Shape-identical to MockSmtpSender."""
+
+    sent: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_send: bool = False
+
+    async def send(
+        self,
+        to: list[str],
+        cc: list[str],
+        subject: str,
+        body: str,
+        in_reply_to: str | None = None,
+    ) -> str:
+        if self.raise_on_send:
+            raise RuntimeError("MockEwsSender configured to raise")
+        message_id = f"<{uuid.uuid4()}@mock-ews.local>"
         self.sent.append({
             "message_id":  message_id,
             "to":          list(to),

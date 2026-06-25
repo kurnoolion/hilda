@@ -2802,3 +2802,49 @@ Fire-and-forget API: `emit_alert` MUST NOT raise to the caller -- internal failu
 - (h) Phase D3+ migration target per `[D-021]` MicroK8s + Helm chart -- container base image choice carries forward unchanged; Helm just orchestrates the same OCI image.
 
 **Anchors**: `[D-021]` (MicroK8s Ph-3+ target -- base image unchanged), `[D-026]` (Docker Compose 6-container deployment), `[D-027]` (Teacher/Student split for proprietary binding code), `[D-038]` (sops-encrypted credentials -- separate path), `[D-054]` (browser automation per [D-054] impl note 2026-06-05 -- Chromium binary requirement; per `[D-116]` D17 now binding-side concern), `[D-116]` D11-D17 (selenium-backed Google Drive binding via thin wrapper), `[D-129]` (Podman runtime -- this decision applies regardless of Podman/Docker choice; runtime-agnostic), validation logs from corp Linux box (2026-06-25 Selenium sanity test).
+
+---
+
+## D-132: EWS adapter for `email_service` -- corp Exchange wire path with mode discriminator
+
+**Date**: 2026-06-25
+**Status**: Ratified
+
+**Context**: HILDA `email_service` ships an IMAP receiver + SMTP sender pair per `[D-016]` for the mailbox channel. Phase D2 first bring-up on the corp Linux box (`omadm-HP-Z640-Workstation`) confirmed that **corp Exchange has IMAP/SMTP DISABLED at the server**. The only mail wire path available on-prem is **Exchange Web Services (EWS)**. Architect colleague Chaitanya Kamsu provided a validated 216-line `ExchangeMailService` reference using `exchangelib` (`Configuration(credentials, service_endpoint, auth_type='basic', version=Version(Build(15,2)))` + `Account(primary_smtp_address, autodiscover=False, access_type=DELEGATE)` + `account.inbox.filter(Q(...))`). `Build(15, 2)` confirms current corp Exchange Server. Per architect 2026-06-25 lock: `[D-016]` "rejected EWS" rationale (Graph API external surface, NFR-1) does NOT apply to on-prem EWS -- Graph is cloud SaaS; EWS is on-prem SOAP. The two paths must coexist (non-corp + dev + mock deployments stay IMAP/SMTP; corp deployment switches to EWS) without forking the `email_service` Public surface.
+
+**Decision**: Add `EwsReceiver` + `EwsSender` adapter pair conforming to the existing `EmailReceiver` + `EmailSender` Protocol surfaces (no Protocol changes); pick at runtime via `EmailServiceConfig.mode: Literal["imap_smtp", "ews", "mock"]` discriminator with factory functions `build_receiver(cfg, cred)` + `build_sender(cfg, cred)` in `email_service/__init__.py`. Library: `exchangelib>=5.2,<6` lazy-imported inside `_fetch_sync` / `_send_sync`. Authentication: basic-over-TLS with a service account (`autodiscover=False`; explicit `service_endpoint` URL). Inbound mechanism: **polling Ph-1** at `EwsConfig.poll_interval_s` (default 60s); EWS streaming notifications deferred Ph-1 next pass. Attachment write-to-disk does NOT happen at the receiver (in-memory bytes on `InboundAttachment.content`; FR-86 storage matrix is the legitimate landing site).
+
+Per architect Q1-Q4 locks 2026-06-25:
+- **Q1**: coexist (mode discriminator) over replace (drop IMAP/SMTP code)
+- **Q2**: `exchangelib` over raw SOAP / `suds-jurko` (matches Chaitanya proven sample)
+- **Q3**: polling Ph-1 over streaming (lower latency benefit does not justify long-lived TCP + reconnect-retry complexity at this scale; FR-23 deadline-tiered polling cadence already covers Ph-1)
+- **Q4**: basic auth + service account (current Exchange server supports this; OAuth deferred Ph-2)
+
+**Why**:
+- (a) **Corp environment forces EWS** -- IMAP/SMTP unavailable at the server. Not a preference; a constraint.
+- (b) **NFR-1 still honored** -- on-prem EWS is internal SOAP, not external SaaS. `[D-016]` Graph rejection rationale does not extend to EWS.
+- (c) **Mode discriminator preserves flexibility** -- non-corp deployments (mock harness, future cloud / SaaS environments, future non-Samsung customers) keep IMAP/SMTP support. Single email_service module serves multiple deployment archetypes.
+- (d) **Protocol surfaces unchanged** -- `EmailReceiver` + `EmailSender` are wire-format-substitutable. Downstream callers (`workflow_engine` ActionKinds, sp_alert_parser, attachment_router, composers) do not see the swap. Tests for the downstream path keep using `MockImapReceiver`/`MockSmtpSender` regardless of production mode.
+- (e) **exchangelib over raw SOAP** -- Chaitanya corp-validated pattern uses exchangelib; mirroring it avoids re-deriving 5+ years of EWS-quirk handling. Library has explicit Build/Version helpers + correct DELEGATE semantics + native attachment + filter Q-object support. Raw SOAP would be 3x the line count + harder to maintain.
+- (f) **Polling over streaming Ph-1** -- streaming notifications (`exchangelib.SyncFolderItems`) give sub-second latency but require long-lived TCP + retry handling on connection drops + SOAP fault recovery. Polling at 60s is sufficient for HILDA owner-reply turn-around (most replies expected hours/days). Streaming is a Ph-1 next pass enhancement when latency justifies the complexity.
+- (g) **Basic auth + service account Ph-1** -- Exchange Server supports basic auth; service account in `customizations/credentials/email.sops.yaml` per `[D-038]`. OAuth deferred Ph-2 because (i) basic works today, (ii) OAuth setup requires Exchange admin coordination for the service account app registration, (iii) Chaitanya pattern is basic -- match the validated approach.
+- (h) **Lazy import** -- `exchangelib` is a heavy dependency (transitively depends on `lxml`, `dnspython`, `tzdata`, `cached_property`, `oauthlib`); non-EWS deployments should not pay the install + import cost. Wrapped in `try: from exchangelib import ...` inside `_fetch_sync` + `_send_sync`; raises `EML-E009` on missing dependency.
+- (i) **No `@retry` decorator on `_send_sync`** -- `workflow_engine` ActionKinds are the source of truth for retries per `[D-022]`. Double-layered retry (decorator + workflow_engine retry policy) is anti-pattern: retries multiply, audit ambiguity, observability fog.
+- (j) **`EwsConfig.fetch_limit` bounds query size** -- `account.inbox.filter(...)[:N]` slice caps each poll exchangelib query (default 50). Prevents pathological backlog drain.
+
+**Consequences**:
+- (a) New file `core/src/email_service/inbound/ews_receiver.py` (~280 lines): `EwsReceiver` class + `_fetch_sync` + `_mark_sync` + `_to_inbound`.
+- (b) New file `core/src/email_service/outbound/ews_sender.py` (~140 lines): `EwsSender` class + `_send_sync`.
+- (c) `core/src/email_service/config.py` adds `EmailMode` Literal type + `EwsConfig` Pydantic model + `EmailServiceConfig.mode` field (default `"imap_smtp"` for backward compat) + `EmailServiceConfig.ews` sub-config.
+- (d) `core/src/email_service/__init__.py` adds factory functions `build_receiver(cfg, cred)` + `build_sender(cfg, cred)` that dispatch on `cfg.mode`. `mode == "mock"` raises `ValueError` to surface mis-wiring early (mock harness wires `MockImapReceiver` / `MockSmtpSender` directly).
+- (e) `core/src/email_service/mocks.py` adds `MockEwsReceiver` + `MockEwsSender` for shape-parity testing (same Protocol surface; in-memory fixtures).
+- (f) `requirements.txt` adds `exchangelib>=5.2,<6`.
+- (g) New error codes `EML-E008` (EWS auth rejected) + `EML-E009` (EWS transport failure) registered in `core/src/diagnostics/error_codes.py`.
+- (h) Tests: `core/tests/test_email_service.py` gains `TestEwsReceiver` (8 tests) + `TestEwsSender` (4 tests) + `TestAdapterFactory` (3 tests) + `TestMockEws` (3 tests) + 3 new `TestConfig` cases (ews defaults + mode switch + invalid-mode rejection). Total +20 tests; suite goes from 798 -> 818.
+- (i) `core/src/email_service/MODULE.md` Sub-modules tree + Key choices (`[D-016]` partially superseded) + Error codes section updated; status header notes the 2026-06-25 evening EWS landing.
+- (j) Phase D2 deployment env (`config/email_service.json` on corp Linux box) can now flip `"mode": "ews"` + populate `EwsConfig.service_endpoint` + `primary_smtp_address` once IT provisions the EWS service account / shared mailbox (carry-forward in STATUS Flag).
+- (k) Streaming notifications + OAuth + multi-tenant Exchange Online deferred Ph-1 next pass / Ph-2 (one-line entries in `email_service/MODULE.md` Deferred section).
+- (l) `[D-016]` Key choices entry marked PARTIALLY SUPERSEDED for corp Exchange path (IMAP/SMTP retained for non-corp + dev + mock; mode picks at runtime).
+- (m) No SP UI changes; no FR additions; no downstream module changes (workflow_engine + sp_alert_parser + attachment_router + composers all consume the Protocol surface unchanged).
+
+**Anchors**: `[D-016]` (IMAP/SMTP partially superseded), `[D-022]` (workflow_engine retry source-of-truth), `[D-025]` (3-tier config + hot-reload), `[D-038]` (sops-encrypted credentials), `[D-107]` (credential_service scope-aware; EMAIL stays SHARED), Chaitanya Kamsu `ExchangeMailService` reference (validated against current corp Exchange Server), NFR-1 (no SaaS LLM / external surface; on-prem EWS honors), NFR-2 (no credential material in logs; per-call credential resolution), FR-9 / FR-10 / FR-12 / FR-23 / FR-24 (mailbox channel callers; Protocol-substitutable), `core/src/email_service/MODULE.md` Key choices, commits from 2026-06-25 evening Phase D2 + EWS landing session.

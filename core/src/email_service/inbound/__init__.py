@@ -5,11 +5,13 @@ from core.src.email_service.inbound.body_parser_freetext import (
 )
 from core.src.email_service.inbound.body_parser_structured import parse_structured_block
 from core.src.email_service.inbound.classifier import classify
+from core.src.email_service.inbound.ews_receiver import EwsReceiver
 from core.src.email_service.inbound.receiver import ImapReceiver
 from core.src.email_service.inbound.subject_parser import parse_subject
 from core.src.email_service.inbound.tg_resolver import resolve_tg_from_email
 
 __all__ = [
+    "EwsReceiver",
     "Fr52AttachmentRouter",
     "ImapReceiver",
     "classify",
