@@ -1,0 +1,56 @@
+# =====================================================================================
+# deploy/Dockerfile.hilda-api -- HILDA's FastAPI app (dashboard backend)
+# =====================================================================================
+#
+# Per [D-026] 6-container architecture: hilda-api serves the dashboard HTTP surface
+# (FR-56/57/58/60/61/87 routes) + FR-61 mediated download endpoint. Reads from NSD
+# bind-mount; talks to postgres + redis on internal compose network.
+#
+# Base: Debian bookworm per [D-130] (Ubuntu 24.04 chromium-browser is snap-stub).
+# Although hilda-api doesn't use Chromium directly, we standardize all HILDA containers
+# on the same base for consistency + easy maintenance.
+# =====================================================================================
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System deps:
+# - ca-certificates: HTTPS verification (corp SP, corp PLM, etc.)
+# - curl: healthchecks
+# - libpq5: psycopg2 runtime dep (Postgres client)
+# - tini: PID 1 signal handling (uvicorn graceful shutdown)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl libpq5 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (cacheable layer)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir psycopg[binary] asyncpg
+
+# Copy HILDA code
+COPY core /app/core
+COPY customizations /app/customizations
+COPY config /app/config
+
+# Non-root user per [D-129] security model + Podman rootless model
+RUN useradd -r -u 10001 -m -d /home/hilda hilda && chown -R hilda:hilda /app
+USER hilda
+
+EXPOSE 8443
+
+# tini = PID 1; reaps zombies + propagates SIGTERM for graceful uvicorn shutdown
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+CMD ["uvicorn", "core.src.dashboard.app:build_app", \
+     "--factory", \
+     "--host", "0.0.0.0", \
+     "--port", "8443", \
+     "--workers", "2", \
+     "--access-log"]

@@ -1,0 +1,201 @@
+# =====================================================================================
+# deploy/docker-compose.yml -- HILDA Ph-1 6-container stack per [D-026]
+# =====================================================================================
+#
+# 4 HILDA containers + postgres + redis = 6 total.
+# Runtime: Podman 4.x with podman-compose 1.x per [D-129] (Docker fallback if corp
+# firewall policy changes; compose syntax v3.x is runtime-interchangeable).
+#
+# Bring-up order (managed via depends_on healthchecks):
+#   postgres (db ready) → redis (broker ready) → hilda-llm-gateway →
+#   → hilda-beat (loads schedule from db) → hilda-worker → hilda-api
+#
+# All HILDA containers bind-mount customizations/ + config/ from host per [D-025]
+# 3-tier config + hot-reload pattern. Real .env file with corp values lives LOCALLY
+# per [D-125] Point 3 (this compose file references env-var names ONLY -- never
+# committed real values).
+#
+# Usage on Linux deployment box:
+#   1. Copy deploy/.env.example -> deploy/.env and fill real values LOCALLY
+#   2. Decrypt sops bundles per deploy/sops_decrypt.sh
+#   3. podman-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+#   4. podman-compose ps to verify; podman-compose logs -f hilda-worker to tail
+# =====================================================================================
+
+version: "3.9"
+
+# ---- Volumes per [D-013] + [D-041] ----
+volumes:
+  postgres_data:                      # Postgres ORM persistence + Celery result backend
+  redis_data:                         # Redis AOF persistence (Celery broker)
+  beat_schedule:                      # celery-beat schedule.db survives restarts
+  nsd_internal:                       # NSD internal/ tree (production = bind to host mount)
+
+
+# ---- Networks ----
+networks:
+  hilda-internal:                     # All HILDA containers + DB + broker
+    driver: bridge
+
+
+# ---- Services ----
+services:
+
+  # -------------------------------------------------------------------------------
+  # postgres -- HILDA's primary persistent store per storage/MODULE.md
+  # -------------------------------------------------------------------------------
+  postgres:
+    image: docker.io/library/postgres:15-alpine
+    container_name: hilda-postgres
+    restart: unless-stopped
+    networks: [hilda-internal]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hilda}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required_in_env}
+      POSTGRES_DB: ${POSTGRES_DB:-hilda}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hilda}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # No external port exposure -- DB is internal-network only.
+
+  # -------------------------------------------------------------------------------
+  # redis -- Celery broker per [D-022] (cache-only Ph-3+ per [D-043])
+  # -------------------------------------------------------------------------------
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: hilda-redis
+    restart: unless-stopped
+    networks: [hilda-internal]
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # -------------------------------------------------------------------------------
+  # hilda-llm-gateway -- on-prem LLM backend per [D-007] + [D-052] tri-backend
+  # -------------------------------------------------------------------------------
+  hilda-llm-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hilda-llm-gateway
+    container_name: hilda-llm-gateway
+    restart: unless-stopped
+    networks: [hilda-internal]
+    environment:
+      LLM_BACKEND: ${LLM_BACKEND:-mock}
+      LLM_MODEL_PATH: ${LLM_MODEL_PATH:-/var/lib/hilda/models}
+    volumes:
+      - ../config:/app/config:ro,Z
+      # Production: bind-mount LLM model files from host
+      # - /var/lib/hilda/models:/var/lib/hilda/models:ro,Z
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # -------------------------------------------------------------------------------
+  # hilda-api -- FastAPI dashboard backend per dashboard/MODULE.md
+  # -------------------------------------------------------------------------------
+  hilda-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hilda-api
+    container_name: hilda-api
+    restart: unless-stopped
+    networks: [hilda-internal]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      HILDA_DB_URL:       postgresql+asyncpg://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
+      HILDA_REDIS_URL:    redis://redis:6379/0
+      HILDA_NSD_ROOT:     /mnt/nsd
+      HILDA_LLM_GATEWAY:  http://hilda-llm-gateway:8080
+      # Dashboard binding
+      HILDA_DASHBOARD_BIND_HOST: 0.0.0.0
+      HILDA_DASHBOARD_BIND_PORT: "8443"
+      HILDA_DASHBOARD_REVERSE_PROXY_ORIGIN: ${REVERSE_PROXY_ORIGIN:-https://hilda-proxy.corp.example}
+    ports:
+      # Reverse-proxy PC fronts this; only expose to localhost on the Linux box
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - ../config:/app/config:ro,Z
+      - ../customizations:/app/customizations:ro,Z
+      - nsd_internal:/mnt/nsd:rw,Z
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "http://localhost:8443/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # -------------------------------------------------------------------------------
+  # hilda-beat -- Celery beat singleton per workflow_engine/MODULE.md
+  # -------------------------------------------------------------------------------
+  hilda-beat:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hilda-beat
+    container_name: hilda-beat
+    restart: unless-stopped
+    networks: [hilda-internal]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      HILDA_DB_URL:    postgresql+asyncpg://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
+      HILDA_REDIS_URL: redis://redis:6379/0
+      HILDA_WFE_BROKER_URL: redis://redis:6379/0
+    volumes:
+      - ../config:/app/config:ro,Z
+      - ../customizations:/app/customizations:ro,Z
+      - beat_schedule:/var/lib/hilda/beat:rw,Z
+
+  # -------------------------------------------------------------------------------
+  # hilda-worker -- Celery worker per workflow_engine/MODULE.md (the big one)
+  # -------------------------------------------------------------------------------
+  # Scale by adding multiple instances with different --queues filters; below is
+  # the single default-queue baseline. Production may run 3 instances:
+  #   hilda-worker-default  (queues=default, concurrency=4)
+  #   hilda-worker-llm      (queues=llm,     concurrency=2)
+  #   hilda-worker-browser  (queues=browser, concurrency=1; Chromium-heavy)
+  # -------------------------------------------------------------------------------
+  hilda-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.hilda-worker
+    container_name: hilda-worker
+    restart: unless-stopped
+    networks: [hilda-internal]
+    depends_on:
+      postgres:           { condition: service_healthy }
+      redis:              { condition: service_healthy }
+      hilda-llm-gateway:  { condition: service_healthy }
+    environment:
+      HILDA_DB_URL:               postgresql+asyncpg://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
+      HILDA_REDIS_URL:            redis://redis:6379/0
+      HILDA_WFE_BROKER_URL:       redis://redis:6379/0
+      HILDA_WFE_RESULT_BACKEND_URL: db+postgresql://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
+      HILDA_NSD_ROOT:             /mnt/nsd
+      HILDA_LLM_GATEWAY:          http://hilda-llm-gateway:8080
+      # Selenium / customer_adapter Chromium config per [D-130]:
+      HILDA_CAD_CHROMIUM_PATH:    /usr/lib/chromium/chromium
+      # IMAP / SMTP (real values via .env per [D-125] Point 3)
+      HILDA_EMAIL_IMAP_HOST:      ${EMAIL_IMAP_HOST:-imap.example}
+      HILDA_EMAIL_SMTP_HOST:      ${EMAIL_SMTP_HOST:-smtp.example}
+      # SharePoint
+      HILDA_SP_SITE_URL:          ${SP_SITE_URL:-https://sp2017.corp.example/sites/hilda}
+    volumes:
+      - ../config:/app/config:ro,Z
+      - ../customizations:/app/customizations:ro,Z
+      - nsd_internal:/mnt/nsd:rw,Z
+      # Production: bind-mount the actual NSD host SMB mount per [D-013]:
+      # - /mnt/nsd:/mnt/nsd:rw,Z,bind-propagation=rslave

@@ -22,3 +22,21 @@ CLAUDE.md
 
 # COMPACT per-clone session binding (do not commit)
 .compact/
+
+# =====================================================================================
+# Deployment LOCAL files per [D-125] Point 3 + [D-129] + [D-130] (2026-06-25)
+# =====================================================================================
+# Real .env with corp values stays LOCAL on architect's Linux deployment box.
+# Only .env.example (sanitized template) is committed to public github.
+deploy/.env
+deploy/.env.local
+deploy/.env.production
+
+# Tier 2 config/*.json production overrides per [D-025] -- sanitized samples
+# stay tracked; production variants are LOCAL.
+config/*.production.json
+config/*.local.json
+
+# Decrypted sops bundles tmpfs (per deploy/sops_decrypt.sh; never committed)
+*.sops.decrypted.yaml
+*.sops.decrypted.json

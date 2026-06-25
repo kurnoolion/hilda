@@ -1,0 +1,70 @@
+# =====================================================================================
+# deploy/Dockerfile.hilda-worker -- HILDA's Celery worker (the big one)
+# =====================================================================================
+#
+# Per [D-026] 6-container architecture: hilda-worker runs Celery worker process
+# executing all 16/18 ActionKinds wired today (state / milestone / routing_resolution
+# / escalation / outreach / submission task groups), plus FR-23 mailbox polling,
+# FR-26 corp PLM polling, FR-52 attachment routing pipeline, customer_adapter
+# Selenium-driven Drive uploads, etc.
+#
+# Base: Debian bookworm per [D-130] -- ships REAL .deb Chromium (Ubuntu 24.04's
+# chromium-browser is snap-only stub that fails in containers).
+#
+# Chromium binary path per [D-130]: /usr/lib/chromium/chromium (the 273MB ELF
+# binary; NOT /usr/bin/chromium which is a 5KB wrapper script).
+# =====================================================================================
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Selenium / Chromium runtime knobs per D-130 validated config:
+    CHROMIUM_PATH=/usr/lib/chromium/chromium \
+    CHROMIUM_FLAGS="--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage"
+
+# System deps:
+# - chromium + chromium-driver: customer_adapter Selenium binding per [D-116]
+# - cifs-utils: SMB/CIFS support for NSD mount per [D-013] (host-mount preferred;
+#               cifs-utils kept as diagnostic / fallback only per requirements.txt)
+# - ca-certificates: HTTPS verification
+# - curl: healthchecks + diagnostic
+# - libpq5 + libpq-dev: psycopg2 Postgres client
+# - fonts-liberation: Chromium font rendering for headless mode
+# - tini: PID 1 signal handling
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium chromium-driver \
+    cifs-utils ca-certificates curl libpq5 fonts-liberation tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+        psycopg[binary] asyncpg \
+        celery[redis]>=5.3 \
+        selenium>=4.15 \
+        pyotp \
+        sops
+
+COPY core /app/core
+COPY customizations /app/customizations
+COPY config /app/config
+
+# Non-root user per [D-129] rootless model
+RUN useradd -r -u 10001 -m -d /home/hilda hilda && chown -R hilda:hilda /app
+USER hilda
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Default Celery worker -- queue list configurable via env / docker-compose override.
+# Concurrency tuned per [D-026] worker shape:
+#   default=4, llm=2, browser=1 (set per-instance via -Q + --concurrency overrides).
+CMD ["celery", "-A", "core.src.workflow_engine.celery_app:hilda_celery_app", \
+     "worker", \
+     "--loglevel=INFO", \
+     "--concurrency=4", \
+     "--queues=default"]

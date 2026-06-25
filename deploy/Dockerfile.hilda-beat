@@ -1,0 +1,48 @@
+# =====================================================================================
+# deploy/Dockerfile.hilda-beat -- Celery beat singleton (HILDA's scheduler)
+# =====================================================================================
+#
+# Per [D-026] 6-container architecture: hilda-beat is the singleton Celery beat
+# process that fires deadline-tiered polling schedules per FR-23/FR-26/FR-55 and
+# rule-engine timer-triggered actions per FR-28. Reads polling_schedule rules from
+# automation_rules.yaml via rule_engine.RuleSet at startup.
+#
+# Small container -- no Chromium needed (beat dispatches tasks to worker queues;
+# never runs task bodies itself). Still on Debian for consistency per [D-130].
+# =====================================================================================
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libpq5 tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+        psycopg[binary] asyncpg \
+        celery[redis]>=5.3
+
+COPY core /app/core
+COPY customizations /app/customizations
+COPY config /app/config
+
+# Non-root + Podman rootless per [D-129]
+RUN useradd -r -u 10001 -m -d /home/hilda hilda && chown -R hilda:hilda /app
+USER hilda
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Beat schedule persisted to bind-mounted volume to survive container restarts
+# (compose mounts /var/lib/hilda/beat to a named volume).
+CMD ["celery", "-A", "core.src.workflow_engine.celery_app:hilda_celery_app", \
+     "beat", \
+     "--loglevel=INFO", \
+     "--schedule=/var/lib/hilda/beat/celerybeat-schedule.db"]

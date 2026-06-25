@@ -1,0 +1,56 @@
+# =====================================================================================
+# deploy/Dockerfile.hilda-llm-gateway -- LLM proxy container (Ph-1 stub; full Ph-1 next pass)
+# =====================================================================================
+#
+# Per [D-026] 6-container architecture: hilda-llm-gateway hosts the on-prem LLM
+# backend per [D-007] (all LLM runtime on-prem; corp doesn't allow cloud LLM).
+# Tri-backend per [D-052]: vllm / llama.cpp / ollama -- backend selection via
+# config/llm.json + env var per [D-025].
+#
+# Ph-1 status: stub container -- runs a placeholder HTTP server that returns mock
+# LLM responses. Real backend integration lands in Ph-1 NEXT pass per llm/MODULE.md
+# (CLASSIFY_DOC_TYPE + CLASSIFY_MESSAGE + REVIEW_DOCUMENT TaskKinds; ROUTE_ATTACHMENT
+# is Ph-1 first pass per llm Ph-1 phasing lock 2026-06-21).
+#
+# Base: Debian bookworm per [D-130] (LLM serving typically needs CUDA drivers, but
+# Ph-1 dev defaults to CPU-only stub; production GPU build follows in Ph-1 next pass).
+# =====================================================================================
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Stub backend defaults; production overrides via env or config/llm.json
+    LLM_BACKEND=mock \
+    LLM_MODEL_PATH=/var/lib/hilda/models
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir uvicorn[standard]
+
+COPY core /app/core
+COPY customizations /app/customizations
+COPY config /app/config
+
+# Non-root + Podman rootless per [D-129]
+RUN useradd -r -u 10001 -m -d /home/hilda hilda && chown -R hilda:hilda /app
+USER hilda
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Ph-1 stub: serves MockLLM responses on :8080 for testing the LLM dispatch path.
+# Real backend (vllm / llama.cpp / ollama) wires in Ph-1 NEXT pass per llm/MODULE.md.
+CMD ["python", "-m", "core.src.llm.gateway_server", \
+     "--host", "0.0.0.0", \
+     "--port", "8080", \
+     "--backend", "mock"]
