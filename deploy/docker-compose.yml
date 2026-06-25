@@ -82,25 +82,33 @@ services:
   # -------------------------------------------------------------------------------
   # hilda-llm-gateway -- on-prem LLM backend per [D-007] + [D-052] tri-backend
   # -------------------------------------------------------------------------------
-  hilda-llm-gateway:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.hilda-llm-gateway
-    container_name: hilda-llm-gateway
-    restart: unless-stopped
-    networks: [hilda-internal]
-    environment:
-      LLM_BACKEND: ${LLM_BACKEND:-mock}
-      LLM_MODEL_PATH: ${LLM_MODEL_PATH:-/var/lib/hilda/models}
-    volumes:
-      - ../config:/app/config:ro,Z
-      # Production: bind-mount LLM model files from host
-      # - /var/lib/hilda/models:/var/lib/hilda/models:ro,Z
-    healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+  # DISABLED Ph-1 first deploy 2026-06-25: core/src/llm/gateway_server.py Ph-1 stub
+  # not yet implemented; container was in restart loop on corp Linux box. Re-enable
+  # once llm/gateway_server.py stub lands in Ph-1 next pass. The HILDA_LLM_GATEWAY
+  # env vars in hilda-api + hilda-worker still point to http://hilda-llm-gateway:8080
+  # which will fail to resolve at runtime -- BUT no Ph-1 code path actually calls
+  # the LLM gateway (CLASSIFY_DOC_TYPE + ROUTE_ATTACHMENT TaskKinds deferred Ph-1
+  # next pass per architect 2026-06-22 lock; runtime-dormant in Ph-1 early drop).
+  #
+  # hilda-llm-gateway:
+  #   build:
+  #     context: ..
+  #     dockerfile: deploy/Dockerfile.hilda-llm-gateway
+  #   container_name: hilda-llm-gateway
+  #   restart: unless-stopped
+  #   networks: [hilda-internal]
+  #   environment:
+  #     LLM_BACKEND: ${LLM_BACKEND:-mock}
+  #     LLM_MODEL_PATH: ${LLM_MODEL_PATH:-/var/lib/hilda/models}
+  #   volumes:
+  #     - ../config:/app/config:ro,Z
+  #     # Production: bind-mount LLM model files from host
+  #     # - /var/lib/hilda/models:/var/lib/hilda/models:ro,Z
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-fs", "http://localhost:8080/healthz"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
 
   # -------------------------------------------------------------------------------
   # hilda-api -- FastAPI dashboard backend per dashboard/MODULE.md
@@ -178,7 +186,8 @@ services:
     depends_on:
       postgres:           { condition: service_healthy }
       redis:              { condition: service_healthy }
-      hilda-llm-gateway:  { condition: service_healthy }
+      # hilda-llm-gateway DISABLED Ph-1 first deploy (see service block above)
+      # hilda-llm-gateway:  { condition: service_healthy }
     environment:
       HILDA_DB_URL:               postgresql+asyncpg://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
       HILDA_REDIS_URL:            redis://redis:6379/0
