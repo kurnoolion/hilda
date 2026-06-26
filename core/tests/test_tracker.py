@@ -53,6 +53,28 @@ class MockStorage:
     def get_delivery_item(self, id):
         return self.items[id]
 
+    def create_delivery_item(self, item):
+        """[D-118] strict-boundary: import a Deliverable from SP ADDED alert
+        into HILDA local storage. Added 2026-06-26."""
+        # Synthesize a delivery_item_id from composite key per [D-091]
+        item_id = getattr(item, "delivery_item_id", None) or (
+            f"{getattr(item, 'customer_id', '?')}-"
+            f"{getattr(item, 'device_id', '?')}-"
+            f"{getattr(item, 'milestone_id', '?')}-"
+            f"{getattr(item, 'item_no', '?')}"
+        )
+        if item_id in self.items:
+            raise ValueError(f"delivery_item already exists: {item_id}")
+        # Allow duck-typed SimpleNamespace OR DeliveryItemBase
+        if not hasattr(item, "delivery_item_id"):
+            try:
+                item.delivery_item_id = item_id  # type: ignore[attr-defined]
+            except (AttributeError, TypeError):
+                pass
+        self.items[item_id] = item
+        self.writes.append(("create", item_id, None))
+        return item_id
+
     def write_delivery_state(self, delivery_item_id, new_state, modified_at, modified_by):
         self.items[delivery_item_id].delivery_state = new_state
         self.writes.append(("state", delivery_item_id, new_state.value))

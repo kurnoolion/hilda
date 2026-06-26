@@ -33,6 +33,28 @@ class StorageWriter(Protocol):
 
     def get_delivery_item(self, delivery_item_id: str) -> DeliveryItemBase: ...
 
+    def create_delivery_item(
+        self,
+        item: DeliveryItemBase,
+    ) -> str:
+        """Create a new DeliveryItem row from SP-imported state.
+
+        Added 2026-06-26 per [D-118] strict-boundary cascade: SP UI engineer
+        owns ALL SP row creation; HILDA imports the Deliverable into local
+        storage when the SP ADDED alert arrives. Caller (import_deliverable_
+        tracker task) is responsible for idempotency check via
+        find_items_by_natural_key before calling create.
+
+        Returns the delivery_item_id (composite-key-derived) of the newly
+        created row.
+
+        Implementation MUST raise on unique-constraint violation
+        (customer_id + device_id + milestone_id + item_no) -- callers expect
+        ValueError or similar; tracker.import_deliverable_tracker handles
+        the race condition by catching + treating as "already exists".
+        """
+        ...
+
     def write_delivery_state(
         self,
         delivery_item_id: str,
