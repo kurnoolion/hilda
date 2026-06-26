@@ -149,7 +149,7 @@ services:
       # at HOST $HILDA_AGE_KEY_DIR (set in deploy/.env LOCAL only) lands at
       # /etc/hilda/age-key/keys.txt where SOPS_AGE_KEY_FILE points.
       - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
-      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
+      - ${HILDA_AGE_KEY_DIR}:/etc/hilda/age-key:ro,Z
     healthcheck:
       test: ["CMD", "curl", "-fsk", "http://localhost:8443/healthz"]
       interval: 30s
@@ -179,7 +179,7 @@ services:
       - ../customizations:/app/customizations:ro,Z
       - beat_schedule:/var/lib/hilda/beat:rw,Z
       - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
-      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
+      - ${HILDA_AGE_KEY_DIR}:/etc/hilda/age-key:ro,Z
 
   # -------------------------------------------------------------------------------
   # hilda-worker -- Celery worker per workflow_engine/MODULE.md (the big one)
@@ -222,6 +222,6 @@ services:
       - ../customizations:/app/customizations:ro,Z
       - nsd_internal:/mnt/nsd:rw,Z
       - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
-      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
+      - ${HILDA_AGE_KEY_DIR}:/etc/hilda/age-key:ro,Z
       # Production: bind-mount the actual NSD host SMB mount per [D-013]:
       # - /mnt/nsd:/mnt/nsd:rw,Z,bind-propagation=rslave
