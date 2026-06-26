@@ -539,8 +539,61 @@ class TestSpAlertParser:
         assert exc_info.value.code_id == "EML-E007"
 
     def test_routing_key_extractor_handles_aliases(self):
-        body = "project_id: P1\nMinorMilestone: P2\nitem_no: 7\n"
-        assert extract_routing_key(body) == ("P1", "P2", 7)
+        # Refactored 2026-06-26: extractor now consumes body_kvs dict (pre-parsed
+        # by SpAlertParser._parse_body) instead of a raw body string. This
+        # eliminates regex divergence between body parser + routing-key parser
+        # that caused 32-key Deliverable bodies to drop project_id.
+        body_kvs = {"project_id": "P1", "MinorMilestone": "P2", "item_no": "7"}
+        assert extract_routing_key(body_kvs) == ("P1", "P2", 7)
+
+    def test_routing_key_extractor_empty_input(self):
+        assert extract_routing_key({}) == (None, None, None)
+
+    def test_routing_key_extractor_empty_string_values_treated_as_absent(self):
+        # Architect Q3 2026-06-27: SP encodes "no value" as empty string on
+        # optional fields. Extractor should NOT treat "" as a valid project_id.
+        body_kvs = {"project_id": "", "milestone_name": "P1", "item_no": "3"}
+        assert extract_routing_key(body_kvs) == (None, "P1", 3)
+
+    def test_routing_key_extractor_32_key_deliverable_body(self):
+        # Regression for the corp Linux box smoke-test finding 2026-06-26:
+        # 32-key Deliverable body. extract_routing_key must pull project_id
+        # cleanly via dict lookup (the prior regex-based impl missed it).
+        body_kvs = {
+            "Title": "Power Management Test Plan",
+            "milestone_name": "P1",
+            "milestone_id": "199",
+            "item_no": "5",
+            "milestone_gating": "Yes",
+            "item_type": "test_tech_waiver_report",
+            "delivery_state": "Not Started",
+            "item_completion_pct": "0",
+            "review_required": "No",
+            "owner_name": "",
+            "owner_corp_usa_email": "",
+            "owner_corp_email": "",
+            "owner_corp_id": "",
+            "tracking_modality": "Email",
+            "no_customer_upload": "No",
+            "force_tracking_enabled": "Yes",
+            "tg_name": "MNO-ETM",
+            "tg_email_group_alias": "",
+            "tg_owner_name": "",
+            "tg_owner_corp_usa_email": "",
+            "tg_owner_corp_id": "",
+            "email_cc_list": "",
+            "project_id": "2350",
+            "project_model": "SM-S671U1",
+            "item_description": '[["Power"]]',
+            "customer_delivery_modality": "GoogleDrive",
+            "customer_delivery_info": "drive.google.com",
+            "doc_count": "0",
+            "review_status": "Pending",
+            "ingress_nsd": "None",
+            "folder_routing_enabled": "No",
+            "sort_order": "1",
+        }
+        assert extract_routing_key(body_kvs) == ("2350", "P1", 5)
 
     # FR-87 handler tests REMOVED 2026-06-26 per [D-122] cascade
     # (FR-87 step A/B handlers removed from sp_alert_parser; flow now via

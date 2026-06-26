@@ -298,8 +298,12 @@ class SpAlertParser:
                     list_name, title, msg.message_id,
                 )
 
-        # -- Routing key extraction from body --
-        project_id, milestone_name, item_number = extract_routing_key(body)
+        # -- Routing key extraction from already-parsed body_kvs --
+        # Refactored 2026-06-26: extractor now consumes body_kvs (the dict
+        # _parse_body already produced) instead of re-parsing body with a
+        # second regex. Eliminates a real bug surfaced on 32-key Deliverable
+        # bodies where the secondary MULTILINE regex missed project_id.
+        project_id, milestone_name, item_number = extract_routing_key(body_kvs)
 
         # -- For Milestones: Title IS the milestone_name --
         if list_name == "Milestones" and milestone_name is None:

@@ -3,62 +3,67 @@
 Body carries key:value pairs identifying the changed entity. Routing key
 shape: (project_id, milestone_name, item_number). Used by parser.py to
 resolve to a SP list + row.
+
+Refactored 2026-06-26 to consume the already-parsed `body_kvs` dict from
+SpAlertParser._parse_body() rather than re-parsing the raw body with a
+separate (subtly different) MULTILINE regex. Surfaced during corp Linux
+box Phase D2 smoke test: 32-key Deliverable body had `project_id: 2350`
+which the body parser correctly extracted into body_kvs but the
+routing_key extractor's MULTILINE regex missed -- leading to None where
+"2350" was expected. Consuming the same dict eliminates the divergence.
 """
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from typing import Iterable, Mapping
 
 __all__ = ["extract_routing_key"]
 
 
-_KV_LINE_RE = re.compile(
-    r"^\s*(?P<key>[A-Za-z][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>.+?)\s*$",
-    re.MULTILINE,
-)
+# Field-name aliases per architect-confirmed corp SP body shapes. All lookups
+# are case-insensitive (body parser preserves case; we normalize at lookup).
+_PROJECT_KEYS: tuple[str, ...] = ("project_id", "projectid")
+_MILESTONE_KEYS: tuple[str, ...] = ("milestone_name", "minormilestone", "milestone")
+_ITEM_KEYS: tuple[str, ...] = ("item_no", "itemnumber", "itemno", "item_number")
 
 
-@dataclass(frozen=True)
-class _RoutingKey:
-    project_id: str | None
-    milestone_name: str | None
-    item_number: int | None
+def _first_nonempty(lower_kvs: Mapping[str, str], aliases: Iterable[str]) -> str | None:
+    """Return the first non-empty value found among the alias list."""
+    for k in aliases:
+        v = lower_kvs.get(k)
+        if v:                # treat empty string as absent
+            return v
+    return None
 
 
 def extract_routing_key(
-    body: str,
+    body_kvs: Mapping[str, str],
 ) -> tuple[str | None, str | None, int | None]:
-    """Extract (project_id, milestone_name, item_number) from a SP alert body.
+    """Extract (project_id, milestone_name, item_number) from a parsed body_kvs dict.
 
     Field aliases accepted (case-insensitive):
-      - project_id    : ProjectID, project_id, Project_ID
-      - milestone     : MinorMilestone, Milestone, milestone_name
-      - item_number   : ItemNumber, item_no, ItemNo
+      - project_id    : project_id, ProjectID, Project_ID
+      - milestone     : milestone_name, MinorMilestone, Milestone
+      - item_number   : item_no, ItemNumber, ItemNo, item_number
 
-    Returns (None, None, None) if the body has no key:value lines at all.
+    Returns (None, None, None) if body_kvs is empty or has no matching keys.
+    Empty-string values are treated as absent (SP encodes "no value" as the
+    empty string on optional fields per architect Q3 2026-06-27 body shape).
     """
-    if not body:
+    if not body_kvs:
         return (None, None, None)
 
-    project_id: str | None = None
-    milestone_name: str | None = None
+    # Case-insensitive lookup -- normalize keys once.
+    lower_kvs = {k.lower(): v for k, v in body_kvs.items()}
+
+    project_id = _first_nonempty(lower_kvs, _PROJECT_KEYS)
+    milestone_name = _first_nonempty(lower_kvs, _MILESTONE_KEYS)
+
     item_number: int | None = None
-
-    project_keys = {"projectid", "project_id"}
-    milestone_keys = {"minormilestone", "milestone", "milestone_name"}
-    item_keys = {"itemnumber", "item_no", "itemno", "item_number"}
-
-    for m in _KV_LINE_RE.finditer(body):
-        key = m.group("key").strip().lower()
-        value = m.group("value").strip()
-        if key in project_keys and project_id is None:
-            project_id = value
-        elif key in milestone_keys and milestone_name is None:
-            milestone_name = value
-        elif key in item_keys and item_number is None:
-            try:
-                item_number = int(value)
-            except (TypeError, ValueError):
-                item_number = None
+    item_raw = _first_nonempty(lower_kvs, _ITEM_KEYS)
+    if item_raw is not None:
+        try:
+            item_number = int(item_raw)
+        except (TypeError, ValueError):
+            item_number = None
 
     return (project_id, milestone_name, item_number)
