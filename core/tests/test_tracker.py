@@ -514,26 +514,32 @@ class TestDefaultWorkitem:
         storage, sp, audit = writers
         instantiate_default_workitem("M-1", "MMK", "MODEL-A", storage, sp, audit,
                                      event_context=ctx())
+        # Per [D-118] Chunk 5: SP UI engineer owns SP row creation; HILDA
+        # only writes the local tracker. sp.writes should be empty for
+        # creates (no sp_writer.create_item call).
         creates = [w for w in sp.writes if w[0] == "create"]
-        assert len(creates) == 1
-        fields = creates[0][3]
-        assert fields["item_type"] == "Default"
-        assert fields["tg_name"] == "_unrouted"
-        assert fields["tg_path_id"] == "_unrouted"
-        assert fields["item_path_id"] is None
-        assert fields["item_no"] == 0
-        assert fields["delivery_state"] == "Open"
-        assert fields["no_customer_upload"] is True
-        assert fields["force_tracking_enabled"] is False
-        assert fields["milestone_gating"] is True
-        assert fields["review_required"] is False
-        assert fields["doc_count"] == 0
-        assert fields["ingress_nsd"] == "None"
-        assert fields["owner_corp_id"] is None
-        assert fields["owner_corp_usa_email"] is None
-        assert fields["customer_id"] == "MMK"
-        assert fields["device_id"] == "MODEL-A"
-        assert fields["milestone_id"] == "M-1"
+        assert creates == []
+        # Storage now carries the row with HILDA-synthesized composite-key id.
+        expected_id = "MMK-MODEL-A-M-1-default"
+        assert expected_id in storage.items
+        item = storage.items[expected_id]
+        assert item.item_type == "Default"
+        assert item.tg_name == "_unrouted"
+        assert item.tg_path_id == "_unrouted"
+        assert item.item_path_id is None
+        assert item.item_no == 0
+        assert item.delivery_state == "Open"
+        assert item.no_customer_upload is True
+        assert item.force_tracking_enabled is False
+        assert item.milestone_gating is True
+        assert item.review_required is False
+        assert item.doc_count == 0
+        assert item.ingress_nsd == "None"
+        assert item.owner_corp_id is None
+        assert item.owner_corp_usa_email is None
+        assert item.customer_id == "MMK"
+        assert item.device_id == "MODEL-A"
+        assert item.milestone_id == "M-1"
 
     def test_idempotent_when_already_exists(self, writers):
         storage, sp, audit = writers

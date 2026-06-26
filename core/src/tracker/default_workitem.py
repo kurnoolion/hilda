@@ -80,8 +80,17 @@ def instantiate_default_workitem(
     returns the existing row without creating a new one (audit-logs
     TRK-W004 informational). Otherwise creates a new row with the FR-78
     hardcoded inventory + identity fields (customer_id / device_id /
-    milestone_id), writes via storage + sp_writer, audit-logs the
-    creation event.
+    milestone_id), writes via storage only, audit-logs the creation event.
+
+    Per [D-118] strict-boundary cascade 2026-06-26: HILDA no longer writes
+    Default WI row to SP. SP UI engineer owns ALL SP row creation; the
+    Default WI row is created in SP via the "Setup Deliverables" button,
+    then imported into HILDA storage via import_deliverable_tracker_task
+    when the SP ADDED alert arrives. This local-only path remains for the
+    direct-invocation case (e.g., tests, dev-mode setup) but does not
+    write to SP. The sp_writer parameter is retained for signature
+    stability but is not called from this function -- callers may pass
+    None safely.
 
     Returns the resulting DeliveryItem (newly-created or pre-existing).
     """
@@ -121,24 +130,23 @@ def instantiate_default_workitem(
         "modified_by":    modified_by,
     }
 
-    # SP-side row creation (per [D-064] -- HILDA-managed default WI is the
-    # one row-creation case where HILDA writes; setup_milestone owns all
-    # other row creation per [D-083] R&R lock).
-    sp_item_id = sp_writer.create_item(
-        entity="delivery_items",
-        scope=event_context.get("sp_scope"),
-        canonical_fields=canonical_fields,
-    )
+    # SP-side row creation REMOVED 2026-06-26 per [D-118] strict-boundary
+    # cascade Chunk 5 -- SP UI engineer creates the Default WI row in SP via
+    # "Setup Deliverables" button. HILDA only creates the local tracker
+    # below; when SP ADDED alert arrives, import_deliverable_tracker_task
+    # is the canonical row-creation path. (Direct-call path here -- e.g.
+    # tests, dev-mode setup -- still creates local tracker without SP.)
+    delivery_item_id = f"{customer_id}-{device_id}-{milestone_id}-default"
 
-    # Storage-side row creation -- mirror the SP write into HILDA Postgres for
-    # state-machine + lifecycle bookkeeping. (Concrete storage impl maps
-    # canonical_fields onto its DeliveryItem model.)
-    canonical_fields["delivery_item_id"] = sp_item_id
-    storage.update_delivery_item(sp_item_id, canonical_fields)
+    # Storage-side row creation -- write HILDA Postgres for state-machine +
+    # lifecycle bookkeeping. (Concrete storage impl maps canonical_fields
+    # onto its DeliveryItem model.)
+    canonical_fields["delivery_item_id"] = delivery_item_id
+    storage.update_delivery_item(delivery_item_id, canonical_fields)
 
     audit.write_communication_log(
         action_type="default_workitem_instantiated",
-        delivery_item_id=sp_item_id,
+        delivery_item_id=delivery_item_id,
         attribution={
             "trigger_source": event_context.get("trigger_source", "automated"),
             "correlation_id": correlation_id,
@@ -152,6 +160,5 @@ def instantiate_default_workitem(
         },
     )
 
-    # Return the just-created item. Concrete StorageWriter impls re-read
-    # the row to populate audit timestamps + sp-side defaults.
-    return storage.get_delivery_item(sp_item_id)
+    # Return the just-created item.
+    return storage.get_delivery_item(delivery_item_id)

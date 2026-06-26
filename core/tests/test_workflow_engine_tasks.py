@@ -230,8 +230,11 @@ class TestStateTasks:
             ).get()
         assert result["outcome"] == "instantiated"
         assert result["milestone_id"] == "M-1"
+        # Per [D-118] Chunk 5: HILDA no longer writes Default WI to SP.
+        # sp_writer should have zero "create" entries; storage carries the
+        # local tracker with HILDA-synthesized composite-key id.
         creates = [w for w in deps.sp_writer.writes if w[0] == "create"]
-        assert len(creates) == 1
+        assert creates == []
 
 
 # ---------------------------------------------------------------------------
