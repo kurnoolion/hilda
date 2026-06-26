@@ -293,13 +293,150 @@ def kickoff_collection_task(
     Triggered by Milestones CHANGED alert with field_deltas containing
     milestone_collection_started_at (per architect direction 2026-06-26).
 
-    Chunk 4 stub: raises NotImplementedError. Real body lands in Chunk 4.
+    params: (none consumed)
+
+    event_context: dispatcher-built dict carrying:
+      - customer_id, milestone_id: from EntityRef
+      - correlation_id: for tracing through the downstream chain
+
+    Filters trackers per FR-8 + send_initial_outreach_on_collection_start
+    rule conditions:
+      - force_tracking_enabled == True
+      - item_type != "Confirmation"   (per FR-58)
+
+    For each matching tracker, dispatches a fresh ItemCreated TriggerEvent
+    via deps.dispatcher.dispatch(...). The dispatcher then runs rule_engine
+    evaluation -> if rule matches, schedules SEND_INITIAL_OUTREACH +
+    UPDATE_STATE actions per the rule's action list.
+
+    Outcomes returned via dict:
+      - "skipped_no_dispatcher" -- deps.dispatcher is None (worker not wired)
+      - "skipped_no_storage"    -- storage method missing (smoke test path)
+      - "fired"                 -- N ItemCreated events dispatched (returns count)
     """
-    raise NotImplementedError(
-        "kickoff_collection_task body is a Chunk 2 stub; "
-        "real implementation lands in Chunk 4 of [D-118] cascade per "
-        "STATUS.md 2026-06-26 PM EVENING Flag item (b)."
+    deps = get_task_deps()
+
+    if deps.dispatcher is None:
+        logger.warning(
+            "kickoff_collection_skip_no_dispatcher: customer_id=%s milestone_id=%s",
+            event_context.get("customer_id"),
+            event_context.get("milestone_id"),
+        )
+        return {"outcome": "skipped_no_dispatcher", "events_fired": 0}
+
+    customer_id = event_context.get("customer_id")
+    milestone_id = event_context.get("milestone_id")
+    if not customer_id or not milestone_id:
+        logger.warning(
+            "kickoff_collection_skip_missing_identity: customer_id=%r milestone_id=%r",
+            customer_id, milestone_id,
+        )
+        return {"outcome": "skipped_missing_identity", "events_fired": 0}
+
+    # Storage method per FR-78 + STATUS.md 2026-06-23 D7 cascade. Duck-typed
+    # lookup avoids hard Protocol declaration (existing MockStorage already has
+    # this method; concrete storage impl will too).
+    list_method = getattr(deps.storage, "list_items_for_milestone", None)
+    if list_method is None:
+        logger.warning("kickoff_collection_skip_no_storage_method")
+        return {"outcome": "skipped_no_storage", "events_fired": 0}
+
+    # Read all trackers for the milestone (states=None -> all states).
+    items = list_method(milestone_id, None) or []
+    if not items:
+        logger.info(
+            "kickoff_collection_empty_milestone: customer_id=%s milestone_id=%s",
+            customer_id, milestone_id,
+        )
+        return {"outcome": "fired", "events_fired": 0, "items_scanned": 0}
+
+    # Filter for outreach-eligible items per FR-8 + rule conditions:
+    #   force_tracking_enabled == True AND item_type != "Confirmation"
+    # (FR-58 explicitly skips Confirmation items from outreach.)
+    eligible = [
+        item for item in items
+        if getattr(item, "force_tracking_enabled", False) is True
+        and getattr(item, "item_type", "") != "Confirmation"
+    ]
+
+    if not eligible:
+        logger.info(
+            "kickoff_collection_no_eligible_items: customer_id=%s milestone_id=%s "
+            "items_scanned=%d",
+            customer_id, milestone_id, len(items),
+        )
+        return {
+            "outcome": "fired",
+            "events_fired": 0,
+            "items_scanned": len(items),
+            "items_eligible": 0,
+        }
+
+    # -- Dispatch one ItemCreated event per eligible tracker --
+    # Lazy-import to avoid circular dep (rule_engine imports workflow_engine in
+    # some flows; lazy keeps task-body import clean).
+    from core.src.rule_engine import EntityRef, TriggerEvent, TriggerKind
+    import uuid as _uuid
+
+    events_fired = 0
+    correlation_id = event_context.get("correlation_id", str(_uuid.uuid4()))
+
+    for item in eligible:
+        item_id = getattr(item, "item_id", None) or getattr(
+            item, "delivery_item_id", None
+        )
+        device_id = getattr(item, "device_id", None)
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_CREATED,
+            sub_trigger=None,
+            entity_ref=EntityRef(
+                customer_id=customer_id,
+                device_id=device_id,
+                milestone_id=milestone_id,
+                delivery_item_id=item_id,
+            ),
+            field_deltas=None,
+            timestamp=datetime.now(timezone.utc),
+            correlation_id=correlation_id,
+            derived_fields={
+                "kickoff_source": "kickoff_collection_task",
+                "item_no":         getattr(item, "item_no", None),
+                "item_type":       getattr(item, "item_type", None),
+                "tg_name":         getattr(item, "tg_name", None),
+                "owner_corp_email": getattr(item, "owner_corp_email", None),
+            },
+        )
+        deps.dispatcher.dispatch(event)
+        events_fired += 1
+
+    # -- Audit log the kickoff --
+    deps.audit.write_communication_log(
+        action_type="collection_kickoff_dispatched",
+        delivery_item_id=None,
+        attribution={
+            "correlation_id": correlation_id,
+            "trigger_source": "milestone_collection_started",
+        },
+        details={
+            "customer_id": customer_id,
+            "milestone_id": milestone_id,
+            "events_fired": str(events_fired),
+            "items_scanned": str(len(items)),
+            "items_eligible": str(len(eligible)),
+        },
     )
+
+    logger.info(
+        "kickoff_collection_fired: customer_id=%s milestone_id=%s "
+        "items_scanned=%d eligible=%d events_fired=%d",
+        customer_id, milestone_id, len(items), len(eligible), events_fired,
+    )
+    return {
+        "outcome":        "fired",
+        "events_fired":   events_fired,
+        "items_scanned":  len(items),
+        "items_eligible": len(eligible),
+    }
 
 
 register_task_binding(TaskBinding(

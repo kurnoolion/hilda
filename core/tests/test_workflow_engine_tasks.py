@@ -746,3 +746,148 @@ class TestImportDeliverableTracker:
         assert item.review_required is False
         assert item.milestone_gating is True
         assert item.delivery_state == "Not Started"
+
+
+# ===========================================================================
+# TestKickoffCollection -- [D-118] Chunk 4
+# ===========================================================================
+
+
+class MockDispatcher:
+    """Minimal TriggerDispatcher impl for kickoff_collection tests. Records all
+    dispatched TriggerEvents for assertion."""
+
+    def __init__(self):
+        self.dispatched = []
+
+    def dispatch(self, event):
+        self.dispatched.append(event)
+
+
+def _mk_kickoff_event_context(
+    *,
+    customer_id: str = "MMK",
+    milestone_id: str = "P1",
+) -> dict:
+    return {
+        "correlation_id": "kickoff-correlation-id",
+        "customer_id":    customer_id,
+        "milestone_id":   milestone_id,
+        "device_id":      None,
+        "delivery_item_id": None,
+        "trigger":        "ItemModified",
+        "sub_trigger":    "changed",
+        "timestamp":      "2026-06-27T11:00:00+00:00",
+        "derived_fields": {
+            "action_type": "changed",
+            "list_name":   "Milestones",
+            "item_title":  "P1",
+            "body_kvs":    {"milestone_collection_started_at": "2026-06-27T10:00Z"},
+            "routing_key": {"milestone_name": milestone_id, "list_suffix": customer_id},
+        },
+    }
+
+
+def _mk_tracker(item_no, item_type, force_tracking_enabled=True, **kw):
+    """Build a SimpleNamespace tracker matching the shape kickoff_collection
+    expects to read from storage."""
+    base = dict(
+        item_id=f"MMK-SM-S671U1-P1-{item_no}",
+        delivery_item_id=f"MMK-SM-S671U1-P1-{item_no}",
+        item_no=item_no,
+        item_type=item_type,
+        force_tracking_enabled=force_tracking_enabled,
+        tg_name=kw.pop("tg_name", "MNO-ETM"),
+        device_id=kw.pop("device_id", "SM-S671U1"),
+        owner_corp_email=kw.pop("owner_corp_email", "owner@corp.example"),
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+class TestKickoffCollection:
+    """[D-118] Chunk 4: kickoff_collection_task body."""
+
+    def test_happy_path_fires_events_for_eligible_items(self, deps):
+        """6 trackers (1 Confirmation, 1 force_tracking=False, 4 eligible) ->
+        4 ItemCreated events dispatched."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+
+        trackers = [
+            _mk_tracker(1, "Confirmation", force_tracking_enabled=True),   # excluded -- Confirmation per FR-58
+            _mk_tracker(2, "compliance_certification_release_notes", force_tracking_enabled=True),
+            _mk_tracker(5, "test_tech_waiver_report", force_tracking_enabled=True),
+            _mk_tracker(7, "test_tech_waiver_report", force_tracking_enabled=True),
+            _mk_tracker(8, "test_tech_waiver_report", force_tracking_enabled=False),  # excluded -- force_tracking=False
+            _mk_tracker(11, "Default", force_tracking_enabled=False),      # excluded -- Default WI per FR-78
+        ]
+        deps.storage.list_items_response = trackers
+        deps_with_dispatcher = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            dispatcher=MockDispatcher(),
+        )
+
+        with override_task_deps(deps_with_dispatcher):
+            ctx = _mk_kickoff_event_context()
+            result = kickoff_collection_task({}, ctx)
+
+        assert result["outcome"] == "fired"
+        assert result["events_fired"] == 3       # items 2, 5, 7
+        assert result["items_scanned"] == 6
+        assert result["items_eligible"] == 3
+        # Verify dispatched events:
+        dispatched = deps_with_dispatcher.dispatcher.dispatched
+        assert len(dispatched) == 3
+        for event in dispatched:
+            assert event.trigger.value == "ItemCreated"
+            assert event.entity_ref.customer_id == "MMK"
+            assert event.entity_ref.milestone_id == "P1"
+
+    def test_empty_milestone_fires_zero_events(self, deps):
+        """No trackers in storage -> 0 events fired, outcome still 'fired'."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+        deps.storage.list_items_response = []
+        deps_with_dispatcher = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            dispatcher=MockDispatcher(),
+        )
+        with override_task_deps(deps_with_dispatcher):
+            result = kickoff_collection_task({}, _mk_kickoff_event_context())
+        assert result["outcome"] == "fired"
+        assert result["events_fired"] == 0
+        assert result["items_scanned"] == 0
+
+    def test_all_confirmation_fires_zero_events(self, deps):
+        """All trackers are Confirmation -> 0 events fired (all filtered per FR-58)."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+        deps.storage.list_items_response = [
+            _mk_tracker(1, "Confirmation"),
+            _mk_tracker(2, "Confirmation"),
+        ]
+        deps_with_dispatcher = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            dispatcher=MockDispatcher(),
+        )
+        with override_task_deps(deps_with_dispatcher):
+            result = kickoff_collection_task({}, _mk_kickoff_event_context())
+        assert result["outcome"] == "fired"
+        assert result["events_fired"] == 0
+        assert result["items_scanned"] == 2
+        assert result["items_eligible"] == 0
+
+    def test_skips_when_dispatcher_missing(self, deps):
+        """deps.dispatcher is None (worker not wired) -> skipped outcome."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+        # deps.dispatcher is None by default
+        with override_task_deps(deps):
+            result = kickoff_collection_task({}, _mk_kickoff_event_context())
+        assert result["outcome"] == "skipped_no_dispatcher"
+        assert result["events_fired"] == 0

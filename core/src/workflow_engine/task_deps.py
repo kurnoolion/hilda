@@ -48,6 +48,13 @@ class TaskDeps:
     messenger:       Any = None        # MessengerAdapter or MessengerService (messenger)
     customer_adapter: Any = None       # CustomerAdapter protocol (customer_adapter)
 
+    # Dispatcher reference for tasks that fire fresh TriggerEvents (added
+    # 2026-06-27 per [D-118] Chunk 4 -- kickoff_collection_task emits one
+    # ItemCreated event per matching tracker, dispatched via the same
+    # workflow_engine.TriggerDispatcher that sp_alert_parser uses). None in
+    # production unless wired at worker startup; tests inject MockDispatcher.
+    dispatcher:      Any = None        # TriggerDispatcher (workflow_engine)
+
 
 _deps: TaskDeps | None = None
 
