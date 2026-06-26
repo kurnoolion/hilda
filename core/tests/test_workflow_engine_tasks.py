@@ -547,13 +547,23 @@ class TestRegistryIntegration:
         assert ActionKind.NOTIFY_PM in ACTION_KIND_TO_TASK
         assert ActionKind.NOTIFY_HILDA_OPS in ACTION_KIND_TO_TASK
 
-    def test_16_of_18_action_kinds_registered_now(self):
+    def test_sp_alert_imports_actions_registered(self):
+        # [D-118] strict-boundary cascade added 2026-06-26:
+        # IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION.
+        # Bodies are stubs in Chunk 2 (registry slot reserved); real impls
+        # land in Chunks 3 + 4.
+        assert ActionKind.IMPORT_DELIVERABLE_TRACKER in ACTION_KIND_TO_TASK
+        assert ActionKind.KICKOFF_COLLECTION in ACTION_KIND_TO_TASK
+
+    def test_18_of_20_action_kinds_registered_now(self):
         # state(2) + milestone(3) + routing_resolution(3) + escalation(2) +
         # outreach(3: SEND_INITIAL_OUTREACH, SEND_REMINDER, NOTIFY_NEW_OWNER) +
-        # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) = 16.
+        # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) +
+        # sp_alert_imports(2: IMPORT_DELIVERABLE_TRACKER, KICKOFF_COLLECTION
+        #                  added 2026-06-26 per [D-118] cascade) = 18.
         # Remaining 2 await downstream module integration:
         # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
-        assert len(ACTION_KIND_TO_TASK) == 16
+        assert len(ACTION_KIND_TO_TASK) == 18
 
     def test_outreach_actions_registered(self):
         assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK

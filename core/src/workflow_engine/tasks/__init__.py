@@ -16,8 +16,17 @@ from core.src.workflow_engine.tasks import (  # noqa: F401
     milestone,
     outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
     routing_resolution,
+    sp_alert_imports,  # added 2026-06-26: IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION per [D-118] cascade
     state,
     submission,      # added 2026-06-27: ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION
 )
 
-__all__ = ["escalation", "milestone", "outreach", "routing_resolution", "state", "submission"]
+__all__ = [
+    "escalation",
+    "milestone",
+    "outreach",
+    "routing_resolution",
+    "sp_alert_imports",
+    "state",
+    "submission",
+]

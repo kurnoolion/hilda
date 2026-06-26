@@ -76,6 +76,11 @@ class ActionKind(str, Enum):
     REASSIGN_DOCUMENT_TO_WORK_ITEM = "ReassignDocumentToWorkItem"
     PROPAGATE_TAGS_TO_ACTIVE_TRACKERS = "PropagateTagsToActiveTrackers"
     REARM_DEADLINE_PROXIMITY = "RearmDeadlineProximity"  # internal re-arm on DeadlineMoved sub-trigger
+    # [D-118] strict-boundary cascade added 2026-06-26: SP UI engineer owns
+    # all SP row creation; HILDA reacts to ADDED alerts (import) + Start
+    # Collection click (kickoff) via these two ActionKinds.
+    IMPORT_DELIVERABLE_TRACKER = "ImportDeliverableTracker"
+    KICKOFF_COLLECTION = "KickoffCollection"
 
 
 class RuleKind(str, Enum):
