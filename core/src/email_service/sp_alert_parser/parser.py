@@ -34,6 +34,7 @@ item_snapshot when applicable) via workflow_engine.TriggerDispatcher.dispatch(..
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import uuid
@@ -131,11 +132,18 @@ _EDITED_SUFFIX_RE = re.compile(r"\s+Edited\s*$", re.IGNORECASE)
 _LEADING_DASH_RE = re.compile(r"^-\s+")
 
 
-class _MessageIdDedup:
-    """LRU-with-TTL Message-ID dedup per architect 2026-06-27.
+class _LruTtlSet:
+    """Generic LRU-with-TTL set used by SpAlertParser's two-layer dedup.
 
-    Bounded size: 1024. TTL: 10 minutes from first-seen. Thread-unsafe
-    (callers are async + single-threaded per Celery worker).
+    Sized + ttl-bounded; thread-unsafe (callers are async + single-threaded per
+    Celery worker). Used twice in SpAlertParser:
+      1. Message-ID dedup (catches SP server retries with preserved Message-ID,
+         original D-128 dedup per architect 2026-06-27)
+      2. Content-hash dedup (catches SP firing duplicate alerts with different
+         Message-IDs but identical payload, added 2026-06-26 after corp Linux
+         box smoke test surfaced the case: two `Milestones - P1` adds arrived
+         within the same second with different Message-IDs but byte-identical
+         routing_key + action_type + body_kvs)
     """
 
     def __init__(self, max_size: int = 1024, ttl: timedelta = timedelta(minutes=10)) -> None:
@@ -143,7 +151,7 @@ class _MessageIdDedup:
         self._ttl = ttl
         self._seen: OrderedDict[str, datetime] = OrderedDict()
 
-    def is_duplicate(self, message_id: str, now: datetime) -> bool:
+    def is_duplicate(self, key: str, now: datetime) -> bool:
         # Evict TTL-expired entries lazily.
         cutoff = now - self._ttl
         while self._seen:
@@ -152,13 +160,51 @@ class _MessageIdDedup:
                 self._seen.popitem(last=False)
             else:
                 break
-        if message_id in self._seen:
+        if key in self._seen:
             return True
-        self._seen[message_id] = now
+        self._seen[key] = now
         # Enforce size cap.
         while len(self._seen) > self._max:
             self._seen.popitem(last=False)
         return False
+
+
+# Backward-compat alias -- existing external imports of _MessageIdDedup
+# (none in-tree at write time, but defensive) keep working.
+_MessageIdDedup = _LruTtlSet
+
+
+def _compute_content_hash(
+    list_name: str,
+    list_suffix: str,
+    action_type: str | None,
+    project_id: str | None,
+    milestone_name: str | None,
+    item_number: int | None,
+    body_kvs: dict[str, str],
+) -> str:
+    """Compute a stable SHA256 over the canonical content of an SP alert.
+
+    Used by SpAlertParser's content-hash dedup pass per architect 2026-06-26
+    smoke-test finding (corp SP fires 2 alert emails with DIFFERENT Message-IDs
+    but identical content for the same logical event).
+
+    Canonical form: pipe-separated routing-key fields + sorted body_kvs. SHA256
+    yields 64-char hex. Stable across Python runs (no salt; deterministic
+    iteration via sorted()).
+    """
+    parts = [
+        list_name,
+        list_suffix,
+        action_type or "",
+        project_id or "",
+        milestone_name or "",
+        "" if item_number is None else str(item_number),
+    ]
+    for k in sorted(body_kvs.keys()):
+        parts.append(f"{k}={body_kvs[k]}")
+    canonical = "|".join(parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class SpAlertParser:
@@ -178,7 +224,13 @@ class SpAlertParser:
     ) -> None:
         self._storage = storage
         self._dispatcher = trigger_dispatcher
-        self._dedup = _MessageIdDedup(max_size=dedup_max_size, ttl=dedup_ttl)
+        # Two-layer dedup per architect 2026-06-26 corp-Linux-box smoke test
+        # finding: SP fires duplicate alerts with different Message-IDs but
+        # identical payload. _id_dedup catches server retries (same Message-ID);
+        # _content_dedup catches duplicate sends (different Message-IDs, same
+        # routing_key + action_type + body_kvs).
+        self._id_dedup = _LruTtlSet(max_size=dedup_max_size, ttl=dedup_ttl)
+        self._content_dedup = _LruTtlSet(max_size=dedup_max_size, ttl=dedup_ttl)
 
     # ------------------------------------------------------------------
     # Parsing
@@ -195,11 +247,11 @@ class SpAlertParser:
         Raises EML-E007 when subject matched in-scope list but no routing key
         could be extracted from body (data quality issue worth surfacing).
         """
-        # -- Dedup (per architect 2026-06-27) --
+        # -- Layer-1 dedup: Message-ID (catches SP server retries) --
         now = datetime.now(timezone.utc)
-        if msg.message_id and self._dedup.is_duplicate(msg.message_id, now):
+        if msg.message_id and self._id_dedup.is_duplicate(msg.message_id, now):
             logger.info(
-                "sp_alert_duplicate: message_id=%s; dropped per architect 2026-06-27",
+                "sp_alert_duplicate_message_id: message_id=%s; dropped per architect 2026-06-27",
                 msg.message_id,
             )
             return None
@@ -266,6 +318,28 @@ class SpAlertParser:
             logger.info(
                 "sp_alert_no_change: list=%s title=%s; dropped per architect 2026-06-27",
                 list_name, title,
+            )
+            return None
+
+        # -- Layer-2 dedup: content-hash (catches duplicate SP sends with
+        #    different Message-IDs but identical payload). Surfaced 2026-06-26
+        #    corp Linux box smoke test -- SP emitted 2 `Milestones - P1` alerts
+        #    same second, different Message-IDs, byte-identical body. Layer-1
+        #    Message-ID dedup can't catch this; content-hash can.
+        content_hash = _compute_content_hash(
+            list_name=list_name,
+            list_suffix=list_suffix,
+            action_type=action_type,
+            project_id=project_id,
+            milestone_name=milestone_name,
+            item_number=item_number,
+            body_kvs=body_kvs,
+        )
+        if self._content_dedup.is_duplicate(content_hash, now):
+            logger.info(
+                "sp_alert_duplicate_content: list=%s title=%s content_hash=%s; "
+                "dropped (SP duplicate-send with different Message-IDs)",
+                list_name, title, content_hash[:16],
             )
             return None
 

@@ -836,22 +836,47 @@ class TestSpAlertParserRegression:
         assert first is not None
         assert second is None       # duplicate dropped
 
-    def test_dedup_does_not_drop_different_message_ids(self):
+    def test_dedup_does_not_drop_different_content_different_message_ids(self):
+        """Two genuinely-different alerts (different content + different Message-IDs)
+        both pass dedup."""
         msg1 = _msg(
             subject="Deliverables_MMK - Device Readiness Review",
             body=_DELIVERABLE_ADD_BODY,
             message_id="<nondup-001@samsung.com>",
         )
+        # Different milestone_id in body -> routing_key differs -> different content-hash
         msg2 = _msg(
-            subject="Deliverables_MMK - Device Readiness Review",
-            body=_DELIVERABLE_ADD_BODY,
-            message_id="<nondup-002@samsung.com>",  # different id
+            subject="Deliverables_MMK - Compliance Certification Release Notes",
+            body=_DELIVERABLE_ADD_BODY.replace("milestone_id: 181", "milestone_id: 999"),
+            message_id="<nondup-002@samsung.com>",
         )
         parser = SpAlertParser(storage=_make_fake_sp_storage())
         first = parser.parse(msg1)
         second = parser.parse(msg2)
         assert first is not None
         assert second is not None
+
+    def test_dedup_drops_duplicate_content_different_message_ids(self):
+        """Layer-2 content-hash dedup added 2026-06-26 per architect smoke-test
+        finding: real corp SP fires duplicate alert emails with DIFFERENT
+        Message-IDs but identical payload (same routing_key + action_type +
+        body_kvs). Layer-1 Message-ID dedup can't catch this -- content-hash
+        dedup must."""
+        msg1 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<dup-content-001@samsung.com>",
+        )
+        msg2 = _msg(
+            subject="Deliverables_MMK - Device Readiness Review",
+            body=_DELIVERABLE_ADD_BODY,
+            message_id="<dup-content-002@samsung.com>",  # different id, SAME content
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        first = parser.parse(msg1)
+        second = parser.parse(msg2)
+        assert first is not None
+        assert second is None  # caught by content-hash dedup
 
     # -- "Changed" alert with no Edited markers -> silent drop per architect 2026-06-27 --
     def test_change_with_empty_field_deltas_dropped(self):
