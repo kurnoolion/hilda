@@ -97,6 +97,11 @@ class TriggerDispatcher:
             "trigger":          event.trigger.value,
             "sub_trigger":      event.sub_trigger,
             "timestamp":        event.timestamp.isoformat() if event.timestamp else None,
+            # derived_fields passed through 2026-06-27 per [D-118] Chunk 3 -- task
+            # bodies can consult caller-supplied facts (e.g. sp_alert_parser puts
+            # body_kvs + routing_key here for import_deliverable_tracker_task).
+            # None when event has no derived_fields (most internal events).
+            "derived_fields":   dict(event.derived_fields) if event.derived_fields else None,
         }
 
     def dispatch(self, event: TriggerEvent) -> DispatchResult:

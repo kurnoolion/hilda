@@ -574,3 +574,175 @@ class TestRegistryIntegration:
         assert ActionKind.ESCALATE in ACTION_KIND_TO_TASK
         assert ActionKind.START_ITEM_COLLECTION in ACTION_KIND_TO_TASK
         assert ActionKind.QUEUE_SUBMISSION in ACTION_KIND_TO_TASK
+
+
+# ===========================================================================
+# TestImportDeliverableTracker -- [D-118] Chunk 3
+# ===========================================================================
+
+
+def _mk_import_event_context(
+    *,
+    sub_trigger: str = "added",
+    customer_id: str = "MMK",
+    milestone_id: str = "P1",
+    body_kvs: dict | None = None,
+    item_title: str = "Device Readiness Review",
+) -> dict:
+    """Build event_context shape that sp_alert_parser + dispatcher would
+    produce per [D-118] Chunk 3 plumbing for a Deliverable ADDED alert."""
+    default_body = {
+        "Title": "Device Readiness Review",
+        "carrier": "MMK",
+        "project_id": "2350",
+        "project_model": "SM-S671U1",
+        "milestone_name": "P1",
+        "milestone_id": "201",
+        "item_no": "5",
+        "item_type": "test_tech_waiver_report",
+        "delivery_state": "Not Started",
+        "owner_name": "Test Owner",
+        "owner_corp_email": "owner@corp.example",
+        "owner_corp_usa_email": "owner.usa@corp.example",
+        "owner_corp_id": "owner_corp_id",
+        "tg_name": "MNO-ETM",
+        "tracking_modality": "Email",
+        "force_tracking_enabled": "Yes",
+        "no_customer_upload": "No",
+        "review_required": "No",
+        "milestone_gating": "Yes",
+        "doc_count": "1",
+        "sort_order": "5",
+    }
+    body = body_kvs if body_kvs is not None else default_body
+    return {
+        "correlation_id": "test-correlation-id",
+        "customer_id":    customer_id,
+        "milestone_id":   milestone_id,
+        "device_id":      None,
+        "delivery_item_id": None,
+        "trigger":        "ItemModified",
+        "sub_trigger":    sub_trigger,
+        "timestamp":      "2026-06-27T10:00:00+00:00",
+        "derived_fields": {
+            "action_type": sub_trigger,
+            "list_name":   "Deliverables",
+            "item_title":  item_title,
+            "body_kvs":    body,
+            "routing_key": {
+                "project_id":     "2350",
+                "milestone_name": milestone_id,
+                "item_number":    5,
+                "list_suffix":    customer_id,
+            },
+        },
+    }
+
+
+class TestImportDeliverableTracker:
+    """[D-118] Chunk 3: import_deliverable_tracker_task body."""
+
+    def test_happy_path_imports_deliverable(self, deps):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context()
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "imported"
+        assert "delivery_item_id" in result
+        # Audit log written:
+        assert any(
+            log[0] == "deliverable_tracker_imported" for log in deps.audit.logs
+        )
+        # Storage shows new item:
+        assert len(deps.storage.items) == 1
+        # No SP write (per [D-118]): SP UI engineer owns row creation; HILDA
+        # only writes the local tracker, never calls sp_writer.create_item.
+        create_calls = [w for w in deps.sp_writer.writes if w[0] == "create"]
+        assert create_calls == []
+
+    def test_idempotent_re_import_on_existing(self, deps):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        # Pre-seed an existing item matching the natural key
+        # (customer_id=MMK, tg_name=MNO-ETM, item_no=5):
+        existing = SimpleNamespace(
+            item_id="MMK-SM-S671U1-P1-5",
+            customer_id="MMK",
+            tg_name="MNO-ETM",
+            item_no=5,
+        )
+        deps.storage.items["MMK-SM-S671U1-P1-5"] = existing
+
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context()
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "already_exists"
+        # Storage count unchanged (no fresh create):
+        assert len(deps.storage.items) == 1
+        # Audit log marks "already_exists":
+        assert any(
+            log[0] == "deliverable_tracker_already_exists" for log in deps.audit.logs
+        )
+
+    def test_skips_non_added_sub_trigger(self, deps):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context(sub_trigger="changed")
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "skipped_non_added"
+        assert len(deps.storage.items) == 0
+        assert deps.audit.logs == []
+
+    def test_skips_missing_body_kvs(self, deps):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context()
+            # Strip body_kvs:
+            ctx["derived_fields"]["body_kvs"] = {}
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "skipped_no_body_kvs"
+        assert len(deps.storage.items) == 0
+
+    def test_skips_missing_identity(self, deps):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            # Body missing project_model AND item_no:
+            ctx = _mk_import_event_context(body_kvs={
+                "Title": "Some Item",
+                "item_type": "test_tech_waiver_report",
+                "delivery_state": "Not Started",
+                # NOTE: no project_model, no item_no
+            })
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "skipped_missing_identity"
+        assert len(deps.storage.items) == 0
+
+    def test_critical_field_mapping(self, deps):
+        """Verify body_kvs string fields land correctly on DeliveryItemBase."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context()
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "imported"
+        item = deps.storage.items[result["delivery_item_id"]]
+        assert item.item_no == 5
+        assert item.item_type == "test_tech_waiver_report"
+        assert item.owner_corp_email == "owner@corp.example"
+        assert item.tg_name == "MNO-ETM"
+        assert item.tracking_modality == ["Email"]
+        assert item.force_tracking_enabled is True       # "Yes" -> True
+        assert item.no_customer_upload is False          # "No" -> False
+        assert item.review_required is False
+        assert item.milestone_gating is True
+        assert item.delivery_state == "Not Started"

@@ -6,28 +6,140 @@ listen-only -- import each Deliverable into local storage on SP ADDED alert,
 then fire ItemCreated TriggerEvents when TPM clicks Start Collection.
 
 This module hosts:
-- import_deliverable_tracker_task: parses SP ADDED alert body_kvs into a
-  DeliveryItemBase + creates the local tracker via storage.create_delivery_item
-  (Protocol method added in Chunk 1 / commit 62fa8ce).
+- import_deliverable_tracker_task: parses SP ADDED alert body_kvs (delivered
+  via TriggerEvent.derived_fields per [D-118] Chunk 3 plumbing) into a
+  DeliveryItemBase + creates the local tracker via storage.create_delivery_item.
+  Idempotent: skips if (customer_id, tg_name, item_no) already exists.
 - kickoff_collection_task: reads all DeliveryItem trackers for the milestone,
   fires ItemCreated TriggerEvents per matching tracker (force_tracking_enabled
   AND item_type != Confirmation). This is what fires the
   send_initial_outreach_on_collection_start rule.
 
-Both bodies are STUBS in Chunk 2 (this commit) -- they register their
-TaskBindings with the workflow_engine registry but raise NotImplementedError
-when invoked. Real implementations land in Chunks 3 + 4.
+Chunk 3 (this commit): import_deliverable_tracker_task real body landed.
+Chunk 4: kickoff_collection_task real body still stub -- next pass.
 """
 from __future__ import annotations
 
+import logging
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from core.src.rule_engine import ActionKind
+from core.src.template_schema import DeliveryItemBase
 
 from core.src.workflow_engine.celery_app import hilda_celery_app
 from core.src.workflow_engine.registry import TaskBinding, register_task_binding
+from core.src.workflow_engine.task_deps import get_task_deps
 
 __all__ = ["import_deliverable_tracker_task", "kickoff_collection_task"]
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# body_kvs -> DeliveryItemBase field-mapping helpers
+# ---------------------------------------------------------------------------
+
+def _yn_to_bool(value: str | None, default: bool = False) -> bool:
+    """SP renders bool fields as Choice(Yes/No) strings per architect Q3 lock
+    2026-06-21 + xlsx convention. Empty/None -> default."""
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in ("yes", "true", "1")
+
+
+def _modality_to_list(value: str | None) -> list[str]:
+    """tracking_modality is MULTI-VALUE per [D-037]; SP renders as semi-colon-
+    separated string. Empty/None -> empty list (the SP Choice MULTI column
+    convention)."""
+    if not value:
+        return []
+    return [m.strip() for m in re.split(r"[;,]", value) if m.strip()]
+
+
+def _to_int(value: str | None, default: int = 0) -> int:
+    """Parse int from body_kv string; default on missing/invalid."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_delivery_item(
+    *,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+    body_kvs: dict[str, str],
+    item_title: str,
+) -> DeliveryItemBase:
+    """Map body_kvs (parsed SP ADDED alert) to a DeliveryItemBase Pydantic
+    model. Critical fields are mapped from body; non-critical fields use
+    sensible defaults (most are Optional[None] or have model-defined defaults).
+
+    Per [D-118] Chunk 3 Ph-1 first-pass: covers the fields needed for
+    end-to-end outreach + classification + routing test. Remaining 25+
+    fields (form-factor flags, JIRA polling state, PM-approval timestamps,
+    FR-87 TPM-resolution fields, etc.) use DeliveryItemBase model defaults
+    -- mapping from body_kvs is Ph-1 next pass enhancement when those fields
+    are operationally exercised.
+    """
+    item_no = _to_int(body_kvs.get("item_no"))
+    # Synthesize composite-key item_id per [D-091] (customer_id-device_id-
+    # milestone_id-item_no); storage may override with its own scheme.
+    item_id = f"{customer_id}-{device_id}-{milestone_id}-{item_no}"
+
+    return DeliveryItemBase(
+        # Identity:
+        item_id=item_id,
+        item_no=item_no,
+        milestone_id=milestone_id,
+        item_name=item_title or body_kvs.get("Title", f"Item {item_no}"),
+        item_type=body_kvs.get("item_type", "Default"),
+        # State:
+        delivery_state=body_kvs.get("delivery_state", "Not Started"),
+        item_completion_pct=_to_int(body_kvs.get("item_completion_pct"), 0),
+        # Owner identity per [D-105] 4-field:
+        owner_corp_usa_email=(body_kvs.get("owner_corp_usa_email") or None),
+        owner_corp_email=(body_kvs.get("owner_corp_email") or None),
+        owner_corp_id=(body_kvs.get("owner_corp_id") or None),
+        owner_name=(body_kvs.get("owner_name") or None),
+        # TG-denormalized per [D-106]:
+        tg_name=(body_kvs.get("tg_name") or None),
+        tg_email_group_alias=(body_kvs.get("tg_email_group_alias") or None),
+        tg_owner_name=(body_kvs.get("tg_owner_name") or None),
+        tg_owner_corp_usa_email=(body_kvs.get("tg_owner_corp_usa_email") or None),
+        tg_owner_corp_email=(body_kvs.get("tg_owner_corp_email") or None),
+        tg_owner_corp_id=(body_kvs.get("tg_owner_corp_id") or None),
+        # Tracking gates per FR-81 + FR-78:
+        tracking_modality=_modality_to_list(body_kvs.get("tracking_modality")),
+        force_tracking_enabled=_yn_to_bool(body_kvs.get("force_tracking_enabled"), default=True),
+        no_customer_upload=_yn_to_bool(body_kvs.get("no_customer_upload"), default=False),
+        # Review gates per FR-7 / FR-53 / FR-70:
+        review_required=_yn_to_bool(body_kvs.get("review_required"), default=False),
+        # Milestone gating per FR-78:
+        milestone_gating=_yn_to_bool(body_kvs.get("milestone_gating"), default=True),
+        # Routing fields per FR-77:
+        ingress_folder=(body_kvs.get("ingress_folder") or None),
+        target_folder=(body_kvs.get("target_folder") or None),
+        # Path components per FR-78:
+        path_id=body_kvs.get("path_id", f"item_{item_no}"),
+        # FR-7 doc_count + sort_order:
+        doc_count=_to_int(body_kvs.get("doc_count"), 1),
+        sort_order=_to_int(body_kvs.get("sort_order"), item_no),
+        # Timestamps:
+        last_updated=datetime.now(timezone.utc),
+        # FR-87 / FR-83 + form-factor flags + JIRA / PM-approval fields all
+        # use model defaults (None / False / 0) until operationally exercised.
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task bodies
+# ---------------------------------------------------------------------------
 
 
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.sp_alert_imports.import_deliverable_tracker")
@@ -35,25 +147,140 @@ def import_deliverable_tracker_task(
     params: dict[str, Any], event_context: dict[str, Any],
 ) -> dict[str, Any]:
     """IMPORT_DELIVERABLE_TRACKER -> create local DeliveryItem tracker from SP
-    ADDED alert body_kvs.
+    ADDED alert body_kvs (per [D-118] Chunk 3).
 
-    params: (none consumed from rule_engine; all needed values come from
-            event_context which carries the parsed alert's body_kvs +
-            routing_key per sp_alert_parser TriggerEvent shape)
+    params: (none consumed; all needed values come from event_context built
+            by sp_alert_parser's TriggerEvent + dispatcher._build_event_context
+            per Chunks 3a + 3b)
 
-    event_context: standard event_context plus:
-      - customer_id: str
-      - milestone_id: str
-      - body_kvs: dict[str, str]  (parsed SP alert body fields)
-      - device_id: str  (resolved from body project_model or template lookup)
+    event_context: dispatcher-built dict carrying:
+      - sub_trigger: should be "added" (from sp_alert_parser action_type)
+      - customer_id, milestone_id: from EntityRef
+      - derived_fields.body_kvs: dict[str, str] from parsed SP body
+      - derived_fields.routing_key: dict with project_id / milestone_name /
+                                     item_number / list_suffix
+      - derived_fields.item_title: from parsed SP subject Title
 
-    Chunk 2 stub: raises NotImplementedError. Real body lands in Chunk 3.
+    Returns dict with outcome marker:
+      - "skipped_non_added"  -- sub_trigger wasn't "added" (no-op for changed/deleted)
+      - "skipped_no_body_kvs" -- derived_fields.body_kvs missing/empty (data issue)
+      - "skipped_missing_identity" -- can't synthesize composite key
+      - "already_exists"     -- idempotent re-import (returns existing delivery_item_id)
+      - "imported"           -- fresh create succeeded
     """
-    raise NotImplementedError(
-        "import_deliverable_tracker_task body is a Chunk 2 stub; "
-        "real implementation lands in Chunk 3 of [D-118] cascade per "
-        "STATUS.md 2026-06-26 EVENING Flag item (g)."
+    deps = get_task_deps()
+
+    # -- Action-type guard: only ADDED triggers import --
+    sub_trigger = event_context.get("sub_trigger")
+    if sub_trigger != "added":
+        logger.info(
+            "import_deliverable_tracker_skip_non_added: sub_trigger=%s",
+            sub_trigger,
+        )
+        return {"outcome": "skipped_non_added", "sub_trigger": sub_trigger}
+
+    # -- Extract derived_fields per Chunks 3a + 3b plumbing --
+    derived = event_context.get("derived_fields") or {}
+    body_kvs = derived.get("body_kvs") or {}
+    routing_key = derived.get("routing_key") or {}
+    item_title = derived.get("item_title") or ""
+
+    if not body_kvs:
+        logger.warning(
+            "import_deliverable_tracker_skip_no_body_kvs: customer_id=%s milestone_id=%s",
+            event_context.get("customer_id"),
+            event_context.get("milestone_id"),
+        )
+        return {"outcome": "skipped_no_body_kvs"}
+
+    # -- Resolve identity --
+    customer_id = event_context.get("customer_id") or routing_key.get("list_suffix")
+    milestone_id = event_context.get("milestone_id") or routing_key.get("milestone_name")
+    # device_id resolved from body project_model per architect direction 2026-06-26
+    # (Ph-1 simplification: device_id = project_model literal).
+    device_id = body_kvs.get("project_model", "")
+    item_no = _to_int(body_kvs.get("item_no"))
+
+    if not (customer_id and milestone_id and device_id and item_no):
+        logger.warning(
+            "import_deliverable_tracker_skip_missing_identity: "
+            "customer_id=%r milestone_id=%r device_id=%r item_no=%r",
+            customer_id, milestone_id, device_id, item_no,
+        )
+        return {
+            "outcome": "skipped_missing_identity",
+            "customer_id": customer_id,
+            "milestone_id": milestone_id,
+            "device_id": device_id,
+            "item_no": item_no,
+        }
+
+    # -- Idempotency check via natural key --
+    tg_name = body_kvs.get("tg_name", "")
+    existing = deps.storage.find_items_by_natural_key(
+        customer_id=customer_id,
+        tg_name=tg_name,
+        item_no=item_no,
     )
+    if existing:
+        existing_id = getattr(existing[0], "item_id", None) or getattr(
+            existing[0], "delivery_item_id", None
+        )
+        logger.info(
+            "import_deliverable_tracker_already_exists: customer_id=%s "
+            "tg_name=%s item_no=%s existing_id=%s",
+            customer_id, tg_name, item_no, existing_id,
+        )
+        deps.audit.write_communication_log(
+            action_type="deliverable_tracker_already_exists",
+            delivery_item_id=existing_id,
+            attribution={
+                "correlation_id": event_context.get("correlation_id", "?"),
+                "trigger_source": "sp_alert_import",
+            },
+            details={
+                "customer_id": customer_id,
+                "milestone_id": milestone_id,
+                "tg_name": tg_name,
+                "item_no": str(item_no),
+            },
+        )
+        return {"outcome": "already_exists", "delivery_item_id": existing_id}
+
+    # -- Build + create --
+    item = _build_delivery_item(
+        customer_id=customer_id,
+        device_id=device_id,
+        milestone_id=milestone_id,
+        body_kvs=body_kvs,
+        item_title=item_title,
+    )
+    new_id = deps.storage.create_delivery_item(item)
+
+    deps.audit.write_communication_log(
+        action_type="deliverable_tracker_imported",
+        delivery_item_id=new_id,
+        attribution={
+            "correlation_id": event_context.get("correlation_id", "?"),
+            "trigger_source": "sp_alert_import",
+        },
+        details={
+            "customer_id": customer_id,
+            "milestone_id": milestone_id,
+            "device_id": device_id,
+            "tg_name": tg_name,
+            "item_no": str(item_no),
+            "item_type": item.item_type,
+            "tracking_modality": ",".join(item.tracking_modality),
+        },
+    )
+
+    logger.info(
+        "import_deliverable_tracker_imported: customer_id=%s milestone_id=%s "
+        "device_id=%s item_no=%s delivery_item_id=%s",
+        customer_id, milestone_id, device_id, item_no, new_id,
+    )
+    return {"outcome": "imported", "delivery_item_id": new_id}
 
 
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.sp_alert_imports.kickoff_collection")
@@ -66,20 +293,12 @@ def kickoff_collection_task(
     Triggered by Milestones CHANGED alert with field_deltas containing
     milestone_collection_started_at (per architect direction 2026-06-26).
 
-    params:
-      - target_state: str (optional; default "Outreach Sent" per [D-124])
-
-    event_context: standard event_context plus:
-      - customer_id: str
-      - milestone_id: str
-      - field_deltas: dict[str, str] (includes milestone_collection_started_at)
-
-    Chunk 2 stub: raises NotImplementedError. Real body lands in Chunk 4.
+    Chunk 4 stub: raises NotImplementedError. Real body lands in Chunk 4.
     """
     raise NotImplementedError(
         "kickoff_collection_task body is a Chunk 2 stub; "
         "real implementation lands in Chunk 4 of [D-118] cascade per "
-        "STATUS.md 2026-06-26 EVENING Flag item (g)."
+        "STATUS.md 2026-06-26 PM EVENING Flag item (b)."
     )
 
 

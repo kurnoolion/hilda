@@ -461,6 +461,20 @@ class SpAlertParser:
                     "action_type": parsed.action_type,
                     "list_name":   parsed.routing_key.list_name,
                     "item_title":  parsed.item_title,
+                    # body_kvs included 2026-06-27 per [D-118] Chunk 3 -- consumed by
+                    # import_deliverable_tracker_task to build DeliveryItemBase from
+                    # SP ADDED alert. Other downstream tasks ignore it (TriggerEvent
+                    # derived_fields are caller-supplied optional facts per
+                    # rule_engine/MODULE.md Worked Example 3).
+                    "body_kvs":    dict(parsed.body_kvs),
+                    # routing_key sub-fields included so import task can resolve
+                    # device_id (from project_model) + customer_id without re-parsing.
+                    "routing_key": {
+                        "project_id":     parsed.routing_key.project_id,
+                        "milestone_name": parsed.routing_key.milestone_name,
+                        "item_number":    parsed.routing_key.item_number,
+                        "list_suffix":    parsed.routing_key.list_suffix,
+                    },
                 },
             )
             self._dispatcher.dispatch(event)
