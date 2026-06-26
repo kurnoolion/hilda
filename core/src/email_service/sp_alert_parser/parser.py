@@ -117,13 +117,28 @@ _ACTION_VERB_RE = re.compile(
 )
 
 # Per-LINE body kv extractor (applied via splitlines() to avoid multi-line bleed).
-# Matches three flavors on a single line:
-#   "key: value"               (no Edited marker, normal field)
+# Matches these flavors on a single line:
+#   "key: value"               (colon-separator -- always used by SP for
+#                               Edited-marker lines AND for ADDED-alert bodies)
 #   "key: - value Edited"      (Edited marker -- changed field)
 #   "key:"  or  "key: "        (empty value -- captured as "" per Q3)
-# Edited marker is captured as a separate group; leading "- " stripped.
+#   "key    value"             (NEW 2026-06-26: multi-space separator with NO
+#                               colon -- surfaced from corp Linux box Phase D2
+#                               CHANGE-alert raw-body diagnostic. SP renders
+#                               table cells through Outlook plain-text conversion
+#                               as 3-4 whitespace chars between key + value for
+#                               non-edited fields when alert type is CHANGED.)
+#
+# The `\s{2,}` lower bound for the no-colon form intentionally rejects single
+# inter-word spaces in header chrome ("Thendral Arasu Panneer Selvam") so we
+# don't false-positive on names + sentences. Architect's smoke output verified
+# field labels use 3+ spaces; ordinary text uses single spaces.
 _BODY_KV_LINE_RE = re.compile(
-    r"^\s*(?P<key>[A-Za-z][A-Za-z0-9_]*)\s*[:=]\s*(?P<value>.*?)\s*$"
+    r"^\s*"
+    r"(?P<key>[A-Za-z][A-Za-z0-9_]*)"
+    r"(?:\s*[:=]\s*|\s{2,})"
+    r"(?P<value>.*?)"
+    r"\s*$"
 )
 
 # After a value is captured, optional leading "- " prefix + optional trailing

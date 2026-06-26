@@ -932,6 +932,73 @@ class TestSpAlertParserRegression:
         assert second is None  # caught by content-hash dedup
 
     # -- "Changed" alert with no Edited markers -> silent drop per architect 2026-06-27 --
+    def test_multispace_separator_milestone_change(self):
+        """Surfaced 2026-06-26 corp Linux box Phase D2 smoke test: real SP
+        CHANGE alert bodies render non-edited fields with multi-space
+        separator (NO colon) -- only the Edited field carries the colon.
+        Previous regex (colon-only) missed all non-edited fields, leaving
+        body_kvs with just `target_date`. Fix: regex now also accepts
+        `\\s{2,}` as separator.
+        """
+        body = (
+            "P1 has been changed\r\n\r\n"
+            "[cid:11341]\r\n"
+            "\r\nTitle    P1"
+            "\r\n\r\ncarrier    MMK"
+            "\r\n\r\nproject_id    2350"
+            "\r\n\r\nproject_model    SM-S671U1"
+            "\r\n\r\nstatus    Not Started"
+            "\r\n\r\ntarget_date:    - 6/30/2026  Edited"
+            "\r\n\r\nmilestone_completion_pct    0\r\n"
+        )
+        msg = _msg(
+            subject="Milestones - P1",
+            body=body,
+            message_id="<multispace-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        assert parsed.action_type == "changed"
+        # All 7 fields should be extracted into body_kvs (was only 1 before fix):
+        assert parsed.body_kvs["Title"] == "P1"
+        assert parsed.body_kvs["carrier"] == "MMK"
+        assert parsed.body_kvs["project_id"] == "2350"
+        assert parsed.body_kvs["project_model"] == "SM-S671U1"
+        assert parsed.body_kvs["status"] == "Not Started"
+        assert parsed.body_kvs["target_date"] == "6/30/2026"  # leading "- " + " Edited" stripped
+        assert parsed.body_kvs["milestone_completion_pct"] == "0"
+        # Only target_date has the Edited marker -> only field_delta:
+        assert parsed.field_deltas == {"target_date": "6/30/2026"}
+        # routing_key now resolved from body_kvs (post-refactor):
+        assert parsed.routing_key.project_id == "2350"
+        assert parsed.routing_key.milestone_name == "P1"
+        # Customer_id extracted from body `carrier:` field (Milestones global list):
+        assert parsed.routing_key.list_suffix == "MMK"
+
+    def test_single_space_does_not_match_kv(self):
+        """Sentence-style text with single inter-word spaces must NOT be
+        misparsed as key:value (regression for the multi-space tolerance fix).
+        """
+        body = (
+            "P1 has been changed\r\n\r\n"
+            "Thendral Arasu Panneer Selvam Device Management MNOs Lab\r\n\r\n"
+            "target_date:    - 6/30/2026  Edited\r\n"
+        )
+        msg = _msg(
+            subject="Milestones - P1",
+            body=body,
+            message_id="<single-space-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        # body_kvs should NOT contain "Thendral" / "Arasu" / "P1" as keys:
+        assert "Thendral" not in parsed.body_kvs
+        assert "Arasu" not in parsed.body_kvs
+        # Only target_date legitimately extracted:
+        assert "target_date" in parsed.body_kvs
+
     def test_change_with_empty_field_deltas_dropped(self):
         msg = _msg(
             subject="Deliverables_MMK - Device Readiness Review",
