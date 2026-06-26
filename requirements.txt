@@ -27,6 +27,13 @@ openpyxl>=3.1,<4
 # the dependency cost; tests stub exchangelib via MockEwsReceiver/Sender.
 exchangelib>=5.2,<6
 
+# email_service — FR-52 step B2 fuzzy filename matching per inbound/attachment_router.py.
+# Eager-imported at email_service package load time (not lazy); production deploys
+# need this on every container path that loads email_service. Missing from
+# requirements.txt pre-2026-06-26; surfaced during D-132 Phase D2 EWS smoke test
+# (rapidfuzz transitively required even when running the EWS adapter only).
+rapidfuzz>=3.6,<4
+
 # storage module — Postgres ORM + migrations + Redis + NSD mount IO
 # (smbprotocol is diagnostic/fallback only — routine NSD IO is the [D-013] host mount)
 sqlalchemy[asyncio]>=2.0,<3
