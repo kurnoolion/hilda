@@ -132,6 +132,10 @@ services:
       HILDA_DASHBOARD_BIND_HOST: 0.0.0.0
       HILDA_DASHBOARD_BIND_PORT: "8443"
       HILDA_DASHBOARD_REVERSE_PROXY_ORIGIN: ${REVERSE_PROXY_ORIGIN:-https://hilda-proxy.corp.example}
+      # credential_service reads sops-encrypted *.enc.env files per [D-038]; sops
+      # binary is in the image (see Dockerfile.hilda-api). Age private key path
+      # below is the in-container target of the HILDA_AGE_KEY_DIR bind-mount.
+      SOPS_AGE_KEY_FILE: /etc/hilda/age-key/keys.txt
     ports:
       # Reverse-proxy PC fronts this; only expose to localhost on the Linux box
       - "127.0.0.1:8443:8443"
@@ -139,6 +143,13 @@ services:
       - ../config:/app/config:ro,Z
       - ../customizations:/app/customizations:ro,Z
       - nsd_internal:/mnt/nsd:rw,Z
+      # Credential bind-mounts per [D-038] + [D-132]: encrypted credentials at
+      # ../customizations/credentials/*.enc.env land at /etc/hilda/credentials/
+      # where SopsCredentialService default env_dir reads them. Age private key
+      # at HOST $HILDA_AGE_KEY_DIR (set in deploy/.env LOCAL only) lands at
+      # /etc/hilda/age-key/keys.txt where SOPS_AGE_KEY_FILE points.
+      - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
+      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
     healthcheck:
       test: ["CMD", "curl", "-fsk", "http://localhost:8443/healthz"]
       interval: 30s
@@ -162,10 +173,13 @@ services:
       HILDA_DB_URL:    postgresql+asyncpg://${POSTGRES_USER:-hilda}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hilda}
       HILDA_REDIS_URL: redis://redis:6379/0
       HILDA_WFE_BROKER_URL: redis://redis:6379/0
+      SOPS_AGE_KEY_FILE: /etc/hilda/age-key/keys.txt
     volumes:
       - ../config:/app/config:ro,Z
       - ../customizations:/app/customizations:ro,Z
       - beat_schedule:/var/lib/hilda/beat:rw,Z
+      - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
+      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
 
   # -------------------------------------------------------------------------------
   # hilda-worker -- Celery worker per workflow_engine/MODULE.md (the big one)
@@ -202,9 +216,12 @@ services:
       HILDA_EMAIL_SMTP_HOST:      ${EMAIL_SMTP_HOST:-smtp.example}
       # SharePoint
       HILDA_SP_SITE_URL:          ${SP_SITE_URL:-https://sp2017.corp.example/sites/hilda}
+      SOPS_AGE_KEY_FILE:          /etc/hilda/age-key/keys.txt
     volumes:
       - ../config:/app/config:ro,Z
       - ../customizations:/app/customizations:ro,Z
       - nsd_internal:/mnt/nsd:rw,Z
+      - ${HILDA_CREDENTIALS_DIR:-../customizations/credentials}:/etc/hilda/credentials:ro,Z
+      - ${HILDA_AGE_KEY_DIR:?HILDA_AGE_KEY_DIR not set in deploy/.env -- see .env.example}:/etc/hilda/age-key:ro,Z
       # Production: bind-mount the actual NSD host SMB mount per [D-013]:
       # - /mnt/nsd:/mnt/nsd:rw,Z,bind-propagation=rslave
