@@ -222,28 +222,29 @@ class EwsReceiver:
         if self._config.inbox_subfolder:
             folder = folder / self._config.inbox_subfolder
 
-        # Filter to messages received after the last successful fetch (or all
-        # if first run). Mark advancement only on successful return.
+        # Filter to messages received after the last successful fetch. On first
+        # run (_last_fetched_at is None) we deliberately DO NOT apply a since
+        # filter -- we want the top-N most recent inbox messages so smoke
+        # tests + post-restart recovery see existing alerts. fetch_limit caps
+        # the initial-fetch volume. After the first successful fetch advances
+        # the high-water mark, subsequent calls poll only the delta.
+        #
+        # Bug avoided: previous version set since=now() on first run, which
+        # filtered `datetime_received > now` -- excluded everything ever sent.
+        # Smoke-test surfaced this 2026-06-26 against real corp Exchange.
         since = self._last_fetched_at
         if since is None:
-            # First run -- start from "now minus poll window" to avoid massive
-            # initial pull. Ph-1 conservative: just fetch the inbox top-N.
-            tz = EWSTimeZone.localzone()
-            now = datetime.now(timezone.utc)
-            since = now
+            qs = folder.all().order_by("-datetime_received")[:self._config.fetch_limit]
         else:
             tz = EWSTimeZone.localzone()
-
-        if since:
             ews_since = EWSDateTime(
                 since.year, since.month, since.day,
                 since.hour, since.minute, since.second,
                 tzinfo=tz,
             )
-            qs = folder.filter(Q(datetime_received__gt=ews_since))
-        else:
-            qs = folder.all()
-        qs = qs.order_by("-datetime_received")[:self._config.fetch_limit]
+            qs = folder.filter(
+                Q(datetime_received__gt=ews_since)
+            ).order_by("-datetime_received")[:self._config.fetch_limit]
 
         out: list[dict[str, Any]] = []
         for msg in qs:
