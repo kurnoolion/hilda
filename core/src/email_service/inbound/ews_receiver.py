@@ -179,6 +179,7 @@ class EwsReceiver:
                 Credentials,
                 EWSDateTime,
                 EWSTimeZone,
+                HTMLBody,
                 Q,
                 Version,
                 FileAttachment,
@@ -269,7 +270,11 @@ class EwsReceiver:
                 ),
                 "subject": msg.subject or "",
                 "body_text": msg.text_body or "",
-                "body_html": (str(msg.body) if msg.body else None) if msg.body_type == "HTML" else None,
+                # exchangelib exposes body as Body or HTMLBody subclass of str;
+                # the prior `msg.body_type == "HTML"` check was wrong (no such
+                # attribute on Message); use isinstance(HTMLBody) instead.
+                # Fix landed 2026-06-26 against real corp Exchange.
+                "body_html": str(msg.body) if (msg.body and isinstance(msg.body, HTMLBody)) else None,
                 "received_at": msg.datetime_received,
                 "attachments": attachments,
             })
