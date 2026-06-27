@@ -39,12 +39,61 @@ _log = logging.getLogger(__name__)
 
 
 class _NoOpAuditStorage:
-    """SpAlertParser expects a storage with log_communication; production
-    polling task doesn't need parser-side audit logging (dispatcher's chain
-    writes its own CommunicationLog rows). NoOp keeps the parser API happy."""
+    """SpAlertParser's constructor takes a `storage` arg but the parser body
+    never calls storage.log_communication anywhere -- the field is unused
+    plumbing kept for parser API compatibility. Inbound-alert audit is
+    written directly by the polling task body via _audit_inbound_sp_alert
+    below (the actual observability seam)."""
 
     async def log_communication(self, row: Any) -> None:
         return None
+
+
+async def _audit_inbound_sp_alert(parsed: Any, msg: Any) -> None:
+    """Write one CommunicationLog row per parsed SP alert (inbound direction).
+
+    Closes the observability gap revealed during Step 1.5 debug 2026-06-27:
+    milestone-add alerts arrived, dispatched=1 per poll, but communication_log
+    stayed at 0 rows because no rule matches list_name=Milestones +
+    sub_trigger=added (by [D-118] design -- only Deliverables-added has a
+    matching IMPORT_DELIVERABLE_TRACKER rule). Previously the inbound event
+    was invisible to anyone inspecting Postgres -- only worker logs showed
+    receipt.
+
+    summary is bounded + contains only enum-token routing fields per NFR-2;
+    no raw body or attachment content is persisted here.
+    """
+    import json
+    from core.src.storage.audit_ops import log_communication
+    from core.src.storage.models import Channel, CommunicationLogRow, Direction
+
+    rk = parsed.routing_key
+    summary = json.dumps({
+        "list":    rk.list_name,
+        "suffix":  rk.list_suffix,
+        "title":   parsed.item_title,
+        "verb":    parsed.action_type,
+        "ms":      rk.milestone_name,
+        "item_no": rk.item_number,
+    }, default=str, separators=(",", ":"))[:1024]
+
+    row = CommunicationLogRow(
+        log_id=str(uuid.uuid4()),
+        channel=Channel.SHAREPOINT,
+        direction=Direction.INBOUND,
+        timestamp=datetime.now(timezone.utc),
+        delivery_item_id=None,
+        device_id=None,
+        sender=getattr(msg, "sender", None),
+        recipients=None,
+        subject=getattr(msg, "subject", None),
+        summary=summary,
+        external_message_id=getattr(msg, "message_id", None),
+        credential_id=None,
+        action_type=f"SP_ALERT_{(parsed.action_type or 'UNKNOWN').upper()}",
+        attachments=[],
+    )
+    await log_communication(row)
 
 
 @hilda_celery_app.task(
@@ -59,6 +108,9 @@ def poll_ews_inbox_task(self) -> dict[str, Any]:
     Returns dict with counts:
       - messages_fetched: total inbox messages this poll cycle
       - sp_alerts: messages classified as SP_ALERT
+      - audited: SP alerts that wrote a CommunicationLog row before dispatch
+        (best-effort; failure does NOT block dispatch). Added 2026-06-27 to
+        close the unmatched-event observability gap.
       - dispatched: events successfully dispatched through dispatcher
       - skipped_no_dispatcher: if deps.dispatcher is None
       - parse_failures: messages that failed parse/dispatch
@@ -125,6 +177,7 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
 
     sp_alerts = 0
     dispatched = 0
+    audited = 0
     parse_failures = 0
 
     for m in msgs:
@@ -147,6 +200,14 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
         if parsed is None:
             # Silent drop (no-op SP CHANGE or Projects Ph-2)
             continue
+
+        # Write inbound-audit row BEFORE dispatch -- captures unmatched events too.
+        try:
+            await _audit_inbound_sp_alert(parsed, m)
+            audited += 1
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("poll_ews_inbox audit failed: %s", str(exc)[:120])
+            # don't increment parse_failures -- audit is best-effort, dispatch still proceeds
 
         try:
             event = TriggerEvent(
@@ -179,12 +240,13 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
             parse_failures += 1
 
     _log.info(
-        "poll_ews_inbox: messages_fetched=%d sp_alerts=%d dispatched=%d parse_failures=%d",
-        len(msgs), sp_alerts, dispatched, parse_failures,
+        "poll_ews_inbox: messages_fetched=%d sp_alerts=%d audited=%d dispatched=%d parse_failures=%d",
+        len(msgs), sp_alerts, audited, dispatched, parse_failures,
     )
     return {
         "messages_fetched": len(msgs),
         "sp_alerts": sp_alerts,
+        "audited": audited,
         "dispatched": dispatched,
         "skipped_no_dispatcher": False,
         "parse_failures": parse_failures,
