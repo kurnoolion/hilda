@@ -129,6 +129,119 @@ def start_item_collection_task(
     }
 
 
+def _resolve_upload_params(
+    deps,
+    params: dict[str, Any],
+    delivery_item_id: str | None,
+) -> dict[str, Any]:
+    """Resolve the 4 upload params (source_dir, filename, target_dir,
+    customer_delivery_info) per precedence:
+      1. Explicit params override (rule YAML can pin any of the 4)
+      2. Storage DeliveryItem for target_dir (item.target_folder per FR-77)
+         + customer_delivery_info (per-item per D-126 cascade)
+      3. Storage documents-for-item lookup for source_dir + filename --
+         picks the most recently ingested final doc per FR-66 single-revision
+         Ph-1 (item.is_final=True; in early drop all docs become final
+         automatically).
+
+    Added 2026-06-27 per architect rule-walk-through Section 4 Chunk B:
+    queue_submission_task previously required all 4 params from the rule
+    YAML; Rule 4-3 (advance_to_ready_for_submission_on_pm_approval) passes
+    only `channel: customer_adapter`. Task fell through to audit-only
+    (would-have-uploaded), silently skipping the carrier upload.
+
+    Mirrors the outreach _resolve_recipient pattern from commit 4d138f3 --
+    storage is authoritative; params override for tests / TPM-manual cases.
+
+    Returns dict with 4 keys; values may be None when not resolvable
+    (caller decides whether to attempt upload based on what's populated).
+    """
+    resolved: dict[str, Any] = {
+        "source_dir":             params.get("source_dir"),
+        "filename":               params.get("filename"),
+        "target_dir":             params.get("target_dir"),
+        "customer_delivery_info": params.get("customer_delivery_info"),
+    }
+    if delivery_item_id is None:
+        return resolved
+
+    # Item-level fields (target_folder + customer_delivery_info)
+    try:
+        item = deps.storage.get_delivery_item(delivery_item_id)
+        if resolved["target_dir"] is None:
+            resolved["target_dir"] = getattr(item, "target_folder", None) or ""
+        if resolved["customer_delivery_info"] is None:
+            resolved["customer_delivery_info"] = (
+                getattr(item, "customer_delivery_info", None) or ""
+            )
+    except Exception:  # noqa: BLE001 -- non-fatal; fall through
+        pass
+
+    # Document path (source_dir + filename) -- requires duck-typed lookup
+    # because storage methods may be sync OR async (storage/document_ops.py
+    # is async; tests use sync mocks).
+    if resolved["source_dir"] is not None and resolved["filename"] is not None:
+        return resolved
+
+    lookup = getattr(deps.storage, "get_documents_for_item", None)
+    if lookup is None:
+        return resolved
+    try:
+        result = lookup(delivery_item_id)
+        # Detect coroutine -> run sync via asyncio.run
+        import inspect
+        if inspect.iscoroutine(result):
+            import asyncio
+            result = asyncio.run(result)
+        docs = list(result or [])
+    except Exception:  # noqa: BLE001 -- non-fatal
+        return resolved
+
+    if not docs:
+        return resolved
+
+    # FR-66 single-revision Ph-1: prefer is_final=True; fall back to most
+    # recent. Docs ordered by ingested_at per document_ops.get_documents_for_item.
+    final_docs = [d for d in docs if getattr(d, "is_final", False)]
+    chosen = (final_docs or docs)[-1]
+
+    # Document path lookup needs both DocumentIndexRow and association rows;
+    # for Ph-1, we use the most recently associated local_nsd_path. If the
+    # chosen doc carries an attribute named `local_nsd_path` (Mock-style), use
+    # it directly; otherwise look up the first association via
+    # get_documents_for_item_associations duck-typed method.
+    local_nsd_path = getattr(chosen, "local_nsd_path", None)
+    if local_nsd_path is None:
+        # Try association lookup; if absent, skip path resolution
+        assoc_lookup = getattr(deps.storage, "get_document_associations_for_item", None)
+        if assoc_lookup is not None:
+            try:
+                assoc_result = assoc_lookup(delivery_item_id)
+                import inspect
+                if inspect.iscoroutine(assoc_result):
+                    import asyncio
+                    assoc_result = asyncio.run(assoc_result)
+                assocs = list(assoc_result or [])
+                if assocs:
+                    local_nsd_path = getattr(assocs[-1], "local_nsd_path", None)
+            except Exception:  # noqa: BLE001
+                pass
+
+    if local_nsd_path:
+        from pathlib import Path as _P
+        p = _P(local_nsd_path)
+        if resolved["source_dir"] is None:
+            resolved["source_dir"] = str(p.parent)
+        if resolved["filename"] is None:
+            resolved["filename"] = p.name
+    else:
+        # Fall back to original_filename when path missing
+        if resolved["filename"] is None:
+            resolved["filename"] = getattr(chosen, "original_filename", None)
+
+    return resolved
+
+
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.submission.queue_submission")
 def queue_submission_task(
     params: dict[str, Any], event_context: dict[str, Any]
@@ -150,13 +263,16 @@ def queue_submission_task(
     body assumes it's been invoked for an item that requires upload.
     """
     deps = get_task_deps()
-    source_dir = params.get("source_dir")
-    filename = params.get("filename")
-    target_dir = params.get("target_dir", "")
-    customer_delivery_info = params.get("customer_delivery_info", "")
     device_id = event_context.get("device_id", event_context.get("project_model", ""))
     milestone_name = event_context.get("milestone_name", "")
     delivery_item_id = event_context.get("delivery_item_id")
+    # Resolve via params + storage chain per [D-080]-style precedence
+    # (added 2026-06-27 per rule-walk-through Chunk B).
+    resolved = _resolve_upload_params(deps, params, delivery_item_id)
+    source_dir = resolved["source_dir"]
+    filename = resolved["filename"]
+    target_dir = resolved["target_dir"] or ""
+    customer_delivery_info = resolved["customer_delivery_info"] or ""
 
     upload_success = False
     error_code = None

@@ -642,6 +642,106 @@ class TestSubmissionTasks:
         assert len(ca.calls) == 1
         assert ca.calls[0]["device_id"] == "MODEL-A"
 
+    # ---- _resolve_upload_params (Chunk B) -- storage lookup chain ----
+
+    def test_queue_submission_resolves_target_dir_from_storage_item(self):
+        """When rule passes only `channel`, target_folder + customer_delivery_info
+        get pulled from the storage item (Rule 4-3 scenario)."""
+        ca = _FakeAsyncCustomerAdapter(success=True)
+        storage = MockStorage()
+        # Pre-seed item with target_folder + customer_delivery_info
+        storage.items["I-1234"] = SimpleNamespace(
+            target_folder="Submissions/P1",
+            customer_delivery_info="drive.google.com/MMK",
+            doc_count=1, doc_count_received=1,
+        )
+        # Stub a sync get_documents_for_item with one final doc
+        doc = SimpleNamespace(
+            file_hash="abc123",
+            original_filename="final_report.pdf",
+            local_nsd_path="/nsd/MMK/P1/I-1234/final_report.pdf",
+            is_final=True,
+        )
+        storage.get_documents_for_item = lambda _id: [doc]
+        d = TaskDeps(storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+                     customer_adapter=ca)
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(d):
+            # Rule 4-3 only passes `channel` -- nothing else
+            result = queue_submission_task.apply_async(
+                args=({"channel": "customer_adapter"},
+                      ctx(device_id="MODEL-A", milestone_name="P1"))
+            ).get()
+        assert result["outcome"] == "uploaded"
+        assert result["upload_success"] is True
+        # Resolved values reflect storage lookup
+        assert ca.calls[0]["customer_delivery_info"] == "drive.google.com/MMK"
+        assert ca.calls[0]["target_dir"] == "Submissions/P1"
+        assert ca.calls[0]["filename"] == "final_report.pdf"
+
+    def test_queue_submission_params_override_storage(self):
+        """Explicit params win over storage lookup (caller can pin)."""
+        ca = _FakeAsyncCustomerAdapter(success=True)
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            target_folder="storage_target",
+            customer_delivery_info="storage_info",
+        )
+        d = TaskDeps(storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+                     customer_adapter=ca)
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(d):
+            result = queue_submission_task.apply_async(
+                args=({"source_dir": "/explicit", "filename": "explicit.pdf",
+                       "target_dir": "explicit_target",
+                       "customer_delivery_info": "explicit_info"},
+                      ctx())
+            ).get()
+        assert result["outcome"] == "uploaded"
+        assert ca.calls[0]["target_dir"] == "explicit_target"
+        assert ca.calls[0]["customer_delivery_info"] == "explicit_info"
+        assert ca.calls[0]["filename"] == "explicit.pdf"
+
+    def test_queue_submission_prefers_is_final_doc(self):
+        """When multiple docs exist, the most recent is_final=True wins."""
+        ca = _FakeAsyncCustomerAdapter(success=True)
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            target_folder="t", customer_delivery_info="ci",
+        )
+        # 3 docs: 2 non-final, 1 final (middle one)
+        docs = [
+            SimpleNamespace(local_nsd_path="/n/draft1.pdf", original_filename="draft1.pdf", is_final=False),
+            SimpleNamespace(local_nsd_path="/n/FINAL.pdf",  original_filename="FINAL.pdf",  is_final=True),
+            SimpleNamespace(local_nsd_path="/n/draft2.pdf", original_filename="draft2.pdf", is_final=False),
+        ]
+        storage.get_documents_for_item = lambda _id: docs
+        d = TaskDeps(storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+                     customer_adapter=ca)
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(d):
+            queue_submission_task.apply_async(
+                args=({"channel": "customer_adapter"}, ctx())
+            ).get()
+        assert ca.calls[0]["filename"] == "FINAL.pdf"
+
+    def test_queue_submission_falls_back_when_no_docs_in_storage(self):
+        """No docs for item -> no source_dir/filename resolved -> audit-only."""
+        ca = _FakeAsyncCustomerAdapter(success=True)
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(target_folder="t", customer_delivery_info="ci")
+        storage.get_documents_for_item = lambda _id: []
+        d = TaskDeps(storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+                     customer_adapter=ca)
+        from core.src.workflow_engine.tasks.submission import queue_submission_task
+        with override_task_deps(d):
+            result = queue_submission_task.apply_async(
+                args=({"channel": "customer_adapter"}, ctx())
+            ).get()
+        # No source_dir+filename -> upload gate fails -> falls through
+        assert result["upload_success"] is False
+        assert ca.calls == []
+
 
 class TestEscalationTasks:
     def test_notify_pm_writes_audit_log(self, deps):
