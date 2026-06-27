@@ -66,6 +66,79 @@ class TriggerDispatcher:
         self._storage = storage
         self._celery_app = celery_app
 
+    # Canonical item fields promoted into event.derived_fields before rule
+    # evaluation (added 2026-06-27 per architect rule-walk-through finding --
+    # see _enrich_event docstring). Listed explicitly rather than auto-promoted
+    # via dir() because Pydantic + SimpleNamespace introspection surfaces
+    # different non-field attributes (model_config / __dict__ / etc.) and a
+    # whitelist makes the promotion contract auditable.
+    _PROMOTABLE_ITEM_FIELDS: tuple[str, ...] = (
+        # Identity:
+        "customer_id", "device_id", "milestone_id", "item_no", "item_id",
+        "delivery_item_id", "item_name", "tg_name",
+        # State + lifecycle:
+        "delivery_state", "prior_delivery_state", "item_completion_pct",
+        "actual_completion_date", "last_updated",
+        # Type + gates per FR-7 / FR-78 / FR-81:
+        "item_type", "force_tracking_enabled", "no_customer_upload",
+        "milestone_gating", "review_required", "review_status",
+        # Counters + outreach timestamps per FR-9 / FR-10 / NFR-21 §5:
+        "doc_count", "reminder_count",
+        "last_owner_contacted", "last_reminder_triggered_at",
+        "last_owner_response_at",
+        # 4-field owner identity per [D-080] + [D-086]:
+        "owner_corp_usa_email", "owner_corp_email", "owner_corp_id", "owner_name",
+        # TG-denormalized per [D-051]:
+        "tg_email_group_alias", "tg_owner_name", "tg_path_id",
+        "tg_owner_corp_usa_email", "tg_owner_corp_email", "tg_owner_corp_id",
+        "ingress_nsd", "folder_routing_enabled",
+        # Routing + tracking:
+        "ingress_folder", "target_folder", "item_path_id", "tracking_modality",
+        # FR-87 / FR-83 / FR-31 sub-1:
+        "manual_triage_required", "rules_paused",
+        "pm_approval_at", "pm_approval_pm_id",
+        # PLM grouping per FR-5 + [D-035]:
+        "plm_id",
+    )
+
+    def _enrich_event(self, event: TriggerEvent, item_snapshot: Any) -> TriggerEvent:
+        """Promote item_snapshot fields into event.derived_fields so the
+        rule_engine evaluator can resolve item-field conditions like
+        force_tracking_enabled / item_type / delivery_state / reminder_count.
+
+        Caller-supplied derived_fields take precedence -- sp_alert_parser's
+        body_kvs + routing_key, kickoff_collection_task's kickoff_source,
+        and any other authored facts survive promotion intact.
+
+        Added 2026-06-27 per architect rule-walk-through 2026-06-27 finding:
+        evaluator at core/src/rule_engine/evaluator.py:39-44 reads conditions
+        only from event.derived_fields + event.field_deltas; item_snapshot is
+        used only for the rules_paused check. Without this enrichment every
+        rule with an item-field condition would silently log RUL-W006 and
+        return False -- which silently broke send_initial_outreach_on_collection_
+        start, send_first_reminder_on_no_contact, send_second_reminder_on_no_
+        contact, escalate_to_messenger_after_2_reminders, and
+        escalate_pm_on_deadline_breach.
+
+        Note: days_to_deadline is NOT enriched here -- it requires Milestone.
+        target_date snapshot + (today - target_date) computation per [D-085]
+        + deadline_evaluator (workflow_engine MODULE.md line 290). Adding that
+        is a follow-up; today's enrichment unblocks Rules 1/2a/2b/3a's
+        delivery_state + reminder_count + force_tracking_enabled conditions.
+        """
+        if item_snapshot is None:
+            return event
+        promoted: dict[str, Any] = {}
+        for field_name in self._PROMOTABLE_ITEM_FIELDS:
+            val = getattr(item_snapshot, field_name, None)
+            if val is not None:
+                promoted[field_name] = val
+        existing = dict(event.derived_fields) if event.derived_fields else {}
+        # Caller-supplied facts take precedence over item snapshot defaults.
+        merged = {**promoted, **existing}
+        from dataclasses import replace
+        return replace(event, derived_fields=merged)
+
     def _fetch_item_snapshot(self, event: TriggerEvent) -> Any:
         """Fetch item snapshot per D12 cascade 2026-06-23. Returns None for
         item-less events (MilestoneAllClosed, CredentialExpired, etc.) or when
@@ -117,6 +190,9 @@ class TriggerDispatcher:
         item_snapshot=None to rule_engine; pause check is skipped automatically.
         """
         item_snapshot = self._fetch_item_snapshot(event)
+        # Enrich derived_fields with item snapshot before rule evaluation
+        # (2026-06-27 cold-start enrichment per architect rule-walk-through).
+        event = self._enrich_event(event, item_snapshot)
         matches: list[RuleMatch] = self._rule_engine.evaluate(event, item_snapshot=item_snapshot)
 
         event_context = self._build_event_context(event)

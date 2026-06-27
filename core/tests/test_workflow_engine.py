@@ -387,6 +387,104 @@ class TestDispatcher:
         _, kwargs = mock_rule_engine.evaluate.call_args
         assert kwargs.get("item_snapshot") is None
 
+    # ---- Cold-start enrichment: item snapshot promoted into derived_fields ----
+    # 2026-06-27 per architect rule-walk-through finding.
+
+    def test_dispatch_enriches_event_derived_fields_from_item_snapshot(self, _registry_snapshot):
+        """item.delivery_state / force_tracking_enabled / item_type / reminder_count
+        get promoted into event.derived_fields so condition evaluator can read them."""
+        item = SimpleNamespace(
+            delivery_item_id="I-1234",
+            customer_id="MMK",
+            device_id="MODEL-A",
+            milestone_id="M-1001",
+            delivery_state="Outreach Sent",
+            force_tracking_enabled=True,
+            item_type="test_tech_waiver_report",
+            reminder_count=1,
+            tg_name="MNO-ETM",
+            owner_corp_email="owner@corp.example",
+            rules_paused=False,
+        )
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(make_event(delivery_item_id="I-1234"))
+
+        # Inspect the enriched event passed to rule_engine.evaluate
+        args, _ = mock_rule_engine.evaluate.call_args
+        enriched_event = args[0]
+        assert enriched_event.derived_fields["delivery_state"] == "Outreach Sent"
+        assert enriched_event.derived_fields["force_tracking_enabled"] is True
+        assert enriched_event.derived_fields["item_type"] == "test_tech_waiver_report"
+        assert enriched_event.derived_fields["reminder_count"] == 1
+        assert enriched_event.derived_fields["tg_name"] == "MNO-ETM"
+        assert enriched_event.derived_fields["owner_corp_email"] == "owner@corp.example"
+
+    def test_dispatch_caller_supplied_derived_fields_win_over_item_snapshot(
+        self, _registry_snapshot
+    ):
+        """sp_alert_parser's body_kvs / kickoff_collection's kickoff_source must
+        not be clobbered by item snapshot fields with the same name."""
+        item = SimpleNamespace(
+            delivery_item_id="I-1234",
+            item_type="storage_value",      # would be promoted...
+            tg_name="storage_tg",
+            rules_paused=False,
+        )
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+
+        # Event carries caller-supplied derived_fields that overlap with item fields
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_CREATED,
+            sub_trigger=None,
+            entity_ref=EntityRef(customer_id="MMK", device_id="MODEL-A",
+                                 milestone_id="M-1001", delivery_item_id="I-1234"),
+            field_deltas=None,
+            timestamp=datetime(2026, 6, 27, 12, 0, tzinfo=timezone.utc),
+            correlation_id="corr-002",
+            derived_fields={"item_type": "caller_value", "kickoff_source": "kickoff_collection_task"},
+        )
+
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(event)
+
+        args, _ = mock_rule_engine.evaluate.call_args
+        enriched_event = args[0]
+        # Caller-supplied item_type wins
+        assert enriched_event.derived_fields["item_type"] == "caller_value"
+        # Caller-supplied kickoff_source preserved
+        assert enriched_event.derived_fields["kickoff_source"] == "kickoff_collection_task"
+        # Storage tg_name (not in caller-supplied) gets promoted
+        assert enriched_event.derived_fields["tg_name"] == "storage_tg"
+
+    def test_dispatch_item_less_event_skips_enrichment(self, _registry_snapshot):
+        """No item_snapshot -> no enrichment; event passes through unchanged."""
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine)
+
+        original_derived = {"some_caller_fact": "value"}
+        event = TriggerEvent(
+            trigger=TriggerKind.MILESTONE_ALL_CLOSED,
+            sub_trigger=None,
+            entity_ref=EntityRef(customer_id="MMK", milestone_id="M-1001"),
+            field_deltas=None,
+            timestamp=datetime(2026, 6, 27, 12, 0, tzinfo=timezone.utc),
+            correlation_id="corr-003",
+            derived_fields=original_derived,
+        )
+        dispatcher.dispatch(event)
+        args, _ = mock_rule_engine.evaluate.call_args
+        # Same derived_fields (no enrichment because no item snapshot)
+        assert args[0].derived_fields == original_derived
+
     def test_dispatch_event_context_uses_id_keys_per_d091(self, _registry_snapshot):
         """Per D1 cascade 2026-06-23: event_context uses customer_id / device_id
         (was customer_slug / device_slug)."""
