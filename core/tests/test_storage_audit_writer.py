@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+)
+
 from core.src.storage.audit_ops import query_communications
 from core.src.storage.audit_writer_impl import PostgresAuditWriter
 from core.src.storage.db import configure_engine, init_db
 
 
 @pytest.fixture(autouse=True)
-async def _fresh_db():
-    engine = configure_engine("sqlite+aiosqlite:///:memory:")
+async def _fresh_db(tmp_path):
+    db_file = tmp_path / "test_audit.db"
+    engine = configure_engine(f"sqlite+aiosqlite:///{db_file}")
     await init_db()
     yield
     await engine.dispose()

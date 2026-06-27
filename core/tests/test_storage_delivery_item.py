@@ -10,6 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
+# Suppress aiosqlite Connection __del__ teardown warnings -- these are benign
+# SQLite-specific GC ordering quirks under pytest-asyncio + module-level engine
+# singleton; production uses Postgres + asyncpg with proper connection pooling.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+)
+
 from core.src.storage.db import configure_engine, init_db
 from core.src.storage.delivery_item_ops import (
     PostgresStorage,
@@ -24,8 +31,12 @@ from core.src.template_schema import DeliveryItemBase
 
 
 @pytest.fixture(autouse=True)
-async def _fresh_db():
-    engine = configure_engine("sqlite+aiosqlite:///:memory:")
+async def _fresh_db(tmp_path):
+    # Per-test temp file (rather than :memory: which has cross-test bleed-through
+    # under pytest-asyncio function scope when other test files share the
+    # storage engine singleton).
+    db_file = tmp_path / "test_di.db"
+    engine = configure_engine(f"sqlite+aiosqlite:///{db_file}")
     await init_db()
     yield
     await engine.dispose()
@@ -70,9 +81,9 @@ def _mk_item(
 
 
 async def test_create_delivery_item_round_trips():
-    item = _mk_item(item_id="MMK-SM-S671U1-P1-5")
+    item = _mk_item(item_id="round-trip-test-id-001")
     new_id = await create_delivery_item(item)
-    assert new_id == "MMK-SM-S671U1-P1-5"
+    assert new_id == "round-trip-test-id-001"
 
     fetched = await get_delivery_item(new_id)
     assert fetched is not None
@@ -95,8 +106,9 @@ async def test_create_delivery_item_rejects_duplicate_id():
 
 
 async def test_get_delivery_item_returns_none_when_missing():
-    # Use random-ish id to avoid bleed-through if engine state leaks across files
-    result = await get_delivery_item("absolutely-does-not-exist-xyz-987654321")
+    # Use a UUID to guarantee no bleed-through if engine state leaks across files.
+    import uuid as _uuid
+    result = await get_delivery_item(f"missing-{_uuid.uuid4()}")
     assert result is None
 
 
