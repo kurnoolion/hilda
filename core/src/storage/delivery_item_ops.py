@@ -19,13 +19,13 @@ Surface (StorageWriter Protocol-aligned, 6 methods):
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from core.src.diagnostics.error_codes import PipelineError
+from core.src.storage._sync_bridge import run_async_sync
 from core.src.storage.db import DeliveryItemTable, session_scope
 from core.src.template_schema import DeliveryItemBase
 
@@ -188,27 +188,27 @@ class PostgresStorage:
     """
 
     def get_delivery_item(self, item_id: str) -> DeliveryItemBase | None:
-        return asyncio.run(get_delivery_item(item_id))
+        return run_async_sync(lambda: get_delivery_item(item_id))
 
     def create_delivery_item(self, item: DeliveryItemBase | Any) -> str:
-        return asyncio.run(create_delivery_item(item))
+        return run_async_sync(lambda: create_delivery_item(item))
 
     def update_delivery_item(self, item_id: str, fields: dict[str, Any]) -> None:
-        return asyncio.run(update_delivery_item(item_id, fields))
+        return run_async_sync(lambda: update_delivery_item(item_id, fields))
 
     def list_items_for_milestone(
         self, milestone_id: str, states: list[str] | None = None
     ) -> list[DeliveryItemBase]:
-        return asyncio.run(list_items_for_milestone(milestone_id, states))
+        return run_async_sync(lambda: list_items_for_milestone(milestone_id, states))
 
     def list_default_workitem_for_milestone(
         self, milestone_id: str
     ) -> DeliveryItemBase | None:
-        return asyncio.run(list_default_workitem_for_milestone(milestone_id))
+        return run_async_sync(lambda: list_default_workitem_for_milestone(milestone_id))
 
     def find_items_by_natural_key(
         self, *, customer_id: str, tg_name: str, item_no: int
     ) -> list[DeliveryItemBase]:
-        return asyncio.run(
-            find_items_by_natural_key(customer_id, tg_name, item_no)
+        return run_async_sync(
+            lambda: find_items_by_natural_key(customer_id, tg_name, item_no)
         )

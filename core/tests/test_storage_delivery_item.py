@@ -95,7 +95,8 @@ async def test_create_delivery_item_rejects_duplicate_id():
 
 
 async def test_get_delivery_item_returns_none_when_missing():
-    result = await get_delivery_item("does-not-exist")
+    # Use random-ish id to avoid bleed-through if engine state leaks across files
+    result = await get_delivery_item("absolutely-does-not-exist-xyz-987654321")
     assert result is None
 
 

@@ -1,0 +1,80 @@
+"""Sync PostgresAuditWriter conforming to tracker.AuditWriter Protocol.
+
+Added 2026-06-27 per architect direction (storage-wireup strand Chunk 2).
+Wraps the existing async audit_ops.log_communication for sync Celery task
+body callers; bridges the AuditWriter Protocol surface (4 args: action_type
++ delivery_item_id + attribution + details) to the richer CommunicationLogRow
+shape.
+
+Pattern matches PostgresStorage (delivery_item_ops.py): async core +
+asyncio.run sync wrappers.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from core.src.storage._sync_bridge import run_async_sync
+from core.src.storage.audit_ops import log_communication
+from core.src.storage.models import Channel, CommunicationLogRow, Direction
+
+__all__ = ["PostgresAuditWriter"]
+
+
+class PostgresAuditWriter:
+    """Conforms to tracker.AuditWriter Protocol.
+
+    The Protocol signature:
+        write_communication_log(
+            action_type: str,
+            delivery_item_id: str | None,
+            attribution: dict[str, str],
+            details: dict[str, Any],
+        ) -> None
+
+    Maps to CommunicationLogRow:
+    - log_id           = synthesized UUID4
+    - channel          = "SharePoint" sentinel for HILDA-internal audit
+                         (CommunicationLogRow has no "Internal"; SharePoint
+                         is the closest existing enum for SP-side context
+                         attributions)
+    - direction        = Outbound (HILDA emitting the audit row)
+    - timestamp        = utcnow
+    - delivery_item_id = passed through
+    - summary          = compact JSON of attribution + details (bounded
+                         enum tokens per NFR-2; no raw customer data per
+                         tracker.protocols.AuditWriter docstring)
+    - action_type      = passed through
+    """
+
+    def write_communication_log(
+        self,
+        action_type: str,
+        delivery_item_id: str | None,
+        attribution: dict[str, str],
+        details: dict[str, Any],
+    ) -> None:
+        import json
+        summary = json.dumps({
+            "attribution": attribution or {},
+            "details":     details or {},
+        }, default=str, separators=(",", ":"))[:4096]   # bounded length
+
+        row = CommunicationLogRow(
+            log_id=str(uuid.uuid4()),
+            channel=Channel.SHAREPOINT,        # sentinel for HILDA-internal audit
+            direction=Direction.OUTBOUND,
+            timestamp=datetime.now(timezone.utc),
+            delivery_item_id=delivery_item_id,
+            device_id=None,
+            sender=attribution.get("modified_by") if attribution else None,
+            recipients=None,
+            subject=None,
+            summary=summary,
+            external_message_id=attribution.get("correlation_id") if attribution else None,
+            credential_id=None,
+            action_type=action_type,
+            attachments=[],
+        )
+        run_async_sync(lambda: log_communication(row))
