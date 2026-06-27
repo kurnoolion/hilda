@@ -28,6 +28,40 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
+def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, Any]) -> str | None:
+    """Resolve outreach recipient per [D-080] 4-field preference chain.
+
+    Precedence (added 2026-06-27 per [D-118] Chunk 4 wireup fix):
+      1. Explicit params.recipient override (rule YAML can pin a recipient)
+      2. Storage DeliveryItem.owner_corp_usa_email  (preferred per [D-080])
+      3. Storage DeliveryItem.owner_corp_email     (fallback per [D-080])
+      4. event_context.owner_corp_usa_email        (legacy callers + test fixtures)
+      5. None -> caller writes audit-only row, skips send
+
+    Prior bug (pre-2026-06-27): tasks read event_context.owner_corp_usa_email,
+    which dispatcher._build_event_context never populates in the Chunk 4 path.
+    Fix: lookup current owner from storage so TPM mid-flight owner changes are
+    honored automatically; event_context fallback preserved for legacy callers
+    that pre-populate it directly.
+    """
+    explicit = params.get("recipient")
+    if explicit:
+        return explicit
+    delivery_item_id = event_context.get("delivery_item_id")
+    if delivery_item_id:
+        try:
+            item = deps.storage.get_delivery_item(delivery_item_id)
+            from_storage = (
+                getattr(item, "owner_corp_usa_email", None)
+                or getattr(item, "owner_corp_email", None)
+            )
+            if from_storage:
+                return from_storage
+        except Exception:  # noqa: BLE001 -- storage miss is non-fatal; fall through
+            pass
+    return event_context.get("owner_corp_usa_email")
+
+
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.outreach.send_initial_outreach")
 def send_initial_outreach_task(
     params: dict[str, Any], event_context: dict[str, Any]
@@ -51,8 +85,8 @@ def send_initial_outreach_task(
     deps = get_task_deps()
     template = params.get("template", "standard_owner_outreach")
     channel = params.get("channel", "email")
-    recipient = params.get("recipient") or event_context.get("owner_corp_usa_email")
     delivery_item_id = event_context.get("delivery_item_id")
+    recipient = _resolve_recipient(deps, event_context, params)
 
     message_id = None
     if channel == "email" and deps.email_sender is not None and recipient:
@@ -111,8 +145,8 @@ def send_reminder_task(
     template = params.get("template", "standard_owner_reminder")
     channel = params.get("channel", "email")
     reminder_count = params.get("reminder_count", 1)
-    recipient = params.get("recipient") or event_context.get("owner_corp_usa_email")
     delivery_item_id = event_context.get("delivery_item_id")
+    recipient = _resolve_recipient(deps, event_context, params)
 
     message_id = None
     if channel == "email" and deps.email_sender is not None and recipient:
@@ -174,8 +208,8 @@ def notify_new_owner_task(
     deps = get_task_deps()
     template = params.get("template", "owner_reassignment_notice")
     channel = params.get("channel", "email")
-    recipient = params.get("recipient") or event_context.get("owner_corp_usa_email")
     delivery_item_id = event_context.get("delivery_item_id")
+    recipient = _resolve_recipient(deps, event_context, params)
 
     message_id = None
     if channel == "email" and deps.email_sender is not None and recipient:

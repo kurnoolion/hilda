@@ -433,6 +433,77 @@ class TestOutreachTasks:
         logs = [a for a in deps.audit.logs if a[0] == "notify_new_owner"]
         assert len(logs) == 1
 
+    # ---- _resolve_recipient helper precedence tests -- [D-118] Chunk 4 wireup ----
+
+    def test_resolve_recipient_prefers_storage_owner_corp_usa_email(self):
+        """Storage-side owner_corp_usa_email beats event_context fallback."""
+        email = _FakeAsyncEmailSender()
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            owner_corp_usa_email="storage-usa@corp.example",
+            owner_corp_email="storage-fallback@corp.example",
+        )
+        d = TaskDeps(
+            storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            send_initial_outreach_task.apply_async(
+                args=({}, ctx(owner_corp_usa_email="ctx-fallback@corp.example"))
+            ).get()
+        assert email.sent[0]["to"] == ["storage-usa@corp.example"]
+
+    def test_resolve_recipient_falls_back_to_owner_corp_email(self):
+        """When storage owner_corp_usa_email is None, falls back to owner_corp_email per [D-080]."""
+        email = _FakeAsyncEmailSender()
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            owner_corp_usa_email=None,
+            owner_corp_email="storage-fallback@corp.example",
+        )
+        d = TaskDeps(
+            storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            send_initial_outreach_task.apply_async(args=({}, ctx())).get()
+        assert email.sent[0]["to"] == ["storage-fallback@corp.example"]
+
+    def test_resolve_recipient_explicit_param_wins(self):
+        """params.recipient pins the value above storage."""
+        email = _FakeAsyncEmailSender()
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            owner_corp_usa_email="storage@corp.example",
+            owner_corp_email=None,
+        )
+        d = TaskDeps(
+            storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            send_initial_outreach_task.apply_async(
+                args=({"recipient": "pinned@corp.example"}, ctx())
+            ).get()
+        assert email.sent[0]["to"] == ["pinned@corp.example"]
+
+    def test_resolve_recipient_audit_only_when_all_sources_empty(self):
+        """No params + no storage + no event_context fallback -> audit-only."""
+        email = _FakeAsyncEmailSender()
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        # storage.items has no I-1234 entry; event_context has no owner_corp_usa_email.
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            result = send_initial_outreach_task.apply_async(args=({}, ctx())).get()
+        assert result["outcome"] == "audit_only"
+        assert email.sent == []
+
 
 class TestSubmissionTasks:
     """ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION -- Ph-1 wire-up."""
