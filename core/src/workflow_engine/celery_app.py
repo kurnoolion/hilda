@@ -66,6 +66,20 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
     app.conf.task_track_started = True
     # Allow tests to run tasks eagerly without a real broker.
     app.conf.task_always_eager = False
+
+    # Beat schedule -- periodic tasks fired by hilda-beat. Added 2026-06-27
+    # per architect direction (no automatic ews_receiver poll prior to this).
+    # Module imports happen lazily so tests that don't need beat don't pay
+    # the cost.
+    app.conf.beat_schedule = {
+        "poll_ews_inbox_60s": {
+            "task":     "core.src.workflow_engine.tasks.email_polling.poll_ews_inbox",
+            "schedule": 60.0,    # seconds; matches email_service.json ews.poll_interval_s default
+            "options":  {"queue": "default", "expires": 55},
+            # expires=55 -> if beat fires while previous poll still running,
+            # the newer one expires before reaching worker (avoids backlog).
+        },
+    }
     return app
 
 

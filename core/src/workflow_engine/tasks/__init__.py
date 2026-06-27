@@ -12,6 +12,7 @@ etc.); workflow_engine just coordinates the Celery scheduling.
 # register_task_binding calls at module load. Order doesn't matter -- each
 # binding is independent.
 from core.src.workflow_engine.tasks import (  # noqa: F401
+    email_polling,   # added 2026-06-27: periodic ews_receiver poll + dispatch
     escalation,
     milestone,
     outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
@@ -22,6 +23,7 @@ from core.src.workflow_engine.tasks import (  # noqa: F401
 )
 
 __all__ = [
+    "email_polling",
     "escalation",
     "milestone",
     "outreach",
