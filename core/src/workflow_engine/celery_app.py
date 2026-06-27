@@ -20,7 +20,9 @@ import logging
 from typing import Any
 
 from celery import Celery
-from celery.signals import task_failure, task_postrun, task_prerun, task_retry
+from celery.signals import (
+    task_failure, task_postrun, task_prerun, task_retry, worker_init,
+)
 
 from core.src.diagnostics import format_code
 
@@ -114,3 +116,30 @@ def _on_task_failure(sender: Any = None, task_id: str | None = None,
     logger.error("WFL-E005: " + format_code(
         "WFL-E005", task_name=name, retries=retry_count, item_id=item_id, exc_class=exc_class,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Worker-init bootstrap -- TaskDeps wireup at worker startup
+# (added 2026-06-27 per architect direction during rule-walk-through:
+# dispatcher + email_sender wired so kickoff_collection_task ItemCreated chain
+# + outreach email send are functional in production).
+# ---------------------------------------------------------------------------
+
+
+@worker_init.connect
+def _on_worker_init(**kwargs: Any) -> None:
+    """Build + install TaskDeps before any task body runs.
+
+    Best-effort: missing config / credentials / concrete impls don't crash
+    worker startup. Each piece logs its skip reason via BootstrapResult so
+    the architect can see what's wired vs stub.
+
+    Test isolation: this signal fires only when a real Celery worker boots
+    (via `celery worker`). In-process tests that use task_always_eager don't
+    trigger worker_init; tests inject TaskDeps directly via override_task_deps.
+    """
+    try:
+        from core.src.workflow_engine.bootstrap import bootstrap_task_deps
+        bootstrap_task_deps()
+    except Exception as exc:  # noqa: BLE001 -- bootstrap is best-effort
+        logger.error("WFL-BOOTSTRAP-FAILED: %s: %s", type(exc).__name__, str(exc)[:200])
