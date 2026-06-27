@@ -151,7 +151,7 @@ def _build_rule_engine(rules_dir: Path | None, result: BootstrapResult) -> Any:
     try:
         from core.src.rule_engine import RuleEngine
         from core.src.rule_engine.config import RuleEngineConfig
-        from core.src.rule_engine.loader import load_rule_set
+        from core.src.rule_engine.loader import RuleSet
 
         if rules_dir is None:
             cfg = RuleEngineConfig.from_sources()  # reads config/rule_engine.json + env
@@ -161,7 +161,10 @@ def _build_rule_engine(rules_dir: Path | None, result: BootstrapResult) -> Any:
             result.warnings.append(f"rule_engine_skip: rules_dir={rules_dir} not a directory")
             return None
 
-        rule_set = load_rule_set(rules_dir)
+        # Use RuleSet.load classmethod (per rule_engine MODULE.md API).
+        # collision/orphan audits left at defaults (True); user can override via
+        # RuleEngineConfig fields if they want them disabled at bootstrap time.
+        rule_set = RuleSet.load(rules_dir)
         engine = RuleEngine(rule_set)
         result.rule_engine_wired = True
         return engine
