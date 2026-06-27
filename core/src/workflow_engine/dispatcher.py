@@ -99,7 +99,41 @@ class TriggerDispatcher:
         "pm_approval_at", "pm_approval_pm_id",
         # PLM grouping per FR-5 + [D-035]:
         "plm_id",
+        # FR-28 OwnerStatusConfirmed + FR-7 doc-count derivation source:
+        "doc_count_received",
     )
+
+    @staticmethod
+    def _derive_facts(item_snapshot: Any) -> dict[str, Any]:
+        """Compute conditional facts not present as direct item fields.
+
+        Added 2026-06-27 per architect rule-walk-through Section 4 finding:
+        rules like `advance_to_document_received_with_parser` (Rule 4-1) and
+        `advance_to_owner_closed_on_status_confirmed` (Rule 4-2) reference
+        `doc_count_reached` as a condition field, but it isn't stored
+        directly -- it's the boolean (doc_count_received >= doc_count) per
+        tracker/guards.py:83. Without this derivation, the FR-28 + FR-7
+        state-machine rules silently fail to match.
+
+        Mirrors the rule_engine MODULE.md Worked Example 3 design ("caller
+        also supplies derived facts"); centralizing here in the dispatcher
+        instead of expecting each trigger source to remember which derived
+        facts each rule needs.
+
+        Returns the computed dict. Caller is responsible for letting
+        caller-supplied derived_fields take precedence.
+
+        Forward-look: days_to_deadline = (Milestone.target_date - today)
+        per [D-085] + deadline_evaluator (workflow_engine MODULE.md line 290)
+        will join this method once Milestone snapshot fetch is wired.
+        """
+        if item_snapshot is None:
+            return {}
+        derived: dict[str, Any] = {}
+        received = getattr(item_snapshot, "doc_count_received", None) or 0
+        expected = getattr(item_snapshot, "doc_count", None) or 0
+        derived["doc_count_reached"] = received >= expected
+        return derived
 
     def _enrich_event(self, event: TriggerEvent, item_snapshot: Any) -> TriggerEvent:
         """Promote item_snapshot fields into event.derived_fields so the
@@ -133,9 +167,12 @@ class TriggerDispatcher:
             val = getattr(item_snapshot, field_name, None)
             if val is not None:
                 promoted[field_name] = val
+        # Computed facts (doc_count_reached etc.) layered above raw promotion;
+        # caller-supplied derived_fields still win below.
+        derived = self._derive_facts(item_snapshot)
         existing = dict(event.derived_fields) if event.derived_fields else {}
         # Caller-supplied facts take precedence over item snapshot defaults.
-        merged = {**promoted, **existing}
+        merged = {**promoted, **derived, **existing}
         from dataclasses import replace
         return replace(event, derived_fields=merged)
 

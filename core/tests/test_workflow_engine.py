@@ -485,6 +485,89 @@ class TestDispatcher:
         # Same derived_fields (no enrichment because no item snapshot)
         assert args[0].derived_fields == original_derived
 
+    # ---- Derived facts: doc_count_reached (Chunk A 2026-06-27) ----
+
+    def test_dispatch_derives_doc_count_reached_true(self, _registry_snapshot):
+        """item.doc_count_received >= item.doc_count -> doc_count_reached=True
+        per FR-28 OwnerStatusConfirmed condition (i)."""
+        item = SimpleNamespace(
+            delivery_item_id="I-1234",
+            doc_count=2,
+            doc_count_received=2,
+            rules_paused=False,
+        )
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(make_event(delivery_item_id="I-1234"))
+        args, _ = mock_rule_engine.evaluate.call_args
+        assert args[0].derived_fields["doc_count_reached"] is True
+
+    def test_dispatch_derives_doc_count_reached_false(self, _registry_snapshot):
+        """received < expected -> doc_count_reached=False."""
+        item = SimpleNamespace(
+            delivery_item_id="I-1234",
+            doc_count=3,
+            doc_count_received=1,
+            rules_paused=False,
+        )
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(make_event(delivery_item_id="I-1234"))
+        args, _ = mock_rule_engine.evaluate.call_args
+        assert args[0].derived_fields["doc_count_reached"] is False
+
+    def test_dispatch_derives_doc_count_reached_handles_missing_attrs(
+        self, _registry_snapshot
+    ):
+        """Item without doc_count fields -> derives False safely (0 >= 0)."""
+        item = SimpleNamespace(delivery_item_id="I-1234", rules_paused=False)
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(make_event(delivery_item_id="I-1234"))
+        args, _ = mock_rule_engine.evaluate.call_args
+        # 0 received >= 0 expected -> True (vacuously satisfied when no docs expected).
+        assert args[0].derived_fields["doc_count_reached"] is True
+
+    def test_dispatch_caller_supplied_doc_count_reached_wins(
+        self, _registry_snapshot
+    ):
+        """Caller-supplied doc_count_reached overrides the derivation."""
+        item = SimpleNamespace(
+            delivery_item_id="I-1234",
+            doc_count=5,
+            doc_count_received=1,   # would derive False...
+            rules_paused=False,
+        )
+        mock_storage = MagicMock()
+        mock_storage.get_delivery_item.return_value = item
+        mock_rule_engine = MagicMock(spec=RuleEngine)
+        mock_rule_engine.evaluate.return_value = []
+
+        event = TriggerEvent(
+            trigger=TriggerKind.STATE_CHANGE,
+            sub_trigger=None,
+            entity_ref=EntityRef(customer_id="MMK", device_id="MODEL-A",
+                                 milestone_id="M-1001", delivery_item_id="I-1234"),
+            field_deltas=None,
+            timestamp=datetime(2026, 6, 27, 12, 0, tzinfo=timezone.utc),
+            correlation_id="corr-004",
+            derived_fields={"doc_count_reached": True},   # ...but caller forces True
+        )
+
+        dispatcher = TriggerDispatcher(rule_engine=mock_rule_engine, storage=mock_storage)
+        dispatcher.dispatch(event)
+        args, _ = mock_rule_engine.evaluate.call_args
+        assert args[0].derived_fields["doc_count_reached"] is True
+
     def test_dispatch_event_context_uses_id_keys_per_d091(self, _registry_snapshot):
         """Per D1 cascade 2026-06-23: event_context uses customer_id / device_id
         (was customer_slug / device_slug)."""
