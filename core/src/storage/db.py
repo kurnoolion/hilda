@@ -13,6 +13,7 @@ from typing import AsyncIterator
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Index,
     Integer,
@@ -34,6 +35,7 @@ __all__ = [
     "Base",
     "AutomationRuleOverrideTable",
     "CommunicationLogTable",
+    "DeliveryItemTable",
     "DocumentIndexTable",
     "DocumentItemAssociationTable",
     "TGFolderRoutingTable",
@@ -153,6 +155,120 @@ class TagCatalogTable(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     color: Mapped[str | None] = mapped_column(String(16), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class DeliveryItemTable(Base):
+    """SQLAlchemy ORM for DeliveryItemBase (template_schema.models). Added
+    2026-06-27 per architect direction to wire HILDA's Postgres-backed
+    StorageWriter implementation -- the missing piece between sp_alert_parser
+    (working) and workflow_engine task bodies (which all need storage).
+
+    Maps DeliveryItemBase Pydantic fields 1:1; nested fields (item_description,
+    tracking_modality, email_cc_list, corp_id_list) use JSON columns;
+    customer_id + device_id are denormalized indexed columns for fast
+    find_items_by_natural_key + list_items_for_milestone lookups.
+    """
+    __tablename__ = "delivery_item"
+    __table_args__ = (
+        Index("ix_di_milestone", "milestone_id"),
+        Index("ix_di_customer", "customer_id"),
+        Index("ix_di_natural_key", "customer_id", "tg_name", "item_no"),  # find_items_by_natural_key
+        Index("ix_di_default_per_milestone", "milestone_id", "item_type"),
+    )
+
+    # Identity
+    item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    item_no: Mapped[int] = mapped_column(Integer)
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    milestone_id: Mapped[str] = mapped_column(String(64))
+    item_name: Mapped[str] = mapped_column(String(256))
+    item_type: Mapped[str] = mapped_column(String(64))
+    item_description: Mapped[list | None] = mapped_column(JSON, nullable=True)  # list[list[str]] per FR-82
+
+    # State + lifecycle
+    delivery_state: Mapped[str] = mapped_column(String(32))
+    prior_delivery_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_completion_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    actual_completion_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    item_completion_pct: Mapped[int] = mapped_column(Integer, default=0)
+
+    # 4-field owner identity per [D-080] + [D-086]
+    owner_corp_usa_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    owner_corp_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    owner_corp_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    owner_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    # Tracking gates per FR-78 / FR-81
+    tracking_modality: Mapped[list] = mapped_column(JSON, default=list)  # multi-value per [D-037]
+    force_tracking_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    no_customer_upload: Mapped[bool] = mapped_column(Boolean, default=False)
+    milestone_gating: Mapped[bool] = mapped_column(Boolean, default=True)
+    review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    review_status: Mapped[str] = mapped_column(String(32), default="not_required")
+    manual_triage_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    rules_paused: Mapped[bool] = mapped_column(Boolean, default=False)  # FR-31 sub-1
+
+    # FR-7 + FR-10 + NFR-21 §5: counters + outreach timestamps
+    doc_count: Mapped[int] = mapped_column(Integer, default=1)
+    doc_count_received: Mapped[int] = mapped_column(Integer, default=0)  # FR-28 doc_count_reached derivation source
+    reminder_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_owner_contacted: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_reminder_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_owner_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_updated: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    # Form-factor flags (7 flags per [D-084])
+    handset: Mapped[bool] = mapped_column(Boolean, default=False)
+    tablet: Mapped[bool] = mapped_column(Boolean, default=False)
+    wearable: Mapped[bool] = mapped_column(Boolean, default=False)
+    ir: Mapped[bool] = mapped_column(Boolean, default=False)
+    osmr: Mapped[bool] = mapped_column(Boolean, default=False)
+    rmr: Mapped[bool] = mapped_column(Boolean, default=False)
+    hmr_smr: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Carrier-portal delivery (per-item denorm per [D-126])
+    customer_delivery_info: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    customer_delivery_credential_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # FR-77 routing
+    ingress_folder: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    target_folder: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # FR-78 path components
+    sort_order: Mapped[int] = mapped_column(Integer)
+    path_id: Mapped[str] = mapped_column(String(128))
+    item_path_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tg_path_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # TG-denormalized per [D-051]
+    tg_name: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    ingress_nsd: Mapped[str] = mapped_column(String(32), default="None")
+    folder_routing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    tg_email_group_alias: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    tg_owner_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    tg_owner_corp_usa_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    tg_owner_corp_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    tg_owner_corp_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    corp_id_list: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Other denormalized fields
+    actual_item_info: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plm_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    owner_status_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_cc_list: Mapped[list | None] = mapped_column(JSON, nullable=True)  # list[dict]
+
+    # JIRA polling state (Ph-2 per FR-25 (b))
+    jira_open_ticket_count: Mapped[int] = mapped_column(Integer, default=0)
+    jira_ticket_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # PM-approval per [D-068]
+    pm_approval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pm_approval_pm_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # TPM-resolution per FR-83 / FR-87
+    tpm_reassignment_target_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AutomationRuleOverrideTable(Base):
