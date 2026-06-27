@@ -249,7 +249,20 @@ def _build_sp_writer(result: BootstrapResult) -> Any:
         from core.src.sharepoint_integration.sp_client import SpClient
         from core.src.sharepoint_integration.sp_writer_impl import SpCrudWriter
 
-        cfg = GlobalSharePointConfig.from_sources()
+        # GlobalSharePointConfig.from_sources() has no default config_path
+        # (unlike GlobalStorageConfig). Pass the conventional location
+        # explicitly so JSON-driven deployments don't fall through to env-only.
+        # First existing path wins; env vars + CLI args still override JSON.
+        sp_config_path: Path | None = None
+        for candidate in (
+            Path("config/sharepoint_integration.json"),       # standard layout
+            Path("/app/config/sharepoint_integration.json"),  # container baked-image fallback
+        ):
+            if candidate.exists():
+                sp_config_path = candidate
+                break
+
+        cfg = GlobalSharePointConfig.from_sources(config_path=sp_config_path)
         client = SpClient(cfg)
         provider = FileBasedListProvider(
             Path("customizations/sharepoint_config")
