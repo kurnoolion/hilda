@@ -177,10 +177,7 @@ class EwsReceiver:
                 Build,
                 Configuration,
                 Credentials,
-                EWSDateTime,
-                EWSTimeZone,
                 HTMLBody,
-                Q,
                 Version,
                 FileAttachment,
             )
@@ -223,29 +220,24 @@ class EwsReceiver:
         if self._config.inbox_subfolder:
             folder = folder / self._config.inbox_subfolder
 
-        # Filter to messages received after the last successful fetch. On first
-        # run (_last_fetched_at is None) we deliberately DO NOT apply a since
-        # filter -- we want the top-N most recent inbox messages so smoke
-        # tests + post-restart recovery see existing alerts. fetch_limit caps
-        # the initial-fetch volume. After the first successful fetch advances
-        # the high-water mark, subsequent calls poll only the delta.
+        # Server-side filter: only unread messages. Combined with the post-fetch
+        # mark-as-read step below, this gives persistent per-message progress
+        # tracking that survives:
+        #   - receiver instance recreation (every poll_ews_inbox_task in
+        #     workflow_engine builds a fresh EwsReceiver -- instance-level
+        #     _last_fetched_at watermark resets to None every cycle and was
+        #     never effective in production. Fix: server-side is_read flag.)
+        #   - container / worker restarts
+        #   - multi-worker contention (server-side state is authoritative)
         #
-        # Bug avoided: previous version set since=now() on first run, which
-        # filtered `datetime_received > now` -- excluded everything ever sent.
-        # Smoke-test surfaced this 2026-06-26 against real corp Exchange.
-        since = self._last_fetched_at
-        if since is None:
-            qs = folder.all().order_by("-datetime_received")[:self._config.fetch_limit]
-        else:
-            tz = EWSTimeZone.localzone()
-            ews_since = EWSDateTime(
-                since.year, since.month, since.day,
-                since.hour, since.minute, since.second,
-                tzinfo=tz,
-            )
-            qs = folder.filter(
-                Q(datetime_received__gt=ews_since)
-            ).order_by("-datetime_received")[:self._config.fetch_limit]
+        # The instance-level _last_fetched_at remains as a NO-OP backstop
+        # (set on success but no longer consulted on filter). Removing it
+        # entirely would be a Protocol churn; leave for a separate pass.
+        #
+        # Live-debug 2026-06-27: architect observed sp_alerts=13 every 60s
+        # (12 Deliverables + persistent re-read of 2 milestone alerts from
+        # prior Step 1). Root cause: instance churn defeated the watermark.
+        qs = folder.filter(is_read=False).order_by("-datetime_received")[:self._config.fetch_limit]
 
         out: list[dict[str, Any]] = []
         for msg in qs:
@@ -278,8 +270,25 @@ class EwsReceiver:
                 "received_at": msg.datetime_received,
                 "attachments": attachments,
             })
+            # Mark read AFTER successful data extraction so a transient EWS
+            # blip on .save() at worst causes one re-fetch on the next poll
+            # (parser-side _LruTtlSet de-dups by message_id + content_hash so
+            # downstream is idempotent). A blip during data extraction leaves
+            # the message unread + retryable.
+            try:
+                msg.is_read = True
+                msg.save(update_fields=["is_read"])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "ews_receiver: mark-as-read failed for message_id=%s: %s",
+                    str(msg.message_id or msg.item_id or "?")[:80],
+                    str(exc)[:120],
+                )
+                # Don't fail the whole fetch; downstream dedup handles the
+                # next poll's re-read gracefully.
 
-        # Advance high-water mark only on success
+        # Advance instance high-water mark (no longer consulted on filter --
+        # is_read is the authoritative seen-bit -- kept for diagnostics).
         self._last_fetched_at = datetime.now(timezone.utc)
         return out
 
