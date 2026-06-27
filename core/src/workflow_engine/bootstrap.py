@@ -290,13 +290,23 @@ def _build_email_sender(result: BootstrapResult) -> Any:
         result.warnings.append(f"email_sender_skip_config: {type(exc).__name__}")
         return None
 
-    # Credential service: optional. If module exposes one, use it; else None.
+    # Credential service: optional but needed for sops-backed creds
+    # (architect's deployment per yesterday's EWS validation). Try concrete
+    # SopsCredentialService first; fall back to None when env/key paths
+    # aren't set up (dev / unit-test setups).
     credential_service: Any = None
     try:
-        from core.src.credential_service import build_credential_service  # type: ignore
-        credential_service = build_credential_service()
-    except Exception:  # noqa: BLE001 -- credential service is optional in dev
-        result.warnings.append("email_sender_no_credential_service: build_credential_service not importable")
+        from core.src.credential_service.service import SopsCredentialService
+        # SopsCredentialService constructor takes default paths; sops/age key
+        # validation happens lazily at first credential lookup, so this
+        # construction always succeeds. The age key file presence is the
+        # actual gate, but bootstrap doesn't validate it here -- if missing,
+        # the first email send will surface CRD-E001.
+        credential_service = SopsCredentialService()
+    except Exception as exc:  # noqa: BLE001 -- credential service is optional in dev
+        result.warnings.append(
+            f"email_sender_no_credential_service: {type(exc).__name__}: {str(exc)[:120]}"
+        )
 
     try:
         sender = build_sender(cfg, credential_service)
