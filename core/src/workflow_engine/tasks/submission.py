@@ -98,6 +98,17 @@ def start_item_collection_task(
     + writes audit log. Chained outreach is the rule_engine's responsibility (action 1
     in StartCollection rule actions list per defaults.yaml worked example).
 
+    Collection-started gate (architect 2026-06-27): paired with
+    notify_new_owner_task. handle_owner_reassignment fires both NotifyNewOwner
+    + StartItemCollection on any OwnerReassigned event. If the TPM hasn't
+    clicked Start Collection on the milestone yet, both should defer --
+    transitioning this one item out of "Not Started" pre-kickoff would
+    desynchronize the milestone (this item in "Outreach Sent" while
+    siblings stay in "Not Started"). When TPM later clicks Start Collection,
+    kickoff_collection_on_milestone_started fires + cascades ItemCreated
+    -> send_initial_outreach_on_collection_start across ALL trackers
+    (including the newly reassigned one) cleanly.
+
     params:
       - target_state: str (default "Outreach Sent" per D-124 DeliveryState α lock)
 
@@ -108,6 +119,44 @@ def start_item_collection_task(
     delivery_item_id = event_context.get("delivery_item_id")
     if delivery_item_id is None:
         raise ValueError("START_ITEM_COLLECTION requires delivery_item_id in event_context")
+
+    # ---- Collection-started gate ----
+    item_snapshot: Any = None
+    if deps.storage is not None:
+        try:
+            item_snapshot = deps.storage.get_delivery_item(delivery_item_id)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("start_item_collection: snapshot fetch failed for item=%s: %s",
+                         delivery_item_id, type(exc).__name__)
+    pre_kickoff = (
+        item_snapshot is None
+        or getattr(item_snapshot, "delivery_state", None) in (None, "Not Started")
+    )
+    if pre_kickoff:
+        _log.info(
+            "start_item_collection: collection not started for item=%s; deferring -- "
+            "TPM Start Collection will kick off via kickoff_collection_on_milestone_started",
+            delivery_item_id,
+        )
+        deps.audit.write_communication_log(
+            action_type="start_item_collection",
+            delivery_item_id=delivery_item_id,
+            attribution={
+                "trigger_source": event_context.get("trigger_source", "automated"),
+                "correlation_id": event_context.get("correlation_id", ""),
+                "modified_by":    event_context.get("pm_id", "system"),
+            },
+            details={
+                "outcome":      "deferred_collection_not_started",
+                "target_state": target_state,
+                "milestone_id": event_context.get("milestone_id"),
+            },
+        )
+        return {
+            "delivery_item_id": delivery_item_id,
+            "target_state":     target_state,
+            "outcome":          "deferred_collection_not_started",
+        }
 
     deps.audit.write_communication_log(
         action_type="start_item_collection",

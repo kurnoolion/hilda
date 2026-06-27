@@ -241,6 +241,16 @@ def notify_new_owner_task(
     field_deltas of an ItemModified TriggerEvent per sp_alert_parser 2026-06-27
     cascade.
 
+    Collection-started gate (architect 2026-06-27): if the milestone has not
+    yet had collection kicked off (item.delivery_state == "Not Started"), we
+    DO NOT send the reassignment notice. Reasoning: an owner edited during
+    setup is just data-entry; the new owner will receive the initial outreach
+    naturally when the TPM later clicks Start Collection -- that fires
+    kickoff_collection_on_milestone_started -> ItemCreated ->
+    send_initial_outreach_on_collection_start, which reads the (then-current)
+    SP-side owner identity. Sending a reassignment notice now would be a
+    confusing duplicate email.
+
     params:
       - template: str (default "owner_reassignment_notice")
       - channel:  str (default "email")
@@ -252,6 +262,54 @@ def notify_new_owner_task(
     template = params.get("template", "owner_reassignment_notice")
     channel = params.get("channel", "email")
     delivery_item_id = event_context.get("delivery_item_id")
+
+    # ---- Collection-started gate ----
+    # Per architect 2026-06-27: do not email new owner if collection hasn't
+    # kicked off yet. Use item.delivery_state as the milestone-level proxy:
+    # KICKOFF_COLLECTION transitions every tracker out of "Not Started" when
+    # the TPM clicks Start Collection. While at least one item remains in
+    # "Not Started", treat the milestone as pre-kickoff.
+    item_snapshot: Any = None
+    if delivery_item_id and deps.storage is not None:
+        try:
+            item_snapshot = deps.storage.get_delivery_item(delivery_item_id)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("notify_new_owner: snapshot fetch failed for item=%s: %s",
+                         delivery_item_id, type(exc).__name__)
+    pre_kickoff = (
+        item_snapshot is None
+        or getattr(item_snapshot, "delivery_state", None) in (None, "Not Started")
+    )
+    if pre_kickoff:
+        _log.info(
+            "notify_new_owner: collection not started for item=%s; deferring -- "
+            "new owner will receive initial outreach when TPM kicks off collection",
+            delivery_item_id,
+        )
+        deps.audit.write_communication_log(
+            action_type="notify_new_owner",
+            delivery_item_id=delivery_item_id,
+            attribution={
+                "trigger_source": event_context.get("trigger_source", "automated"),
+                "correlation_id": event_context.get("correlation_id", ""),
+                "modified_by":    "system",
+            },
+            details={
+                "outcome":      "deferred_collection_not_started",
+                "template":     template,
+                "channel":      channel,
+                "milestone_id": event_context.get("milestone_id"),
+                "send_skipped": True,
+            },
+        )
+        return {
+            "template":   template,
+            "channel":    channel,
+            "recipient":  None,
+            "message_id": None,
+            "outcome":    "deferred_collection_not_started",
+        }
+
     recipient = _resolve_recipient(deps, event_context, params)
 
     message_id = None
