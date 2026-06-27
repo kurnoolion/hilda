@@ -304,6 +304,18 @@ def configure_engine(url: str | None = None, *, echo: bool = False) -> AsyncEngi
         from sqlalchemy.pool import StaticPool
 
         kwargs["poolclass"] = StaticPool
+    elif resolved.startswith("postgresql"):
+        # NullPool for postgres -- each connection created fresh per query +
+        # disposed after. Trades a small perf cost for compatibility with the
+        # sync_bridge.run_async_sync pattern (used by PostgresStorage +
+        # PostgresAuditWriter under Celery prefork): every asyncio.run() call
+        # creates a new event loop, and asyncpg connections from a previous
+        # loop's pool can't be reused (raises InterfaceError). NullPool
+        # bypasses pool reuse entirely. Added 2026-06-27 per live diagnosis
+        # on architect's Linux box.
+        from sqlalchemy.pool import NullPool
+
+        kwargs["poolclass"] = NullPool
     _engine = create_async_engine(resolved, **kwargs)
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
