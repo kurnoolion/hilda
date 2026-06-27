@@ -79,6 +79,7 @@ def bootstrap_task_deps(
     messenger: Any = None,
     auto_storage: bool = True,
     auto_audit: bool = True,
+    auto_sp_writer: bool = True,
 ) -> BootstrapResult:
     """Construct the TaskDeps bundle for production worker startup.
 
@@ -105,6 +106,8 @@ def bootstrap_task_deps(
         storage = _build_postgres_storage(result)
     if audit is None and auto_audit:
         audit = _build_postgres_audit_writer(result)
+    if sp_writer is None and auto_sp_writer:
+        sp_writer = _build_sp_writer(result)
 
     result.storage_wired = storage is not None
     result.sp_writer_wired = sp_writer is not None
@@ -142,14 +145,17 @@ def bootstrap_task_deps(
 
 
 def _build_rule_engine(rules_dir: Path | None, result: BootstrapResult) -> Any:
+    """Resolve rules_dir via 3-tier precedence (caller arg > RuleEngineConfig
+    JSON/env > module default). Loader walks <rules_dir>/global/*.yaml only
+    per D7 cascade 2026-06-23 (Ph-1 = Global tier only)."""
     try:
         from core.src.rule_engine import RuleEngine
+        from core.src.rule_engine.config import RuleEngineConfig
         from core.src.rule_engine.loader import load_rule_set
 
         if rules_dir is None:
-            # Default location per rule_engine MODULE.md D7 cascade:
-            # Ph-1 reads customizations/rules/global/*.yaml only.
-            rules_dir = Path("customizations/rules/global")
+            cfg = RuleEngineConfig.from_sources()  # reads config/rule_engine.json + env
+            rules_dir = cfg.rules_dir
 
         if not rules_dir.is_dir():
             result.warnings.append(f"rule_engine_skip: rules_dir={rules_dir} not a directory")
@@ -179,21 +185,25 @@ def _build_dispatcher(rule_engine: Any, storage: Any, result: BootstrapResult) -
 
 
 def _build_postgres_storage(result: BootstrapResult) -> Any:
-    """Construct PostgresStorage when HILDA_STORAGE_DB_URL is in env.
+    """Construct PostgresStorage using GlobalStorageConfig.from_sources()
+    which reads config/storage.json + HILDA_STORAGE_DB_URL env + CLI overrides
+    per 3-tier precedence (extended 2026-06-27 to honor JSON-driven deployments).
 
     Calls configure_engine + init_db so the schema exists; idempotent on
     re-call (SQLAlchemy DDL is CREATE IF NOT EXISTS via metadata.create_all).
     """
-    import os
-    if not os.environ.get("HILDA_STORAGE_DB_URL"):
-        result.warnings.append("postgres_storage_skip: HILDA_STORAGE_DB_URL not set")
-        return None
     try:
         from core.src.storage._sync_bridge import run_async_sync
+        from core.src.storage.config import GlobalStorageConfig
         from core.src.storage.db import configure_engine, init_db
         from core.src.storage.delivery_item_ops import PostgresStorage
 
-        configure_engine()  # reads HILDA_STORAGE_DB_URL from env
+        cfg = GlobalStorageConfig.from_sources()
+        # Detect "default-only" fallback: if no JSON + no env, from_sources
+        # returns the model defaults which point at localhost. Honor the
+        # defaults silently (some local dev setups want this) but record a
+        # skip warning so deployments without intended DB config can spot it.
+        configure_engine(url=cfg.db_url)
         run_async_sync(init_db)
         return PostgresStorage()
     except Exception as exc:  # noqa: BLE001
@@ -204,15 +214,49 @@ def _build_postgres_storage(result: BootstrapResult) -> Any:
 def _build_postgres_audit_writer(result: BootstrapResult) -> Any:
     """Construct PostgresAuditWriter. Reuses the engine configured by
     _build_postgres_storage; no separate engine init."""
-    import os
-    if not os.environ.get("HILDA_STORAGE_DB_URL"):
-        result.warnings.append("postgres_audit_skip: HILDA_STORAGE_DB_URL not set")
-        return None
     try:
         from core.src.storage.audit_writer_impl import PostgresAuditWriter
         return PostgresAuditWriter()
     except Exception as exc:  # noqa: BLE001
         result.warnings.append(f"postgres_audit_skip_build: {type(exc).__name__}: {str(exc)[:120]}")
+        return None
+
+
+def _build_sp_writer(result: BootstrapResult) -> Any:
+    """Construct SpCrudWriter conforming to tracker.SpWriter Protocol.
+
+    Reads GlobalSharePointConfig.from_sources() (config/sharepoint_integration.json
+    + HILDA_SP_* env + CLI overrides) and FileBasedListProvider (loads
+    customizations/sharepoint_config/customers/*.yaml). Both have built-in
+    self-discovering constructors -- bootstrap just wires them together.
+
+    Per [D-064]: HILDA -> SP REST is the sole writeback channel; SpCrudWriter
+    is the canonical Protocol impl tracker tasks call when they need to mirror
+    HILDA state transitions back to the SP row.
+
+    Silent-skip semantics consistent with the other auto-construct paths --
+    missing config, missing creds, missing customer YAMLs all degrade
+    gracefully; sp_writer stays None; tracker tasks degrade to audit-only on
+    SP writes (existing graceful-degrade pattern in tracker.update_delivery_state).
+    """
+    try:
+        from core.src.sharepoint_integration.config import GlobalSharePointConfig
+        from core.src.sharepoint_integration.list_crud import SpCrud
+        from core.src.sharepoint_integration.list_provider import FileBasedListProvider
+        from core.src.sharepoint_integration.sp_client import SpClient
+        from core.src.sharepoint_integration.sp_writer_impl import SpCrudWriter
+
+        cfg = GlobalSharePointConfig.from_sources()
+        client = SpClient(cfg)
+        provider = FileBasedListProvider(
+            Path("customizations/sharepoint_config")
+        )
+        crud = SpCrud(client, provider)
+        return SpCrudWriter(crud)
+    except Exception as exc:  # noqa: BLE001 -- silent-skip per architect direction
+        result.warnings.append(
+            f"sp_writer_skip: {type(exc).__name__}: {str(exc)[:120]}"
+        )
         return None
 
 

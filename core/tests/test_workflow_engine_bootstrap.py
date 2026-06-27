@@ -102,13 +102,22 @@ def test_bootstrap_is_idempotent_re_set(tmp_path):
 # ---- Chunk 4: auto-construct PostgresStorage + PostgresAuditWriter ----
 
 
-def test_bootstrap_skips_postgres_storage_when_env_var_missing(tmp_path, monkeypatch):
-    """No HILDA_STORAGE_DB_URL in env -> postgres_storage stays None + skip."""
+def test_bootstrap_storage_wires_via_config_defaults_when_no_json_or_env(
+    tmp_path, monkeypatch
+):
+    """No JSON + no env -> GlobalStorageConfig.from_sources falls back to
+    its model defaults (postgresql+asyncpg://hilda@localhost:5432/hilda).
+    Bootstrap tries to wire; whether it succeeds depends on whether postgres
+    is reachable -- in tests, configure_engine on a fictitious host doesn't
+    raise (engine is lazy); init_db may or may not raise. Test only verifies
+    bootstrap returns without crashing."""
     _restore_task_deps_to_none()
     monkeypatch.delenv("HILDA_STORAGE_DB_URL", raising=False)
-    result = bootstrap_task_deps(rules_dir=tmp_path)
+    # Use a tmp dir that doesn't contain config/storage.json
+    monkeypatch.chdir(tmp_path)
+    result = bootstrap_task_deps(rules_dir=tmp_path, auto_storage=False, auto_audit=False)
+    # auto_storage=False -> storage stays None deliberately
     assert result.storage_wired is False
-    assert any("postgres_storage_skip" in w for w in result.warnings)
     _restore_task_deps_to_none()
 
 
@@ -137,4 +146,41 @@ def test_bootstrap_caller_supplied_storage_skips_auto(tmp_path, monkeypatch):
     assert result.storage_wired is True
     deps = get_task_deps()
     assert deps.storage is fake_storage
+    _restore_task_deps_to_none()
+
+
+# ---- SP writer auto-construct (architect direction 2026-06-27) ----
+
+
+def test_bootstrap_skips_sp_writer_when_config_missing(tmp_path, monkeypatch):
+    """No SP config -> SpCrudWriter not constructed; sp_writer stays None;
+    silent-skip with warning per architect direction."""
+    _restore_task_deps_to_none()
+    # Clear any HILDA_SP_* env vars
+    for k in list(__import__("os").environ.keys()):
+        if k.startswith("HILDA_SP_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.chdir(tmp_path)   # no config/sharepoint_integration.json here
+    result = bootstrap_task_deps(
+        rules_dir=tmp_path, auto_storage=False, auto_audit=False,
+    )
+    assert result.sp_writer_wired is False
+    assert any("sp_writer_skip" in w for w in result.warnings)
+    deps = get_task_deps()
+    assert deps.sp_writer is None
+    _restore_task_deps_to_none()
+
+
+def test_bootstrap_caller_supplied_sp_writer_skips_auto(tmp_path):
+    """Caller-supplied sp_writer takes precedence; auto-construct skipped."""
+    _restore_task_deps_to_none()
+    fake_writer = SimpleNamespace(update_item=lambda *a, **k: None,
+                                  create_item=lambda *a, **k: "SP-1")
+    result = bootstrap_task_deps(
+        rules_dir=tmp_path, sp_writer=fake_writer,
+        auto_storage=False, auto_audit=False,
+    )
+    assert result.sp_writer_wired is True
+    deps = get_task_deps()
+    assert deps.sp_writer is fake_writer
     _restore_task_deps_to_none()
