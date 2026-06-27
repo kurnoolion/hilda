@@ -135,6 +135,71 @@ class TriggerDispatcher:
         derived["doc_count_reached"] = received >= expected
         return derived
 
+    # Field-delta -> semantic sub_trigger map per [D-118] + defaults.yaml +
+    # automation_rules.yaml rules that key off specialized sub_triggers:
+    #   - OwnerReassigned matches handle_owner_reassignment (defaults.yaml:7)
+    #     -> NotifyNewOwner + StartItemCollection
+    #   - DeadlineMoved matches rearm_deadline_on_milestone_target_moved
+    #     -> RearmDeadlineProximity
+    #   - TagsModified matches propagate_tags_on_modification
+    #     -> PropagateTagsToActiveTrackers
+    #
+    # The SP alert parser emits raw verbs ("added"/"changed"/"deleted") from
+    # the email body's "<title> has been (added|changed|deleted)" header
+    # line; it does NOT know which YAML sub_triggers exist. Refinement lives
+    # here so the rule engine + YAML stay decoupled from the parser's wire
+    # format.
+    #
+    # Priority order matters when multiple semantic fields change in one
+    # alert: owner edits dominate (NotifyNewOwner + StartItemCollection is
+    # the most disruptive downstream chain and shouldn't be skipped), then
+    # deadline, then tags. Multi-semantic refinement (split one event into N)
+    # is a Ph-2 consideration; logged as a known limitation in workflow_engine
+    # MODULE.md when this lands.
+    _OWNER_DELTA_FIELDS = frozenset({
+        "owner_corp_email", "owner_corp_usa_email",
+        "owner_corp_id", "owner_name", "owner_employee_id",
+    })
+    _DEADLINE_DELTA_FIELDS = frozenset({"target_date"})
+    _TAGS_DELTA_FIELD_PREFIXES = ("tag_", "tags_")
+
+    @classmethod
+    def _refine_sub_trigger(cls, event: TriggerEvent) -> TriggerEvent:
+        """Map raw 'changed' SP alerts to semantic sub_triggers based on
+        which fields were edited. Leaves added/deleted/None untouched and
+        returns the event unchanged when no field_deltas were provided.
+
+        Added 2026-06-27 per architect during Step 2 owner-edit debug:
+        SpAlertParser emits sub_trigger='changed' for any SP item edit, but
+        handle_owner_reassignment (defaults.yaml) wants sub_trigger=
+        'OwnerReassigned'. Without this refinement step the rule never
+        matches and owner edits produce zero downstream behavior (no audit
+        of a matched action, no NotifyNewOwner email, no StartItemCollection).
+        """
+        if event.sub_trigger != "changed":
+            return event
+        deltas = event.field_deltas or {}
+        if not deltas:
+            return event
+        delta_keys = set(deltas.keys())
+
+        refined: str | None = None
+        if delta_keys & cls._OWNER_DELTA_FIELDS:
+            refined = "OwnerReassigned"
+        elif delta_keys & cls._DEADLINE_DELTA_FIELDS:
+            refined = "DeadlineMoved"
+        elif any(k.startswith(cls._TAGS_DELTA_FIELD_PREFIXES) for k in delta_keys):
+            refined = "TagsModified"
+
+        if refined is None:
+            return event
+        logger.debug(
+            "dispatcher._refine_sub_trigger: '%s' -> '%s' (field_deltas=%s)",
+            event.sub_trigger, refined, sorted(delta_keys)[:8],
+        )
+        from dataclasses import replace
+        return replace(event, sub_trigger=refined)
+
     def _enrich_event(self, event: TriggerEvent, item_snapshot: Any) -> TriggerEvent:
         """Promote item_snapshot fields into event.derived_fields so the
         rule_engine evaluator can resolve item-field conditions like
@@ -226,6 +291,12 @@ class TriggerDispatcher:
         Item-less triggers (MilestoneAllClosed, CredentialExpired, etc.) pass
         item_snapshot=None to rule_engine; pause check is skipped automatically.
         """
+        # Refine 'changed' sub_trigger to semantic variants (OwnerReassigned /
+        # DeadlineMoved / TagsModified) based on which fields were edited, so
+        # rules keyed off specialized sub_triggers can match raw SP alerts.
+        # Runs first so item-snapshot enrichment below sees the final sub_trigger
+        # (some Ph-2 enrichments may key off it).
+        event = self._refine_sub_trigger(event)
         item_snapshot = self._fetch_item_snapshot(event)
         # Enrich derived_fields with item snapshot before rule evaluation
         # (2026-06-27 cold-start enrichment per architect rule-walk-through).
