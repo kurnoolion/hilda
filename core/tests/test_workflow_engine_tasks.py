@@ -504,6 +504,74 @@ class TestOutreachTasks:
         assert result["outcome"] == "audit_only"
         assert email.sent == []
 
+    # ---- _record_reminder_attempt FR-10 cadence counter advancement ----
+
+    def test_send_reminder_increments_reminder_count_in_storage(self):
+        """Each send_reminder_task call advances item.reminder_count by 1 +
+        stamps last_reminder_triggered_at per NFR-21 §5 amendment."""
+        email = _FakeAsyncEmailSender()
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            owner_corp_usa_email="owner@corp.example",
+            owner_corp_email=None,
+            reminder_count=0,
+            last_reminder_triggered_at=None,
+        )
+        d = TaskDeps(
+            storage=storage, sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_reminder_task
+        with override_task_deps(d):
+            # First reminder
+            r1 = send_reminder_task.apply_async(args=({}, ctx())).get()
+            # Second reminder (simulating next LastContactThreshold fire)
+            r2 = send_reminder_task.apply_async(args=({}, ctx())).get()
+        # reminder_count advances 0 -> 1 -> 2 on storage
+        assert storage.items["I-1234"].reminder_count == 2
+        assert storage.items["I-1234"].last_reminder_triggered_at is not None
+        # Task return values reflect the actual cadence number, not the default
+        assert r1["reminder_count"] == 1
+        assert r2["reminder_count"] == 2
+        # Email subjects show the right cadence number
+        assert "#1" in email.sent[0]["subject"]
+        assert "#2" in email.sent[1]["subject"]
+
+    def test_send_reminder_increments_even_when_audit_only(self):
+        """No email_sender wired -> still advances cadence (otherwise unwired
+        dev/test setups would loop Rule 2a forever)."""
+        storage = MockStorage()
+        storage.items["I-1234"] = SimpleNamespace(
+            owner_corp_usa_email=None,
+            owner_corp_email=None,
+            reminder_count=5,
+            last_reminder_triggered_at=None,
+        )
+        d = TaskDeps(storage=storage, sp_writer=MockSp(), audit=MockAudit())
+        from core.src.workflow_engine.tasks.outreach import send_reminder_task
+        with override_task_deps(d):
+            result = send_reminder_task.apply_async(args=({}, ctx())).get()
+        assert result["outcome"] == "audit_only"
+        assert storage.items["I-1234"].reminder_count == 6  # still advanced
+
+    def test_send_reminder_handles_missing_delivery_item_id_gracefully(self):
+        """No delivery_item_id in event_context -> no storage update; falls back
+        to params.reminder_count for subject/audit."""
+        email = _FakeAsyncEmailSender()
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_reminder_task
+        ctx_no_id = ctx()
+        ctx_no_id.pop("delivery_item_id", None)
+        with override_task_deps(d):
+            result = send_reminder_task.apply_async(
+                args=({"reminder_count": 3, "recipient": "x@y"}, ctx_no_id)
+            ).get()
+        # Falls back to params value because storage update skipped
+        assert result["reminder_count"] == 3
+
 
 class TestSubmissionTasks:
     """ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION -- Ph-1 wire-up."""

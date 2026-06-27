@@ -28,6 +28,43 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
+def _record_reminder_attempt(deps, delivery_item_id: str | None) -> int | None:
+    """Increment item.reminder_count + stamp last_reminder_triggered_at after
+    a SEND_REMINDER task body fires.
+
+    Added 2026-06-27 per [D-118] Chunk 4 rule-walk-through Finding 1 -- prior
+    code never incremented reminder_count, so the FR-10 cadence ladder
+    (Rule 2a: count<1 -> 1st reminder; Rule 2b: 1<=count<2 -> 2nd reminder)
+    would loop forever on Rule 2a and never escalate to Rule 2b. Now the
+    counter advances each task invocation regardless of email-send success
+    (audit-only mode still advances cadence -- otherwise un-wired dev setups
+    would never exit Rule 2a).
+
+    Also stamps last_reminder_triggered_at per NFR-21 §5 amendment 2026-06-21
+    (HILDA + SP UI dual-writer; this is HILDA's write).
+
+    Returns the new reminder_count, or None if delivery_item_id missing /
+    storage write failed (non-fatal -- caller still audit-logs).
+    """
+    if not delivery_item_id:
+        return None
+    try:
+        item = deps.storage.get_delivery_item(delivery_item_id)
+        prior = getattr(item, "reminder_count", 0) or 0
+        new_count = prior + 1
+        from datetime import datetime, timezone
+        deps.storage.update_delivery_item(
+            delivery_item_id,
+            {
+                "reminder_count":             new_count,
+                "last_reminder_triggered_at": datetime.now(timezone.utc),
+            },
+        )
+        return new_count
+    except Exception:  # noqa: BLE001 -- non-fatal; audit-only fall-through
+        return None
+
+
 def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, Any]) -> str | None:
     """Resolve outreach recipient per [D-080] 4-field preference chain.
 
@@ -144,9 +181,15 @@ def send_reminder_task(
     deps = get_task_deps()
     template = params.get("template", "standard_owner_reminder")
     channel = params.get("channel", "email")
-    reminder_count = params.get("reminder_count", 1)
     delivery_item_id = event_context.get("delivery_item_id")
     recipient = _resolve_recipient(deps, event_context, params)
+
+    # Advance FR-10 cadence counter BEFORE send so audit log + email subject
+    # reflect the actual cadence number (1st reminder -> count=1, 2nd -> 2).
+    # Falls back to the params.reminder_count for tests that pre-set it +
+    # for legacy callers that don't have storage-side reminder_count.
+    new_count = _record_reminder_attempt(deps, delivery_item_id)
+    reminder_count = new_count if new_count is not None else params.get("reminder_count", 1)
 
     message_id = None
     if channel == "email" and deps.email_sender is not None and recipient:
