@@ -88,7 +88,15 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
 
     # --- Build receiver ---
     cfg = EmailServiceConfig.from_sources()
-    cred = SopsCredentialService()
+    # Honor SOPS_AGE_KEY_FILE env var if set (architect's container has
+    # /etc/hilda/age-key/keys.txt; default would point at /etc/hilda/age.key).
+    import os
+    from pathlib import Path as _P
+    age_key_env = os.environ.get("SOPS_AGE_KEY_FILE")
+    cred_kwargs: dict[str, Any] = {}
+    if age_key_env:
+        cred_kwargs["age_key_path"] = _P(age_key_env)
+    cred = SopsCredentialService(**cred_kwargs)
     await cred.load()
     recv = build_receiver(cfg, cred)
 

@@ -296,13 +296,17 @@ def _build_email_sender(result: BootstrapResult) -> Any:
     # aren't set up (dev / unit-test setups).
     credential_service: Any = None
     try:
+        import os
         from core.src.credential_service.service import SopsCredentialService
-        # SopsCredentialService constructor takes default paths; sops/age key
-        # validation happens lazily at first credential lookup, so this
-        # construction always succeeds. The age key file presence is the
-        # actual gate, but bootstrap doesn't validate it here -- if missing,
-        # the first email send will surface CRD-E001.
-        credential_service = SopsCredentialService()
+        # Honor SOPS_AGE_KEY_FILE env var if set (standard sops convention)
+        # so deployments with custom key paths (e.g. /etc/hilda/age-key/keys.txt)
+        # decrypt correctly. Falls back to default if env unset.
+        age_key_env = os.environ.get("SOPS_AGE_KEY_FILE")
+        kwargs: dict[str, Any] = {}
+        if age_key_env:
+            from pathlib import Path as _P
+            kwargs["age_key_path"] = _P(age_key_env)
+        credential_service = SopsCredentialService(**kwargs)
     except Exception as exc:  # noqa: BLE001 -- credential service is optional in dev
         result.warnings.append(
             f"email_sender_no_credential_service: {type(exc).__name__}: {str(exc)[:120]}"
