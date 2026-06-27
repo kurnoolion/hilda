@@ -11,7 +11,12 @@ etc.); workflow_engine just coordinates the Celery scheduling.
 # Import-time registration: pulling in each tasks/<name>.py triggers the
 # register_task_binding calls at module load. Order doesn't matter -- each
 # binding is independent.
-from core.src.workflow_engine.tasks import (  # noqa: F401
+# Use relative imports per Python sub-package idiom: avoids
+# "partially initialized module" ImportError that can surface when the
+# package's own __init__.py uses absolute-path multi-name imports against
+# itself (race between module attribute assignment and submodule load
+# triggered by sibling decorator side effects).
+from . import (  # noqa: F401
     email_polling,   # added 2026-06-27: periodic ews_receiver poll + dispatch
     escalation,
     milestone,
