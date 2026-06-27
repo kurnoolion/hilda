@@ -77,6 +77,8 @@ def bootstrap_task_deps(
     audit: Any = None,
     customer_adapter: Any = None,
     messenger: Any = None,
+    auto_storage: bool = True,
+    auto_audit: bool = True,
 ) -> BootstrapResult:
     """Construct the TaskDeps bundle for production worker startup.
 
@@ -93,6 +95,17 @@ def bootstrap_task_deps(
     Returns BootstrapResult for observability + tests.
     """
     result = BootstrapResult()
+
+    # -------- 0. Auto-construct concrete storage + audit if not pre-injected --------
+    # Storage strand Chunk 4 (2026-06-27): when HILDA_STORAGE_DB_URL is set
+    # and no caller-supplied storage was passed, build PostgresStorage +
+    # PostgresAuditWriter from the existing storage module. This wires the
+    # Rule 1 conditions on force_tracking_enabled etc. into a real database.
+    if storage is None and auto_storage:
+        storage = _build_postgres_storage(result)
+    if audit is None and auto_audit:
+        audit = _build_postgres_audit_writer(result)
+
     result.storage_wired = storage is not None
     result.sp_writer_wired = sp_writer is not None
     result.audit_wired = audit is not None
@@ -162,6 +175,44 @@ def _build_dispatcher(rule_engine: Any, storage: Any, result: BootstrapResult) -
         return dispatcher
     except Exception as exc:  # noqa: BLE001
         result.warnings.append(f"dispatcher_skip: {type(exc).__name__}: {str(exc)[:120]}")
+        return None
+
+
+def _build_postgres_storage(result: BootstrapResult) -> Any:
+    """Construct PostgresStorage when HILDA_STORAGE_DB_URL is in env.
+
+    Calls configure_engine + init_db so the schema exists; idempotent on
+    re-call (SQLAlchemy DDL is CREATE IF NOT EXISTS via metadata.create_all).
+    """
+    import os
+    if not os.environ.get("HILDA_STORAGE_DB_URL"):
+        result.warnings.append("postgres_storage_skip: HILDA_STORAGE_DB_URL not set")
+        return None
+    try:
+        from core.src.storage._sync_bridge import run_async_sync
+        from core.src.storage.db import configure_engine, init_db
+        from core.src.storage.delivery_item_ops import PostgresStorage
+
+        configure_engine()  # reads HILDA_STORAGE_DB_URL from env
+        run_async_sync(init_db)
+        return PostgresStorage()
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(f"postgres_storage_skip_build: {type(exc).__name__}: {str(exc)[:120]}")
+        return None
+
+
+def _build_postgres_audit_writer(result: BootstrapResult) -> Any:
+    """Construct PostgresAuditWriter. Reuses the engine configured by
+    _build_postgres_storage; no separate engine init."""
+    import os
+    if not os.environ.get("HILDA_STORAGE_DB_URL"):
+        result.warnings.append("postgres_audit_skip: HILDA_STORAGE_DB_URL not set")
+        return None
+    try:
+        from core.src.storage.audit_writer_impl import PostgresAuditWriter
+        return PostgresAuditWriter()
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(f"postgres_audit_skip_build: {type(exc).__name__}: {str(exc)[:120]}")
         return None
 
 

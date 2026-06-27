@@ -90,10 +90,51 @@ def test_bootstrap_result_summary_line_lists_wired_and_skipped():
 def test_bootstrap_is_idempotent_re_set(tmp_path):
     """Calling bootstrap twice -> second install overrides first; no crash."""
     _restore_task_deps_to_none()
-    bootstrap_task_deps(rules_dir=tmp_path)
+    bootstrap_task_deps(rules_dir=tmp_path, auto_storage=False, auto_audit=False)
     deps1 = get_task_deps()
-    bootstrap_task_deps(rules_dir=tmp_path)
+    bootstrap_task_deps(rules_dir=tmp_path, auto_storage=False, auto_audit=False)
     deps2 = get_task_deps()
     # Both calls succeeded; deps singleton has been re-set
     assert deps1 is not None and deps2 is not None
+    _restore_task_deps_to_none()
+
+
+# ---- Chunk 4: auto-construct PostgresStorage + PostgresAuditWriter ----
+
+
+def test_bootstrap_skips_postgres_storage_when_env_var_missing(tmp_path, monkeypatch):
+    """No HILDA_STORAGE_DB_URL in env -> postgres_storage stays None + skip."""
+    _restore_task_deps_to_none()
+    monkeypatch.delenv("HILDA_STORAGE_DB_URL", raising=False)
+    result = bootstrap_task_deps(rules_dir=tmp_path)
+    assert result.storage_wired is False
+    assert any("postgres_storage_skip" in w for w in result.warnings)
+    _restore_task_deps_to_none()
+
+
+def test_bootstrap_auto_constructs_postgres_storage_when_url_set(tmp_path, monkeypatch):
+    """HILDA_STORAGE_DB_URL=sqlite -> auto-constructs PostgresStorage + audit."""
+    _restore_task_deps_to_none()
+    db_path = tmp_path / "boot.db"
+    monkeypatch.setenv("HILDA_STORAGE_DB_URL", f"sqlite+aiosqlite:///{db_path}")
+    result = bootstrap_task_deps(rules_dir=tmp_path)
+    assert result.storage_wired is True
+    assert result.audit_wired is True
+    deps = get_task_deps()
+    assert deps.storage is not None
+    assert deps.audit is not None
+    _restore_task_deps_to_none()
+
+
+def test_bootstrap_caller_supplied_storage_skips_auto(tmp_path, monkeypatch):
+    """Caller-supplied storage takes precedence; auto-construct skipped."""
+    _restore_task_deps_to_none()
+    monkeypatch.setenv("HILDA_STORAGE_DB_URL", "sqlite+aiosqlite:///should-not-be-used.db")
+    fake_storage = SimpleNamespace(get_delivery_item=lambda _id: None)
+    result = bootstrap_task_deps(
+        rules_dir=tmp_path, storage=fake_storage,
+    )
+    assert result.storage_wired is True
+    deps = get_task_deps()
+    assert deps.storage is fake_storage
     _restore_task_deps_to_none()
