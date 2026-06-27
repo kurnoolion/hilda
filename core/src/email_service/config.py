@@ -91,6 +91,18 @@ class EwsConfig(BaseModel):
     folder_processed: str = "Processed"        # MOVE target after read
     fetch_limit: int = 50                      # per-poll cap to bound exchangelib query size
 
+    # Subject-prefix scope filter -- the mailbox may be shared with humans /
+    # other automation (e.g. OMADM_BOT), so HILDA only reads + marks-as-read
+    # messages whose subject begins with one of these tokens. Per SP alert
+    # convention the subject is "<List>[_<suffix>] - <title>" so the list
+    # name sits at position 0. Empty tuple disables scope filtering (read
+    # everything unread -- not recommended for shared mailboxes).
+    sp_alert_subject_prefixes: tuple[str, ...] = (
+        "Milestones",
+        "Deliverables",
+        "Projects",
+    )
+
     # Sender behavior
     from_addr: str = "hilda-noreply@corp.example"
 

@@ -178,6 +178,7 @@ class EwsReceiver:
                 Configuration,
                 Credentials,
                 HTMLBody,
+                Q,
                 Version,
                 FileAttachment,
             )
@@ -220,15 +221,22 @@ class EwsReceiver:
         if self._config.inbox_subfolder:
             folder = folder / self._config.inbox_subfolder
 
-        # Server-side filter: only unread messages. Combined with the post-fetch
-        # mark-as-read step below, this gives persistent per-message progress
-        # tracking that survives:
+        # Server-side filter: only unread SP-alert-shaped messages. Combined
+        # with the post-fetch mark-as-read step below, this gives persistent
+        # per-message progress tracking that survives:
         #   - receiver instance recreation (every poll_ews_inbox_task in
         #     workflow_engine builds a fresh EwsReceiver -- instance-level
         #     _last_fetched_at watermark resets to None every cycle and was
         #     never effective in production. Fix: server-side is_read flag.)
         #   - container / worker restarts
         #   - multi-worker contention (server-side state is authoritative)
+        #
+        # Subject-prefix scoping (config.sp_alert_subject_prefixes) is
+        # critical for shared mailboxes -- OMADM_BOT serves other automation
+        # + humans, so HILDA must NOT mark non-SP mail as read. The default
+        # prefixes match SP's "<List>[_<suffix>] - <title>" alert format.
+        # Empty prefixes -> filter disabled (every unread message read; not
+        # recommended unless the mailbox is HILDA-only).
         #
         # The instance-level _last_fetched_at remains as a NO-OP backstop
         # (set on success but no longer consulted on filter). Removing it
@@ -237,7 +245,16 @@ class EwsReceiver:
         # Live-debug 2026-06-27: architect observed sp_alerts=13 every 60s
         # (12 Deliverables + persistent re-read of 2 milestone alerts from
         # prior Step 1). Root cause: instance churn defeated the watermark.
-        qs = folder.filter(is_read=False).order_by("-datetime_received")[:self._config.fetch_limit]
+        # Scope-narrowing added same day after Step 1.5 success: shared
+        # OMADM_BOT mailbox must not lose unread state on non-HILDA mail.
+        qs = folder.filter(is_read=False)
+        prefixes = self._config.sp_alert_subject_prefixes
+        if prefixes:
+            subject_q = Q(subject__startswith=prefixes[0])
+            for p in prefixes[1:]:
+                subject_q |= Q(subject__startswith=p)
+            qs = qs.filter(subject_q)
+        qs = qs.order_by("-datetime_received")[:self._config.fetch_limit]
 
         out: list[dict[str, Any]] = []
         for msg in qs:
