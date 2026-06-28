@@ -44,11 +44,14 @@ class SpCrud:
         [D-088] 3-tuple.
         """
         list_name = self._provider.get_list_name(entity, scope)
-        col_map = self._provider.get_column_map(entity, scope)
-        select_list = list(col_map.values())
-        if extra_select:
-            select_list.extend(extra_select)
-        select = select_list or None
+        # NOTE: $select intentionally omitted to be resilient to MMK-style
+        # column-map drift where one YAML column is missing on the live SP
+        # list (HTTP 400 -1 "field or property 'X' does not exist" would
+        # otherwise break the whole request). from_sp_fields filters at the
+        # Python layer; bandwidth cost is acceptable for single-row reads.
+        # extra_select (User/Person expansion fields like TPM/EMail) still
+        # forwarded so $expand siblings are returned.
+        select: list[str] | None = list(extra_select) if extra_select else None
         items_sp = await self._client.get_list_items(
             list_name,
             select=select,
@@ -70,10 +73,26 @@ class SpCrud:
         entity: str,
         scope: ListScope,
         canonical_filters: dict[str, Any] | None = None,
+        *,
+        with_select: bool = False,
     ) -> list[dict[str, Any]]:
+        """Read SP rows, returning canonical-field dicts.
+
+        with_select (added 2026-06-27 per architect Step 4 SP-read probe):
+        whether to send `$select=<col_map.values()>` in the request. Default
+        False -- SP returns the full row and `from_sp_fields` filters at the
+        Python layer. Robust against SP schema drift where one column in the
+        customer YAML doesn't exist in the live list (HTTP 400 -1
+        "field or property 'X' does not exist" otherwise breaks the whole
+        request). Callers who need the bandwidth optimization can opt in via
+        with_select=True after verifying every YAML column matches the SP
+        InternalName.
+        """
         list_name = self._provider.get_list_name(entity, scope)
-        col_map = self._provider.get_column_map(entity, scope)
-        select = list(col_map.values()) or None
+        select: list[str] | None = None
+        if with_select:
+            col_map = self._provider.get_column_map(entity, scope)
+            select = list(col_map.values()) or None
         filter_expr: str | None = None
         if canonical_filters:
             sp_fields = self._provider.to_sp_fields(entity, scope, canonical_filters)
