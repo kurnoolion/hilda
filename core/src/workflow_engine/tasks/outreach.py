@@ -338,6 +338,45 @@ def _fetch_template_inputs(
     return owner_identity, item_for_template
 
 
+def _send_batch_outreach_email(
+    *,
+    deps,
+    owner_identity: dict[str, Any],
+    items: list[dict[str, Any]],
+    batch_id: str,
+    recipient: str,
+) -> str | None:
+    """Render outreach_table.j2 with N item rows and send ONE email to the
+    owner. Returns the EWS Message-ID on success, None on send failure.
+
+    Called from sp_alert_imports.kickoff_collection_task after it has
+    resolved owner identity via Path A SP batch-read and grouped items by
+    owner. Centralized here so the template+send pair stays in the outreach
+    module rather than leaking into sp_alert_imports.
+
+    Architect Step 5 design 2026-06-28: one email per owner with all the
+    owner's items in a single table, not one email per item.
+    """
+    body_html = _render_outreach_table(
+        owner_identity=owner_identity,
+        items=items,
+        batch_id=batch_id,
+    )
+    try:
+        return _send_email(
+            deps,
+            to=recipient,
+            subject=f"[HILDA] Status request -- {batch_id}",
+            body_marker=body_html,
+        )
+    except Exception as e:  # noqa: BLE001
+        _log.warning(
+            "_send_batch_outreach_email: send failed for owner=%s batch=%s items=%d: %s: %s",
+            recipient, batch_id, len(items), type(e).__name__, str(e)[:120],
+        )
+        return None
+
+
 def _render_outreach_table(
     *,
     owner_identity: dict[str, Any],
