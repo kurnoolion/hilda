@@ -21,12 +21,15 @@ Key invariants enforced here:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from core.src.diagnostics.error_codes import PipelineError
 from core.src.template_schema import DeliveryItemBase
+
+logger = logging.getLogger(__name__)
 
 from core.src.tracker.guards import (
     GuardResult,
@@ -314,12 +317,35 @@ def update_delivery_state(
         modified_at=now,
         modified_by=modified_by,
     )
-    sp_writer.update_item(
-        entity="delivery_items",
-        scope=event_context.get("sp_scope"),    # provided by caller; None ok for tests
-        item_id=delivery_item_id,
-        canonical_fields=field_updates,
-    )
+    # SP-side reflection of the new state -- best-effort, guarded.
+    # Per [D-118] strict-boundary cascade: SP UI engineer owns SP row writes;
+    # HILDA's Ph-1 state machine is Postgres-authoritative. The SP-side
+    # delivery_state column reflects via the separate refresh / SP UI write
+    # path, not from HILDA's transition body.
+    #
+    # When event_context["sp_scope"] is provided AND sp_writer is wired, we
+    # attempt the SP update as a courtesy. Failure (no scope, scope shape
+    # mismatch, item_id-vs-SP-Id mismatch, network) is logged and DOES NOT
+    # roll back the Postgres state change -- the cascade must proceed.
+    #
+    # Architect Step 4 Start Collection 2026-06-28: prior unconditional call
+    # crashed with AttributeError 'NoneType.device_id' because event_context
+    # didn't carry sp_scope (dispatcher's _build_event_context doesn't set
+    # it; transition tasks are workflow_engine-driven, not SP-write-driven).
+    sp_scope = event_context.get("sp_scope")
+    if sp_writer is not None and sp_scope is not None:
+        try:
+            sp_writer.update_item(
+                entity="delivery_items",
+                scope=sp_scope,
+                item_id=delivery_item_id,
+                canonical_fields=field_updates,
+            )
+        except Exception as exc:  # noqa: BLE001 -- best-effort, non-fatal
+            logger.warning(
+                "update_delivery_state: SP-side update_item failed for item=%s: %s: %s",
+                delivery_item_id, type(exc).__name__, str(exc)[:120],
+            )
     audit_details: dict[str, Any] = {
         "from_state": from_state.value,
         "to_state": target_state.value,
