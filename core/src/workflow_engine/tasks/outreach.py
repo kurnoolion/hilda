@@ -122,43 +122,46 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
     Best-effort: returns None on any failure (network, no match, schema
     mismatch). Caller falls back to storage / event_context.
 
-    Filter strategy: scope by customer_id (selects Deliverables_<customer_id>
-    list), then filter by item_no. In the architect's current MMK Ph-1 test
-    setup (one milestone P1, item_nos 1..11) this returns the unique row.
-    Multi-milestone deployments where item_no is not globally unique within
-    the customer's Deliverables list will need to add milestone_name (or
-    equivalent) to the canonical_filters once the SP column-map is known.
+    Natural key per architect 2026-06-27 Step 4 probe: SP Deliverables list
+    is scoped by customer (Deliverables_<customer_id>) and rows within the
+    list are uniquely identified by (milestone_id, item_no). Filtering by
+    item_no alone returned 7 rows (multiple milestones per customer share
+    item_no=1). Adding milestone_id narrows to the single target row.
     """
     from core.src.sharepoint_integration.config import ListScope
     customer_id = getattr(item, "customer_id", None)
+    milestone_id = getattr(item, "milestone_id", None)
     item_no = getattr(item, "item_no", None)
     if not customer_id or item_no is None:
         return None
+    filters: dict[str, Any] = {"item_no": item_no}
+    if milestone_id:
+        filters["milestone_id"] = milestone_id
     try:
         scope = ListScope(customer_id=customer_id)
         rows = deps.sp_writer.get_items(
             entity="delivery_items",
             scope=scope,
-            canonical_filters={"item_no": item_no},
+            canonical_filters=filters,
         )
     except Exception as exc:  # noqa: BLE001 -- SP read is best-effort
         _log.warning(
-            "_resolve_recipient: SP read failed for customer_id=%s item_no=%s: %s",
-            customer_id, item_no, type(exc).__name__,
+            "_resolve_recipient: SP read failed for customer_id=%s milestone_id=%s item_no=%s: %s",
+            customer_id, milestone_id, item_no, type(exc).__name__,
         )
         return None
     if not rows:
         _log.info(
-            "_resolve_recipient: SP returned no rows for customer_id=%s item_no=%s",
-            customer_id, item_no,
+            "_resolve_recipient: SP returned no rows for customer_id=%s milestone_id=%s item_no=%s",
+            customer_id, milestone_id, item_no,
         )
         return None
     if len(rows) > 1:
         _log.warning(
-            "_resolve_recipient: SP returned %d rows for customer_id=%s item_no=%s; "
-            "using first. Multi-milestone deployments should add milestone discriminator "
-            "to canonical_filters once SP schema mapping is known.",
-            len(rows), customer_id, item_no,
+            "_resolve_recipient: SP returned %d rows for customer_id=%s milestone_id=%s item_no=%s; "
+            "using first. Natural key (customer, milestone, item_no) should be unique -- "
+            "check MMK column-map mapping for milestone_id or schema for duplicate rows.",
+            len(rows), customer_id, milestone_id, item_no,
         )
     row = rows[0]
     return row.get("owner_corp_usa_email") or row.get("owner_corp_email")
