@@ -136,6 +136,86 @@ def _modified_by_of(event_context: dict[str, Any], trigger_source: TriggerSource
     return pm_id or "tpm_unknown"
 
 
+def _sp_writeback_field_updates(
+    *,
+    sp_writer: SpWriter,
+    item: DeliveryItemBase,
+    customer_id: str,
+    delivery_item_id: str,
+    field_updates: dict[str, Any],
+) -> None:
+    """Two-step SP write per [D-137]: natural-key lookup -> update_item with
+    SP's integer Id. Caller wraps in try/except for best-effort semantics
+    per [D-118]. Returns silently when:
+      - sp_writer lacks get_items (mock path / older SpWriter impl);
+      - no natural-key filters can be built from the item;
+      - no SP row matches the filters;
+      - the matched row has no _sp_id.
+    Each silent return is logged at INFO so ops can grep failure modes.
+    """
+    from core.src.sharepoint_integration.config import ListScope
+
+    get_items = getattr(sp_writer, "get_items", None)
+    if get_items is None:
+        logger.info(
+            "update_delivery_state: sp_writer has no get_items method "
+            "(mock or older impl); skipping SP writeback for item=%s",
+            delivery_item_id,
+        )
+        return
+
+    scope = ListScope(customer_id=customer_id)
+    filters: dict[str, Any] = {}
+    item_no = getattr(item, "item_no", None)
+    milestone_id = getattr(item, "milestone_id", None)
+    device_id = (
+        getattr(item, "device_id", None)
+        or getattr(item, "project_model", None)
+    )
+    if item_no is not None:
+        filters["item_no"] = item_no
+    if milestone_id:
+        filters["milestone_id"] = milestone_id
+    if device_id:
+        filters["project_model"] = device_id
+
+    if not filters:
+        logger.info(
+            "update_delivery_state: no natural-key filters for item=%s; "
+            "skipping SP writeback (item missing item_no + milestone_id + device_id)",
+            delivery_item_id,
+        )
+        return
+
+    rows = get_items(
+        entity="delivery_items",
+        scope=scope,
+        canonical_filters=filters,
+    )
+    if not rows:
+        logger.info(
+            "update_delivery_state: SP row not found by natural-key %s for item=%s; "
+            "skipping SP writeback",
+            filters, delivery_item_id,
+        )
+        return
+
+    sp_id_raw = rows[0].get("_sp_id")
+    if sp_id_raw is None:
+        logger.info(
+            "update_delivery_state: SP row matched but missing _sp_id for item=%s",
+            delivery_item_id,
+        )
+        return
+
+    sp_writer.update_item(
+        entity="delivery_items",
+        scope=scope,
+        item_id=str(sp_id_raw),
+        canonical_fields=field_updates,
+    )
+
+
 def _build_field_updates(
     item: DeliveryItemBase,
     target_state: DeliveryState,
@@ -317,30 +397,36 @@ def update_delivery_state(
         modified_at=now,
         modified_by=modified_by,
     )
-    # SP-side reflection of the new state -- best-effort, guarded.
-    # Per [D-118] strict-boundary cascade: SP UI engineer owns SP row writes;
-    # HILDA's Ph-1 state machine is Postgres-authoritative. The SP-side
-    # delivery_state column reflects via the separate refresh / SP UI write
-    # path, not from HILDA's transition body.
+    # SP-side reflection of the new state -- best-effort per [D-118] strict
+    # boundary: Postgres is authoritative; SP write failure logs + continues,
+    # NEVER rolls back the Postgres state change. The state cascade must proceed.
     #
-    # When event_context["sp_scope"] is provided AND sp_writer is wired, we
-    # attempt the SP update as a courtesy. Failure (no scope, scope shape
-    # mismatch, item_id-vs-SP-Id mismatch, network) is logged and DOES NOT
-    # roll back the Postgres state change -- the cascade must proceed.
+    # Pattern per [D-137] (ratified 2026-06-28): two-step write -- first
+    # resolve SP's integer Id via natural-key lookup, then update_item with
+    # that Id. SP REST /items({Id}) expects an integer auto-counter, not
+    # HILDA's composite delivery_item_id slug; prior direct-write code 400'd
+    # silently (architect live-debug discovery 2026-06-28).
     #
-    # Architect Step 4 Start Collection 2026-06-28: prior unconditional call
-    # crashed with AttributeError 'NoneType.device_id' because event_context
-    # didn't carry sp_scope (dispatcher's _build_event_context doesn't set
-    # it; transition tasks are workflow_engine-driven, not SP-write-driven).
-    sp_scope = event_context.get("sp_scope")
-    if sp_writer is not None and sp_scope is not None:
+    # Scope is derived from item.customer_id (read at top of this function).
+    # Previously read event_context['sp_scope'] which dispatcher-driven and
+    # kickoff-driven flows never set -- the entire SP-write branch silently
+    # skipped, so HILDA-driven state transitions (NS->Open->Outreach Sent ->
+    # Owner Closed -> Under PM Review) never reflected in SP. Surfaced by
+    # architect 2026-06-28 mid-PM-approval design pass: SP UI engineer's
+    # PM Approval button visibility logic depends on delivery_state being
+    # current in SP.
+    if sp_writer is not None:
         try:
-            sp_writer.update_item(
-                entity="delivery_items",
-                scope=sp_scope,
-                item_id=delivery_item_id,
-                canonical_fields=field_updates,
-            )
+            from core.src.sharepoint_integration.config import ListScope
+            customer_id = getattr(item, "customer_id", None)
+            if customer_id:
+                _sp_writeback_field_updates(
+                    sp_writer=sp_writer,
+                    item=item,
+                    customer_id=customer_id,
+                    delivery_item_id=delivery_item_id,
+                    field_updates=field_updates,
+                )
         except Exception as exc:  # noqa: BLE001 -- best-effort, non-fatal
             logger.warning(
                 "update_delivery_state: SP-side update_item failed for item=%s: %s: %s",

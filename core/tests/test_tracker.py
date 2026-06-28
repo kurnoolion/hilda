@@ -133,6 +133,13 @@ class MockSp:
     def __init__(self):
         self.writes = []
         self._next_id = 1000
+        # Per-call lookup results keyed by frozenset(filters.items()).
+        # Default: empty list -> caller treats as "no SP row found" and skips
+        # writeback. Tests that want to exercise the SP-writeback path seed
+        # this dict explicitly. Phase B 2026-06-28: tracker.transitions
+        # _sp_writeback_field_updates calls get_items() to resolve _sp_id
+        # before update_item.
+        self.get_items_responses: dict = {}
 
     def update_item(self, entity, scope, item_id, canonical_fields):
         self.writes.append(("update", entity, item_id, dict(canonical_fields)))
@@ -142,6 +149,10 @@ class MockSp:
         self._next_id += 1
         self.writes.append(("create", entity, new_id, dict(canonical_fields)))
         return new_id
+
+    def get_items(self, entity, scope, canonical_filters=None):
+        key = frozenset((canonical_filters or {}).items())
+        return self.get_items_responses.get(key, [])
 
 
 class MockAudit:
@@ -485,6 +496,68 @@ class TestTransitions:
         assert upm_writes
         assert upm_writes[0][2].get("pm_approval_at") is None
         assert upm_writes[0][2].get("pm_approval_pm_id") is None
+
+    def test_sp_writeback_two_step_natural_key_lookup(self, writers):
+        """[D-137] / architect 2026-06-28: HILDA-driven state transitions must
+        reflect back to SP via natural-key -> _sp_id lookup + update_item.
+        Without this fix, SP UI engineer's button-visibility logic (which
+        depends on delivery_state being current in SP) breaks for all
+        HILDA-driven transitions (NS->Open->Outreach Sent->Owner Closed->
+        Under PM Review)."""
+        storage, sp, audit = writers
+        storage.items["MMK-DEV-MS-9"] = mk_item(
+            DeliveryState.OPEN,
+            customer_id="MMK", device_id="DEV", milestone_id="MS", item_no=9,
+        )
+        # Seed MockSp.get_items to return an SP row with _sp_id=42 when
+        # asked for natural key (item_no=9, milestone_id=MS, project_model=DEV).
+        sp.get_items_responses[frozenset({
+            ("item_no", 9), ("milestone_id", "MS"), ("project_model", "DEV"),
+        })] = [{"_sp_id": 42, "item_no": 9}]
+
+        update_delivery_state(
+            "MMK-DEV-MS-9", DeliveryState.OUTREACH_SENT, {},
+            ctx(), storage, sp, audit,
+        )
+        sp_updates = [w for w in sp.writes if w[0] == "update"]
+        assert sp_updates, "expected SP update_item to be called"
+        # update_item called with the SP integer Id, NOT HILDA's composite slug
+        assert sp_updates[0][2] == "42"
+        assert sp_updates[0][3].get("delivery_state") == "Outreach Sent"
+
+    def test_sp_writeback_skips_when_no_sp_row_matches(self, writers):
+        """Natural-key lookup returns []; writeback skipped, Postgres write
+        still proceeds. Best-effort per [D-118]."""
+        storage, sp, audit = writers
+        storage.items["UNKNOWN-1"] = mk_item(
+            DeliveryState.OPEN,
+            customer_id="MMK", device_id="DEV", milestone_id="MS", item_no=99,
+        )
+        # MockSp.get_items_responses left empty -> returns [] for all keys.
+        r = update_delivery_state(
+            "UNKNOWN-1", DeliveryState.OUTREACH_SENT, {},
+            ctx(), storage, sp, audit,
+        )
+        # Postgres transition succeeded
+        assert r.outcome == "transitioned"
+        # SP update_item NOT called
+        sp_updates = [w for w in sp.writes if w[0] == "update"]
+        assert not sp_updates
+
+    def test_sp_writeback_skips_when_customer_id_missing(self, writers):
+        """Item without customer_id -> writeback skipped, Postgres still works.
+        Defensive against legacy rows pre-customer_id-stamping."""
+        storage, sp, audit = writers
+        storage.items["LEGACY-1"] = mk_item(
+            DeliveryState.OPEN, customer_id=None,
+        )
+        r = update_delivery_state(
+            "LEGACY-1", DeliveryState.OUTREACH_SENT, {},
+            ctx(), storage, sp, audit,
+        )
+        assert r.outcome == "transitioned"
+        sp_updates = [w for w in sp.writes if w[0] == "update"]
+        assert not sp_updates
 
     def test_bypass_guards_with_wrong_trigger_source_raises_e004(self, writers):
         storage, sp, audit = writers

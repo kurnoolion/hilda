@@ -136,6 +136,13 @@ class MockSp:
     def __init__(self):
         self.writes = []
         self._next_id = 5000
+        # Per-call lookup results keyed by frozenset(filters.items()).
+        # Default: empty list -> caller treats as "no SP row found" and skips
+        # writeback. Tests that want to exercise the SP-writeback path seed
+        # this dict explicitly. Phase B 2026-06-28: tracker.transitions
+        # _sp_writeback_field_updates calls get_items() to resolve _sp_id
+        # before update_item.
+        self.get_items_responses: dict = {}
 
     def update_item(self, entity, scope, item_id, canonical_fields):
         self.writes.append(("update", entity, item_id, dict(canonical_fields)))
@@ -145,6 +152,10 @@ class MockSp:
         self._next_id += 1
         self.writes.append(("create", entity, new_id, dict(canonical_fields)))
         return new_id
+
+    def get_items(self, entity, scope, canonical_filters=None):
+        key = frozenset((canonical_filters or {}).items())
+        return self.get_items_responses.get(key, [])
 
 
 class MockAudit:
