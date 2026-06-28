@@ -379,10 +379,17 @@ async def _write_note_only(
                      delivery_item_id, {**common, "error": str(exc)[:120]})
         return
 
-    # SharePoint write (best-effort). Build scope from item's customer_id.
-    # If sp_writer isn't wired (Ph-1 dev) OR customer_id missing OR SP throws,
-    # log + continue -- the Postgres write above already succeeded so the PM
-    # dashboard (which reads Postgres) is in sync.
+    # SharePoint write (best-effort). Two-step pattern because SP REST expects
+    # its own integer auto-counter Id, not HILDA's composite delivery_item_id:
+    #   step 1: get_items with natural-key filter -> row dict with _sp_id
+    #   step 2: update_item with that _sp_id + the new field
+    # Architect live test 2026-06-28: SHP-E001 HTTP 400 on direct update
+    # because list_crud passes item_id through to SP REST /items(N) which
+    # rejects "MMK-SM-S671U1-P1-2" as not-an-integer.
+    # If sp_writer is unwired (Ph-1 dev), customer_id missing, no SP row
+    # matches the natural key, or SP throws, we log + continue -- Postgres
+    # is authoritative per [D-118] so the PM dashboard (Postgres-fed) stays
+    # in sync; the SP cell just won't reflect until SP-side refresh runs.
     sp_written = False
     sp_error: str | None = None
     if deps.sp_writer is not None:
@@ -390,18 +397,49 @@ async def _write_note_only(
             from core.src.sharepoint_integration.config import ListScope
             item = deps.storage.get_delivery_item(delivery_item_id)
             customer_id = getattr(item, "customer_id", None) if item else None
-            if customer_id:
-                deps.sp_writer.update_item(
-                    entity="delivery_items",
-                    scope=ListScope(customer_id=customer_id),
-                    item_id=delivery_item_id,
-                    canonical_fields={"owner_status_note": note},
-                )
-                sp_written = True
-            else:
+            if not customer_id:
                 sp_error = "missing_customer_id_on_item"
+            else:
+                scope = ListScope(customer_id=customer_id)
+                filters: dict[str, Any] = {}
+                item_no = getattr(item, "item_no", None)
+                milestone_id = getattr(item, "milestone_id", None)
+                device_id = (
+                    getattr(item, "device_id", None)
+                    or getattr(item, "project_model", None)
+                )
+                if item_no is not None:
+                    filters["item_no"] = item_no
+                if milestone_id:
+                    filters["milestone_id"] = milestone_id
+                if device_id:
+                    filters["project_model"] = device_id
+
+                if not filters:
+                    sp_error = "no_natural_key_filters_available"
+                else:
+                    rows = deps.sp_writer.get_items(
+                        entity="delivery_items",
+                        scope=scope,
+                        canonical_filters=filters,
+                    )
+                    if not rows:
+                        sp_error = f"no_sp_row_matches_natural_key:{filters}"
+                    else:
+                        sp_id_raw = rows[0].get("_sp_id")
+                        sp_id = str(sp_id_raw) if sp_id_raw is not None else ""
+                        if not sp_id:
+                            sp_error = "sp_row_missing_sp_id"
+                        else:
+                            deps.sp_writer.update_item(
+                                entity="delivery_items",
+                                scope=scope,
+                                item_id=sp_id,
+                                canonical_fields={"owner_status_note": note},
+                            )
+                            sp_written = True
         except Exception as exc:  # noqa: BLE001
-            sp_error = f"{type(exc).__name__}: {str(exc)[:120]}"
+            sp_error = f"{type(exc).__name__}: {str(exc)[:160]}"
             _log.warning(
                 "owner_reply SP note write failed for item=%s: %s",
                 delivery_item_id, sp_error,
