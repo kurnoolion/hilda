@@ -410,8 +410,8 @@ def update_delivery_state(
     # Scope is derived from item.customer_id (read at top of this function).
     # Previously read event_context['sp_scope'] which dispatcher-driven and
     # kickoff-driven flows never set -- the entire SP-write branch silently
-    # skipped, so HILDA-driven state transitions (NS->Open->Outreach Sent ->
-    # Owner Closed -> Under PM Review) never reflected in SP. Surfaced by
+    # skipped, so HILDA-driven state transitions (NS->Open->OutreachSent ->
+    # OwnerClosed -> UnderPMReview) never reflected in SP. Surfaced by
     # architect 2026-06-28 mid-PM-approval design pass: SP UI engineer's
     # PM Approval button visibility logic depends on delivery_state being
     # current in SP.

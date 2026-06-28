@@ -300,7 +300,7 @@ def kickoff_collection_task(
     """KICKOFF_COLLECTION -> for each Not-Started tracker in the milestone:
     group by owner, send ONE outreach email per owner with all their items in
     a single multi-row table, transition each item Not Started -> Open ->
-    Outreach Sent.
+    OutreachSent.
 
     Triggered by Milestones CHANGED alert with field_deltas containing
     milestone_collection_started_at (per architect direction 2026-06-26).
@@ -308,7 +308,7 @@ def kickoff_collection_task(
     Architect Step 5 2026-06-28 restructure -- two problems fixed in one pass:
       (1) Re-fire on already-processed items: prior implementation dispatched
           ItemCreated for every eligible item regardless of delivery_state.
-          Items already in Outreach Sent re-fired the cascade -> Outreach
+          Items already in OutreachSent re-fired the cascade -> Outreach
           Sent -> Open transitions were illegal -> noisy errors. Fix: filter
           eligibility to delivery_state == "Not Started" only. Re-clicking
           Start Collection is now safely idempotent.
@@ -481,7 +481,7 @@ def kickoff_collection_task(
                 )
 
         # Step 3: audit each item with send_initial_outreach (recipient + batch_id +
-        # message_id common to the whole group) and transition Open -> Outreach Sent.
+        # message_id common to the whole group) and transition Open -> OutreachSent.
         for item in group_items:
             item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
             deps.audit.write_communication_log(
@@ -529,7 +529,7 @@ def kickoff_collection_task(
                 items_transitioned += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "kickoff_collection: Open->Outreach Sent failed for item=%s: %s: %s",
+                    "kickoff_collection: Open->OutreachSent failed for item=%s: %s: %s",
                     item_id, type(exc).__name__, str(exc)[:120],
                 )
                 items_failed += 1

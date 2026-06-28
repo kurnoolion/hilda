@@ -650,9 +650,9 @@ class TestEnums:
         (PascalCase with spaces)."""
         assert len(DeliveryState) == 11
         assert {s.value for s in DeliveryState} == {
-            "Not Started", "Open", "Outreach Sent", "Document Received",
-            "Owner Closed", "Under PM Review", "Ready For Submission",
-            "Submitted To Customer", "Closed", "Delayed", "Blocked",
+            "Not Started", "Open", "OutreachSent", "DocumentReceived",
+            "OwnerClosed", "UnderPMReview", "ReadyForSubmission",
+            "SubmittedToCustomer", "Closed", "Delayed", "Blocked",
         }
 
     def test_item_type_4_values_per_d053(self) -> None:

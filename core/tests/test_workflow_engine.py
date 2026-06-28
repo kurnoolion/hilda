@@ -398,7 +398,7 @@ class TestDispatcher:
             customer_id="MMK",
             device_id="MODEL-A",
             milestone_id="M-1001",
-            delivery_state="Outreach Sent",
+            delivery_state="OutreachSent",
             force_tracking_enabled=True,
             item_type="test_tech_waiver_report",
             reminder_count=1,
@@ -417,7 +417,7 @@ class TestDispatcher:
         # Inspect the enriched event passed to rule_engine.evaluate
         args, _ = mock_rule_engine.evaluate.call_args
         enriched_event = args[0]
-        assert enriched_event.derived_fields["delivery_state"] == "Outreach Sent"
+        assert enriched_event.derived_fields["delivery_state"] == "OutreachSent"
         assert enriched_event.derived_fields["force_tracking_enabled"] is True
         assert enriched_event.derived_fields["item_type"] == "test_tech_waiver_report"
         assert enriched_event.derived_fields["reminder_count"] == 1

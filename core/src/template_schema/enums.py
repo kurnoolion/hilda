@@ -16,17 +16,22 @@ class DeliveryState(str, Enum):
     report status before outreach). Extensible via DeliveryStateRegistry.
     """
 
-    # Per architect lock 2026-06-26 direction (α): enum value strings match SP display
-    # (PascalCase with spaces). Same pattern as [D-094] SUPERSEDED 2026-06-23 item_type
-    # mixed-case lock. Python attribute names stay SCREAMING_SNAKE_CASE.
+    # Per architect direction 2026-06-28 [D-138] supersedes [D-124] (α): enum value
+    # strings match SP UI Choice column display. SP UI uses PascalCase-no-space for
+    # multi-word values (OutreachSent, DocumentReceived, OwnerClosed, UnderPMReview,
+    # ReadyForSubmission, SubmittedToCustomer) and single-word/two-word-natural for
+    # the rest (Not Started, Open, Closed, Delayed, Blocked). D-124's space-bearing
+    # convention was based on incorrect reading of SP display; corrected by direct
+    # screenshot of SP UI Choice list 2026-06-28. Python attribute names stay
+    # SCREAMING_SNAKE_CASE for readability of code.
     NOT_STARTED           = "Not Started"
     OPEN                  = "Open"
-    OUTREACH_SENT         = "Outreach Sent"
-    DOCUMENT_RECEIVED     = "Document Received"
-    OWNER_CLOSED          = "Owner Closed"
-    UNDER_PM_REVIEW       = "Under PM Review"
-    READY_FOR_SUBMISSION  = "Ready For Submission"
-    SUBMITTED_TO_CUSTOMER = "Submitted To Customer"
+    OUTREACH_SENT         = "OutreachSent"
+    DOCUMENT_RECEIVED     = "DocumentReceived"
+    OWNER_CLOSED          = "OwnerClosed"
+    UNDER_PM_REVIEW       = "UnderPMReview"
+    READY_FOR_SUBMISSION  = "ReadyForSubmission"
+    SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"
     CLOSED                = "Closed"
     DELAYED               = "Delayed"
     BLOCKED               = "Blocked"

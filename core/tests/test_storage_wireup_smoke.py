@@ -107,7 +107,7 @@ def test_full_chain_import_then_kickoff(tmp_path, monkeypatch):
     # Architect Step 5 Phase A 2026-06-28 restructure: kickoff no longer
     # dispatches ItemCreated events -- it groups eligible items by owner,
     # sends one batch email per owner, and transitions each item Not Started ->
-    # Open -> Outreach Sent inline. Stub the two SP/email helpers so this
+    # Open -> OutreachSent inline. Stub the two SP/email helpers so this
     # in-process smoke test doesn't need a live SP or EWS endpoint.
     import core.src.workflow_engine.tasks.sp_alert_imports as kc_mod
 

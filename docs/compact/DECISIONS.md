@@ -2497,9 +2497,9 @@ NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `wo
 ## D-124: `DeliveryState` enum value strings match SP display (PascalCase + spaces) -- direction (α)
 
 **Date**: 2026-06-26
-**Status**: Ratified
+**Status**: Partially superseded by `[D-138]` 2026-06-28 -- the title wording ("PascalCase + spaces") was a typo; the Decision block of this ADR already showed no-space PascalCase values verbatim (`"OutreachSent"`, `"OwnerClosed"`, etc.). D-138 re-codifies the original intent + corrects enum-file drift that landed space-bearing values between ratification and 2026-06-28.
 
-**Context**: HILDA's canonical `DeliveryState` enum (in `core/src/template_schema/enums.py`) originally used SCREAMING_SNAKE_CASE Python attribute names + various value-string conventions (e.g., `OUTREACH_SENT = "OutreachSent"` no-space PascalCase). The SP UI engineer's actual SP Choice column values are PascalCase WITH spaces (e.g., `"Not Started"`, `"Outreach Sent"`, `"Owner Closed"`) per architect's live SP REST probe 2026-06-26 (showed `delivery_state = "Not Started"`). The mismatch meant HILDA's runtime evaluator (rule_engine condition matching) would never fire against real SP data.
+**Context**: HILDA's canonical `DeliveryState` enum (in `core/src/template_schema/enums.py`) originally used SCREAMING_SNAKE_CASE Python attribute names + various value-string conventions (e.g., `OUTREACH_SENT = "OutreachSent"` no-space PascalCase). The SP UI engineer's actual SP Choice column values are PascalCase WITH spaces (e.g., `"Not Started"`, `"OutreachSent"`, `"OwnerClosed"`) per architect's live SP REST probe 2026-06-26 (showed `delivery_state = "Not Started"`). The mismatch meant HILDA's runtime evaluator (rule_engine condition matching) would never fire against real SP data.
 
 **Decision**: Update `DeliveryState` enum **value strings** to match SP display verbatim -- PascalCase + spaces. Python attribute names stay SCREAMING_SNAKE_CASE (Python convention). Direction (α):
 
@@ -2507,12 +2507,12 @@ NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `wo
 class DeliveryState(str, Enum):
     NOT_STARTED            = "Not Started"
     OPEN                   = "Open"
-    OUTREACH_SENT          = "Outreach Sent"
-    DOCUMENT_RECEIVED      = "Document Received"
-    OWNER_CLOSED           = "Owner Closed"
-    UNDER_PM_REVIEW        = "Under PM Review"
-    READY_FOR_SUBMISSION   = "Ready For Submission"
-    SUBMITTED_TO_CUSTOMER  = "Submitted To Customer"
+    OUTREACH_SENT          = "OutreachSent"
+    DOCUMENT_RECEIVED      = "DocumentReceived"
+    OWNER_CLOSED           = "OwnerClosed"
+    UNDER_PM_REVIEW        = "UnderPMReview"
+    READY_FOR_SUBMISSION   = "ReadyForSubmission"
+    SUBMITTED_TO_CUSTOMER  = "SubmittedToCustomer"
     CLOSED                 = "Closed"
     DELAYED                = "Delayed"
     BLOCKED                = "Blocked"
@@ -2524,14 +2524,14 @@ Cascade: `customizations/rules/global/automation_rules.yaml` condition values up
 - (a) Single source of truth -- SP UI engineer's Choice column values are the operational truth (TPMs see + edit them in SP UI). HILDA's enum should mirror, not diverge.
 - (b) Matches the same pattern as `[D-094]` SUPERSEDED 2026-06-23 item_type lock -- short-label categories Confirmation/Default PascalCase; long names snake_case. DeliveryState extends the same discipline: enum value strings = SP display strings.
 - (c) Direction (α) over (β) translation layer -- a translation layer (`SP_TO_CANONICAL_STATE = {"Not Started": "OPEN", ...}`) at the SP-READ boundary adds an indirection HILDA developers must remember + maintain. Direction (α) removes the indirection entirely.
-- (d) rule_engine condition matching works out of the box -- rules can reference `delivery_state in ["Outreach Sent", "Document Received"]` and match runtime events directly.
+- (d) rule_engine condition matching works out of the box -- rules can reference `delivery_state in ["OutreachSent", "DocumentReceived"]` and match runtime events directly.
 - (e) Avoids future drift between HILDA enum values + SP Choice values -- when SP UI engineer adds a new state (e.g., "Awaiting Approval"), HILDA enum mirrors verbatim; no mapping table sync.
 
 **Consequences**:
 - (a) `core/src/template_schema/enums.py` `DeliveryState` value strings updated (commit `f8289f2`).
 - (b) `customizations/rules/global/automation_rules.yaml` condition values updated to PascalCase-with-spaces; orphan values OwnerResponseReceived / OutreachReminded / AIReviewed removed in same cascade (commit `057b33d`).
 - (c) 4 test files updated for new string values: `test_template_schema.py` + `test_tracker.py` + `test_workflow_engine_tasks.py` + `test_dashboard.py`.
-- (d) String values containing spaces require quoting in YAML (`value: "Outreach Sent"` not `value: Outreach Sent`) -- caught + fixed during cascade.
+- (d) String values containing spaces require quoting in YAML (`value: "OutreachSent"` not `value: OutreachSent`) -- caught + fixed during cascade.
 - (e) `[D-094]` SUPERSEDED + `[D-119]` `tpm_resolved_doc_type` (4-value lowercase snake_case for HILDA-owned page) precedents both confirm: enum value strings = SP-display strings where SP UI is the authoritative surface; canonical lowercase snake_case where HILDA owns full read+write (FR-87 page).
 - (f) No translation layer at SP-READ boundary -- HILDA's evaluator reads `row["delivery_state"]` and matches enum values directly.
 - (g) Future SP-side Choice value addition: HILDA architect adds the new enum member with matching value string; no broader cascade.
@@ -3172,7 +3172,7 @@ NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `wo
 **Date**: 2026-06-26
 **Status**: Ratified
 
-**Context**: HILDA's canonical `DeliveryState` enum (in `core/src/template_schema/enums.py`) originally used SCREAMING_SNAKE_CASE both for Python attribute names AND value strings (e.g., `OUTREACH_SENT = "OutreachSent"` no-space PascalCase + variations). The SP UI engineer's actual SP Choice column values are PascalCase with spaces (e.g., `"Not Started"`, `"Outreach Sent"`, `"Owner Closed"`) per architect's live SP REST probe 2026-06-26 (showed `delivery_state = "Not Started"`). The mismatch meant HILDA's runtime evaluator (rule_engine condition matching) would never fire against real SP data.
+**Context**: HILDA's canonical `DeliveryState` enum (in `core/src/template_schema/enums.py`) originally used SCREAMING_SNAKE_CASE both for Python attribute names AND value strings (e.g., `OUTREACH_SENT = "OutreachSent"` no-space PascalCase + variations). The SP UI engineer's actual SP Choice column values are PascalCase with spaces (e.g., `"Not Started"`, `"OutreachSent"`, `"OwnerClosed"`) per architect's live SP REST probe 2026-06-26 (showed `delivery_state = "Not Started"`). The mismatch meant HILDA's runtime evaluator (rule_engine condition matching) would never fire against real SP data.
 
 **Decision**: Update `DeliveryState` enum **value strings** to match SP display verbatim — PascalCase + spaces. Python attribute names stay SCREAMING_SNAKE_CASE (Python convention). Direction (α):
 
@@ -3180,31 +3180,31 @@ NO `sp_alert_parser` handler dispatch. NO `rule_engine` trigger sub-type. NO `wo
 class DeliveryState(str, Enum):
     NOT_STARTED            = "Not Started"
     OPEN                   = "Open"
-    OUTREACH_SENT          = "Outreach Sent"
-    DOCUMENT_RECEIVED      = "Document Received"
-    OWNER_CLOSED           = "Owner Closed"
-    UNDER_PM_REVIEW        = "Under PM Review"
-    READY_FOR_SUBMISSION   = "Ready For Submission"
-    SUBMITTED_TO_CUSTOMER  = "Submitted To Customer"
+    OUTREACH_SENT          = "OutreachSent"
+    DOCUMENT_RECEIVED      = "DocumentReceived"
+    OWNER_CLOSED           = "OwnerClosed"
+    UNDER_PM_REVIEW        = "UnderPMReview"
+    READY_FOR_SUBMISSION   = "ReadyForSubmission"
+    SUBMITTED_TO_CUSTOMER  = "SubmittedToCustomer"
     CLOSED                 = "Closed"
     DELAYED                = "Delayed"
     BLOCKED                = "Blocked"
 ```
 
-Cascade: `customizations/rules/global/automation_rules.yaml` condition values updated to match (e.g., `delivery_state in [Outreach Sent, ...]` not `[OutreachSent, ...]`). All test files updated to match. 4 test files touched + 1 production code file.
+Cascade: `customizations/rules/global/automation_rules.yaml` condition values updated to match (e.g., `delivery_state in [OutreachSent, ...]` not `[OutreachSent, ...]`). All test files updated to match. 4 test files touched + 1 production code file.
 
 **Why**:
 - (a) **Single source of truth** -- SP UI engineer's Choice column values are the operational truth (TPMs see + edit them in SP UI). HILDA's enum should mirror, not diverge.
 - (b) **Matches the same pattern as `[D-094]` SUPERSEDED 2026-06-23 item_type lock** -- short-label categories Confirmation/Default PascalCase; long names snake_case. DeliveryState extends the same discipline: enum value strings = SP display strings.
 - (c) **Direction (α) over (β) translation layer** -- a translation layer (`SP_TO_CANONICAL_STATE = {"Not Started": "OPEN", ...}`) at the SP-READ boundary adds an indirection HILDA developers must remember + maintain. Direction (α) removes the indirection entirely.
-- (d) **rule_engine condition matching works out of the box** -- rules can reference `delivery_state in ["Outreach Sent", "Document Received"]` and match runtime events directly.
+- (d) **rule_engine condition matching works out of the box** -- rules can reference `delivery_state in ["OutreachSent", "DocumentReceived"]` and match runtime events directly.
 - (e) **Avoids future drift between HILDA enum values + SP Choice values** -- when SP UI engineer adds a new state (e.g., "Awaiting Approval"), HILDA enum mirrors verbatim; no mapping table sync.
 
 **Consequences**:
 - (a) `core/src/template_schema/enums.py` `DeliveryState` value strings updated (commit `f8289f2`).
 - (b) `customizations/rules/global/automation_rules.yaml` condition values updated to PascalCase-with-spaces; orphan values OwnerResponseReceived / OutreachReminded / AIReviewed removed in same cascade (commit `057b33d`).
 - (c) 4 test files updated for new string values: `test_template_schema.py` + `test_tracker.py` + `test_workflow_engine_tasks.py` + `test_dashboard.py`.
-- (d) String values containing spaces require quoting in YAML (`value: "Outreach Sent"` not `value: Outreach Sent`) -- caught + fixed during cascade.
+- (d) String values containing spaces require quoting in YAML (`value: "OutreachSent"` not `value: OutreachSent`) -- caught + fixed during cascade.
 - (e) `[D-094]` SUPERSEDED + `[D-119]` `tpm_resolved_doc_type` (4-value lowercase snake_case for HILDA-owned page) precedents both confirm: enum value strings = SP-display strings where SP UI is the authoritative surface; canonical lowercase snake_case where HILDA owns full read+write (FR-87 page).
 - (f) No translation layer at SP-READ boundary -- HILDA's evaluator reads `row["delivery_state"]` and matches enum values directly.
 - (g) Future SP-side Choice value addition: HILDA architect adds the new enum member with matching value string; no broader cascade.
@@ -3323,12 +3323,12 @@ Implementation cascade (5 chunks):
 - Chunk 1 (`62fa8ce`, 2026-06-26): Add `StorageWriter.create_delivery_item` Protocol method + Mock impls. Sets up the local-import path that replaces SP-create.
 - Chunk 2 (`70b256a`, 2026-06-26): Add `IMPORT_DELIVERABLE_TRACKER` + `KICKOFF_COLLECTION` ActionKinds + stub task bindings in `core/src/workflow_engine/tasks/sp_alert_imports.py`.
 - Chunk 3 (`69c1d68`, 2026-06-26 PM): Real `import_deliverable_tracker_task` body -- parses SP ADDED alert body_kvs into DeliveryItemBase, resolves device_id, idempotency via `find_items_by_natural_key`, calls `storage.create_delivery_item`.
-- Chunk 4 (`5196a4a`, 2026-06-26 PM; rewritten 2026-06-28 `ddca41d`): Real `kickoff_collection_task` body -- filters by `force_tracking_enabled=true AND delivery_state="Not Started"`, groups by owner via Path A SP batch-read, sends ONE batch outreach email per owner with multi-row HTML table, transitions each item NS->Open->Outreach Sent inline.
+- Chunk 4 (`5196a4a`, 2026-06-26 PM; rewritten 2026-06-28 `ddca41d`): Real `kickoff_collection_task` body -- filters by `force_tracking_enabled=true AND delivery_state="Not Started"`, groups by owner via Path A SP batch-read, sends ONE batch outreach email per owner with multi-row HTML table, transitions each item NS->Open->OutreachSent inline.
 - Chunk 5 (`4ed2e0e`, 2026-06-26 PM): Remove `sp_writer.create_item` from `instantiate_default_workitem`. The Default WI row is now created by the SP UI engineer's "Setup Deliverables" button, same as every other Deliverable row.
 
 YAML companion (architect-driven on Linux box): two new rules added to `customizations/rules/global/automation_rules.yaml` -- `import_deliverable_tracker_on_sp_add` (trigger=ItemModified + list_name=Deliverables + action_type=added) and `kickoff_collection_on_milestone_started` (trigger=ItemModified + list_name=Milestones + action_type=changed + field_deltas contains_key=milestone_collection_started_at).
 
-End-to-end validation 2026-06-28: TPM "Setup Milestone" in SP UI -> SP fires ADDED -> HILDA logs (no action); TPM "Setup Deliverables" -> SP UI engineer creates 10 + 1 Default WI rows -> SP fires 11 ADDED -> HILDA imports 11 trackers; TPM "Start Collection" -> SP fires CHANGED with milestone_collection_started_at delta -> HILDA's kickoff_collection groups by owner + sends batch outreach + transitions all eligible items to Outreach Sent. Live-validated against real corp Exchange + real corp SP for customer MMK on device SM-S671U1.
+End-to-end validation 2026-06-28: TPM "Setup Milestone" in SP UI -> SP fires ADDED -> HILDA logs (no action); TPM "Setup Deliverables" -> SP UI engineer creates 10 + 1 Default WI rows -> SP fires 11 ADDED -> HILDA imports 11 trackers; TPM "Start Collection" -> SP fires CHANGED with milestone_collection_started_at delta -> HILDA's kickoff_collection groups by owner + sends batch outreach + transitions all eligible items to OutreachSent. Live-validated against real corp Exchange + real corp SP for customer MMK on device SM-S671U1.
 
 **Why**:
 - (a) **Cleaner separation of responsibility** -- one writer (SP UI engineer) for all SP rows; one reader (HILDA) for all SP alerts. Eliminates the prior "HILDA writes some SP rows" asymmetry that confused both teams. SP UI engineer is the team with deep familiarity with SP REST quirks (column-type mappings, Person/Group field shapes, list-name capitalization); HILDA writing into SP introduces a second source of SP write traffic with different code paths and different failure modes.
@@ -3414,3 +3414,65 @@ Established implementation: `owner_reply._write_note_only` (commit `fed0b45`). S
 - (f) Performance: 2 SP REST round-trips per HILDA->SP write (one GET + one PATCH). At Ph-1 volume (single-digit writes per minute, typically one per owner reply note), this is well within SP's rate budget. If Ph-3+ HILDA->SP write volume grows, caching `_sp_id` on the local row (rejected alternative above) is a viable optimization -- but not before telemetry justifies.
 
 **Anchors**: `[D-064]` (HILDA -> SP REST writeback channel), `[D-118]` (SP UI engineer provisioning boundary -- HILDA->SP writes are field-only, never row-create), `[D-135]` (strict-boundary cascade -- this ADR is the pattern for HILDA->SP writes that the cascade allows), commits `fe9dd16` (get_items sync wrapper), `fed0b45` (_write_note_only two-step implementation -- canonical reference), `a8dbb7e` (tracker.transitions best-effort SP writeback -- unchanged here, upgrade deferred).
+
+## D-138: `DeliveryState` enum value strings = SP UI Choice column verbatim (re-aligns D-124 intent after drift)
+
+**Date**: 2026-06-28
+**Status**: Ratified
+**Supersedes**: `[D-124]` heading wording (Decision-block content was already correct)
+
+**Context**: Architect screenshot 2026-06-28 of the SP UI Delivery State Choice column shows 11 values: `Blocked / Closed / Delayed / DocumentReceived / Not Started / Open / OutreachSent / OwnerClosed / ReadyForSubmission / SubmittedToCustomer / UnderPMReview`. Multi-word values are PascalCase-NO-space (`OutreachSent`, `OwnerClosed`, `UnderPMReview`, `DocumentReceived`, `ReadyForSubmission`, `SubmittedToCustomer`); the two values that ARE naturally two words in English use a space (`Not Started`); single-word values are plain (`Open` / `Closed` / `Delayed` / `Blocked`).
+
+Pre-D-138, HILDA's `core/src/template_schema/enums.py` `DeliveryState` enum had **space-bearing** values (`"Outreach Sent"`, `"Owner Closed"`, etc.). This caused two production issues:
+- (a) **State writeback to SP silently failed** for multi-word values: SP rejects the Choice value with HTTP 400 because `"Outreach Sent"` is not in SP's allowed Choice list (`OutreachSent` is). Combined with `[D-137]` deferred SP-writeback being already broken (architect found 2026-06-28 mid-PM-approval design pass; fixed in commit `f9542fa`), the entire HILDA-driven NS->Open->OutreachSent->OwnerClosed->UnderPMReview cascade was invisible in SP UI.
+- (b) **SP-alert parser inbound flow** -- when an SP CHANGED alert delivered `delivery_state: OutreachSent` from SP, HILDA's local row got that value, but HILDA's own state-machine rules referenced `"Outreach Sent"` (space) for matching, causing mismatches in rule evaluation.
+
+**Historical note on D-124 drift**: `[D-124]` (2026-06-26) was titled "DeliveryState enum value strings match SP display (PascalCase + spaces) -- direction (α)". The heading wording said "with spaces", but the Decision block code sample inside D-124 actually showed no-space PascalCase (`"OutreachSent"`, `"OwnerClosed"`, `"UnderPMReview"`, etc.). So D-124's INTENT was always no-space PascalCase matching SP UI; the title was a typo/misnomer. Sometime between D-124 ratification and this cascade, the enum file got drifted to space-bearing values -- likely via an over-literal reading of D-124's title rather than its Decision block. D-138 re-aligns enum + cascade with D-124's original Decision-block intent, and corrects the title-vs-body inconsistency by issuing a fresh ADR rather than amending D-124 in-place.
+
+**Decision**: `DeliveryState` enum value strings match the SP UI Choice column verbatim:
+
+```python
+class DeliveryState(str, Enum):
+    NOT_STARTED           = "Not Started"           # SP UI: "Not Started"
+    OPEN                  = "Open"                  # SP UI: "Open"
+    OUTREACH_SENT         = "OutreachSent"          # SP UI: "OutreachSent"
+    DOCUMENT_RECEIVED     = "DocumentReceived"      # SP UI: "DocumentReceived"
+    OWNER_CLOSED          = "OwnerClosed"           # SP UI: "OwnerClosed"
+    UNDER_PM_REVIEW       = "UnderPMReview"         # SP UI: "UnderPMReview"
+    READY_FOR_SUBMISSION  = "ReadyForSubmission"    # SP UI: "ReadyForSubmission"
+    SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"   # SP UI: "SubmittedToCustomer"
+    CLOSED                = "Closed"                # SP UI: "Closed"
+    DELAYED               = "Delayed"               # SP UI: "Delayed"
+    BLOCKED               = "Blocked"               # SP UI: "Blocked"
+```
+
+Per architect direction 2026-06-28: "at this time, SP UI list values cannot be changed - hilda to modify". HILDA aligns to SP UI; not the other way around. This treats the SP UI engineer's Choice column as the authoritative source per [D-118] strict boundary.
+
+**Cascade scope**: 80 occurrences across 18 files updated by mechanical sed. Files touched:
+- Production code (6): `template_schema/enums.py`, `tracker/transitions.py`, `storage/delivery_item_ops.py`, `workflow_engine/tasks/sp_alert_imports.py`, `workflow_engine/tasks/submission.py`, `email_service/MODULE.md` (narrative).
+- MODULE.md docs (4): `dashboard/MODULE.md`, `email_service/MODULE.md`, `template_schema/MODULE.md`, `tracker/MODULE.md`.
+- Tests (5): `test_storage_wireup_smoke.py`, `test_template_schema.py`, `test_tracker.py`, `test_workflow_engine.py`, `test_workflow_engine_tasks.py`.
+- Customizations YAML (2): `customizations/rules/global/automation_rules.yaml` rule condition values; `customizations/rules/global/defaults.yaml` defaults.
+- Compact docs (2): `docs/compact/DECISIONS.md` (this commit + back-references), `docs/compact/STATUS.md` (Done entries narrative).
+
+908/908 tests passing post-cascade.
+
+**Why**:
+- (a) **SP UI is the operational source of truth** -- per [D-118] strict-boundary, SP UI engineer owns SP row provisioning + Choice column value enumeration. HILDA aligns to SP; not the other way around. If SP UI engineer ever changes the Choice values (e.g., for a new customer's installation), HILDA's enum is the cascade point -- single source.
+- (b) **Direction (α) over translation layer** -- same rationale as [D-124] (e) holds: no per-write / per-read translation indirection at the SP boundary. The `SharePointListProvider` already does column-name translation; layering a value-map on top adds complexity that pays off only when multiple SP installations have divergent Choice values. Defer that to Ph-2 if/when a second customer surfaces a different Choice convention.
+- (c) **Audit log readability trade-off acknowledged** -- `"UnderPMReview"` is slightly harder to skim than `"Under PM Review"` in audit logs; the trade-off is operational alignment > human readability. Future ops dashboards can format the value for display if needed.
+- (d) **Path A over Path B** -- the alternative (keep HILDA's space-bearing enum + per-customer Choice value-map in `SharePointListProvider`) was rejected for Ph-1 because (i) single customer (MMK) deployment; (ii) value-map adds 2 new translation sites (read path + write path) with their own test surface; (iii) Ph-2 can introduce value-map cleanly if needed by adding `value_map: delivery_state: {"Outreach Sent": "OutreachSent"}` to `customer.yaml` and updating the provider to consume it.
+- (e) **D-124 title-vs-body inconsistency resolved via fresh ADR** -- amending [D-124] in-place would lose audit history. D-138 supersedes the title wording and re-codifies what D-124's Decision block always said.
+
+**Consequences**:
+- (a) `core/src/template_schema/enums.py` enum value strings = SP UI Choice values verbatim.
+- (b) `tracker.transitions.update_delivery_state` SP writeback (newly fixed in commit `f9542fa` per [D-137]) now writes the correct Choice value to SP -- HILDA-driven state transitions (NS->Open->OutreachSent->OwnerClosed->UnderPMReview->ReadyForSubmission->SubmittedToCustomer->Closed) propagate visibly to SP UI.
+- (c) `sp_alert_parser` inbound: when SP CHANGED alert carries `delivery_state: OutreachSent` value, it matches HILDA's enum directly; no translation step. Rule conditions like `value: OutreachSent` in `automation_rules.yaml` match cleanly.
+- (d) Audit log values now show no-space form (`{"to_state": "OutreachSent"}` rather than `{"to_state": "Outreach Sent"}`). Existing audit rows pre-D-138 retain their old form; ops queries spanning the cascade boundary need to look for both spellings during the transition window.
+- (e) `customizations/rules/global/automation_rules.yaml` condition values updated (`value: OutreachSent` etc.); `defaults.yaml` likewise. These rules continue to evaluate correctly because they reference the same value strings the enum now uses.
+- (f) MODULE.md narrative text in 4 modules updated for consistency -- doc readers see the same spellings code uses.
+- (g) STATUS.md prior Done entries narrative was updated by the cascade sed -- historical entries now say "OutreachSent" etc. This is a minor documentation hygiene change (entries describe past work in the present terminology); the underlying decisions are unchanged.
+- (h) D-124 in DECISIONS.md is unchanged except for its title wording's drift now being formally captured by D-138. Future readers see D-124's Decision block was always correct; D-138 documents the title-correction + re-cascade.
+- (i) Reusable pattern: when SP UI engineer adds a new state, HILDA enum mirrors the value verbatim; no separate translation table to maintain.
+
+**Anchors**: `[D-118]` (SP UI engineer owns SP definitions; HILDA aligns), `[D-124]` (Decision-block intent re-codified; title-wording superseded), `[D-135]` (strict-boundary cascade complete -- D-138 is the value-string companion piece), `[D-137]` (SP writeback two-step pattern -- D-138 is the value-string the pattern writes), commits `f9542fa` (D-137 implementation that surfaced this) + the D-138 cascade commit.

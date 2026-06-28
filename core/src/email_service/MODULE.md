@@ -135,7 +135,7 @@ class StructuredReplyBlock:
 @dataclass(frozen=True)
 class PerItemReplyUpdate:
     item_no:           int
-    delivery_state:    str | None        # "Open" / "Owner Closed" / "Delayed" / "Blocked" / etc. (D-124 α: PascalCase + space)
+    delivery_state:    str | None        # "Open" / "OwnerClosed" / "Delayed" / "Blocked" / etc. (D-124 α: PascalCase + space)
     owner_status_note: str | None
     confidence:        float             # 1.0 for structured-block parse; LLM-derived for path (c)
 

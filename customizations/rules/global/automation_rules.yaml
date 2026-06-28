@@ -62,7 +62,7 @@ rules:
           template: initial_outreach_per_owner
           channel: email
       - kind: UpdateState
-        params: { target_state: Outreach Sent }
+        params: { target_state: OutreachSent }
 
   # =====================================================================================
   # 2. REMINDERS -- FR-10 cadence; reminder_count increments by SendReminder action.
@@ -78,7 +78,7 @@ rules:
     condition:
       and:
         - { field: reminder_count, op: lt, value: 1 }
-        - { field: delivery_state, op: eq, value: "Outreach Sent" }
+        - { field: delivery_state, op: eq, value: "OutreachSent" }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_1, channel: email }
@@ -89,7 +89,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 1 }
         - { field: reminder_count, op: lt, value: 2 }
-        - { field: delivery_state, op: eq, value: "Outreach Sent" }
+        - { field: delivery_state, op: eq, value: "OutreachSent" }
     actions:
       - kind: SendReminder
         params: { template: standard_owner_reminder_2, channel: email }
@@ -105,7 +105,7 @@ rules:
       and:
         - { field: reminder_count, op: gte, value: 2 }
         - { field: days_to_deadline, op: lte, value: 3 }
-        - { field: delivery_state, op: eq, value: "Outreach Sent" }
+        - { field: delivery_state, op: eq, value: "OutreachSent" }
     actions:
       - kind: Escalate
         params:
@@ -120,7 +120,7 @@ rules:
     condition:
       and:
         - { field: days_to_deadline, op: lte, value: 0 }
-        - { field: delivery_state, op: neq, value: Owner Closed }
+        - { field: delivery_state, op: neq, value: OwnerClosed }
         - { field: delivery_state, op: neq, value: Closed }
     actions:
       - kind: NotifyPM
@@ -148,7 +148,7 @@ rules:
     trigger: StateChange
     condition:
       and:
-        - { field: target_state, op: eq, value: Document Received }
+        - { field: target_state, op: eq, value: DocumentReceived }
         - { field: review_required, op: eq, value: true }
         - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
     actions:
@@ -174,21 +174,21 @@ rules:
     trigger: OwnerStatusConfirmed
     condition:
       and:
-        - { field: doc_count_reached, op: eq, value: true }                 # FR-7 Owner Closed 2-condition guard
-        - { field: delivery_state, op: eq, value: "Document Received" }
+        - { field: doc_count_reached, op: eq, value: true }                 # FR-7 OwnerClosed 2-condition guard
+        - { field: delivery_state, op: eq, value: "DocumentReceived" }
     actions:
       - kind: UpdateState
-        params: { target_state: Owner Closed }
+        params: { target_state: OwnerClosed }
 
   - rule_id: advance_to_ready_for_submission_on_pm_approval
     trigger: PMApproval
     condition:
       field: delivery_state
       op: eq
-      value: Owner Closed
+      value: OwnerClosed
     actions:
       - kind: UpdateState
-        params: { target_state: "Ready For Submission" }   # D-124 (α) lock 2026-06-26: PascalCase + space
+        params: { target_state: "ReadyForSubmission" }   # D-124 (α) lock 2026-06-26: PascalCase + space
       - kind: QueueSubmission
         params: { channel: customer_adapter }
 

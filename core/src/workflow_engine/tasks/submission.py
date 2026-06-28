@@ -94,7 +94,7 @@ def escalate_task(
 def start_item_collection_task(
     params: dict[str, Any], event_context: dict[str, Any]
 ) -> dict[str, Any]:
-    """START_ITEM_COLLECTION per FR-8 -- transitions delivery_state to "Outreach Sent"
+    """START_ITEM_COLLECTION per FR-8 -- transitions delivery_state to "OutreachSent"
     + writes audit log. Chained outreach is the rule_engine's responsibility (action 1
     in StartCollection rule actions list per defaults.yaml worked example).
 
@@ -103,19 +103,19 @@ def start_item_collection_task(
     + StartItemCollection on any OwnerReassigned event. If the TPM hasn't
     clicked Start Collection on the milestone yet, both should defer --
     transitioning this one item out of "Not Started" pre-kickoff would
-    desynchronize the milestone (this item in "Outreach Sent" while
+    desynchronize the milestone (this item in "OutreachSent" while
     siblings stay in "Not Started"). When TPM later clicks Start Collection,
     kickoff_collection_on_milestone_started fires + cascades ItemCreated
     -> send_initial_outreach_on_collection_start across ALL trackers
     (including the newly reassigned one) cleanly.
 
     params:
-      - target_state: str (default "Outreach Sent" per D-124 DeliveryState α lock)
+      - target_state: str (default "OutreachSent" per D-124 DeliveryState α lock)
 
     event_context: standard.
     """
     deps = get_task_deps()
-    target_state = params.get("target_state", "Outreach Sent")
+    target_state = params.get("target_state", "OutreachSent")
     delivery_item_id = event_context.get("delivery_item_id")
 
     # ---- Collection-started gate ----

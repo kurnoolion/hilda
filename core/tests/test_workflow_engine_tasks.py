@@ -214,10 +214,10 @@ class TestStateTasks:
         deps.storage.items["I-1234"] = mk_item(DeliveryState.OPEN)
         with override_task_deps(deps):
             result = update_state_task.apply_async(
-                args=({"target_state": "Outreach Sent"}, ctx())
+                args=({"target_state": "OutreachSent"}, ctx())
             ).get()
         assert result["outcome"] == "transitioned"
-        assert result["to_state"] == "Outreach Sent"
+        assert result["to_state"] == "OutreachSent"
 
     def test_update_state_idempotent_noop(self, deps):
         deps.storage.items["I-1234"] = mk_item(DeliveryState.OPEN)
@@ -441,7 +441,7 @@ class TestOutreachTasks:
         # Seed storage with an item already past Not Started so the
         # collection-started gate (architect 2026-06-27) does not defer.
         deps.storage.items["I-1234"] = SimpleNamespace(
-            delivery_state="Outreach Sent",
+            delivery_state="OutreachSent",
             owner_corp_usa_email="newowner@corp.example",
         )
         from core.src.workflow_engine.tasks.outreach import notify_new_owner_task
@@ -643,7 +643,7 @@ class TestSubmissionTasks:
         # Seed storage with an item already past Not Started so the gate
         # (architect 2026-06-27) does not defer.
         deps.storage.items["I-1234"] = SimpleNamespace(
-            delivery_state="Outreach Sent",
+            delivery_state="OutreachSent",
         )
         from core.src.workflow_engine.tasks.submission import start_item_collection_task
         with override_task_deps(deps):
@@ -651,7 +651,7 @@ class TestSubmissionTasks:
                 args=({}, ctx())
             ).get()
         assert result["outcome"] == "audit_written"
-        assert result["target_state"] == "Outreach Sent"
+        assert result["target_state"] == "OutreachSent"
         logs = [a for a in deps.audit.logs if a[0] == "start_item_collection"]
         assert len(logs) == 1
 
@@ -1110,7 +1110,7 @@ class TestKickoffCollection:
     kickoff_collection_task body. Post-restructure the task no longer dispatches
     ItemCreated events -- it groups eligible trackers by owner, sends ONE batch
     outreach email per owner, and transitions each item Not Started -> Open ->
-    Outreach Sent inline. Confirmation items ARE eligible per FR-58 correction.
+    OutreachSent inline. Confirmation items ARE eligible per FR-58 correction.
     """
 
     def _patch_kickoff_helpers(self, monkeypatch, owner_map=None, message_id="MID-1"):
@@ -1143,7 +1143,7 @@ class TestKickoffCollection:
 
     def test_happy_path_groups_by_owner_and_sends_batch_emails(self, deps, monkeypatch):
         """5 eligible trackers, 2 distinct owners -> 2 batch emails sent;
-        all 5 transition Not Started -> Open -> Outreach Sent. Item filtered
+        all 5 transition Not Started -> Open -> OutreachSent. Item filtered
         out by force_tracking_enabled=False. Confirmation IS eligible per
         FR-58 correction (architect 2026-06-28).
         """
@@ -1190,7 +1190,7 @@ class TestKickoffCollection:
         assert result["items_eligible"] == 4         # items 1, 2, 5, 7 (Confirmation included)
         assert result["owner_groups"] == 2           # alice + bob
         assert result["emails_sent"] == 2
-        assert result["items_transitioned"] == 4     # all eligible reach Outreach Sent
+        assert result["items_transitioned"] == 4     # all eligible reach OutreachSent
         assert result["items_failed"] == 0
         # Each batch email recorded once with the right recipient + size.
         recipients_sorted = sorted(r["recipient"] for r in recorder)
@@ -1226,8 +1226,8 @@ class TestKickoffCollection:
         )
         self._patch_kickoff_helpers(monkeypatch)
         deps.storage.list_items_response = [
-            _mk_tracker(1, "test_tech_waiver_report", delivery_state="Outreach Sent"),
-            _mk_tracker(2, "Confirmation",            delivery_state="Outreach Sent"),
+            _mk_tracker(1, "test_tech_waiver_report", delivery_state="OutreachSent"),
+            _mk_tracker(2, "Confirmation",            delivery_state="OutreachSent"),
         ]
         with override_task_deps(deps):
             result = kickoff_collection_task({}, _mk_kickoff_event_context())

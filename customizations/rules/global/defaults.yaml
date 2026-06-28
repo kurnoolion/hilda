@@ -48,7 +48,7 @@ rules:
       value: true
     actions:
       - kind: UpdateState                        # action 0 — state first
-        params: { target_state: "Document Received" }     # D-124 (α) lock 2026-06-26: PascalCase + space
+        params: { target_state: "DocumentReceived" }     # D-124 (α) lock 2026-06-26: PascalCase + space
       - kind: TriggerAIReview                    # action 1 — review second (consumes the updated state)
         params: {}
 

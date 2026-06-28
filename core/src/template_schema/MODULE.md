@@ -26,14 +26,14 @@ class DeliveryState(str, Enum):
     per FR-7 + FR-2 R&R lock; was missing in 2026-05-15 rewrite)."""
     NOT_STARTED          = "Not Started"          # initial at setup_milestone per FR-7 + FR-2 R&R; hardcoded by SP UI engineer's web part
     OPEN                 = "Open"                 # transitioned by HILDA at Start Collection per FR-8 step 1
-    OUTREACH_SENT        = "Outreach Sent"        # initial outreach dispatched per FR-9 (D-124 α: PascalCase + space)
-    DOCUMENT_RECEIVED    = "Document Received"    # document arrived via any ingest channel
-    UNDER_PM_REVIEW      = "Under PM Review"      # active TPM review gate per FR-56
-    OWNER_CLOSED         = "Owner Closed"         # owner confirmed done; transient — forks per FR-7 (D-048 multi-rev selection)
+    OUTREACH_SENT        = "OutreachSent"        # initial outreach dispatched per FR-9 (D-124 α: PascalCase + space)
+    DOCUMENT_RECEIVED    = "DocumentReceived"    # document arrived via any ingest channel
+    UNDER_PM_REVIEW      = "UnderPMReview"      # active TPM review gate per FR-56
+    OWNER_CLOSED         = "OwnerClosed"         # owner confirmed done; transient — forks per FR-7 (D-048 multi-rev selection)
     DELAYED              = "Delayed"              # owner-reported delay; transient
     BLOCKED              = "Blocked"              # owner-reported blocker; transient
-    READY_FOR_SUBMISSION = "Ready For Submission" # PM approved per FR-28 PMApproval trigger
-    SUBMITTED_TO_CUSTOMER = "Submitted To Customer" # submission package dispatched per FR-18
+    READY_FOR_SUBMISSION = "ReadyForSubmission" # PM approved per FR-28 PMApproval trigger
+    SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer" # submission package dispatched per FR-18
     CLOSED               = "Closed"               # manually set per FR-14 / FR-64; automated transition deferred per DEF-20
 
 class ItemType(str, Enum):

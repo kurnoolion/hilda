@@ -57,12 +57,12 @@ class DeliveryState(str, Enum):
     ReadyForSubmission), never to Open."""
     NOT_STARTED            = "Not Started"
     OPEN                   = "Open"
-    OUTREACH_SENT          = "Outreach Sent"       # D-124 α: PascalCase + space
-    DOCUMENT_RECEIVED      = "Document Received"
-    OWNER_CLOSED           = "Owner Closed"
-    UNDER_PM_REVIEW        = "Under PM Review"
-    READY_FOR_SUBMISSION   = "Ready For Submission"
-    SUBMITTED_TO_CUSTOMER  = "Submitted To Customer"
+    OUTREACH_SENT          = "OutreachSent"       # D-124 α: PascalCase + space
+    DOCUMENT_RECEIVED      = "DocumentReceived"
+    OWNER_CLOSED           = "OwnerClosed"
+    UNDER_PM_REVIEW        = "UnderPMReview"
+    READY_FOR_SUBMISSION   = "ReadyForSubmission"
+    SUBMITTED_TO_CUSTOMER  = "SubmittedToCustomer"
     CLOSED                 = "Closed"
     DELAYED                = "Delayed"
     BLOCKED                = "Blocked"

@@ -217,7 +217,7 @@ class PostgresStorage:
         Architect Step 4 unblock 2026-06-28: prior AttributeError
         'PostgresStorage object has no attribute write_delivery_state'
         crashed every kickoff_collection NS->Open + every downstream
-        UpdateState Open->Outreach Sent, breaking the cascade midway
+        UpdateState Open->OutreachSent, breaking the cascade midway
         between send_initial_outreach (already written) and the
         state-transition audit.
         """
