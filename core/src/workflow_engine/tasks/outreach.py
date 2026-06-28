@@ -122,21 +122,32 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
     Best-effort: returns None on any failure (network, no match, schema
     mismatch). Caller falls back to storage / event_context.
 
-    Natural key per architect 2026-06-27 Step 4 probe: SP Deliverables list
-    is scoped by customer (Deliverables_<customer_id>) and rows within the
-    list are uniquely identified by (milestone_id, item_no). Filtering by
-    item_no alone returned 7 rows (multiple milestones per customer share
-    item_no=1). Adding milestone_id narrows to the single target row.
+    Natural key per architect 2026-06-27 Step 4 probe + field-map table:
+      - Milestone instance: (carrier, milestone_name, project_id_or_project_model)
+        is unique. carrier is implicit in scope=ListScope(customer_id=...).
+      - Delivery item:      milestone-instance key + item_no as a selector
+        (item_no is a row attribute, not part of the milestone natural key).
+
+    HILDA storage -> canonical_filters mapping:
+      - item.milestone_id  -> canonical "milestone_id"  -> SP "milestone_name" (text, "P1")
+      - item.device_id     -> canonical "project_model" -> SP "project_model"  (text, "SM-S671U1")
+      - item.item_no       -> canonical "item_no"       -> SP "item_no"        (number, 1)
+
+    Filtering by all three returns exactly the target row even when the
+    customer's Deliverables list spans multiple projects / milestones.
     """
     from core.src.sharepoint_integration.config import ListScope
     customer_id = getattr(item, "customer_id", None)
     milestone_id = getattr(item, "milestone_id", None)
+    device_id = getattr(item, "device_id", None)
     item_no = getattr(item, "item_no", None)
     if not customer_id or item_no is None:
         return None
     filters: dict[str, Any] = {"item_no": item_no}
     if milestone_id:
         filters["milestone_id"] = milestone_id
+    if device_id:
+        filters["project_model"] = device_id
     try:
         scope = ListScope(customer_id=customer_id)
         rows = deps.sp_writer.get_items(
@@ -146,22 +157,25 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
         )
     except Exception as exc:  # noqa: BLE001 -- SP read is best-effort
         _log.warning(
-            "_resolve_recipient: SP read failed for customer_id=%s milestone_id=%s item_no=%s: %s",
-            customer_id, milestone_id, item_no, type(exc).__name__,
+            "_resolve_recipient: SP read failed for customer_id=%s milestone_id=%s "
+            "project_model=%s item_no=%s: %s",
+            customer_id, milestone_id, device_id, item_no, type(exc).__name__,
         )
         return None
     if not rows:
         _log.info(
-            "_resolve_recipient: SP returned no rows for customer_id=%s milestone_id=%s item_no=%s",
-            customer_id, milestone_id, item_no,
+            "_resolve_recipient: SP returned no rows for customer_id=%s milestone_id=%s "
+            "project_model=%s item_no=%s",
+            customer_id, milestone_id, device_id, item_no,
         )
         return None
     if len(rows) > 1:
         _log.warning(
-            "_resolve_recipient: SP returned %d rows for customer_id=%s milestone_id=%s item_no=%s; "
-            "using first. Natural key (customer, milestone, item_no) should be unique -- "
-            "check MMK column-map mapping for milestone_id or schema for duplicate rows.",
-            len(rows), customer_id, milestone_id, item_no,
+            "_resolve_recipient: SP returned %d rows for customer_id=%s milestone_id=%s "
+            "project_model=%s item_no=%s; using first. Natural key "
+            "(customer, milestone, project_model) + item_no should be unique -- "
+            "check MMK column-map or schema for duplicates.",
+            len(rows), customer_id, milestone_id, device_id, item_no,
         )
     row = rows[0]
     return row.get("owner_corp_usa_email") or row.get("owner_corp_email")
