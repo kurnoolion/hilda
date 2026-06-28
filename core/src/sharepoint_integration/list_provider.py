@@ -164,7 +164,7 @@ class FileBasedListProvider:
         if scope.device_id:
             override = self._find_override(entity, scope)
             if override is not None and override.list_name:
-                return override.list_name
+                return self._substitute_placeholders(override.list_name, scope)
         cfg = self._require_customer(scope.customer_id, entity)
         entry = cfg.lists.get(entity)
         if entry is None:
@@ -176,7 +176,30 @@ class FileBasedListProvider:
                     "device": scope.device_id or "",
                 },
             )
-        return entry.name
+        return self._substitute_placeholders(entry.name, scope)
+
+    @staticmethod
+    def _substitute_placeholders(name: str, scope: ListScope) -> str:
+        """Resolve <customer_id> / <device_id> template tokens in list names.
+
+        Added 2026-06-27 per architect Path A SP-read probe finding: MMK.yaml
+        had Deliverables_<customer_id> as a literal placeholder, matching the
+        SP UI Engineer's dynamic construction pattern (siteProperties.list.
+        deliverables + carrier). HILDA used to send the literal "<customer_id>"
+        string to SP -> HTTP 400 (no such list). Substituting at lookup time
+        keeps customer YAMLs reusable as templates rather than forcing one
+        hardcoded list-name per customer.
+
+        Supports tokens:
+          <customer_id>  -> scope.customer_id   (required; always present)
+          <device_id>    -> scope.device_id     (only when set; left untouched
+                                                 when None to surface mis-scope
+                                                 as visibly wrong list names)
+        """
+        out = name.replace("<customer_id>", scope.customer_id)
+        if scope.device_id is not None:
+            out = out.replace("<device_id>", scope.device_id)
+        return out
 
     def get_column_map(self, entity: str, scope: ListScope) -> dict[str, str]:
         self._require_canonical_entity(entity, scope)
