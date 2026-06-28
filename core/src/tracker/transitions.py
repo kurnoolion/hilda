@@ -217,7 +217,22 @@ def update_delivery_state(
     8. Return TransitionResult with dispatch_signal -- caller fires StateChange.
     """
     item = storage.get_delivery_item(delivery_item_id)
+    # Coerce from string (PostgresStorage returns varchar text) -> enum.
+    # DeliveryState is `class DeliveryState(str, Enum)` so DeliveryState("Not Started")
+    # constructs the enum directly. Fix 2026-06-27 architect Step 4 Start Collection:
+    # 'str' object has no attribute 'value' at transitions.py:273 (from_state.value)
+    # because the ORM read returned the column's stored varchar, not an enum instance.
     from_state = item.delivery_state
+    if not isinstance(from_state, DeliveryState):
+        try:
+            from_state = DeliveryState(from_state)
+        except (ValueError, TypeError):
+            # Unknown stored string -- treat as no-op rather than crash the cascade.
+            # Surface via audit so the bad row is visible without breaking the worker.
+            raise PipelineError(  # noqa: TRY301
+                "TRK-E001",
+                context={"reason": f"unknown delivery_state {from_state!r} on item {delivery_item_id}"},
+            )
     trigger_source: TriggerSource = event_context.get("trigger_source", "automated")
     correlation_id = _correlation_id_of(event_context)
     pm_id = event_context.get("pm_id")
