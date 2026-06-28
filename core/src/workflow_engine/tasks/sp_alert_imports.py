@@ -97,6 +97,16 @@ def _build_delivery_item(
         item_id=item_id,
         item_no=item_no,
         milestone_id=milestone_id,
+        # customer_id + device_id ride as Pydantic extras (model_config
+        # extra="allow"); _pydantic_to_row_kwargs picks them up via getattr
+        # so DeliveryItemTable.customer_id + .device_id columns get written
+        # (NOT NULL on storage for downstream natural-key + SP-read lookups).
+        # Fix 2026-06-27 architect Step 4: prior code only used these two
+        # params to compose item_id but never assigned them to the model,
+        # leaving columns NULL on insert -- Path A SP-read at fire-time
+        # then early-exited because item.customer_id was None.
+        customer_id=customer_id,
+        device_id=device_id,
         item_name=item_title or body_kvs.get("Title", f"Item {item_no}"),
         item_type=body_kvs.get("item_type", "Default"),
         # State:
