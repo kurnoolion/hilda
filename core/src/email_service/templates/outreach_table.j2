@@ -1,0 +1,61 @@
+<!--
+  HILDA initial outreach -- table format per architect 2026-06-28.
+  Owner edits the `status` and `owner_status_note` cells inline. Reply parsing
+  is structural (header row text + cell index), so attribute stripping by
+  email clients is non-fatal. batch_id is embedded both in the subject and in
+  a tagged span at the top so the inbound parser can correlate the reply back
+  to the outreach.
+-->
+<html>
+<body style="font-family: Arial, sans-serif; font-size: 14px;">
+
+<p>Hello {{ owner.owner_name or "Owner" }},</p>
+
+<p>Please update the status of work items assigned to you.</p>
+
+<!--
+  Tagged anchor: keeps the BATCH-id correlation findable even when the owner
+  edits the table or strips formatting. The inbound parser looks for the
+  literal "HILDA-BATCH-ID:" token + the BATCH-<id> value.
+-->
+<p style="font-size: 12px; color: #666;">
+  HILDA-BATCH-ID: {{ batch_id }}
+</p>
+
+<table border="1" cellpadding="6" cellspacing="0"
+       style="border-collapse: collapse; margin: 12px 0;">
+  <thead style="background-color: #f0f0f0;">
+    <tr>
+      <th align="left">item_no</th>
+      <th align="left">item_title</th>
+      <th align="left">status</th>
+      <th align="left">owner_status_note</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for it in items %}
+    <tr>
+      <td>{{ it.item_no }}</td>
+      <td>{{ it.item_name or it.get("item_title", "") }}</td>
+      <td>Open</td>
+      <td>&nbsp;</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p><strong>status</strong> values: Open / Closed / Blocked / Delayed</p>
+
+<ul style="font-size: 13px; color: #555;">
+  <li><strong>Open</strong> &mdash; still working; leave as-is or add a note.</li>
+  <li><strong>Closed</strong> &mdash; you confirm the work is done.</li>
+  <li><strong>Blocked</strong> &mdash; cannot proceed; please add the blocker in
+      <em>owner_status_note</em>.</li>
+  <li><strong>Delayed</strong> &mdash; running late; please add an ETA in
+      <em>owner_status_note</em>.</li>
+</ul>
+
+<p>Thanks.</p>
+
+</body>
+</html>

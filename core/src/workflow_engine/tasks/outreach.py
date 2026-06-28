@@ -202,35 +202,59 @@ def send_initial_outreach_task(
     - When deps.email_sender is None (Ph-1 worker not fully wired): audit-only.
     """
     deps = get_task_deps()
-    template = params.get("template", "standard_owner_outreach")
+    template = params.get("template", "outreach_table")
     channel = params.get("channel", "email")
     delivery_item_id = event_context.get("delivery_item_id")
     recipient = _resolve_recipient(deps, event_context, params)
 
+    # Generate BATCH-id deterministically from correlation_id so the inbound
+    # reply parser can correlate the reply back to delivery_item_id via the
+    # communication_log audit row. Uses the first 10 hex chars of correlation
+    # (sufficient entropy for FR-24 BATCH-id token uniqueness within a
+    # milestone's outreach window).
+    correlation_id = event_context.get("correlation_id", "")
+    batch_id = f"BATCH-{correlation_id.replace('-', '')[:10]}"
+
+    # Resolve owner identity for template rendering (owner_name) AND fetch the
+    # current SP-side item row for item_name. Best-effort -- on any failure,
+    # fall back to recipient-only / minimal-render path.
+    owner_identity, item_for_template = _fetch_template_inputs(
+        deps, delivery_item_id, recipient,
+    )
+
     message_id = None
     if channel == "email" and deps.email_sender is not None and recipient:
         try:
+            body_html = _render_outreach_table(
+                owner_identity=owner_identity,
+                items=[item_for_template] if item_for_template else [],
+                batch_id=batch_id,
+            )
             message_id = _send_email(
                 deps,
                 to=recipient,
-                subject=f"[HILDA] Document request -- BATCH-{event_context.get('correlation_id', '')[:8]}",
-                body_marker=f"send_initial_outreach: template={template}",
+                subject=f"[HILDA] Status request -- {batch_id}",
+                body_marker=body_html,
             )
         except Exception as e:  # noqa: BLE001 -- audit-best-effort
-            _log.warning("send_initial_outreach email send failed: %s", type(e).__name__)
+            _log.warning(
+                "send_initial_outreach email send failed: %s: %s",
+                type(e).__name__, str(e)[:120],
+            )
 
     deps.audit.write_communication_log(
         action_type="send_initial_outreach",
         delivery_item_id=delivery_item_id,
         attribution={
             "trigger_source": event_context.get("trigger_source", "automated"),
-            "correlation_id": event_context.get("correlation_id", ""),
+            "correlation_id": correlation_id,
             "modified_by":    event_context.get("pm_id", "system"),
         },
         details={
             "template":      template,
             "channel":       channel,
             "recipient":     recipient,
+            "batch_id":      batch_id,
             "milestone_id":  event_context.get("milestone_id"),
             "message_id":    message_id,
             "send_skipped":  message_id is None,
@@ -240,9 +264,107 @@ def send_initial_outreach_task(
         "template":     template,
         "channel":      channel,
         "recipient":    recipient,
+        "batch_id":     batch_id,
         "message_id":   message_id,
         "outcome":      "sent" if message_id else "audit_only",
     }
+
+
+def _fetch_template_inputs(
+    deps, delivery_item_id: str | None, recipient: str | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Resolve owner identity dict + SP-side item row dict for the outreach
+    template render. Best-effort: returns minimal stubs on lookup failure so
+    the email still sends (owner_name='Owner', item_name='Item ?').
+
+    Identity dict shape per [D-105]:
+      {owner_corp_usa_email, owner_corp_email, owner_corp_id, owner_name}
+    Item dict shape for template (subset):
+      {item_no, item_name}
+    """
+    owner_identity: dict[str, Any] = {
+        "owner_corp_usa_email": recipient,
+        "owner_corp_email":     None,
+        "owner_corp_id":        None,
+        "owner_name":           None,
+    }
+    item_for_template: dict[str, Any] | None = None
+    if not delivery_item_id or deps.storage is None:
+        return owner_identity, item_for_template
+
+    try:
+        item = deps.storage.get_delivery_item(delivery_item_id)
+    except Exception:  # noqa: BLE001
+        return owner_identity, item_for_template
+    if item is None:
+        return owner_identity, item_for_template
+
+    # Always populate item shape from storage snapshot (cheap, no SP call).
+    item_for_template = {
+        "item_no":   getattr(item, "item_no", None),
+        "item_name": getattr(item, "item_name", None) or f"Item {getattr(item, 'item_no', '?')}",
+    }
+
+    # SP-read for live owner_name (matches Path A: SP is source of truth for
+    # owner identity). Best-effort -- never blocks the send.
+    if deps.sp_writer is not None:
+        try:
+            from core.src.sharepoint_integration.config import ListScope
+            scope = ListScope(customer_id=getattr(item, "customer_id", "") or "")
+            filters: dict[str, Any] = {}
+            if getattr(item, "milestone_id", None):
+                filters["milestone_id"] = item.milestone_id
+            if getattr(item, "device_id", None):
+                filters["project_model"] = item.device_id
+            if getattr(item, "item_no", None) is not None:
+                filters["item_no"] = item.item_no
+            if filters:
+                rows = deps.sp_writer.get_items(
+                    entity="delivery_items", scope=scope, canonical_filters=filters,
+                )
+                if rows:
+                    r = rows[0]
+                    owner_identity["owner_name"] = r.get("owner_name") or None
+                    owner_identity["owner_corp_id"] = r.get("owner_corp_id") or None
+                    owner_identity["owner_corp_email"] = (
+                        r.get("owner_corp_email") or owner_identity["owner_corp_email"]
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "_fetch_template_inputs: SP owner lookup failed for item=%s: %s",
+                delivery_item_id, type(exc).__name__,
+            )
+
+    return owner_identity, item_for_template
+
+
+def _render_outreach_table(
+    *,
+    owner_identity: dict[str, Any],
+    items: list[dict[str, Any]],
+    batch_id: str,
+) -> str:
+    """Render outreach_table.j2 -> HTML string for the email body.
+
+    The template includes:
+      - greeting using owner.owner_name (falls back to "Owner" inside the j2)
+      - HILDA-BATCH-ID anchor span (parser-readable)
+      - <table> with one row per item (item_no, item_name, status=Open, note=blank)
+      - status legend + reply instructions
+
+    Caller passes already-resolved data; this function does NOT do any IO.
+    """
+    from jinja2 import Environment, PackageLoader, select_autoescape
+    env = Environment(
+        loader=PackageLoader("core.src.email_service", "templates"),
+        autoescape=select_autoescape(["html", "j2"]),
+    )
+    template = env.get_template("outreach_table.j2")
+    return template.render(
+        owner=owner_identity,
+        items=items,
+        batch_id=batch_id,
+    )
 
 
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.outreach.send_reminder")

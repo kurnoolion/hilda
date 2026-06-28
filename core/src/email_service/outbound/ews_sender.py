@@ -118,6 +118,7 @@ class EwsSender:
         try:
             from exchangelib import (   # type: ignore[import-not-found]
                 DELEGATE,
+                HTMLBody,
                 IMPERSONATION,
                 Account,
                 Build,
@@ -160,10 +161,19 @@ class EwsSender:
             access_type=access_type,
         )
 
+        # Auto-detect HTML by leading '<' in the body. exchangelib renders
+        # plain `body` as plain text; HTMLBody-wrapped body sets the message
+        # content-type to text/html so receivers see formatted output (tables,
+        # lists, links). Detection is intentionally loose -- a body starting
+        # with any HTML tag triggers it. Added 2026-06-28 to support the
+        # outreach_table.j2 template per architect Step 5 design.
+        stripped = body.lstrip()
+        body_payload: Any = HTMLBody(body) if stripped.startswith("<") else body
+
         msg = Message(
             account=account,
             subject=subject,
-            body=body,
+            body=body_payload,
             to_recipients=[Mailbox(email_address=addr) for addr in to],
             cc_recipients=[Mailbox(email_address=addr) for addr in cc] if cc else None,
         )
