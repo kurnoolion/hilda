@@ -34,6 +34,12 @@ exchangelib>=5.2,<6
 # (rapidfuzz transitively required even when running the EWS adapter only).
 rapidfuzz>=3.6,<4
 
+# email_service — HTML table parser for owner-reply path (Phase B 2026-06-28).
+# outreach_table.j2 emits an HTML table that owners edit inline; body_parser_table
+# extracts rows tolerant to email-client formatting drift. Lazy-imported in
+# body_parser_table.py so non-EWS deployments don't pay the cost.
+beautifulsoup4>=4.12,<5
+
 # storage module — Postgres ORM + migrations + Redis + NSD mount IO
 # (smbprotocol is diagnostic/fallback only — routine NSD IO is the [D-013] host mount)
 sqlalchemy[asyncio]>=2.0,<3

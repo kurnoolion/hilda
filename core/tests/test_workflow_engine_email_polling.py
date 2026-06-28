@@ -137,8 +137,12 @@ async def test_poll_dispatches_each_sp_alert(base_deps):
     assert fake_dispatcher.dispatch.call_count == 3
 
 
-async def test_poll_skips_non_sp_alerts(base_deps):
-    """OWNER_REPLY / other messages skipped silently."""
+async def test_poll_enqueues_owner_replies(base_deps):
+    """OWNER_REPLY messages are not dispatched as SP alerts -- they enqueue
+    apply_owner_reply_task via .delay() per Phase B 2026-06-28 wiring.
+    Replaces the old test_poll_skips_non_sp_alerts which asserted silent skip
+    (the pre-Phase-B behavior).
+    """
     fake_dispatcher = MagicMock()
     deps_with_dispatcher = TaskDeps(
         storage=base_deps.storage,
@@ -147,7 +151,23 @@ async def test_poll_skips_non_sp_alerts(base_deps):
         dispatcher=fake_dispatcher,
     )
 
-    msgs = [MagicMock() for _ in range(3)]
+    # Use real-ish InboundMessage-shaped mocks so the payload-build in
+    # _enqueue_owner_reply produces JSON-serializable strings (MagicMock
+    # attributes would break celery's task.delay JSON encoding).
+    from datetime import datetime, timezone
+    def _msg(i):
+        m = MagicMock()
+        m.message_id = f"msg-{i}"
+        m.subject = f"Re: [HILDA] Status request -- BATCH-test{i}"
+        m.body_text = ""
+        m.body_html = "<p>HILDA-BATCH-ID: BATCH-testX</p>"
+        m.sender = "owner@corp.example"
+        m.to_addrs = ()
+        m.cc_addrs = ()
+        m.received_at = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
+        m.attachments = ()
+        return m
+    msgs = [_msg(i) for i in range(3)]
     fake_receiver = MagicMock()
     fake_receiver.fetch_once = AsyncMock(return_value=msgs)
 
@@ -162,7 +182,10 @@ async def test_poll_skips_non_sp_alerts(base_deps):
          patch(
              "core.src.email_service.inbound.classifier.classify",
              return_value=EmailKind.OWNER_REPLY,
-         ):
+         ), \
+         patch(
+             "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.delay"
+         ) as mock_delay:
         mock_cred = MagicMock()
         mock_cred.load = AsyncMock()
         mock_cred_cls.return_value = mock_cred
@@ -171,6 +194,15 @@ async def test_poll_skips_non_sp_alerts(base_deps):
     assert result["messages_fetched"] == 3
     assert result["sp_alerts"] == 0
     assert result["dispatched"] == 0
+    assert result["owner_replies"] == 3
+    assert result["owner_reply_enqueued"] == 3
+    assert mock_delay.call_count == 3
+    # Each call gets a JSON-serializable payload dict.
+    for call in mock_delay.call_args_list:
+        payload = call.args[0]
+        assert isinstance(payload, dict)
+        assert payload["message_id"].startswith("msg-")
+        assert payload["sender"] == "owner@corp.example"
     assert fake_dispatcher.dispatch.call_count == 0
 
 

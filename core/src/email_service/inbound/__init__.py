@@ -4,6 +4,7 @@ from core.src.email_service.inbound.body_parser_freetext import (
     parse_freetext_with_attachments,
 )
 from core.src.email_service.inbound.body_parser_structured import parse_structured_block
+from core.src.email_service.inbound.body_parser_table import parse_table_block
 from core.src.email_service.inbound.classifier import classify
 from core.src.email_service.inbound.ews_receiver import EwsReceiver
 from core.src.email_service.inbound.receiver import ImapReceiver
@@ -18,5 +19,6 @@ __all__ = [
     "parse_freetext_with_attachments",
     "parse_structured_block",
     "parse_subject",
+    "parse_table_block",
     "resolve_tg_from_email",
 ]

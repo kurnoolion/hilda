@@ -103,22 +103,43 @@ def test_full_chain_import_then_kickoff(tmp_path, monkeypatch):
     assert stored_item.item_type == "test_tech_waiver_report"
     assert stored_item.tg_name == "MNO-ETM"
 
-    # ---- Phase 2: kickoff_collection_task reads + dispatches ----
-    # Replace dispatcher with a recording mock so we can inspect dispatched
-    # events without needing the full rule_engine chain.
+    # ---- Phase 2: kickoff_collection_task reads + sends batch outreach ----
+    # Architect Step 5 Phase A 2026-06-28 restructure: kickoff no longer
+    # dispatches ItemCreated events -- it groups eligible items by owner,
+    # sends one batch email per owner, and transitions each item Not Started ->
+    # Open -> Outreach Sent inline. Stub the two SP/email helpers so this
+    # in-process smoke test doesn't need a live SP or EWS endpoint.
+    import core.src.workflow_engine.tasks.sp_alert_imports as kc_mod
+
+    owner_map = {
+        imported_id: {
+            "owner_corp_usa_email": "owner.usa@corp.example",
+            "owner_corp_email":     "owner@corp.example",
+            "owner_name":           "Test Owner",
+        }
+    }
+    monkeypatch.setattr(
+        kc_mod, "_resolve_owners_for_eligible",
+        lambda deps, customer_id, milestone_id, eligible: owner_map,
+    )
+    sent_batches: list[dict] = []
+    def _fake_send(*, deps, owner_identity, items, batch_id, recipient):
+        sent_batches.append({
+            "recipient": recipient, "batch_id": batch_id, "n_items": len(items),
+        })
+        return "SMOKE-MID-1"
+    monkeypatch.setattr(
+        "core.src.workflow_engine.tasks.outreach._send_batch_outreach_email",
+        _fake_send,
+    )
+
     from core.src.workflow_engine.task_deps import TaskDeps, override_task_deps
 
-    class RecordingDispatcher:
-        def __init__(self): self.dispatched = []
-        def dispatch(self, event): self.dispatched.append(event)
-
-    recording = RecordingDispatcher()
     deps_for_kickoff = TaskDeps(
         storage=deps.storage,
         sp_writer=deps.sp_writer,
         audit=deps.audit,
-        dispatcher=recording,
-        email_sender=deps.email_sender,
+        email_sender=object(),  # opaque non-None sentinel; _send is stubbed
     )
     from core.src.workflow_engine.tasks.sp_alert_imports import kickoff_collection_task
     with override_task_deps(deps_for_kickoff):
@@ -131,11 +152,13 @@ def test_full_chain_import_then_kickoff(tmp_path, monkeypatch):
         )
 
     assert kickoff_result["outcome"] == "fired"
-    assert kickoff_result["events_fired"] == 1   # one eligible item
     assert kickoff_result["items_eligible"] == 1
-    # Dispatcher recorded an ItemCreated event for the imported tracker
-    assert len(recording.dispatched) == 1
-    assert recording.dispatched[0].trigger.value == "ItemCreated"
-    assert recording.dispatched[0].entity_ref.delivery_item_id == imported_id
+    assert kickoff_result["owner_groups"] == 1
+    assert kickoff_result["emails_sent"] == 1
+    assert kickoff_result["items_transitioned"] == 1
+    # One batch email recorded, addressed to the imported tracker's owner.
+    assert len(sent_batches) == 1
+    assert sent_batches[0]["recipient"] == "owner.usa@corp.example"
+    assert sent_batches[0]["n_items"] == 1
 
     _restore_task_deps_to_none()

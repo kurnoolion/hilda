@@ -19,6 +19,7 @@ from core.src.email_service.inbound import (
     parse_freetext_with_attachments,
     parse_structured_block,
     parse_subject,
+    parse_table_block,
     resolve_tg_from_email,
 )
 from core.src.email_service.outbound import (
@@ -88,6 +89,7 @@ __all__ = [
     "parse_freetext_with_attachments",
     "parse_structured_block",
     "parse_subject",
+    "parse_table_block",
     "resolve_tg_from_email",
 ]
 

@@ -45,6 +45,7 @@ from core.src.email_service import (
     parse_freetext_with_attachments,
     parse_structured_block,
     parse_subject,
+    parse_table_block,
     resolve_tg_from_email,
 )
 from core.src.email_service.email_service_cli import _cmd_diagnostic, main as cli_main
@@ -77,6 +78,7 @@ def _msg(
     cc_addrs: tuple[str, ...] = (),
     attachments: tuple[InboundAttachment, ...] = (),
     message_id: str = "<test@local>",
+    body_html: str | None = None,
 ) -> InboundMessage:
     return InboundMessage(
         message_id=message_id,
@@ -86,7 +88,7 @@ def _msg(
         cc_addrs=cc_addrs,
         subject=subject,
         body_text=body,
-        body_html=None,
+        body_html=body_html,
         attachments=attachments,
     )
 
@@ -297,6 +299,172 @@ class TestBodyParserStructured:
         item = _candidate_test_item(owner_corp_usa_email="owner@corp.example")
         match = resolve_sender_match("stranger@corp.example", (), [item])
         assert match == "mismatch"
+
+
+# ===========================================================================
+# TestBodyParserTable -- HTML table reply parser (Phase B 2026-06-28)
+# ===========================================================================
+
+
+_TABLE_REPLY_TEMPLATE = """
+<html><body>
+<p>Hello Owner,</p>
+<p>HILDA-BATCH-ID: {batch_id}</p>
+<table>
+  <thead><tr>
+    <th>item_no</th><th>item_title</th>
+    <th>status</th><th>owner_status_note</th>
+  </tr></thead>
+  <tbody>
+{rows}
+  </tbody>
+</table>
+</body></html>
+""".strip()
+
+
+def _row(item_no, title, status, note):
+    return (
+        f"    <tr><td>{item_no}</td><td>{title}</td>"
+        f"<td>{status}</td><td>{note}</td></tr>"
+    )
+
+
+def _table_msg(batch_id, rows_html, *, sender="owner@corp.example", subject_batch=None):
+    sub = subject_batch or batch_id
+    return _msg(
+        subject=f"Re: [HILDA] Status request -- {sub}",
+        body="",
+        sender=sender,
+        body_html=_TABLE_REPLY_TEMPLATE.format(batch_id=batch_id, rows=rows_html),
+    )
+
+
+class TestBodyParserTable:
+    def test_parses_clean_table(self):
+        rows = "\n".join([
+            _row(1, "test_5g_n78", "Closed", "all passed"),
+            _row(2, "test_5g_n41", "Open",   ""),
+            _row(3, "test_5g_n77", "Blocked", "waiting on rig"),
+            _row(4, "test_5g_n79", "Delayed", "vendor late"),
+        ])
+        msg = _table_msg("BATCH-abc123", rows)
+        expected = [_candidate_test_item(owner_corp_usa_email="owner@corp.example")]
+        block = parse_table_block(msg, "BATCH-abc123", expected)
+        assert block is not None
+        assert block.batch_id == "BATCH-abc123"
+        assert block.sender_match == "owner"
+        assert len(block.per_item_updates) == 4
+        assert block.per_item_updates[0].item_no == 1
+        assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
+        assert block.per_item_updates[0].owner_status_note == "all passed"
+        assert block.per_item_updates[1].delivery_state == "OPEN"
+        assert block.per_item_updates[1].owner_status_note is None
+        assert block.per_item_updates[2].delivery_state == "BLOCKED"
+        assert block.per_item_updates[3].delivery_state == "DELAYED"
+        for u in block.per_item_updates:
+            assert u.confidence == 1.0
+
+    def test_returns_none_when_anchor_missing(self):
+        rows = _row(1, "x", "Closed", "")
+        body = _TABLE_REPLY_TEMPLATE.format(
+            batch_id="BATCH-abc", rows=rows
+        ).replace("HILDA-BATCH-ID:", "BATCH:")
+        msg = _msg(subject="Re: BATCH-abc", body="", body_html=body)
+        assert parse_table_block(msg, "BATCH-abc", []) is None
+
+    def test_returns_none_when_anchor_batch_id_mismatch(self):
+        msg = _table_msg("BATCH-zzz", _row(1, "x", "Closed", ""))
+        assert parse_table_block(msg, "BATCH-abc", []) is None
+
+    def test_returns_none_when_body_html_empty(self):
+        msg = _msg(subject="Re: BATCH-abc", body="some text only", body_html=None)
+        assert parse_table_block(msg, "BATCH-abc", []) is None
+
+    def test_case_insensitive_status_values(self):
+        rows = "\n".join([
+            _row(1, "x", "CLOSED",  "shouty"),
+            _row(2, "y", "blocked", "lower"),
+            _row(3, "z", "Delayed", "mixed"),
+        ])
+        msg = _table_msg("BATCH-c", rows)
+        block = parse_table_block(msg, "BATCH-c", [])
+        assert block is not None
+        states = [u.delivery_state for u in block.per_item_updates]
+        assert states == ["OWNER_CLOSED", "BLOCKED", "DELAYED"]
+
+    def test_case_insensitive_header_match(self):
+        body = """
+        <p>HILDA-BATCH-ID: BATCH-x</p>
+        <table>
+          <tr><th>ITEM_NO</th><th>STATUS</th><th>OWNER_STATUS_NOTE</th></tr>
+          <tr><td>7</td><td>Closed</td><td>done</td></tr>
+        </table>
+        """
+        msg = _msg(subject="Re: BATCH-x", body="", body_html=body)
+        block = parse_table_block(msg, "BATCH-x", [])
+        assert block is not None
+        assert block.per_item_updates[0].item_no == 7
+        assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
+        assert block.per_item_updates[0].owner_status_note == "done"
+
+    def test_skips_row_with_non_integer_item_no(self):
+        rows = "\n".join([
+            _row("notanint", "x", "Closed", "ignored"),
+            _row(2, "y", "Open", "kept"),
+        ])
+        msg = _table_msg("BATCH-d", rows)
+        block = parse_table_block(msg, "BATCH-d", [])
+        assert block is not None
+        assert len(block.per_item_updates) == 1
+        assert block.per_item_updates[0].item_no == 2
+
+    def test_unknown_status_preserved_as_uppercase_symbol(self):
+        rows = _row(1, "x", "Frobnicated", "weird value")
+        msg = _table_msg("BATCH-u", rows)
+        block = parse_table_block(msg, "BATCH-u", [])
+        assert block is not None
+        assert block.per_item_updates[0].delivery_state == "FROBNICATED"
+
+    def test_handles_nbsp_in_cells(self):
+        rows = "    <tr><td>5</td><td>x</td><td>Closed</td><td>foo&nbsp;bar</td></tr>"
+        msg = _table_msg("BATCH-n", rows)
+        block = parse_table_block(msg, "BATCH-n", [])
+        assert block is not None
+        assert block.per_item_updates[0].owner_status_note == "foo bar"
+
+    def test_picks_hilda_table_among_multiple_tables(self):
+        body = """
+        <p>HILDA-BATCH-ID: BATCH-m</p>
+        <table><tr><th>signature</th></tr><tr><td>--Alice</td></tr></table>
+        <table>
+          <tr><th>item_no</th><th>status</th><th>owner_status_note</th></tr>
+          <tr><td>9</td><td>Closed</td><td>ok</td></tr>
+        </table>
+        """
+        msg = _msg(subject="Re: BATCH-m", body="", body_html=body)
+        block = parse_table_block(msg, "BATCH-m", [])
+        assert block is not None
+        assert block.per_item_updates[0].item_no == 9
+
+    def test_returns_none_when_no_table_has_required_headers(self):
+        body = """
+        <p>HILDA-BATCH-ID: BATCH-n</p>
+        <table>
+          <tr><th>foo</th><th>bar</th></tr>
+          <tr><td>1</td><td>2</td></tr>
+        </table>
+        """
+        msg = _msg(subject="Re: BATCH-n", body="", body_html=body)
+        assert parse_table_block(msg, "BATCH-n", []) is None
+
+    def test_sender_match_passes_through(self):
+        rows = _row(1, "x", "Closed", "")
+        msg = _table_msg("BATCH-s", rows, sender="stranger@external.example")
+        item = _candidate_test_item(owner_corp_usa_email="owner@corp.example")
+        block = parse_table_block(msg, "BATCH-s", [item])
+        assert block is not None
+        assert block.sender_match == "mismatch"
 
 
 # ===========================================================================

@@ -179,12 +179,25 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
     dispatched = 0
     audited = 0
     parse_failures = 0
+    owner_replies = 0
+    owner_reply_enqueued = 0
 
     for m in msgs:
         try:
             kind = classify(m)
         except Exception:  # noqa: BLE001
             kind = None
+        if kind == EmailKind.OWNER_REPLY:
+            owner_replies += 1
+            try:
+                _enqueue_owner_reply(m)
+                owner_reply_enqueued += 1
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "poll_ews_inbox owner-reply enqueue failed: %s: %s",
+                    type(exc).__name__, str(exc)[:120],
+                )
+            continue
         if kind != EmailKind.SP_ALERT:
             continue
         sp_alerts += 1
@@ -240,14 +253,46 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
             parse_failures += 1
 
     _log.info(
-        "poll_ews_inbox: messages_fetched=%d sp_alerts=%d audited=%d dispatched=%d parse_failures=%d",
-        len(msgs), sp_alerts, audited, dispatched, parse_failures,
+        "poll_ews_inbox: messages_fetched=%d sp_alerts=%d audited=%d "
+        "dispatched=%d owner_replies=%d owner_reply_enqueued=%d "
+        "parse_failures=%d",
+        len(msgs), sp_alerts, audited, dispatched,
+        owner_replies, owner_reply_enqueued, parse_failures,
     )
     return {
-        "messages_fetched": len(msgs),
-        "sp_alerts": sp_alerts,
-        "audited": audited,
-        "dispatched": dispatched,
-        "skipped_no_dispatcher": False,
-        "parse_failures": parse_failures,
+        "messages_fetched":       len(msgs),
+        "sp_alerts":              sp_alerts,
+        "audited":                audited,
+        "dispatched":             dispatched,
+        "owner_replies":          owner_replies,
+        "owner_reply_enqueued":   owner_reply_enqueued,
+        "skipped_no_dispatcher":  False,
+        "parse_failures":         parse_failures,
     }
+
+
+def _enqueue_owner_reply(msg: Any) -> None:
+    """Build the serialisable payload + enqueue apply_owner_reply_task.
+
+    Lazy import keeps the polling task body callable when the owner_reply
+    task module fails to import (e.g. circular-import surprise in a degraded
+    deployment). InboundMessage is a frozen dataclass; we flatten the fields
+    that the task body needs back into an InboundMessage on the other side.
+    """
+    from core.src.workflow_engine.tasks.owner_reply import apply_owner_reply_task
+
+    received_at = getattr(msg, "received_at", None)
+    payload: dict[str, Any] = {
+        "message_id":   getattr(msg, "message_id", ""),
+        "sender":       getattr(msg, "sender", "") or "",
+        "to_addrs":     list(getattr(msg, "to_addrs", ()) or ()),
+        "cc_addrs":     list(getattr(msg, "cc_addrs", ()) or ()),
+        "subject":      getattr(msg, "subject", "") or "",
+        "body_text":    getattr(msg, "body_text", "") or "",
+        "body_html":    getattr(msg, "body_html", None),
+        "received_at_iso": received_at.isoformat() if received_at else None,
+        # Attachments dropped from owner-reply payload Ph-1: the table-format
+        # reply is structural status, not document delivery. Doc attachments
+        # ride the separate FR-52 inbound routing path (Step 5.5).
+    }
+    apply_owner_reply_task.delay(payload)

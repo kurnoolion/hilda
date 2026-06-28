@@ -424,6 +424,15 @@ class TestOutreachTasks:
         assert "#2" in email.sent[0]["subject"]
 
     def test_notify_new_owner_audit_only_path(self, deps):
+        """Post-kickoff path: item already past Not Started, no email_sender
+        wired -> outcome=audit_only. Pre-kickoff path is covered by
+        test_notify_new_owner_deferred_pre_kickoff."""
+        # Seed storage with an item already past Not Started so the
+        # collection-started gate (architect 2026-06-27) does not defer.
+        deps.storage.items["I-1234"] = SimpleNamespace(
+            delivery_state="Outreach Sent",
+            owner_corp_usa_email="newowner@corp.example",
+        )
         from core.src.workflow_engine.tasks.outreach import notify_new_owner_task
         with override_task_deps(deps):
             result = notify_new_owner_task.apply_async(
@@ -432,6 +441,21 @@ class TestOutreachTasks:
         assert result["outcome"] == "audit_only"
         logs = [a for a in deps.audit.logs if a[0] == "notify_new_owner"]
         assert len(logs) == 1
+
+    def test_notify_new_owner_deferred_pre_kickoff(self, deps):
+        """Pre-kickoff path: no item snapshot OR item still in Not Started ->
+        outcome=deferred_collection_not_started; email not sent (architect
+        2026-06-27 -- avoids confusing duplicate when TPM later kicks off)."""
+        from core.src.workflow_engine.tasks.outreach import notify_new_owner_task
+        # No deps.storage.items seeded -> get_delivery_item returns nothing.
+        with override_task_deps(deps):
+            result = notify_new_owner_task.apply_async(
+                args=({}, ctx(owner_corp_usa_email="newowner@corp.example"))
+            ).get()
+        assert result["outcome"] == "deferred_collection_not_started"
+        logs = [a for a in deps.audit.logs if a[0] == "notify_new_owner"]
+        assert len(logs) == 1
+        assert logs[0][3]["outcome"] == "deferred_collection_not_started"
 
     # ---- _resolve_recipient helper precedence tests -- [D-118] Chunk 4 wireup ----
 
@@ -602,6 +626,14 @@ class TestSubmissionTasks:
         assert m.sent == [("alice", m.sent[0][1])]
 
     def test_start_item_collection_writes_audit(self, deps):
+        """Post-kickoff path: item already past Not Started -> audit written +
+        outcome=audit_written. Pre-kickoff path is covered by
+        test_start_item_collection_deferred_pre_kickoff."""
+        # Seed storage with an item already past Not Started so the gate
+        # (architect 2026-06-27) does not defer.
+        deps.storage.items["I-1234"] = SimpleNamespace(
+            delivery_state="Outreach Sent",
+        )
         from core.src.workflow_engine.tasks.submission import start_item_collection_task
         with override_task_deps(deps):
             result = start_item_collection_task.apply_async(
@@ -611,6 +643,21 @@ class TestSubmissionTasks:
         assert result["target_state"] == "Outreach Sent"
         logs = [a for a in deps.audit.logs if a[0] == "start_item_collection"]
         assert len(logs) == 1
+
+    def test_start_item_collection_deferred_pre_kickoff(self, deps):
+        """Pre-kickoff path: no item snapshot OR item still in Not Started ->
+        outcome=deferred_collection_not_started (architect 2026-06-27 --
+        prevents one item desynchronizing from siblings still in Not Started)."""
+        from core.src.workflow_engine.tasks.submission import start_item_collection_task
+        # No deps.storage.items seeded -> get_delivery_item raises/returns None.
+        with override_task_deps(deps):
+            result = start_item_collection_task.apply_async(
+                args=({}, ctx())
+            ).get()
+        assert result["outcome"] == "deferred_collection_not_started"
+        logs = [a for a in deps.audit.logs if a[0] == "start_item_collection"]
+        assert len(logs) == 1
+        assert logs[0][3]["outcome"] == "deferred_collection_not_started"
 
     def test_queue_submission_audit_only_when_no_customer_adapter(self, deps):
         from core.src.workflow_engine.tasks.submission import queue_submission_task
@@ -1048,88 +1095,151 @@ def _mk_tracker(item_no, item_type, force_tracking_enabled=True, **kw):
 
 
 class TestKickoffCollection:
-    """[D-118] Chunk 4: kickoff_collection_task body."""
+    """[D-118] Chunk 4 + Step 5 Phase A 2026-06-28 restructure:
+    kickoff_collection_task body. Post-restructure the task no longer dispatches
+    ItemCreated events -- it groups eligible trackers by owner, sends ONE batch
+    outreach email per owner, and transitions each item Not Started -> Open ->
+    Outreach Sent inline. Confirmation items ARE eligible per FR-58 correction.
+    """
 
-    def test_happy_path_fires_events_for_eligible_items(self, deps):
-        """6 trackers (1 Confirmation, 1 force_tracking=False, 4 eligible) ->
-        4 ItemCreated events dispatched."""
+    def _patch_kickoff_helpers(self, monkeypatch, owner_map=None, message_id="MID-1"):
+        """Stub the two SP/email helpers kickoff_collection_task calls so unit
+        tests don't need a live SP or EWS endpoint. Returns the lists the stubs
+        write to so tests can assert call counts."""
+        import core.src.workflow_engine.tasks.sp_alert_imports as kc
+
+        resolved = owner_map if owner_map is not None else {}
+        emails_sent_recorder: list[dict] = []
+
+        def fake_resolve(deps, customer_id, milestone_id, eligible):
+            return resolved
+
+        def fake_send(*, deps, owner_identity, items, batch_id, recipient):
+            emails_sent_recorder.append({
+                "owner_identity": owner_identity,
+                "items":          [dict(i) for i in items],
+                "batch_id":       batch_id,
+                "recipient":      recipient,
+            })
+            return message_id
+
+        monkeypatch.setattr(kc, "_resolve_owners_for_eligible", fake_resolve)
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.outreach._send_batch_outreach_email",
+            fake_send,
+        )
+        return emails_sent_recorder
+
+    def test_happy_path_groups_by_owner_and_sends_batch_emails(self, deps, monkeypatch):
+        """5 eligible trackers, 2 distinct owners -> 2 batch emails sent;
+        all 5 transition Not Started -> Open -> Outreach Sent. Item filtered
+        out by force_tracking_enabled=False. Confirmation IS eligible per
+        FR-58 correction (architect 2026-06-28).
+        """
         from core.src.workflow_engine.tasks.sp_alert_imports import (
             kickoff_collection_task,
         )
-
+        # Eligibility requires delivery_state == "Not Started" + force_tracking=True.
         trackers = [
-            _mk_tracker(1, "Confirmation", force_tracking_enabled=True),   # excluded -- Confirmation per FR-58
-            _mk_tracker(2, "compliance_certification_release_notes", force_tracking_enabled=True),
-            _mk_tracker(5, "test_tech_waiver_report", force_tracking_enabled=True),
-            _mk_tracker(7, "test_tech_waiver_report", force_tracking_enabled=True),
-            _mk_tracker(8, "test_tech_waiver_report", force_tracking_enabled=False),  # excluded -- force_tracking=False
-            _mk_tracker(11, "Default", force_tracking_enabled=False),      # excluded -- Default WI per FR-78
+            _mk_tracker(1,  "Confirmation",                          delivery_state="Not Started"),
+            _mk_tracker(2,  "compliance_certification_release_notes", delivery_state="Not Started"),
+            _mk_tracker(5,  "test_tech_waiver_report",                delivery_state="Not Started"),
+            _mk_tracker(7,  "test_tech_waiver_report",                delivery_state="Not Started"),
+            _mk_tracker(8,  "test_tech_waiver_report",                delivery_state="Not Started",
+                        force_tracking_enabled=False),                  # excluded
+            _mk_tracker(11, "Default",                                delivery_state="Not Started",
+                        force_tracking_enabled=False),                  # excluded
         ]
+        # Pre-seed all trackers into storage so update_delivery_state can read
+        # their snapshot (NS -> Open requires from_state to be an enum value).
+        for t in trackers:
+            deps.storage.items[t.item_id] = t
+
+        # Owner map: items 1+2+5 -> alice, items 7+8 -> bob (only eligible ones used).
+        owner_map = {
+            trackers[0].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
+            trackers[1].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
+            trackers[2].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
+            trackers[3].item_id: {"owner_corp_usa_email": "bob@corp.example",   "owner_name": "Bob"},
+        }
+        recorder = self._patch_kickoff_helpers(monkeypatch, owner_map=owner_map)
         deps.storage.list_items_response = trackers
-        deps_with_dispatcher = TaskDeps(
+        # email_sender must be non-None for the batch send branch to enter.
+        deps_with_email = TaskDeps(
             storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
-            dispatcher=MockDispatcher(),
+            email_sender=object(),  # opaque non-None sentinel; _send is stubbed
         )
 
-        with override_task_deps(deps_with_dispatcher):
+        with override_task_deps(deps_with_email):
             ctx = _mk_kickoff_event_context()
             result = kickoff_collection_task({}, ctx)
 
         assert result["outcome"] == "fired"
-        assert result["events_fired"] == 3       # items 2, 5, 7
         assert result["items_scanned"] == 6
-        assert result["items_eligible"] == 3
-        # Verify dispatched events:
-        dispatched = deps_with_dispatcher.dispatcher.dispatched
-        assert len(dispatched) == 3
-        for event in dispatched:
-            assert event.trigger.value == "ItemCreated"
-            assert event.entity_ref.customer_id == "MMK"
-            assert event.entity_ref.milestone_id == "P1"
+        assert result["items_eligible"] == 4         # items 1, 2, 5, 7 (Confirmation included)
+        assert result["owner_groups"] == 2           # alice + bob
+        assert result["emails_sent"] == 2
+        assert result["items_transitioned"] == 4     # all eligible reach Outreach Sent
+        assert result["items_failed"] == 0
+        # Each batch email recorded once with the right recipient + size.
+        recipients_sorted = sorted(r["recipient"] for r in recorder)
+        assert recipients_sorted == ["alice@corp.example", "bob@corp.example"]
+        alice_batch = next(r for r in recorder if r["recipient"] == "alice@corp.example")
+        assert len(alice_batch["items"]) == 3
+        bob_batch = next(r for r in recorder if r["recipient"] == "bob@corp.example")
+        assert len(bob_batch["items"]) == 1
+        # Aggregate kickoff audit row written exactly once.
+        kickoff_logs = [a for a in deps.audit.logs if a[0] == "collection_kickoff_dispatched"]
+        assert len(kickoff_logs) == 1
 
-    def test_empty_milestone_fires_zero_events(self, deps):
-        """No trackers in storage -> 0 events fired, outcome still 'fired'."""
+    def test_empty_milestone_returns_zero_emails(self, deps, monkeypatch):
+        """No trackers in storage -> fired outcome, zero emails, zero scanned."""
+        self._patch_kickoff_helpers(monkeypatch)
         from core.src.workflow_engine.tasks.sp_alert_imports import (
             kickoff_collection_task,
         )
         deps.storage.list_items_response = []
-        deps_with_dispatcher = TaskDeps(
-            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
-            dispatcher=MockDispatcher(),
-        )
-        with override_task_deps(deps_with_dispatcher):
-            result = kickoff_collection_task({}, _mk_kickoff_event_context())
-        assert result["outcome"] == "fired"
-        assert result["events_fired"] == 0
-        assert result["items_scanned"] == 0
-
-    def test_all_confirmation_fires_zero_events(self, deps):
-        """All trackers are Confirmation -> 0 events fired (all filtered per FR-58)."""
-        from core.src.workflow_engine.tasks.sp_alert_imports import (
-            kickoff_collection_task,
-        )
-        deps.storage.list_items_response = [
-            _mk_tracker(1, "Confirmation"),
-            _mk_tracker(2, "Confirmation"),
-        ]
-        deps_with_dispatcher = TaskDeps(
-            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
-            dispatcher=MockDispatcher(),
-        )
-        with override_task_deps(deps_with_dispatcher):
-            result = kickoff_collection_task({}, _mk_kickoff_event_context())
-        assert result["outcome"] == "fired"
-        assert result["events_fired"] == 0
-        assert result["items_scanned"] == 2
-        assert result["items_eligible"] == 0
-
-    def test_skips_when_dispatcher_missing(self, deps):
-        """deps.dispatcher is None (worker not wired) -> skipped outcome."""
-        from core.src.workflow_engine.tasks.sp_alert_imports import (
-            kickoff_collection_task,
-        )
-        # deps.dispatcher is None by default
         with override_task_deps(deps):
             result = kickoff_collection_task({}, _mk_kickoff_event_context())
-        assert result["outcome"] == "skipped_no_dispatcher"
-        assert result["events_fired"] == 0
+        assert result["outcome"] == "fired"
+        assert result["emails_sent"] == 0
+        assert result["items_scanned"] == 0
+
+    def test_all_items_past_not_started_zero_eligible(self, deps, monkeypatch):
+        """All trackers already past Not Started (e.g. re-click of Start
+        Collection after first run) -> 0 eligible, 0 emails. Architect Step 5
+        idempotency fix 2026-06-28: re-clicking Start Collection is safe.
+        """
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+        self._patch_kickoff_helpers(monkeypatch)
+        deps.storage.list_items_response = [
+            _mk_tracker(1, "test_tech_waiver_report", delivery_state="Outreach Sent"),
+            _mk_tracker(2, "Confirmation",            delivery_state="Outreach Sent"),
+        ]
+        with override_task_deps(deps):
+            result = kickoff_collection_task({}, _mk_kickoff_event_context())
+        assert result["outcome"] == "fired"
+        assert result["items_scanned"] == 2
+        assert result["items_eligible"] == 0
+        assert result["emails_sent"] == 0
+
+    def test_skips_when_storage_missing_list_method(self, deps, monkeypatch):
+        """deps.storage without list_items_for_milestone -> skipped_no_storage.
+        Replaces the old skips-when-dispatcher-missing test: dispatcher is no
+        longer consulted by kickoff_collection_task post Step 5 restructure.
+        """
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            kickoff_collection_task,
+        )
+        self._patch_kickoff_helpers(monkeypatch)
+        # Custom storage shim without list_items_for_milestone.
+        bare_storage = SimpleNamespace(get_delivery_item=lambda x: None)
+        deps_bare = TaskDeps(
+            storage=bare_storage, sp_writer=deps.sp_writer, audit=deps.audit,
+        )
+        with override_task_deps(deps_bare):
+            result = kickoff_collection_task({}, _mk_kickoff_event_context())
+        assert result["outcome"] == "skipped_no_storage"
+        assert result["emails_sent"] == 0
