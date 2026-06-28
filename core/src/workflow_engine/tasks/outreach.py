@@ -66,37 +66,102 @@ def _record_reminder_attempt(deps, delivery_item_id: str | None) -> int | None:
 
 
 def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, Any]) -> str | None:
-    """Resolve outreach recipient per [D-080] 4-field preference chain.
+    """Resolve outreach recipient per [D-080] preference chain.
 
-    Precedence (added 2026-06-27 per [D-118] Chunk 4 wireup fix):
-      1. Explicit params.recipient override (rule YAML can pin a recipient)
-      2. Storage DeliveryItem.owner_corp_usa_email  (preferred per [D-080])
-      3. Storage DeliveryItem.owner_corp_email     (fallback per [D-080])
-      4. event_context.owner_corp_usa_email        (legacy callers + test fixtures)
-      5. None -> caller writes audit-only row, skips send
+    Path A precedence (architect 2026-06-27: SP is source of truth):
+      1. Explicit params.recipient                 (rule YAML can pin)
+      2. **SP-side owner_corp_usa_email**          (live; via sp_writer)
+      3. **SP-side owner_corp_email**              (live fallback)
+      4. Storage DeliveryItem.owner_corp_usa_email (offline fallback if SP
+         unreachable -- typically None today since HILDA doesn't replicate
+         SP fields; kept for testability + transitional state)
+      5. Storage DeliveryItem.owner_corp_email     (offline fallback)
+      6. event_context.owner_corp_usa_email        (legacy callers / fixtures)
+      7. None -> caller writes audit-only row, skips send
 
-    Prior bug (pre-2026-06-27): tasks read event_context.owner_corp_usa_email,
-    which dispatcher._build_event_context never populates in the Chunk 4 path.
-    Fix: lookup current owner from storage so TPM mid-flight owner changes are
-    honored automatically; event_context fallback preserved for legacy callers
-    that pre-populate it directly.
+    Reading SP at fire-time means TPM mid-flight owner edits in SP are
+    automatically honored without HILDA-side persistence. Failure modes
+    (network, SP outage, schema mismatch) fall through silently to the
+    storage/event_context fallbacks rather than blocking the email.
     """
     explicit = params.get("recipient")
     if explicit:
         return explicit
+
     delivery_item_id = event_context.get("delivery_item_id")
+    item = None
     if delivery_item_id:
         try:
             item = deps.storage.get_delivery_item(delivery_item_id)
-            from_storage = (
-                getattr(item, "owner_corp_usa_email", None)
-                or getattr(item, "owner_corp_email", None)
-            )
-            if from_storage:
-                return from_storage
-        except Exception:  # noqa: BLE001 -- storage miss is non-fatal; fall through
-            pass
+        except Exception:  # noqa: BLE001 -- storage miss is non-fatal
+            item = None
+
+    # Path A: SP read at fire-time
+    if item is not None and deps.sp_writer is not None:
+        sp_owner = _read_owner_from_sp(deps, item)
+        if sp_owner:
+            return sp_owner
+
+    # Fallback 1: storage-cached owner identity (typically NULL in current
+    # Ph-1 since HILDA doesn't replicate SP fields).
+    if item is not None:
+        from_storage = (
+            getattr(item, "owner_corp_usa_email", None)
+            or getattr(item, "owner_corp_email", None)
+        )
+        if from_storage:
+            return from_storage
+
+    # Fallback 2: event_context (legacy callers + tests that pre-populate)
     return event_context.get("owner_corp_usa_email")
+
+
+def _read_owner_from_sp(deps, item: Any) -> str | None:
+    """Read live owner identity from SP via sp_writer.get_items.
+
+    Best-effort: returns None on any failure (network, no match, schema
+    mismatch). Caller falls back to storage / event_context.
+
+    Filter strategy: scope by customer_id (selects Deliverables_<customer_id>
+    list), then filter by item_no. In the architect's current MMK Ph-1 test
+    setup (one milestone P1, item_nos 1..11) this returns the unique row.
+    Multi-milestone deployments where item_no is not globally unique within
+    the customer's Deliverables list will need to add milestone_name (or
+    equivalent) to the canonical_filters once the SP column-map is known.
+    """
+    from core.src.sharepoint_integration.config import ListScope
+    customer_id = getattr(item, "customer_id", None)
+    item_no = getattr(item, "item_no", None)
+    if not customer_id or item_no is None:
+        return None
+    try:
+        scope = ListScope(customer_id=customer_id)
+        rows = deps.sp_writer.get_items(
+            entity="delivery_items",
+            scope=scope,
+            canonical_filters={"item_no": item_no},
+        )
+    except Exception as exc:  # noqa: BLE001 -- SP read is best-effort
+        _log.warning(
+            "_resolve_recipient: SP read failed for customer_id=%s item_no=%s: %s",
+            customer_id, item_no, type(exc).__name__,
+        )
+        return None
+    if not rows:
+        _log.info(
+            "_resolve_recipient: SP returned no rows for customer_id=%s item_no=%s",
+            customer_id, item_no,
+        )
+        return None
+    if len(rows) > 1:
+        _log.warning(
+            "_resolve_recipient: SP returned %d rows for customer_id=%s item_no=%s; "
+            "using first. Multi-milestone deployments should add milestone discriminator "
+            "to canonical_filters once SP schema mapping is known.",
+            len(rows), customer_id, item_no,
+        )
+    row = rows[0]
+    return row.get("owner_corp_usa_email") or row.get("owner_corp_email")
 
 
 @hilda_celery_app.task(name="core.src.workflow_engine.tasks.outreach.send_initial_outreach")

@@ -28,8 +28,14 @@ class SpCrudWriter:
     Methods:
     - update_item(entity, scope, item_id, canonical_fields) -> None
     - create_item(entity, scope, canonical_fields) -> str (new item_id)
+    - get_items(entity, scope, canonical_filters)        -> list of canonical
+      field dicts. Added 2026-06-27 per architect Path A "read SP at
+      fire-time" -- send_initial_outreach + reminder tasks pull the
+      current owner identity from SP rather than HILDA's stored copy, so
+      mid-flight TPM owner edits in SP are honored without HILDA-side
+      replication.
 
-    Both delegate to SpCrud's async ops via the thread-bridged sync helper.
+    All delegate to SpCrud's async ops via the thread-bridged sync helper.
     """
 
     def __init__(self, sp_crud: SpCrud) -> None:
@@ -54,4 +60,19 @@ class SpCrudWriter:
     ) -> str:
         return run_async_sync(
             lambda: self._crud.create_item(entity, scope, canonical_fields)
+        )
+
+    def get_items(
+        self,
+        entity: str,
+        scope: Any,                      # ListScope from sharepoint_integration
+        canonical_filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Sync wrapper around SpCrud.get_items -- canonical-field-out rows.
+
+        Each returned dict carries `_sp_id` (SP's auto-counter Id) alongside
+        the customer's canonical fields. Empty list when no match.
+        """
+        return run_async_sync(
+            lambda: self._crud.get_items(entity, scope, canonical_filters)
         )
