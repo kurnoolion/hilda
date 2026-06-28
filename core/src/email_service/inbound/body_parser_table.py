@@ -33,6 +33,7 @@ format) and then to FR-12 path (c) Ph-2 stub.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from core.src.email_service.inbound.body_parser_structured import resolve_sender_match
@@ -43,6 +44,8 @@ from core.src.email_service.protocol import (
 )
 
 __all__ = ["parse_table_block"]
+
+_log = logging.getLogger(__name__)
 
 
 # Matches the body anchor emitted by outreach_table.j2:
@@ -90,8 +93,17 @@ def parse_table_block(
     try:
         from bs4 import BeautifulSoup
     except ImportError:
-        # bs4 is in requirements.txt per Phase B 2026-06-28; if missing the
-        # caller should treat as parser-unavailable rather than crash.
+        # bs4 is in requirements.txt per Phase B 2026-06-28. If we hit this
+        # branch the container hasn't been rebuilt with the new requirements.
+        # Log loudly because the symptom otherwise looks like "unparseable
+        # body" and burns multiple rounds of debug (architect live test
+        # 2026-06-28). Use WARNING so it shows up at default log level.
+        _log.warning(
+            "parse_table_block: beautifulsoup4 not installed -- container "
+            "image needs rebuild with current requirements.txt. Parser "
+            "returning None; owner replies will all be classified as "
+            "'unparseable' until bs4 is installed."
+        )
         return None
 
     soup = BeautifulSoup(body, "html.parser")
