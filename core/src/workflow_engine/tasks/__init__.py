@@ -21,6 +21,7 @@ from . import (  # noqa: F401
     escalation,
     milestone,
     outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
+    owner_reply,     # added 2026-06-28: Phase B apply_owner_reply task (HTML table parser)
     routing_resolution,
     sp_alert_imports,  # added 2026-06-26: IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION per [D-118] cascade
     state,
@@ -32,6 +33,7 @@ __all__ = [
     "escalation",
     "milestone",
     "outreach",
+    "owner_reply",
     "routing_resolution",
     "sp_alert_imports",
     "state",
