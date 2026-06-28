@@ -40,9 +40,22 @@ rules:
   - rule_id: send_initial_outreach_on_collection_start
     trigger: ItemCreated                                  # fires when setup_milestone / Start Collection creates a tracker per FR-8
     condition:
-      and:
-        - { field: force_tracking_enabled, op: eq, value: true }
-        - { field: item_type, op: neq, value: "Confirmation" }   # Confirmations skip outreach per FR-58
+      field: force_tracking_enabled
+      op: eq
+      value: true
+    # Confirmation items DO get outreach per FR-58 + FR-25(b) lock:
+    # "Open -> OutreachSent. FR-8 initial outreach email DOES fire ...
+    #  body tailored to JIRA modality: 'please review open JIRA tickets ...
+    #  and reply to confirm milestone completion'." The whole point of a
+    # Confirmation item is the owner's reply confirming closure; skipping
+    # outreach would leave the item indefinitely in Open with no closure
+    # signal. Item-type-specific TEMPLATE selection (FR-9 honors
+    # tg_email_group_alias batching; modality-tailored body for
+    # CustomerJIRA-only Confirmations per FR-25(b)) is a downstream
+    # composer concern, not a rule-matching concern -- the rule fires
+    # for every item_type that opts in via force_tracking_enabled.
+    # Comment "Confirmations skip outreach per FR-58" REMOVED 2026-06-27
+    # per architect Step 4 challenge -- prior rule contradicted FR-58.
     actions:
       - kind: SendInitialOutreach                         # per FR-9: honors tg_email_group_alias batching
         params:
