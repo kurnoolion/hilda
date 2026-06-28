@@ -95,10 +95,19 @@ def build_chain_from_rule_match(
 ) -> Signature:
     """Per [D-066]: build one Celery chain from a RuleMatch's ordered actions list.
 
-    Each chain task receives `(params, event_context, previous_result=None)` per
-    the common task shape. Returns a Celery `Signature` ready for `.apply_async()`.
+    Each chain task receives `(params, event_context)` -- the action arguments
+    are independent of the previous action's return value. Use immutable
+    signatures (.si) so Celery's chain mechanism does NOT prepend the prior
+    task's result as a positional argument.
 
-    Raises WFL-E001 if any action_kind in the match is not in the registry.
+    Bug fix 2026-06-27 architect Step 2 owner-edit test: prior `.s()` produced
+    TypeError "start_item_collection_task() takes 2 positional arguments but
+    3 were given" when handle_owner_reassignment (defaults.yaml) chained
+    NotifyNewOwner -> StartItemCollection. .s() prepends previous return as
+    arg0; .si() doesn't.
+
+    Returns a Celery `Signature` ready for `.apply_async()`. Raises WFL-E001
+    if any action_kind in the match is not in the registry.
     """
     if not match.actions:
         raise ValueError(f"RuleMatch '{match.rule_id}' has empty actions list")
@@ -108,9 +117,8 @@ def build_chain_from_rule_match(
         binding = ACTION_KIND_TO_TASK.get(action.kind)
         if binding is None:
             raise PipelineError("WFL-E001", {"action_kind": action.kind.value})
-        # Pass (params, event_context) -- previous_result is added by Celery canvas
-        # when chained tasks return a value.
-        sig = binding.celery_task.s(action.params, event_context)
+        # Immutable signature so chained tasks see only (params, event_context).
+        sig = binding.celery_task.si(action.params, event_context)
         signatures.append(sig)
 
     if len(signatures) == 1:
