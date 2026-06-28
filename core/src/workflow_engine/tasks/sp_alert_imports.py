@@ -360,13 +360,16 @@ def kickoff_collection_task(
         )
         return {"outcome": "fired", "events_fired": 0, "items_scanned": 0}
 
-    # Filter for outreach-eligible items per FR-8 + rule conditions:
-    #   force_tracking_enabled == True AND item_type != "Confirmation"
-    # (FR-58 explicitly skips Confirmation items from outreach.)
+    # Filter for outreach-eligible items per FR-8: force_tracking_enabled
+    # must be True. Confirmation items ARE included (FR-58 corrected
+    # 2026-06-28: owner reply confirming closure requires the initial
+    # outreach; skipping leaves Confirmations stuck in Open with no
+    # closure signal). Item-type-specific template + body tailoring (e.g.
+    # CustomerJIRA-only Confirmation modality per FR-25(b)) is a
+    # composer-level concern downstream, not a kickoff-eligibility gate.
     eligible = [
         item for item in items
         if getattr(item, "force_tracking_enabled", False) is True
-        and getattr(item, "item_type", "") != "Confirmation"
     ]
 
     if not eligible:
@@ -382,10 +385,20 @@ def kickoff_collection_task(
             "items_eligible": 0,
         }
 
-    # -- Dispatch one ItemCreated event per eligible tracker --
-    # Lazy-import to avoid circular dep (rule_engine imports workflow_engine in
-    # some flows; lazy keeps task-body import clean).
+    # -- Transition Not Started -> Open per item BEFORE dispatching ItemCreated --
+    # Architect direction 2026-06-28: state moves to Open first, then dispatch
+    # occurs. The state machine requires Not Started -> Open -> Outreach Sent;
+    # the downstream send_initial_outreach rule's UpdateState target=Outreach
+    # Sent is then a legal Open -> Outreach Sent transition. Without this
+    # pre-step, every item's UpdateState chain hits "illegal_transition" /
+    # TRK-E001 because Not Started -> Outreach Sent is not in
+    # LEGAL_TRANSITIONS.
+    #
+    # Lazy-import update_delivery_state to keep task-body import clean (tracker
+    # transitively pulls workflow_engine.tasks in some flows).
     from core.src.rule_engine import EntityRef, TriggerEvent, TriggerKind
+    from core.src.tracker import DeliveryState
+    from core.src.tracker.transitions import update_delivery_state
     import uuid as _uuid
 
     events_fired = 0
@@ -396,6 +409,38 @@ def kickoff_collection_task(
             item, "delivery_item_id", None
         )
         device_id = getattr(item, "device_id", None)
+
+        # Step 1: transition Not Started -> Open. Idempotent if already past
+        # NOT_STARTED (update_delivery_state returns no_op_idempotent when
+        # from_state == target_state). Failure logged + counted but does NOT
+        # block the kickoff dispatch -- downstream rule will reject the
+        # transition again if it remains illegal, surfacing the bad row.
+        try:
+            update_delivery_state(
+                delivery_item_id=item_id,
+                target_state=DeliveryState.OPEN,
+                params={},
+                event_context={
+                    "correlation_id": correlation_id,
+                    "customer_id":    customer_id,
+                    "milestone_id":   milestone_id,
+                    "delivery_item_id": item_id,
+                    "trigger_source": "kickoff_collection_task",
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+                bypass_guards=False,
+            )
+        except Exception as exc:  # noqa: BLE001 -- per-item failure is non-fatal
+            logger.warning(
+                "kickoff_collection: NS->Open transition failed for item=%s: %s: %s",
+                item_id, type(exc).__name__, str(exc)[:120],
+            )
+
+        # Step 2: dispatch ItemCreated -- downstream rule fires
+        # send_initial_outreach + UpdateState target=Outreach Sent (legal:
+        # Open -> Outreach Sent).
         event = TriggerEvent(
             trigger=TriggerKind.ITEM_CREATED,
             sub_trigger=None,
