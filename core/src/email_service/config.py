@@ -103,6 +103,16 @@ class EwsConfig(BaseModel):
         "Projects",
     )
 
+    # Owner-reply scope marker. Server-side subject filter OR's this against
+    # the SP-alert prefixes so reply emails are also fetched. The kickoff
+    # outreach template sends subject "[HILDA] Status request -- BATCH-<id>";
+    # owner replies preserve "BATCH-<id>" regardless of "RE:" / "Re:" / "Fwd:"
+    # prefix added by the email client. Phase B 2026-06-28 fix -- without
+    # this clause owner replies are silently dropped before reaching the
+    # classifier because their subject doesn't startswith any SP alert prefix.
+    # Empty string disables the owner-reply filter (no owner replies fetched).
+    owner_reply_subject_marker: str = "BATCH-"
+
     # Sender behavior
     from_addr: str = "hilda-noreply@corp.example"
 

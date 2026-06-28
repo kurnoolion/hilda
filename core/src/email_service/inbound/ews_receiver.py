@@ -249,11 +249,20 @@ class EwsReceiver:
         # OMADM_BOT mailbox must not lose unread state on non-HILDA mail.
         qs = folder.filter(is_read=False)
         prefixes = self._config.sp_alert_subject_prefixes
-        if prefixes:
-            subject_q = Q(subject__startswith=prefixes[0])
-            for p in prefixes[1:]:
-                subject_q |= Q(subject__startswith=p)
-            qs = qs.filter(subject_q)
+        owner_marker = self._config.owner_reply_subject_marker
+        # Build OR-combined subject clause: SP alerts (startswith prefix) OR
+        # owner replies (contains BATCH-<id> marker). Phase B 2026-06-28 fix:
+        # owner replies have subject "RE: [HILDA] Status request -- BATCH-<id>"
+        # which doesn't match any SP-alert prefix, so the prefix-only filter
+        # was silently dropping every reply before classification.
+        clauses = [Q(subject__startswith=p) for p in prefixes] if prefixes else []
+        if owner_marker:
+            clauses.append(Q(subject__contains=owner_marker))
+        if clauses:
+            combined = clauses[0]
+            for c in clauses[1:]:
+                combined |= c
+            qs = qs.filter(combined)
         qs = qs.order_by("-datetime_received")[:self._config.fetch_limit]
 
         out: list[dict[str, Any]] = []
