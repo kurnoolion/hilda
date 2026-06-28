@@ -466,6 +466,44 @@ class TestBodyParserTable:
         assert block is not None
         assert block.sender_match == "mismatch"
 
+    def test_outlook_mangled_anchor_still_parses(self):
+        """Outlook reply rendering inserts inline spans/o:p tags between the
+        HILDA-BATCH-ID: label and the BATCH-<id> token. The literal regex on
+        raw HTML fails; parser must extract text first. Architect live test
+        2026-06-28 regression -- diag showed body had the anchor AND the
+        BATCH-id yet the raw-HTML regex returned None."""
+        body = """
+        <html><body>
+        <p>Updated table below</p>
+        <p style="font-size:12px;color:#666;">
+          HILDA-BATCH-ID:<span style="mso-spacerun:yes">&nbsp;</span>
+          <o:p></o:p>BATCH-32100bde75
+        </p>
+        <table>
+          <tr><th>item_no</th><th>item_title</th>
+              <th>status</th><th>owner_status_note</th></tr>
+          <tr><td>1</td><td>Device Readiness Review</td>
+              <td>Closed</td><td></td></tr>
+          <tr><td>2</td><td>Sustainability Cert Form</td>
+              <td>Open</td><td>Working with sustainability team</td></tr>
+        </table>
+        </body></html>
+        """
+        msg = _msg(
+            subject="RE: [HILDA] Status request -- BATCH-32100bde75",
+            body="",
+            body_html=body,
+            sender="owner@corp.example",
+        )
+        block = parse_table_block(msg, "BATCH-32100bde75", [])
+        assert block is not None, "anchor regex must match after html->text extract"
+        assert len(block.per_item_updates) == 2
+        assert block.per_item_updates[0].item_no == 1
+        assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
+        assert block.per_item_updates[1].item_no == 2
+        assert block.per_item_updates[1].delivery_state == "OPEN"
+        assert block.per_item_updates[1].owner_status_note == "Working with sustainability team"
+
 
 # ===========================================================================
 # TestBodyParserFreetext (Ph-2 stub)

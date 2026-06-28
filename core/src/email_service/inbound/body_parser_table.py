@@ -87,13 +87,6 @@ def parse_table_block(
     if not body:
         return None
 
-    # Defensive anchor check: parser only proceeds when the body carries our
-    # tagged BATCH-ID anchor matching the subject's batch_id. Prevents picking
-    # up a stray <table> from the owner's signature or a quoted unrelated mail.
-    anchor_match = _BATCH_ANCHOR_RE.search(body)
-    if anchor_match is None or anchor_match.group(1) != batch_id:
-        return None
-
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -102,6 +95,21 @@ def parse_table_block(
         return None
 
     soup = BeautifulSoup(body, "html.parser")
+
+    # Defensive anchor check: parser only proceeds when the body carries our
+    # tagged BATCH-ID anchor matching the subject's batch_id. Prevents picking
+    # up a stray <table> from the owner's signature or a quoted unrelated mail.
+    #
+    # Run the regex against text-extracted body, not raw HTML: Outlook reply
+    # rendering often inserts inline <span>/<o:p>/&nbsp; between the
+    # "HILDA-BATCH-ID:" label and the "BATCH-<id>" token, which defeats the
+    # `\s*` between them in the raw HTML. Architect live test 2026-06-28:
+    # diagnostic showed html_has_anchor=True + html_has_batch_id=True yet the
+    # raw-HTML regex returned None.
+    text_for_anchor = soup.get_text(" ", strip=True)
+    anchor_match = _BATCH_ANCHOR_RE.search(text_for_anchor)
+    if anchor_match is None or anchor_match.group(1) != batch_id:
+        return None
     table_rows = _find_hilda_table_rows(soup)
     if table_rows is None:
         return None
