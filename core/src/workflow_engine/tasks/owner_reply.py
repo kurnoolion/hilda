@@ -150,13 +150,27 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
         block = parse_structured_block(msg, batch_id, expected_items)
         parser_used = "structured"
     if block is None:
-        await _audit(deps, "owner_reply_unparseable", None, {
-            "batch_id":      batch_id,
-            "message_id":    msg.message_id,
-            "subject":       (msg.subject or "")[:120],
-            "sender":        msg.sender,
-            "correlation_id": correlation_id,
-        })
+        # Structured diagnostic so next "unparseable" is one log line away
+        # from root cause. Don't store body content (NFR-2) -- presence flags
+        # + small contains-check probes only.
+        body_html = msg.body_html or ""
+        body_text = msg.body_text or ""
+        diag = {
+            "batch_id":           batch_id,
+            "message_id":         msg.message_id,
+            "subject":            (msg.subject or "")[:120],
+            "sender":             msg.sender,
+            "body_html_len":      len(body_html),
+            "body_text_len":      len(body_text),
+            "html_has_anchor":    "HILDA-BATCH-ID" in body_html,
+            "text_has_anchor":    "HILDA-BATCH-ID" in body_text,
+            "html_has_table_tag": "<table" in body_html.lower(),
+            "html_has_batch_id":  batch_id in body_html,
+            "text_has_batch_id":  batch_id in body_text,
+            "correlation_id":     correlation_id,
+        }
+        _log.info("owner_reply_unparseable diag: %r", diag)
+        await _audit(deps, "owner_reply_unparseable", None, diag)
         return {"batch_id": batch_id, "rows_parsed": 0,
                 "error": "unparseable"}
 

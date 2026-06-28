@@ -37,6 +37,37 @@ from core.src.email_service.protocol import (
 
 __all__ = ["EwsReceiver", "CredentialServiceProtocol"]
 
+
+# Compact set of HTML markers indicating an inbound message body carries
+# markup even when the wire BodyType attribute is "Text". Phase B 2026-06-28:
+# Outlook reply quirk causes the original HTML outreach to roundtrip with
+# BodyType downgraded -- we still want body_html populated so the table
+# parser can find the table the owner edited inline.
+_HTML_MARKERS = ("<html", "<body", "<table", "<div", "<p", "<br")
+
+
+def _extract_body_html(msg, html_body_cls):
+    """Return msg.body as a string when it carries HTML, else None.
+
+    Two acceptance paths:
+      1. isinstance(msg.body, HTMLBody) -- exchangelib already typed it as
+         HTML based on the wire BodyType attribute. Primary path.
+      2. msg.body is a Body (text-typed on the wire) but its string form
+         contains one of _HTML_MARKERS. Fallback for Outlook reply downgrade.
+
+    Either path returns str(msg.body); both return None if msg.body is empty.
+    """
+    body = msg.body
+    if not body:
+        return None
+    if isinstance(body, html_body_cls):
+        return str(body)
+    body_str = str(body)
+    lower = body_str.lower()
+    if any(marker in lower for marker in _HTML_MARKERS):
+        return body_str
+    return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -288,11 +319,16 @@ class EwsReceiver:
                 ),
                 "subject": msg.subject or "",
                 "body_text": msg.text_body or "",
-                # exchangelib exposes body as Body or HTMLBody subclass of str;
-                # the prior `msg.body_type == "HTML"` check was wrong (no such
-                # attribute on Message); use isinstance(HTMLBody) instead.
-                # Fix landed 2026-06-26 against real corp Exchange.
-                "body_html": str(msg.body) if (msg.body and isinstance(msg.body, HTMLBody)) else None,
+                # exchangelib exposes body as Body or HTMLBody subclass of str.
+                # 2026-06-26: switched from msg.body_type (no such attribute) to
+                # isinstance(HTMLBody).
+                # 2026-06-28 Phase B widen: also accept bodies whose string form
+                # carries HTML tag markers even when the wire's BodyType=Text.
+                # Outlook inbound replies sometimes downgrade BodyType to Text on
+                # the way back to the server while preserving the markup inline
+                # -- isinstance(HTMLBody) alone left body_html=None and broke
+                # apply_owner_reply table parsing (architect live test).
+                "body_html": _extract_body_html(msg, HTMLBody),
                 "received_at": msg.datetime_received,
                 "attachments": attachments,
             })
