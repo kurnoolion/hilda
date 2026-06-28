@@ -365,11 +365,20 @@ class TestBodyParserTable:
         for u in block.per_item_updates:
             assert u.confidence == 1.0
 
-    def test_returns_none_when_anchor_missing(self):
+    def test_returns_none_when_batch_id_absent_from_body(self):
+        """Parser must refuse to parse when the body doesn't reference the
+        target batch_id at all -- defends against stray-table matches in an
+        unrelated reply. Replaces the old test_returns_none_when_anchor_missing
+        which checked for a literal HILDA-BATCH-ID: label; Outlook reply
+        rendering broke that strict check (architect live test 2026-06-28),
+        so the parser now substring-checks the batch_id only.
+        """
         rows = _row(1, "x", "Closed", "")
+        # Render the template with a DIFFERENT batch_id so the target batch_id
+        # we ask for never appears in the body.
         body = _TABLE_REPLY_TEMPLATE.format(
-            batch_id="BATCH-abc", rows=rows
-        ).replace("HILDA-BATCH-ID:", "BATCH:")
+            batch_id="BATCH-other-batch", rows=rows
+        )
         msg = _msg(subject="Re: BATCH-abc", body="", body_html=body)
         assert parse_table_block(msg, "BATCH-abc", []) is None
 

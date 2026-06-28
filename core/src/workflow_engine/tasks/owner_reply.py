@@ -155,6 +155,27 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
         # + small contains-check probes only.
         body_html = msg.body_html or ""
         body_text = msg.body_text or ""
+        # Probe what bs4 actually finds in the HTML so the next failure
+        # tells us whether it's anchor / table-count / header-mismatch.
+        table_count = 0
+        sample_headers: list[str] = []
+        try:
+            from bs4 import BeautifulSoup as _BS
+            soup_probe = _BS(body_html, "html.parser")
+            tables = soup_probe.find_all("table")
+            table_count = len(tables)
+            for t in tables:
+                tr0 = t.find("tr")
+                if tr0 is None:
+                    continue
+                cells = tr0.find_all(["th", "td"])
+                texts = [c.get_text(strip=True).lower() for c in cells]
+                if texts:
+                    sample_headers.append("|".join(texts)[:120])
+                if len(sample_headers) >= 3:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         diag = {
             "batch_id":           batch_id,
             "message_id":         msg.message_id,
@@ -167,6 +188,8 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
             "html_has_table_tag": "<table" in body_html.lower(),
             "html_has_batch_id":  batch_id in body_html,
             "text_has_batch_id":  batch_id in body_text,
+            "table_count":        table_count,
+            "sample_headers":     sample_headers,
             "correlation_id":     correlation_id,
         }
         _log.info("owner_reply_unparseable diag: %r", diag)

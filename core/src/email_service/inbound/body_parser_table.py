@@ -96,19 +96,22 @@ def parse_table_block(
 
     soup = BeautifulSoup(body, "html.parser")
 
-    # Defensive anchor check: parser only proceeds when the body carries our
-    # tagged BATCH-ID anchor matching the subject's batch_id. Prevents picking
-    # up a stray <table> from the owner's signature or a quoted unrelated mail.
+    # Defensive anchor check: parser only proceeds when the body references
+    # our specific batch_id somewhere. Prevents picking up a stray <table>
+    # from a wholly unrelated reply.
     #
-    # Run the regex against text-extracted body, not raw HTML: Outlook reply
-    # rendering often inserts inline <span>/<o:p>/&nbsp; between the
-    # "HILDA-BATCH-ID:" label and the "BATCH-<id>" token, which defeats the
-    # `\s*` between them in the raw HTML. Architect live test 2026-06-28:
-    # diagnostic showed html_has_anchor=True + html_has_batch_id=True yet the
-    # raw-HTML regex returned None.
-    text_for_anchor = soup.get_text(" ", strip=True)
-    anchor_match = _BATCH_ANCHOR_RE.search(text_for_anchor)
-    if anchor_match is None or anchor_match.group(1) != batch_id:
+    # We do a plain substring check (not a regex tying "HILDA-BATCH-ID:" to
+    # the token) because Outlook's reply rendering puts arbitrary inline
+    # markup AND sometimes intervening content from the quoted history
+    # between the label and the value -- two earlier attempts (raw-HTML
+    # regex 2026-06-28a, text-extract regex 2026-06-28b) both broke on
+    # real corp Outlook replies.
+    #
+    # The classifier already confirmed the SUBJECT carries BATCH-<id>;
+    # we only need to confirm the body references the SAME batch_id. If
+    # the body matches but doesn't carry our outreach table,
+    # _find_hilda_table_rows returns None and the parser still bails out.
+    if batch_id not in body:
         return None
     table_rows = _find_hilda_table_rows(soup)
     if table_rows is None:
