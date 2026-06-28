@@ -501,6 +501,12 @@ def kickoff_collection_task(
                     "milestone_id": milestone_id,
                     "message_id":   message_id,
                     "send_skipped": message_id is None,
+                    # item_no added 2026-06-28 so Phase B owner_reply_task can
+                    # resolve (batch_id, item_no) -> delivery_item_id without
+                    # round-tripping the delivery_item row. Lookup falls back
+                    # to the live row's item_no when this key is absent
+                    # (back-compat with rows audited before this commit).
+                    "item_no":      getattr(item, "item_no", None),
                 },
             )
             try:

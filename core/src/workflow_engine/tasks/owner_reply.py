@@ -434,38 +434,60 @@ async def _lookup_batch_items(batch_id: str) -> list[dict[str, Any]]:
     # details.batch_id. Avoids JSONB-specific SQL so sqlite tests still work.
     matched: list[dict[str, Any]] = []
     seen_item_ids: set[str] = set()
+    scanned = 0
+    parse_failed = 0
+    no_delivery_item_id = 0
+    no_item_no = 0
+    item_row_missing = 0
     for r in rows:
         summary = r.summary
         if not summary or batch_id not in summary:
             continue
+        scanned += 1
         try:
             payload = json.loads(summary)
         except (ValueError, TypeError):
+            parse_failed += 1
             continue
         details = payload.get("details") if isinstance(payload, dict) else None
         if not isinstance(details, dict):
+            parse_failed += 1
             continue
         if details.get("batch_id") != batch_id:
             continue
         delivery_item_id = r.delivery_item_id
         if not delivery_item_id or delivery_item_id in seen_item_ids:
+            no_delivery_item_id += 1
             continue
         seen_item_ids.add(delivery_item_id)
 
-        item_no_raw = details.get("item_no")
+        # Hydrate from the live delivery_item row -- gives us both the
+        # owner identity (for sender_match) and item_no (so we don't depend
+        # on kickoff having written item_no into details, which it didn't
+        # in the original Step 5 Phase A audit shape). Architect live test
+        # 2026-06-28: "batch_not_found" was the symptom of this depencency.
+        item = await get_delivery_item(delivery_item_id)
+        if item is None:
+            item_row_missing += 1
+            continue
+        # Prefer the live row's item_no; fall back to details.item_no (added
+        # 2026-06-28 forward) only if the row doesn't expose it.
+        item_no_val: int | None
+        raw_from_row = getattr(item, "item_no", None)
+        raw_from_details = details.get("item_no")
         try:
-            item_no_val = int(item_no_raw) if item_no_raw is not None else None
+            if raw_from_row is not None:
+                item_no_val = int(raw_from_row)
+            elif raw_from_details is not None:
+                item_no_val = int(raw_from_details)
+            else:
+                item_no_val = None
         except (ValueError, TypeError):
             item_no_val = None
         if item_no_val is None:
+            no_item_no += 1
             continue
 
-        # Hydrate owner identity from the current delivery_item row so the
-        # sender_match check uses live values (not the snapshot at outreach
-        # time, which could lag if owner was reassigned mid-window).
-        item = await get_delivery_item(delivery_item_id)
-        if item is None:
-            continue
         matched.append({
             "item_no":              item_no_val,
             "delivery_item_id":     delivery_item_id,
@@ -474,4 +496,12 @@ async def _lookup_batch_items(batch_id: str) -> list[dict[str, Any]]:
             "tg_email_group_alias": getattr(item, "tg_email_group_alias", None)
                                     or getattr(item, "email_group_alias", None),
         })
+
+    if not matched:
+        _log.info(
+            "owner_reply lookup empty: batch=%s scanned=%d parse_failed=%d "
+            "no_delivery_item_id=%d no_item_no=%d item_row_missing=%d total_audit_rows=%d",
+            batch_id, scanned, parse_failed, no_delivery_item_id,
+            no_item_no, item_row_missing, len(rows),
+        )
     return matched
