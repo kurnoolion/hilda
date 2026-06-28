@@ -196,6 +196,33 @@ class PostgresStorage:
     def update_delivery_item(self, item_id: str, fields: dict[str, Any]) -> None:
         return run_async_sync(lambda: update_delivery_item(item_id, fields))
 
+    def write_delivery_state(
+        self,
+        *,
+        delivery_item_id: str,
+        new_state: Any,            # DeliveryState enum
+        modified_at: Any,          # datetime
+        modified_by: str | None = None,
+    ) -> None:
+        """No-op stub on PostgresStorage for the Ph-1 cascade.
+
+        tracker.transitions.update_delivery_state calls this alongside
+        update_delivery_item to record a state-history audit row in a
+        separate table. That table isn't yet wired in storage (deferred);
+        the current-state column on delivery_item IS already persisted by
+        update_delivery_item via field_updates['delivery_state'], so this
+        no-op keeps the transition cascade unblocked. State-history audit
+        will land when a state_transition_log ORM table + ops are added.
+
+        Architect Step 4 unblock 2026-06-28: prior AttributeError
+        'PostgresStorage object has no attribute write_delivery_state'
+        crashed every kickoff_collection NS->Open + every downstream
+        UpdateState Open->Outreach Sent, breaking the cascade midway
+        between send_initial_outreach (already written) and the
+        state-transition audit.
+        """
+        return None
+
     def list_items_for_milestone(
         self, milestone_id: str, states: list[str] | None = None
     ) -> list[DeliveryItemBase]:
