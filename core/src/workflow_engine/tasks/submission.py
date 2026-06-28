@@ -117,12 +117,15 @@ def start_item_collection_task(
     deps = get_task_deps()
     target_state = params.get("target_state", "Outreach Sent")
     delivery_item_id = event_context.get("delivery_item_id")
-    if delivery_item_id is None:
-        raise ValueError("START_ITEM_COLLECTION requires delivery_item_id in event_context")
 
     # ---- Collection-started gate ----
+    # Gate FIRST, strict delivery_item_id check after. Reason: SP-alert-driven
+    # OwnerReassigned events don't carry delivery_item_id (parser only knows
+    # customer_id + milestone_id + item_no; natural-key resolution is deferred
+    # work). The gate's "no snapshot -> pre_kickoff" branch correctly defers
+    # in that case. Only post-kickoff invocations need the strict check.
     item_snapshot: Any = None
-    if deps.storage is not None:
+    if delivery_item_id and deps.storage is not None:
         try:
             item_snapshot = deps.storage.get_delivery_item(delivery_item_id)
         except Exception as exc:  # noqa: BLE001
@@ -157,6 +160,10 @@ def start_item_collection_task(
             "target_state":     target_state,
             "outcome":          "deferred_collection_not_started",
         }
+
+    # Post-gate: real state transition requires a resolved item id.
+    if delivery_item_id is None:
+        raise ValueError("START_ITEM_COLLECTION requires delivery_item_id in event_context")
 
     deps.audit.write_communication_log(
         action_type="start_item_collection",
