@@ -106,8 +106,15 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
 
     candidate_items = _widen_candidates_for_router(deps, batch_items)
 
+    # All items in a batch share customer_id by construction (batch is owner-
+    # scoped, and owners are TG-scoped within one customer). Pick first.
+    customer_id = (
+        (candidate_items[0].get("customer_id") if candidate_items else None)
+        or ""
+    )
+
     # Construct router in Ph-1 first-pass mode.
-    router = _build_ph1_router(deps)
+    router = _build_ph1_router(deps, customer_id=customer_id)
     if router is None:
         await _audit(deps, "process_inbound_attachments_router_unavailable",
                      None, {
@@ -250,27 +257,57 @@ class _AsyncStorageShim:
         return await _f(delivery_item_id, doc_type)
 
 
-def _build_ph1_router(deps):
+def _resolve_doc_type_rules_path(customer_id: str):
+    """Resolve doc_type_filename_rules.yaml per architect direction 2026-06-29.
+
+    Lookup order (first existing wins):
+      1. customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml  (canonical per [D-091])
+      2. /app/customizations/template_schemas/<customer_id>/doc_type_filename_rules.yaml  (container bind-mount path)
+      3. core/src/email_service/default_doc_type_rules.yaml                          (default; dev path)
+      4. /app/core/src/email_service/default_doc_type_rules.yaml                      (default; container path)
+
+    Returns the first existing Path, or the default path (which may or may not
+    exist -- router opens it lazily and falls back to UNRESOLVED classification
+    on read failure).
+    """
+    from pathlib import Path
+    candidates = []
+    if customer_id:
+        candidates.extend([
+            Path(f"customizations/template_schemas/{customer_id}/doc_type_filename_rules.yaml"),
+            Path(f"/app/customizations/template_schemas/{customer_id}/doc_type_filename_rules.yaml"),
+        ])
+    candidates.extend([
+        Path("core/src/email_service/default_doc_type_rules.yaml"),
+        Path("/app/core/src/email_service/default_doc_type_rules.yaml"),
+    ])
+    for p in candidates:
+        if p.exists():
+            return p
+    # None exist; return the last (default container path); router will
+    # surface the read failure via UNRESOLVED + warning log.
+    return candidates[-1]
+
+
+def _build_ph1_router(deps, *, customer_id: str = ""):
     """Construct Fr52AttachmentRouter in Ph-1 first-pass mode (substring only).
     Returns None when prerequisites unavailable.
 
     Storage arg: passes an _AsyncStorageShim (NOT deps.storage) per the
     protocol-mismatch fix 2026-06-29. The shim async-wraps the 2 read ops
     the router awaits internally.
+
+    Rules path: resolves per-customer via _resolve_doc_type_rules_path per
+    architect direction 2026-06-29 -- previously hardcoded to default rules,
+    which silently bypassed customer-specific classification rules.
     """
     try:
-        from pathlib import Path
         from core.src.email_service.inbound.attachment_router import Fr52AttachmentRouter
-        # Default doc_type filename rules live with email_service. Customer-
-        # specific override via customer.yaml customizations is Ph-2.
-        rules_path = Path(
-            "/app/core/src/email_service/default_doc_type_rules.yaml"
+        rules_path = _resolve_doc_type_rules_path(customer_id)
+        _log.info(
+            "process_inbound_attachments: doc_type_rules_path=%s customer=%s exists=%s",
+            rules_path, customer_id or "(none)", rules_path.exists(),
         )
-        if not rules_path.exists():
-            # Dev / test path
-            rules_path = Path(
-                "core/src/email_service/default_doc_type_rules.yaml"
-            )
         return Fr52AttachmentRouter(
             storage=_AsyncStorageShim(),    # async-shim per 2026-06-29 fix
             llm=None,                       # Ph-1 no LLM ROUTE_ATTACHMENT
