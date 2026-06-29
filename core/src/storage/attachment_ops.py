@@ -34,8 +34,7 @@ import aiofiles
 from sqlalchemy import update
 
 from core.src.diagnostics.error_codes import PipelineError
-from core.src.storage.db import DeliveryItemTable
-from core.src.storage.engine import session_scope
+from core.src.storage.db import DeliveryItemTable, session_scope
 from core.src.storage.nsd import NSDPath
 
 __all__ = [
