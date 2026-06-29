@@ -198,8 +198,15 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
     item_description + item_name + item_type + tg_name. owner_reply's
     _lookup_batch_items returns a narrower shape; here we widen by
     fetching the full DeliveryItemBase per id.
+
+    Architect 2026-06-29 backup plan: if local row has NULL tg_path_id or
+    item_path_id, JIT-fetch from SP at attachment-processing time and
+    persist back. This catches items imported BEFORE the kickoff back-fill
+    (commit 02951ef) landed -- those rows would still be NULL on attachment
+    arrival without this safety net.
     """
     widened: list[dict] = []
+    items_by_id: dict[str, Any] = {}
     for it in batch_items:
         delivery_item_id = it.get("delivery_item_id")
         if not delivery_item_id:
@@ -210,6 +217,74 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
             item = None
         if item is None:
             continue
+        items_by_id[delivery_item_id] = item
+
+    # JIT back-fill: if any item is missing tg_path_id or item_path_id, do
+    # ONE SP batch read for the whole milestone+device and patch local rows.
+    # Best-effort -- on SP failure we fall back to tg_name + item_no
+    # synthesized paths so the cascade keeps moving (the fallback was the
+    # previous behaviour; preserving it for robustness).
+    missing = [
+        (item_id, item) for item_id, item in items_by_id.items()
+        if not getattr(item, "tg_path_id", None) or not getattr(item, "item_path_id", None)
+    ]
+    if missing and deps.sp_writer is not None:
+        try:
+            from core.src.sharepoint_integration.config import ListScope
+            # All items in one batch share customer_id + milestone_id +
+            # device_id (architect-confirmed batch scoping).
+            sample = missing[0][1]
+            customer_id = getattr(sample, "customer_id", None)
+            milestone_id = getattr(sample, "milestone_id", None)
+            device_id = getattr(sample, "device_id", None)
+            if customer_id and milestone_id and device_id:
+                rows = deps.sp_writer.get_items(
+                    entity="delivery_items",
+                    scope=ListScope(customer_id=customer_id),
+                    canonical_filters={
+                        "milestone_id":  milestone_id,
+                        "project_model": device_id,
+                    },
+                )
+                sp_by_item_no = {r.get("item_no"): r for r in rows if r.get("item_no") is not None}
+                backfilled = 0
+                for item_id, item in missing:
+                    sp_row = sp_by_item_no.get(getattr(item, "item_no", None))
+                    if not sp_row:
+                        continue
+                    updates: dict[str, Any] = {}
+                    sp_tg_path_id = sp_row.get("tg_path_id")
+                    sp_item_path_id = sp_row.get("item_path_id")
+                    if sp_tg_path_id and not getattr(item, "tg_path_id", None):
+                        updates["tg_path_id"] = sp_tg_path_id
+                    if sp_item_path_id and not getattr(item, "item_path_id", None):
+                        updates["item_path_id"] = sp_item_path_id
+                    if updates:
+                        try:
+                            deps.storage.update_delivery_item(item_id, updates)
+                            # Refresh in-memory model so the widening below
+                            # picks up the new values immediately.
+                            for k, v in updates.items():
+                                setattr(item, k, v)
+                            backfilled += 1
+                        except Exception as exc:  # noqa: BLE001
+                            _log.warning(
+                                "JIT path-fields back-fill failed for item=%s: %s",
+                                item_id, type(exc).__name__,
+                            )
+                if backfilled:
+                    _log.info(
+                        "process_inbound_attachments: JIT-backfilled tg_path_id/"
+                        "item_path_id for %d/%d items missing them",
+                        backfilled, len(missing),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "process_inbound_attachments: JIT path-fields SP fetch failed: %s",
+                type(exc).__name__,
+            )
+
+    for delivery_item_id, item in items_by_id.items():
         widened.append({
             "item_id":               delivery_item_id,
             "item_no":               getattr(item, "item_no", None),
