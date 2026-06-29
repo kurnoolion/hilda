@@ -227,12 +227,18 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
     # the test flow starts from OutreachSent (skipping kickoff back-fill),
     # so existing items' NULL item_description never gets refreshed unless
     # we do it here at attachment time.
+    # Also back-fill doc_count + review_required which the SP_ALERT body
+    # parse doesn't carry today. Same SP read covers all 5 fields.
+    # Architect 2026-06-29: "postgres should pull doc_count, review_required
+    # fields from SP - can you please check".
     missing = [
         (item_id, item) for item_id, item in items_by_id.items()
         if (
             not getattr(item, "tg_path_id", None)
             or not getattr(item, "item_path_id", None)
             or getattr(item, "item_description", None) in (None, [], "")
+            or getattr(item, "doc_count", None) in (None, 0)
+            or getattr(item, "review_required", None) is None
         )
     ]
     if missing and deps.sp_writer is not None:
@@ -263,6 +269,8 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
                     sp_tg_path_id = sp_row.get("tg_path_id")
                     sp_item_path_id = sp_row.get("item_path_id")
                     sp_item_description_raw = sp_row.get("item_description")
+                    sp_doc_count = sp_row.get("doc_count")
+                    sp_review_required = sp_row.get("review_required")
                     if sp_tg_path_id and not getattr(item, "tg_path_id", None):
                         updates["tg_path_id"] = sp_tg_path_id
                     if sp_item_path_id and not getattr(item, "item_path_id", None):
@@ -280,6 +288,20 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
                         parsed = _parse_item_description(sp_item_description_raw)
                         if parsed is not None:
                             updates["item_description"] = parsed
+                    # doc_count: int field on SP; back-fill when local is 0/None.
+                    # SP may return as int or string; coerce.
+                    if sp_doc_count is not None and getattr(item, "doc_count", None) in (None, 0):
+                        try:
+                            updates["doc_count"] = int(sp_doc_count)
+                        except (TypeError, ValueError):
+                            pass
+                    # review_required: Yes/No Choice on SP, may arrive as bool
+                    # or string. Coerce defensively.
+                    if sp_review_required is not None and getattr(item, "review_required", None) is None:
+                        if isinstance(sp_review_required, bool):
+                            updates["review_required"] = sp_review_required
+                        elif isinstance(sp_review_required, str):
+                            updates["review_required"] = sp_review_required.strip().lower() in ("yes", "true", "1")
                     if updates:
                         try:
                             deps.storage.update_delivery_item(item_id, updates)

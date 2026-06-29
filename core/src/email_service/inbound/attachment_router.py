@@ -239,20 +239,27 @@ class Fr52AttachmentRouter:
             and primary_item_dict.get("item_type") != ItemType.DEFAULT.value
         )
 
-        # Ph-1 first pass per architect 2026-06-29: skip Step C entirely.
-        # Slug + rev_number stay None; Step D picks staged_revision path.
-        # Ph-2 multi-revision per [D-066] will re-enable this block.
-        if self._ph1_first_pass_substring_only:
-            gate_passes = False
-
+        # Ph-1 first pass per architect 2026-06-29 -- corrected 2026-06-29
+        # (post live-test bug discovery):
+        # Step C MULTI-REVISION lookup (existing-slug resolution + LLM
+        # CLASSIFY_DOC) is Ph-2. Ph-1 always treats files as NEW_DOCUMENT,
+        # rev=1, slug derived from filename. The earlier impl forced
+        # gate_passes=False which suppressed the NEW_DOCUMENT slug assignment
+        # too, sending classified files into _staged_classification path.
+        # Bug was: 'no multi-revision handling in Ph-1' got misread as
+        # 'no slug + rev assignment in Ph-1'; the actual requirement is
+        # 'no slug LOOKUP across prior revisions in Ph-1'.
         if gate_passes and primary_item is not None:
-            # Step 1 slug match (Step 2/3 LLM CLASSIFY_DOC is Ph-2)
-            try:
-                slugs = await self._storage.find_doc_id_slugs_for_item(
-                    primary_item.item_id, DocType(doc_type_value)
-                )
-            except Exception:
-                slugs = []
+            slugs: list = []
+            if not self._ph1_first_pass_substring_only:
+                # Ph-2: look up existing slugs for this (item, doc_type)
+                # to determine if this is a new revision of an existing doc.
+                try:
+                    slugs = await self._storage.find_doc_id_slugs_for_item(
+                        primary_item.item_id, DocType(doc_type_value)
+                    )
+                except Exception:
+                    slugs = []
             if not slugs:
                 # NEW_DOCUMENT short-circuit -- derive a slug from filename + rev1
                 doc_id_slug = self._slug_from_filename(attachment.filename)
