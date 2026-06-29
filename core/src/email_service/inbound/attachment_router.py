@@ -318,15 +318,26 @@ class Fr52AttachmentRouter:
         """Branch B: FR-52 5-step routing. Returns (matches, resolution)."""
         filename = (attachment.filename or "").lower()
 
-        # ---- Step B1: strict substring match ----
-        # item_description per FR-82 is nested list-of-lists; for Ph-1 first
-        # cut treat as a flat comma-separated tag list OR list of strings.
+        # ---- Step B1: strict substring match per FR-82 + architect 2026-06-29 ----
+        # item_description is list-of-lists with AND-of-OR semantics:
+        #   outer list = OR (any group matching is enough)
+        #   inner list = AND (every tag in the group must appear in filename)
+        # Examples:
+        #   [["Sustainability"]]                       -> match if filename contains "Sustainability"
+        #   [["SDoc"], ["Qualification", "Product"]]   -> match if filename contains "SDoc"
+        #                                                  OR (contains both "Qualification" AND "Product")
+        #   [["5G", "LC"]]                             -> match if filename contains both "5G" AND "LC"
+        # Earlier flat-AND impl was incorrect; broke architect live test 2026-06-29
+        # ("Sustainability" file didn't match item with [["Sustainability"]] tag).
         b1_matches: list[AttachmentItemMatch] = []
         for cand in candidate_items:
-            tags = self._extract_tags(cand.get("item_description"))
-            if not tags:
+            groups = self._extract_tag_groups(cand.get("item_description"))
+            if not groups:
                 continue
-            if all(t.lower() in filename for t in tags):
+            if any(
+                all(tag.lower() in filename for tag in group)
+                for group in groups
+            ):
                 b1_matches.append(
                     AttachmentItemMatch(
                         item_id=cand["item_id"],
@@ -435,29 +446,46 @@ class Fr52AttachmentRouter:
         return [], RoutingResolution.STAGED_DEFAULT
 
     @staticmethod
-    def _extract_tags(item_description: Any) -> list[str]:
-        """Extract flat tag list from FR-82 nested item_description.
+    def _extract_tag_groups(item_description: Any) -> list[list[str]]:
+        """Extract AND-of-OR tag groups from FR-82 nested item_description.
 
-        Accepted shapes (Ph-1 lenient):
-        - None / "" -> []
-        - "tag1,tag2,tag3" (comma-separated string)
-        - ["tag1", "tag2"] (flat list)
-        - [["tag1", "tag2"], ["tag3"]] (nested list-of-lists per FR-82) -- flattened
+        Architect semantics 2026-06-29:
+          outer list = OR  (any group matching is enough to route)
+          inner list = AND (every tag in the group must appear in filename)
+
+        Canonical shape: list[list[str]] (e.g. [["Sustainability"]] is one
+        group with one tag; [["SDoc"], ["Qualification", "Product"]] is two
+        groups: OR(AND("SDoc"), AND("Qualification","Product"))).
+
+        Lenient input shapes (Ph-1; SP serializers may emit any of these):
+        - None / "" / "null"                       -> []
+        - "tag1,tag2,tag3"  (legacy CSV)           -> [["tag1"], ["tag2"], ["tag3"]]
+                                                       (each tag becomes its own OR group;
+                                                        back-compat with flat string fields)
+        - ["tag1", "tag2"]  (flat list)            -> [["tag1"], ["tag2"]]
+                                                       (each tag becomes its own OR group)
+        - [["A", "B"], ["C"]]  (nested, canonical) -> [["A", "B"], ["C"]]
         """
         if not item_description:
             return []
         if isinstance(item_description, str):
-            return [t.strip() for t in item_description.split(",") if t.strip()]
+            # Legacy CSV: each tag becomes its own one-element AND group
+            # (so substring match is true if filename contains ANY of the tags)
+            return [[t.strip()] for t in item_description.split(",") if t.strip()]
         if isinstance(item_description, list):
-            tags: list[str] = []
+            groups: list[list[str]] = []
             for entry in item_description:
                 if isinstance(entry, str):
-                    tags.append(entry.strip())
+                    if entry.strip():
+                        groups.append([entry.strip()])
                 elif isinstance(entry, list):
-                    for sub in entry:
-                        if isinstance(sub, str):
-                            tags.append(sub.strip())
-            return [t for t in tags if t]
+                    inner = [
+                        s.strip() for s in entry
+                        if isinstance(s, str) and s.strip()
+                    ]
+                    if inner:
+                        groups.append(inner)
+            return groups
         return []
 
     @staticmethod
