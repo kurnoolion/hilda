@@ -303,9 +303,9 @@ async def _persist_routed_attachment(
     Returns counts for the caller's telemetry.
     """
     from core.src.storage.models import (
-        DocumentIndexRow, DocumentItemAssociation,
+        DocumentIndexRow, DocumentItemAssociation, NSDPathType,
     )
-    from core.src.template_schema.enums import IngestSource, NSDPathType, DocType
+    from core.src.template_schema.enums import IngestSource, DocType
 
     # Resolve NSD path. Choose constructor based on nsd_path_type + match count.
     nsd_path = _resolve_nsd_path(routed, attachment, candidate_items)
@@ -450,8 +450,8 @@ def _resolve_nsd_path(routed, attachment, candidate_items: list[dict]):
     """Map (RoutedAttachment.nsd_path_type, matches, item context) -> NSDPath.
     Returns None when prerequisite item context is missing.
     """
+    from core.src.storage.models import NSDPathType
     from core.src.storage.nsd import NSDPath
-    from core.src.template_schema.enums import NSDPathType
 
     primary_item = None
     if routed.matches:

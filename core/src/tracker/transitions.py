@@ -136,6 +136,16 @@ def _modified_by_of(event_context: dict[str, Any], trigger_source: TriggerSource
     return pm_id or "tpm_unknown"
 
 
+# HILDA-only fields that must NOT propagate to SP via _sp_writeback_field_updates.
+# These have no SP column mapping (intentionally HILDA-local per architect direction);
+# including them in canonical_fields passed to sp_writer.update_item triggers
+# SHP-E003 "Canonical field has no SP column mapping for entity" errors that
+# surfaced in the architect's live test 2026-06-29.
+_HILDA_ONLY_FIELDS = frozenset({
+    "owner_intent_closed_at",   # architect 2026-06-29 race-resolution; HILDA-only
+})
+
+
 def _sp_writeback_field_updates(
     *,
     sp_writer: SpWriter,
@@ -208,11 +218,23 @@ def _sp_writeback_field_updates(
         )
         return
 
+    # Strip HILDA-only fields (no SP column mapping per architect 2026-06-29).
+    # Caller's Postgres write already included them; SP just doesn't know them.
+    sp_field_updates = {
+        k: v for k, v in field_updates.items() if k not in _HILDA_ONLY_FIELDS
+    }
+    if not sp_field_updates:
+        logger.info(
+            "update_delivery_state: all field_updates are HILDA-only; "
+            "no SP writeback needed for item=%s", delivery_item_id,
+        )
+        return
+
     sp_writer.update_item(
         entity="delivery_items",
         scope=scope,
         item_id=str(sp_id_raw),
-        canonical_fields=field_updates,
+        canonical_fields=sp_field_updates,
     )
 
 
