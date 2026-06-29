@@ -68,6 +68,40 @@ def _to_int(value: str | None, default: int = 0) -> int:
         return default
 
 
+def _parse_item_description(raw: Any) -> list | None:
+    """Parse FR-82 item_description value into list-of-lists (AND-of-OR groups).
+
+    Architect 2026-06-29: SP list column type is 'Note' (multi-line text);
+    SP serializes the value as the literal Python/JSON representation, e.g.
+    [["Sustainability"]] or [['SDoc'],['Qualification','Product']]. In SP
+    alert email body_kvs this arrives as a string; via SP REST it MAY arrive
+    as the parsed list already (canonical_field map dependent).
+
+    Use ast.literal_eval to handle both single- and double-quoted forms
+    safely (json.loads rejects single quotes). Returns None for empty /
+    unparseable inputs; the Fr52 Step B1 matcher's _extract_tag_groups treats
+    None as 'skip this candidate' which is the desired behaviour.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        # Already parsed (e.g. via SP REST canonical_field map). Return as-is;
+        # _extract_tag_groups will normalize the shape.
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() in ("null", "none"):
+            return None
+        try:
+            import ast
+            value = ast.literal_eval(text)
+            if isinstance(value, list):
+                return value
+        except (ValueError, SyntaxError):
+            pass
+    return None
+
+
 def _build_delivery_item(
     *,
     customer_id: str,
@@ -137,6 +171,14 @@ def _build_delivery_item(
         target_folder=(body_kvs.get("target_folder") or None),
         # Path components per FR-78:
         path_id=body_kvs.get("path_id", f"item_{item_no}"),
+        tg_path_id=(body_kvs.get("tg_path_id") or None),
+        item_path_id=(body_kvs.get("item_path_id") or None),
+        # FR-82 item_description tags (AND-of-OR groups for FR-52 Step B1):
+        # parsed from SP's literal-text rendering of the Note column. Architect
+        # 2026-06-29: previously missing -> HILDA's local row had NULL tags ->
+        # substring matcher skipped every candidate -> attachments always
+        # landed in default_workitem (_unrouted).
+        item_description=_parse_item_description(body_kvs.get("item_description")),
         # FR-7 doc_count + sort_order:
         doc_count=_to_int(body_kvs.get("doc_count"), 1),
         sort_order=_to_int(body_kvs.get("sort_order"), item_no),
@@ -391,6 +433,41 @@ def kickoff_collection_task(
     # final fallback.
     owner_map = _resolve_owners_for_eligible(deps, customer_id, milestone_id, eligible)
 
+    # Back-fill metadata fields (item_description, tg_path_id, item_path_id)
+    # from SP to local row. Architect 2026-06-29: prior ADDED import code path
+    # didn't carry these, leaving Fr52 substring matcher blind. Refresh here
+    # at kickoff time -- one SP read already happened above for owner identity;
+    # we just persist 3 additional fields from the same response. Best-effort
+    # per-item; failures don't block kickoff.
+    backfilled = 0
+    for item in eligible:
+        item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
+        if not item_id:
+            continue
+        info = owner_map.get(item_id) or {}
+        updates: dict[str, Any] = {}
+        if info.get("item_description") is not None:
+            updates["item_description"] = info["item_description"]
+        if info.get("tg_path_id"):
+            updates["tg_path_id"] = info["tg_path_id"]
+        if info.get("item_path_id"):
+            updates["item_path_id"] = info["item_path_id"]
+        if not updates:
+            continue
+        try:
+            deps.storage.update_delivery_item(item_id, updates)
+            backfilled += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "kickoff_collection: metadata back-fill failed for item=%s: %s",
+                item_id, type(exc).__name__,
+            )
+    if backfilled:
+        logger.info(
+            "kickoff_collection: metadata back-filled from SP for %d/%d items",
+            backfilled, len(eligible),
+        )
+
     # Group eligible items by owner_corp_usa_email (preferred per [D-080]).
     # Items with no resolvable owner go into a __no_owner__ group -- they
     # still get state-transitioned but no email is sent for that group.
@@ -630,6 +707,13 @@ def _resolve_owners_for_eligible(
                 "owner_corp_email":     r.get("owner_corp_email"),
                 "owner_corp_id":        r.get("owner_corp_id"),
                 "owner_name":           r.get("owner_name"),
+                # Metadata fields back-filled at kickoff per architect 2026-06-29:
+                # initial ADDED import may have left these NULL (older code path);
+                # kickoff is the natural point to refresh from SP since the same
+                # SP batch read happens here anyway.
+                "item_description":     _parse_item_description(r.get("item_description")),
+                "tg_path_id":           r.get("tg_path_id"),
+                "item_path_id":         r.get("item_path_id"),
             }
     return out
 
