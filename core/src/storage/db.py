@@ -266,6 +266,13 @@ class DeliveryItemTable(Base):
     # PM-approval per [D-068]
     pm_approval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pm_approval_pm_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # owner_intent_closed_at -- see DeliveryItemBase docstring; persisted
+    # when owner replies "Closed" but doc_count_not_reached blocks transition.
+    # Reconcile rule auto-advances state when docs catch up. Architect
+    # 2026-06-29 race-resolution.
+    owner_intent_closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     # TPM-resolution per FR-83 / FR-87
     tpm_reassignment_target_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

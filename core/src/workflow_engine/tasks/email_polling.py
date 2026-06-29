@@ -272,17 +272,34 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
 
 
 def _enqueue_owner_reply(msg: Any) -> None:
-    """Build the serialisable payload + enqueue apply_owner_reply_task.
+    """Build the serialisable payload + enqueue apply_owner_reply_task AND
+    (when attachments present) process_inbound_attachments_task.
 
-    Lazy import keeps the polling task body callable when the owner_reply
-    task module fails to import (e.g. circular-import surprise in a degraded
-    deployment). InboundMessage is a frozen dataclass; we flatten the fields
-    that the task body needs back into an InboundMessage on the other side.
+    Both run in parallel per architect 2026-06-29 Q1 lock (option c). Race
+    on doc_count is reconciled via owner_intent_closed_at persistence
+    (apply_owner_reply sets it on guard_denied OwnerClosed; reconcile rule
+    catches it when doc_count_reached fires from this attachment task).
+
+    Attachments are serialized as dicts (InboundAttachment is a frozen
+    dataclass; Celery JSON serializes the dict shape cleanly).
     """
+    from core.src.workflow_engine.tasks.inbound_attachment import (
+        process_inbound_attachments_task,
+    )
     from core.src.workflow_engine.tasks.owner_reply import apply_owner_reply_task
 
     received_at = getattr(msg, "received_at", None)
-    payload: dict[str, Any] = {
+    attachments_raw = getattr(msg, "attachments", ()) or ()
+    attachments_payload: list[dict[str, Any]] = []
+    for a in attachments_raw:
+        attachments_payload.append({
+            "filename":     getattr(a, "filename", "") or "",
+            "content":      getattr(a, "content", b"") or b"",
+            "content_type": getattr(a, "content_type", "application/octet-stream"),
+            "file_hash":    getattr(a, "file_hash", "") or "",
+        })
+
+    base_payload: dict[str, Any] = {
         "message_id":   getattr(msg, "message_id", ""),
         "sender":       getattr(msg, "sender", "") or "",
         "to_addrs":     list(getattr(msg, "to_addrs", ()) or ()),
@@ -291,8 +308,14 @@ def _enqueue_owner_reply(msg: Any) -> None:
         "body_text":    getattr(msg, "body_text", "") or "",
         "body_html":    getattr(msg, "body_html", None),
         "received_at_iso": received_at.isoformat() if received_at else None,
-        # Attachments dropped from owner-reply payload Ph-1: the table-format
-        # reply is structural status, not document delivery. Doc attachments
-        # ride the separate FR-52 inbound routing path (Step 5.5).
     }
-    apply_owner_reply_task.delay(payload)
+
+    # Path 1: structural status -- table parse + per-row dispatch. Attachments
+    # are NOT in this payload; they go to the parallel task below.
+    apply_owner_reply_task.delay(base_payload)
+
+    # Path 2: per-attachment routing + storage write + AttachmentReceived
+    # event emission. Only enqueue when attachments exist.
+    if attachments_payload:
+        attach_payload = {**base_payload, "attachments": attachments_payload}
+        process_inbound_attachments_task.delay(attach_payload)

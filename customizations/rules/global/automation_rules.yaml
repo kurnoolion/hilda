@@ -144,6 +144,28 @@ rules:
       - kind: TriggerParser                               # FR-16 rule-based parser; runs AFTER defaults.yaml UpdateState chain
         params: {}
 
+  - rule_id: reconcile_owner_intent_on_state_change
+    # Architect 2026-06-29 race-resolution: owner may have replied "Closed"
+    # via the table while doc_count_not_reached blocked the OwnerClosed
+    # transition (guard_denied). apply_owner_reply persisted that intent as
+    # owner_intent_closed_at. When the final required doc arrives, defaults.yaml's
+    # advance_state_on_doc_count_reached rule advances state to DocumentReceived
+    # via AttachmentReceived trigger. The StateChange event fired AFTER that
+    # transition is the signal here -- chain another transition to OwnerClosed
+    # when the prior owner intent was persisted. Owner shouldn't have to
+    # re-confirm. tracker.transitions clears owner_intent_closed_at on
+    # OwnerClosed entry so this rule fires at most once per cycle. Using
+    # trigger=StateChange (not AttachmentReceived) avoids the RUL-W001
+    # collision with advance_state_on_doc_count_reached.
+    trigger: StateChange
+    condition:
+      and:
+        - { field: target_state,           op: eq,  value: DocumentReceived }
+        - { field: owner_intent_closed_at, op: neq, value: null }
+    actions:
+      - kind: UpdateState
+        params: { target_state: OwnerClosed }
+
   - rule_id: trigger_ai_review_on_review_required
     trigger: StateChange
     condition:

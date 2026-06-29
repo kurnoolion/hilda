@@ -315,6 +315,14 @@ class DeliveryItemBase(_Base):
     # PM-approval recording per [D-068]:
     pm_approval_at:                  datetime | None = None
     pm_approval_pm_id:               str | None      = None
+    # owner_intent_closed_at -- timestamp owner replied "Closed" while
+    # doc_count_reached was still false (guard_denied on OwnerClosed entry).
+    # Persisted so the reconcile_owner_intent_on_state_change rule can
+    # auto-advance to OwnerClosed when docs catch up. Cleared on:
+    #   - OwnerClosed entry (consumed by transition)
+    #   - subsequent owner reply status=Open (owner revokes intent)
+    # Architect 2026-06-29 race-resolution: "owner can open after closure".
+    owner_intent_closed_at:          datetime | None = None
     # TPM-resolution fields per FR-83 / FR-87:
     tpm_reassignment_target_item_id: int | None = None
     tpm_resolved_doc_type:           str | None = None   # LIST/Choice per architect direction 2026-06-21

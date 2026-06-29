@@ -240,6 +240,15 @@ def _build_field_updates(
         # Exit off-path: clear prior_delivery_state (resume to active).
         updates["prior_delivery_state"] = None
 
+    # ---- owner_intent_closed_at clearing on OwnerClosed entry ----
+    # Architect 2026-06-29 race-resolution: owner_intent_closed_at persists the
+    # owner's "Closed" reply when doc_count_not_reached guard-denied the
+    # transition. Once OwnerClosed is reached (either directly when docs were
+    # already in OR via the reconcile rule), the intent has been consumed and
+    # MUST be cleared so it doesn't re-fire later.
+    if target_state == DeliveryState.OWNER_CLOSED:
+        updates["owner_intent_closed_at"] = None
+
     # ---- pm_approval_at clearing discipline (defensive against stale approval) ----
     # Cleared on: (a) entry to UNDER_PM_REVIEW from any path -- fresh review cycle,
     # (b) rewind from SUBMITTED_TO_CUSTOMER, (c) DELAYED/BLOCKED return to UNDER_PM_REVIEW

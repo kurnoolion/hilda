@@ -239,3 +239,39 @@ class PostgresStorage:
         return run_async_sync(
             lambda: find_items_by_natural_key(customer_id, tg_name, item_no)
         )
+
+    # ----------------------------------------------------------------------
+    # Inbound attachment ops (Step 5.5 cascade, architect 2026-06-29)
+    # ----------------------------------------------------------------------
+
+    def add_document_index_row(self, row: Any) -> None:
+        """Sync wrapper around document_ops.add_document_index_row."""
+        from core.src.storage.document_ops import add_document_index_row as _add
+        return run_async_sync(lambda: _add(row))
+
+    def add_document_item_association(self, assoc: Any) -> None:
+        """Sync wrapper around document_ops.add_document_item_association."""
+        from core.src.storage.document_ops import add_document_item_association as _add
+        return run_async_sync(lambda: _add(assoc))
+
+    def get_document_index_row_by_hash(self, file_hash: str) -> Any:
+        """Sync wrapper for Step 0 dedup lookup (called by Fr52AttachmentRouter)."""
+        from core.src.storage.document_ops import get_document_index_row_by_hash as _get
+        return run_async_sync(lambda: _get(file_hash))
+
+    def find_doc_id_slugs_for_item(self, delivery_item_id: str, doc_type: Any) -> list[str]:
+        """Sync wrapper for Step C slug match (Ph-2 path; sync wrapper added now for completeness)."""
+        from core.src.storage.document_ops import find_doc_id_slugs_for_item as _find
+        return run_async_sync(lambda: _find(delivery_item_id, doc_type))
+
+    def write_attachment_bytes(self, nsd_path: Any, content: bytes) -> Any:
+        """Sync wrapper around attachment_ops.write_attachment_bytes."""
+        from core.src.storage.attachment_ops import write_attachment_bytes as _write
+        return run_async_sync(lambda: _write(nsd_path, content))
+
+    def increment_doc_count_received(
+        self, delivery_item_id: str, by: int = 1,
+    ) -> int:
+        """Sync wrapper around attachment_ops.increment_doc_count_received."""
+        from core.src.storage.attachment_ops import increment_doc_count_received as _inc
+        return run_async_sync(lambda: _inc(delivery_item_id, by=by))

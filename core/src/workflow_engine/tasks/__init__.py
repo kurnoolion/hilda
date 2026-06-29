@@ -20,6 +20,7 @@ from . import (  # noqa: F401
     email_polling,   # added 2026-06-27: periodic ews_receiver poll + dispatch
     escalation,
     milestone,
+    inbound_attachment,  # added 2026-06-29: Step 5.5 process_inbound_attachments task (FR-52/FR-85/FR-86)
     outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
     owner_reply,     # added 2026-06-28: Phase B apply_owner_reply task (HTML table parser)
     pm_approval,     # added 2026-06-28: Pattern A apply_pm_approval task (SP-authoritative mirror)
@@ -33,6 +34,7 @@ __all__ = [
     "email_polling",
     "escalation",
     "milestone",
+    "inbound_attachment",
     "outreach",
     "owner_reply",
     "pm_approval",

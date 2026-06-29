@@ -101,6 +101,10 @@ class TriggerDispatcher:
         "plm_id",
         # FR-28 OwnerStatusConfirmed + FR-7 doc-count derivation source:
         "doc_count_received",
+        # owner_intent_closed_at -- persisted owner "Closed" intent when
+        # doc_count_not_reached blocked transition. Promoted so reconcile rule
+        # condition can reference it (architect 2026-06-29 race-resolution).
+        "owner_intent_closed_at",
     )
 
     @staticmethod

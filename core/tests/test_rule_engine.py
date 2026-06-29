@@ -431,8 +431,11 @@ class TestLoader:
         #   added import_deliverable_tracker_on_sp_add +
         #   kickoff_collection_on_milestone_started for the alert-driven listener
         #   = net +1 over the prior 16 + 2 polling = 18 baseline -> 19 now.
-        # Total: 6 + 19 = 25.
-        assert len(rs.all_rules()) == 25
+        # Total: 6 + 19 = 25. Bumped to 26 on 2026-06-29 architect Step 5.5:
+        # added reconcile_owner_intent_on_doc_count_reached to automation_rules
+        # (race-resolution rule per Q1 design pass -- catches owner Closed
+        # intent persisted when doc_count_not_reached guard-denied earlier).
+        assert len(rs.all_rules()) == 26
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):

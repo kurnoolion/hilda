@@ -133,6 +133,7 @@ class Fr52AttachmentRouter:
         llm_confidence_threshold: float = 0.75,
         plm_upload_enabled: bool = True,
         review_required_enabled: bool = True,
+        ph1_first_pass_substring_only: bool = False,
     ) -> None:
         self._storage = storage
         self._llm = llm
@@ -145,6 +146,13 @@ class Fr52AttachmentRouter:
         self._llm_confidence_threshold = llm_confidence_threshold
         self._plm_upload_enabled = plm_upload_enabled
         self._review_required_enabled = review_required_enabled
+        # Ph-1 first-pass scope per architect 2026-06-29:
+        #   - Branch B: ONLY Step B1 (substring on item_description); skip
+        #     fuzzy/folder/LLM/default-WI fallback. Returns empty matches when
+        #     B1 doesn't match -> Step D routes to unrouted NSD path.
+        #   - Step C (new-vs-revision): skipped (Ph-2 multi-revision per [D-066]).
+        #     Slug + rev_number stay None; Step D picks staged_revision path.
+        self._ph1_first_pass_substring_only = ph1_first_pass_substring_only
         self._rules_cache: dict[str, list[re.Pattern[str]]] | None = None
 
     def _rules(self) -> dict[str, list[re.Pattern[str]]]:
@@ -230,6 +238,12 @@ class Fr52AttachmentRouter:
             and primary_item_dict is not None
             and primary_item_dict.get("item_type") != ItemType.DEFAULT.value
         )
+
+        # Ph-1 first pass per architect 2026-06-29: skip Step C entirely.
+        # Slug + rev_number stay None; Step D picks staged_revision path.
+        # Ph-2 multi-revision per [D-066] will re-enable this block.
+        if self._ph1_first_pass_substring_only:
+            gate_passes = False
 
         if gate_passes and primary_item is not None:
             # Step 1 slug match (Step 2/3 LLM CLASSIFY_DOC is Ph-2)
@@ -322,6 +336,12 @@ class Fr52AttachmentRouter:
                 )
         if b1_matches:
             return b1_matches, RoutingResolution.SUBSTRING_MATCH
+
+        # Ph-1 first pass per architect 2026-06-29: substring-only mode.
+        # Skip B2-B5 entirely; return empty matches (Step D routes to
+        # unrouted NSD path via _select_nsd_path_type fallback).
+        if self._ph1_first_pass_substring_only:
+            return [], RoutingResolution.SUBSTRING_MATCH
 
         # ---- Step B2: fuzzy match via rapidfuzz ----
         b2_matches: list[AttachmentItemMatch] = []

@@ -237,6 +237,19 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
 
         symbol = upd.delivery_state
         if symbol == "OPEN":
+            # Owner reply status=Open also REVOKES any prior owner_intent_closed_at
+            # per architect 2026-06-29: "owner can open after closure". Clear the
+            # intent so the reconcile rule (reconcile_owner_intent_on_doc_count_reached)
+            # doesn't auto-advance the item later.
+            try:
+                deps.storage.update_delivery_item(
+                    delivery_item_id, {"owner_intent_closed_at": None}
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "owner_reply: failed to clear owner_intent_closed_at for "
+                    "item=%s: %s", delivery_item_id, str(exc)[:120],
+                )
             if upd.owner_status_note:
                 # Note-only path: persist owner_status_note, no transition.
                 # Per architect 2026-06-28 design table.
@@ -281,6 +294,22 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
                 notes_written += 1
         elif outcome == "guard_denied":
             guard_denied += 1
+            # Persist owner's intent so the reconcile rule can auto-advance
+            # OwnerClosed later when docs catch up to doc_count.
+            # Architect 2026-06-29 race-resolution: owner shouldn't have to
+            # re-confirm Closed after submitting the last required doc.
+            if target_state == DeliveryState.OWNER_CLOSED:
+                from datetime import datetime, timezone
+                try:
+                    deps.storage.update_delivery_item(
+                        delivery_item_id,
+                        {"owner_intent_closed_at": datetime.now(timezone.utc)},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning(
+                        "owner_reply: failed to persist owner_intent_closed_at "
+                        "for item=%s: %s", delivery_item_id, str(exc)[:120],
+                    )
         elif outcome == "illegal_transition":
             illegal += 1
         # no_op_idempotent counts as success-equivalent for telemetry purposes
