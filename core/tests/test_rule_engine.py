@@ -420,12 +420,19 @@ class TestLoader:
 
     def test_repo_sample_global_defaults_loads(self):
         rs = RuleSet.load(REPO_ROOT / "customizations" / "rules")
-        # 6 rules from defaults.yaml (Worked Examples 1-3) + 18 rules from
-        # automation_rules.yaml (Ph-1 end-to-end test scaffold; 3 FR-87 rules
-        # REMOVED per [D-122] dashboard-direct-POST; advance_to_ai_reviewed_on_pass
-        # REMOVED per architect lock 2026-06-26 -- AI review tracks via review_status
-        # field, not delivery_state) = 24 total.
-        assert len(rs.all_rules()) == 24
+        # defaults.yaml: 5 trigger_action rules (Worked Examples 1-3 +
+        # advance_state_on_doc_count_reached + review_on_supplementary_attachment)
+        # + 1 polling_schedule (default_polling_schedule) = 6.
+        # automation_rules.yaml: 17 trigger_action rules + 2 polling_schedules = 19.
+        #   automation_rules history: was 18 then 16 (removed FR-87 + AI-pass);
+        #   architect 2026-06-28 changes: removed
+        #   instantiate_default_work_item_on_tracker_created per [D-118]/[D-135]
+        #   strict-boundary (SP UI engineer creates Default WI; HILDA imports);
+        #   added import_deliverable_tracker_on_sp_add +
+        #   kickoff_collection_on_milestone_started for the alert-driven listener
+        #   = net +1 over the prior 16 + 2 polling = 18 baseline -> 19 now.
+        # Total: 6 + 19 = 25.
+        assert len(rs.all_rules()) == 25
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):

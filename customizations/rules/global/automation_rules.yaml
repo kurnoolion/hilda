@@ -81,7 +81,7 @@ rules:
         - { field: delivery_state, op: eq, value: "OutreachSent" }
     actions:
       - kind: SendReminder
-        params: { template: standard_owner_reminder_1, channel: email }
+        params: { template: standard_owner_reminder_1, channel: email, reminder_count: 1 }
 
   - rule_id: send_second_reminder_on_no_contact
     trigger: LastContactThreshold
@@ -92,7 +92,7 @@ rules:
         - { field: delivery_state, op: eq, value: "OutreachSent" }
     actions:
       - kind: SendReminder
-        params: { template: standard_owner_reminder_2, channel: email }
+        params: { template: standard_owner_reminder_2, channel: email, reminder_count: 2 }
 
   # =====================================================================================
   # 3. ESCALATION -- Q-M4 architect lock 2026-06-25.
@@ -110,7 +110,7 @@ rules:
       - kind: Escalate
         params:
           channel: corp_messenger
-          reason: post_reminder
+          reason: reminder_cadence_exhausted
           escalation_template: tg_lead_escalation
       - kind: NotifyPM
         params: { urgency: high, reason: cross_channel_escalation }
@@ -224,15 +224,13 @@ rules:
         params: {}
 
   # =====================================================================================
-  # 5. TRACKER CREATION -- FR-78 default work-item auto-instantiation.
+  # 5. TRACKER CREATION -- RETIRED 2026-06-28 per [D-118] / [D-135] strict-boundary
+  # cascade. The prior rule instantiate_default_work_item_on_tracker_created fired
+  # InstantiateDefaultWorkItem on local TrackerCreated; with the strict boundary
+  # SP UI engineer creates ALL SP rows (including the Default WI) and HILDA
+  # imports each via import_deliverable_tracker_on_sp_add (Section 9 below).
+  # No HILDA-driven Default WI auto-instantiation in Ph-1.
   # =====================================================================================
-
-  - rule_id: instantiate_default_work_item_on_tracker_created
-    trigger: TrackerCreated
-    condition: null
-    actions:
-      - kind: InstantiateDefaultWorkItem                  # FR-78 per [D-053] -- default-item shape
-        params: {}
 
   # =====================================================================================
   # 6. CLOSE ALL ITEMS -- FR-64 Option (b) per [D-100] HILDA-owned per-item cascade.
@@ -279,6 +277,35 @@ rules:
     actions:
       - kind: NotifyHildaOps                              # FR-75 -- routes to HildaOpsAlert (NOT NotifyPM)
         params: { urgency: high, reason: credential_expired }
+
+  # =====================================================================================
+  # 9. SP-ALERT-DRIVEN TRACKER IMPORT + KICKOFF -- [D-118] / [D-135] strict-boundary cascade.
+  # SP UI engineer creates SP rows (Milestones + Deliverables + Default WI);
+  # HILDA reacts to ADDED alerts (import each Deliverable into local storage) +
+  # CHANGED alerts with milestone_collection_started_at delta (fire kickoff).
+  # =====================================================================================
+
+  - rule_id: import_deliverable_tracker_on_sp_add
+    trigger: ItemModified
+    sub_trigger: added
+    condition:
+      field: list_name
+      op: eq
+      value: Deliverables                                 # scope to Deliverables list (not Milestones/Projects)
+    actions:
+      - kind: ImportDeliverableTracker                    # task reads body_kvs + routing_key from event.derived_fields
+        params: {}
+
+  - rule_id: kickoff_collection_on_milestone_started
+    trigger: ItemModified
+    sub_trigger: changed
+    condition:
+      and:
+        - { field: list_name,                       op: eq,  value: Milestones }
+        - { field: milestone_collection_started_at, op: neq, value: null }
+    actions:
+      - kind: KickoffCollection                           # groups items by owner; sends batch outreach; transitions NS->Open->OutreachSent
+        params: {}
 
 # =====================================================================================
 # POLLING SCHEDULES -- FR-23 (email IMAP) + FR-26 (corp PLM) deadline-tiered.
