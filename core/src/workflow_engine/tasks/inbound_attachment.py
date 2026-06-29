@@ -219,14 +219,21 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
             continue
         items_by_id[delivery_item_id] = item
 
-    # JIT back-fill: if any item is missing tg_path_id or item_path_id, do
-    # ONE SP batch read for the whole milestone+device and patch local rows.
-    # Best-effort -- on SP failure we fall back to tg_name + item_no
-    # synthesized paths so the cascade keeps moving (the fallback was the
-    # previous behaviour; preserving it for robustness).
+    # JIT back-fill: if any item is missing tg_path_id, item_path_id, OR
+    # item_description, do ONE SP batch read for the whole milestone+device
+    # and patch local rows. Best-effort -- on SP failure we fall back to
+    # tg_name + item_no synthesized paths and skip routing for that item.
+    # Architect 2026-06-29: extended to include item_description because
+    # the test flow starts from OutreachSent (skipping kickoff back-fill),
+    # so existing items' NULL item_description never gets refreshed unless
+    # we do it here at attachment time.
     missing = [
         (item_id, item) for item_id, item in items_by_id.items()
-        if not getattr(item, "tg_path_id", None) or not getattr(item, "item_path_id", None)
+        if (
+            not getattr(item, "tg_path_id", None)
+            or not getattr(item, "item_path_id", None)
+            or getattr(item, "item_description", None) in (None, [], "")
+        )
     ]
     if missing and deps.sp_writer is not None:
         try:
@@ -255,10 +262,24 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
                     updates: dict[str, Any] = {}
                     sp_tg_path_id = sp_row.get("tg_path_id")
                     sp_item_path_id = sp_row.get("item_path_id")
+                    sp_item_description_raw = sp_row.get("item_description")
                     if sp_tg_path_id and not getattr(item, "tg_path_id", None):
                         updates["tg_path_id"] = sp_tg_path_id
                     if sp_item_path_id and not getattr(item, "item_path_id", None):
                         updates["item_path_id"] = sp_item_path_id
+                    if (
+                        sp_item_description_raw is not None
+                        and getattr(item, "item_description", None) in (None, [], "")
+                    ):
+                        # Reuse the same parser as sp_alert_imports for shape
+                        # consistency. ast.literal_eval handles both list and
+                        # string-of-list inputs.
+                        from core.src.workflow_engine.tasks.sp_alert_imports import (
+                            _parse_item_description,
+                        )
+                        parsed = _parse_item_description(sp_item_description_raw)
+                        if parsed is not None:
+                            updates["item_description"] = parsed
                     if updates:
                         try:
                             deps.storage.update_delivery_item(item_id, updates)
