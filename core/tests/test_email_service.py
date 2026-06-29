@@ -1191,6 +1191,49 @@ class TestSpAlertParserRegression:
         # Customer_id extracted from body `carrier:` field (Milestones global list):
         assert parsed.routing_key.list_suffix == "MMK"
 
+    # Architect 2026-06-29: SP renders dash-less Edited form for direct-UI edits:
+    #   "doc_count: 0 1 Edited"   -- key has colon, value has BOTH old + new tokens
+    # Distinct from the dash-form "key: - <new> Edited" handled by other tests.
+    # Parser must capture key without colon and value=<new_value only>.
+    def test_edited_dash_less_form_takes_last_token(self):
+        """SP CHANGE alert with direct-UI edit produces dash-less Edited
+        value: 'doc_count: 0 1 Edited' (old=0, new=1). Parser must extract
+        value=1 (last whitespace-separated token), key='doc_count' (no colon).
+        Architect live test 2026-06-29: before this regression-guard, the
+        whole '0 1' string was stored, breaking int coercion for doc_count
+        + similar numeric/choice fields (review_required, sort_order, etc.).
+        """
+        body = (
+            "P1-2 has been changed\r\n\r\n"
+            "Title    Item 2\r\n\r\n"
+            "carrier    MMK\r\n\r\n"
+            "project_id    2350\r\n\r\n"
+            "project_model    SM-S671U1\r\n\r\n"
+            "item_no    2\r\n\r\n"
+            "doc_count: 0 1 Edited\r\n\r\n"
+            "review_required: No Yes Edited\r\n\r\n"
+            "sort_order    1\r\n"
+        )
+        msg = _msg(
+            subject="Deliverables_MMK - P1-2",
+            body=body,
+            message_id="<dash-less-edited-001@samsung.com>",
+        )
+        parser = SpAlertParser(storage=_make_fake_sp_storage())
+        parsed = parser.parse(msg)
+        assert parsed is not None
+        # Key without colon -- caller can use body_kvs.get("doc_count"):
+        assert "doc_count" in parsed.body_kvs
+        assert "doc_count:" not in parsed.body_kvs
+        # Value = NEW value (1), not "0 1":
+        assert parsed.body_kvs["doc_count"] == "1"
+        assert int(parsed.body_kvs["doc_count"]) == 1  # round-trips as int
+        # Same treatment for other dash-less Edited fields:
+        assert parsed.body_kvs["review_required"] == "Yes"
+        # Edited fields surface in field_deltas with the NEW value only:
+        assert parsed.field_deltas.get("doc_count") == "1"
+        assert parsed.field_deltas.get("review_required") == "Yes"
+
     def test_single_space_does_not_match_kv(self):
         """Sentence-style text with single inter-word spaces must NOT be
         misparsed as key:value (regression for the multi-space tolerance fix).

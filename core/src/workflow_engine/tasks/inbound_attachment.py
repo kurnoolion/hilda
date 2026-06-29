@@ -288,13 +288,27 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
                         parsed = _parse_item_description(sp_item_description_raw)
                         if parsed is not None:
                             updates["item_description"] = parsed
-                    # doc_count: int field on SP; back-fill when local is 0/None.
-                    # SP may return as int or string; coerce.
-                    if sp_doc_count is not None and getattr(item, "doc_count", None) in (None, 0):
-                        try:
-                            updates["doc_count"] = int(sp_doc_count)
-                        except (TypeError, ValueError):
-                            pass
+                    # doc_count back-fill per architect 2026-06-29 protection rule:
+                    # "any non-zero value in postgres is final; never write 0".
+                    # Reason: subsequent SP CHANGE alerts (e.g. on state change
+                    # NotStarted->Open->OutreachSent) may re-read the row and
+                    # return doc_count=0 if SP hasn't propagated the prior edit
+                    # to its alert payload yet. Writing 0 over a known-good
+                    # non-zero would corrupt the state machine's doc_count_reached
+                    # gate.
+                    # Rule: write doc_count only when (a) SP returns non-zero AND
+                    # (b) local is None or 0. SP returning 0 is always ignored.
+                    try:
+                        sp_doc_count_int = int(sp_doc_count) if sp_doc_count is not None else None
+                    except (TypeError, ValueError):
+                        sp_doc_count_int = None
+                    local_doc_count = getattr(item, "doc_count", None)
+                    if (
+                        sp_doc_count_int is not None
+                        and sp_doc_count_int > 0
+                        and local_doc_count in (None, 0)
+                    ):
+                        updates["doc_count"] = sp_doc_count_int
                     # review_required: Yes/No Choice on SP, may arrive as bool
                     # or string. Coerce defensively.
                     if sp_review_required is not None and getattr(item, "review_required", None) is None:
