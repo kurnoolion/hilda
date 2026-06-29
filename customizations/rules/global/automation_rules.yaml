@@ -181,15 +181,27 @@ rules:
         params: { target_state: OwnerClosed }
 
   - rule_id: advance_to_ready_for_submission_on_pm_approval
-    trigger: PMApproval
+    # Pattern A (SP-authoritative) per architect 2026-06-28 design lock + [D-068]:
+    # SP UI engineer's PM Approval button atomically writes 3 fields
+    # (delivery_state + pm_approval_at + pm_approval_pm_id) in one SP
+    # transaction. Dispatcher refines sub_trigger 'changed' -> 'PmApproved'
+    # when pm_approval_at OR pm_approval_pm_id appear in field_deltas.
+    # ApplyPMApproval mirrors the 3 fields to local Postgres (no
+    # state-machine transition; HILDA trusts SP/TPM authority -- guards
+    # enforced on SP-side button visibility + TPM judgment).
+    trigger: ItemModified
+    sub_trigger: PmApproved
     condition:
+      # Snapshot value (pre-CHANGE) per dispatcher._enrich_event canonical-
+      # field promotion. After mirror runs, local Postgres reflects
+      # ReadyForSubmission; before mirror, snapshot reads UnderPMReview.
       field: delivery_state
       op: eq
-      value: OwnerClosed
+      value: UnderPMReview                                # D-138 spelling (no space)
     actions:
-      - kind: UpdateState
-        params: { target_state: "ReadyForSubmission" }   # D-124 (α) lock 2026-06-26: PascalCase + space
-      - kind: QueueSubmission
+      - kind: ApplyPMApproval                             # mirror SP fields to Postgres
+        params: {}
+      - kind: QueueSubmission                             # FR-18 carrier submission
         params: { channel: customer_adapter }
 
   # NOTE: `handle_owner_reassignment` is defined in defaults.yaml (seeded from

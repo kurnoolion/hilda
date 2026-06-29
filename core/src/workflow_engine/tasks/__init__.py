@@ -22,6 +22,7 @@ from . import (  # noqa: F401
     milestone,
     outreach,        # added 2026-06-27: SEND_INITIAL_OUTREACH + SEND_REMINDER + NOTIFY_NEW_OWNER
     owner_reply,     # added 2026-06-28: Phase B apply_owner_reply task (HTML table parser)
+    pm_approval,     # added 2026-06-28: Pattern A apply_pm_approval task (SP-authoritative mirror)
     routing_resolution,
     sp_alert_imports,  # added 2026-06-26: IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION per [D-118] cascade
     state,
@@ -34,6 +35,7 @@ __all__ = [
     "milestone",
     "outreach",
     "owner_reply",
+    "pm_approval",
     "routing_resolution",
     "sp_alert_imports",
     "state",

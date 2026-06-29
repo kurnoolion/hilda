@@ -52,7 +52,7 @@ class TriggerKind(str, Enum):
 # ItemModified sub-triggers (Ph-1) — discriminated by TriggerEvent.sub_trigger / Rule.sub_trigger.
 # Membership is validated at load time (loader.py), not at model construction — Ph-2 may extend
 # sub-triggers via registry per the D-DRAFT-3 ownership decision.
-ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified"}
+ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved"}
 
 
 class ActionKind(str, Enum):
@@ -81,6 +81,13 @@ class ActionKind(str, Enum):
     # Collection click (kickoff) via these two ActionKinds.
     IMPORT_DELIVERABLE_TRACKER = "ImportDeliverableTracker"
     KICKOFF_COLLECTION = "KickoffCollection"
+    # PM-approval Pattern A added 2026-06-28 per architect design pass:
+    # SP UI engineer's button atomically writes 3 fields (delivery_state +
+    # pm_approval_at + pm_approval_pm_id per [D-068]); HILDA's task body mirrors
+    # those to local Postgres. No state-machine transition / guards on HILDA
+    # side (SP/TPM is authoritative; guards enforced on SP-side button
+    # visibility + TPM judgment before click).
+    APPLY_PM_APPROVAL = "ApplyPMApproval"
 
 
 class RuleKind(str, Enum):

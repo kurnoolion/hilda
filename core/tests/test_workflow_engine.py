@@ -182,10 +182,12 @@ class TestCeleryApp:
 
 
 class TestRegistry:
-    def test_expected_20_action_kinds(self):
-        # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade:
-        # IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION added.
-        assert len(expected_action_kinds_ph1()) == 20
+    def test_expected_21_action_kinds(self):
+        # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
+        # (IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION).
+        # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
+        # (APPLY_PM_APPROVAL added).
+        assert len(expected_action_kinds_ph1()) == 21
 
     def test_registry_initially_empty_or_partial(self, _registry_snapshot):
         # In a fresh test run with the registry snapshotted, we can clear and verify

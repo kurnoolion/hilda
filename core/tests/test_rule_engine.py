@@ -84,12 +84,16 @@ class TestEnums:
         assert len(TriggerKind) == 13
 
     def test_item_modified_sub_triggers_ph1(self):
-        assert ITEM_MODIFIED_SUB_TRIGGERS_PH1 == {"OwnerReassigned", "DeadlineMoved", "TagsModified"}
+        assert ITEM_MODIFIED_SUB_TRIGGERS_PH1 == {
+            "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
+        }
 
-    def test_action_kind_has_20_members(self):
-        # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade:
-        # added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION.
-        assert len(ActionKind) == 20
+    def test_action_kind_has_21_members(self):
+        # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
+        # (added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION). Bumped
+        # 20 -> 21 on 2026-06-28 per architect PM-approval design pass:
+        # added APPLY_PM_APPROVAL (Pattern A SP-authoritative mirror per [D-068]).
+        assert len(ActionKind) == 21
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",
@@ -810,9 +814,14 @@ class TestCLI:
         out = capsys.readouterr().out
         assert out.startswith("RPT|RUL|run-test|")
         assert "rules_total=9" in out          # 6 global + 2 customer + 1 device
-        assert "trigger_kinds=15" in out
+        # Bumped 15 -> 16 on 2026-06-28 per architect PM-approval design pass:
+        # ITEM_MODIFIED_SUB_TRIGGERS_PH1 grew {OwnerReassigned, DeadlineMoved,
+        # TagsModified} -> +PmApproved = 4. _PH1_TRIGGER_COUNT = (13-1)+4 = 16.
+        assert "trigger_kinds=16" in out
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] cascade.
-        assert "action_kinds=20" in out
+        # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
+        # (APPLY_PM_APPROVAL added).
+        assert "action_kinds=21" in out
         assert "postgres_overrides=0" in out
 
     def test_explain_emits_met_and_trace(self, rules_tree, capsys):

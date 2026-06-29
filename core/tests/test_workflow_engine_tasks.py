@@ -855,15 +855,17 @@ class TestRegistryIntegration:
         assert ActionKind.IMPORT_DELIVERABLE_TRACKER in ACTION_KIND_TO_TASK
         assert ActionKind.KICKOFF_COLLECTION in ACTION_KIND_TO_TASK
 
-    def test_18_of_20_action_kinds_registered_now(self):
+    def test_19_of_21_action_kinds_registered_now(self):
         # state(2) + milestone(3) + routing_resolution(3) + escalation(2) +
         # outreach(3: SEND_INITIAL_OUTREACH, SEND_REMINDER, NOTIFY_NEW_OWNER) +
         # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) +
         # sp_alert_imports(2: IMPORT_DELIVERABLE_TRACKER, KICKOFF_COLLECTION
-        #                  added 2026-06-26 per [D-118] cascade) = 18.
+        #                  added 2026-06-26 per [D-118] cascade) +
+        # pm_approval(1: APPLY_PM_APPROVAL added 2026-06-28 per architect
+        #             Pattern A design lock) = 19.
         # Remaining 2 await downstream module integration:
         # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
-        assert len(ACTION_KIND_TO_TASK) == 18
+        assert len(ACTION_KIND_TO_TASK) == 19
 
     def test_outreach_actions_registered(self):
         assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK
@@ -1254,3 +1256,199 @@ class TestKickoffCollection:
             result = kickoff_collection_task({}, _mk_kickoff_event_context())
         assert result["outcome"] == "skipped_no_storage"
         assert result["emails_sent"] == 0
+
+
+# ===========================================================================
+# TestPMApproval -- Pattern A (SP-authoritative mirror) per architect 2026-06-28
+# ===========================================================================
+
+
+def _pm_approval_event_context(**kw):
+    """Event-context shape produced by sp_alert_parser + dispatcher when SP UI
+    engineer's PM Approval button fires the atomic 3-field CHANGED alert."""
+    base = {
+        "correlation_id":   "pm-corr-001",
+        "delivery_item_id": "MMK-SM-S671U1-P1-1",
+        "trigger_source":   "automated",
+        "field_deltas": {
+            "delivery_state":    ("UnderPMReview",       "ReadyForSubmission"),
+            "pm_approval_at":    (None,                  "2026-06-28T22:00:00+00:00"),
+            "pm_approval_pm_id": (None,                  "tarasu@sea.samsung.com"),
+        },
+    }
+    base.update(kw)
+    return base
+
+
+class TestPMApproval:
+    """Pattern A SP-authoritative mirror per [D-068] + architect 2026-06-28
+    design lock. Task body MIRRORS the 3 SP-authored fields to local Postgres;
+    does NOT run state-machine transition (HILDA trusts SP/TPM authority)."""
+
+    def test_mirrors_three_fields_to_local_row(self, deps):
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, _pm_approval_event_context())
+            ).get()
+        assert result["outcome"] == "applied"
+        assert sorted(result["fields_mirrored"]) == [
+            "delivery_state", "pm_approval_at", "pm_approval_pm_id",
+        ]
+        # Verify storage write captured all 3 fields with NEW values
+        updates = [w for w in deps.storage.di_updates
+                   if w[0] == "MMK-SM-S671U1-P1-1"]
+        assert updates, "expected storage.update_delivery_item to be called"
+        fields = updates[0][1]
+        assert fields["delivery_state"]    == "ReadyForSubmission"
+        assert fields["pm_approval_at"]    == "2026-06-28T22:00:00+00:00"
+        assert fields["pm_approval_pm_id"] == "tarasu@sea.samsung.com"
+
+    def test_audit_attribution_uses_pm_corp_email(self, deps):
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        with override_task_deps(deps):
+            apply_pm_approval_task.apply_async(
+                args=({}, _pm_approval_event_context())
+            ).get()
+        logs = [a for a in deps.audit.logs if a[0] == "pm_approval"]
+        assert len(logs) == 1
+        action_type, item_id, attribution, details = logs[0]
+        assert item_id == "MMK-SM-S671U1-P1-1"
+        assert attribution["modified_by"] == "tarasu@sea.samsung.com"
+        assert details["source"] == "sp_atomic_write"
+        assert details["pattern"] == "A"
+
+    def test_partial_field_deltas_mirrors_what_present(self, deps):
+        """Defensive: if SP somehow writes fewer than 3 fields, mirror what's
+        there; don't fail."""
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        ctx_partial = _pm_approval_event_context(field_deltas={
+            "pm_approval_at": (None, "2026-06-28T22:00:00+00:00"),
+        })
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, ctx_partial)
+            ).get()
+        assert result["outcome"] == "applied"
+        assert result["fields_mirrored"] == ["pm_approval_at"]
+
+    def test_empty_field_deltas_skips(self, deps):
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        ctx_empty = _pm_approval_event_context(field_deltas={})
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, ctx_empty)
+            ).get()
+        assert result["outcome"] == "skipped_no_deltas"
+
+    def test_missing_delivery_item_id_skips(self, deps):
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        ctx_no_id = _pm_approval_event_context()
+        ctx_no_id["delivery_item_id"] = None
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, ctx_no_id)
+            ).get()
+        assert result["outcome"] == "skipped_missing_item_id"
+
+    def test_non_pm_field_deltas_no_op(self, deps):
+        """Deltas dont include any of the 3 PM fields -- task skips cleanly."""
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        ctx_other = _pm_approval_event_context(field_deltas={
+            "some_other_field": (None, "x"),
+        })
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, ctx_other)
+            ).get()
+        assert result["outcome"] == "skipped_no_pm_fields"
+
+    def test_handles_list_delta_shape(self, deps):
+        """Celery JSON serialization converts tuples -> lists. Task must
+        handle both shapes for field_deltas[name]."""
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        ctx_list = _pm_approval_event_context(field_deltas={
+            "delivery_state":    ["UnderPMReview", "ReadyForSubmission"],
+            "pm_approval_at":    [None, "2026-06-28T22:00:00+00:00"],
+            "pm_approval_pm_id": [None, "tarasu@sea.samsung.com"],
+        })
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, ctx_list)
+            ).get()
+        assert result["outcome"] == "applied"
+        updates = [w for w in deps.storage.di_updates
+                   if w[0] == "MMK-SM-S671U1-P1-1"]
+        assert updates[0][1]["delivery_state"] == "ReadyForSubmission"
+
+
+class TestDispatcherPmApprovedRefinement:
+    """Dispatcher._refine_sub_trigger refines 'changed' -> 'PmApproved' when
+    pm_approval_at OR pm_approval_pm_id appears in field_deltas, added
+    2026-06-28 per architect PM-approval design pass."""
+
+    def test_pm_approval_at_alone_triggers_refinement(self):
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas={"pm_approval_at": (None, "2026-06-28T22:00:00+00:00")},
+            timestamp=None, correlation_id="c-1", derived_fields=None,
+        )
+        refined = TriggerDispatcher._refine_sub_trigger(event)
+        assert refined.sub_trigger == "PmApproved"
+
+    def test_pm_approval_pm_id_alone_triggers_refinement(self):
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas={"pm_approval_pm_id": (None, "tarasu@sea.samsung.com")},
+            timestamp=None, correlation_id="c-1", derived_fields=None,
+        )
+        refined = TriggerDispatcher._refine_sub_trigger(event)
+        assert refined.sub_trigger == "PmApproved"
+
+    def test_pm_approval_wins_over_owner_in_same_deltas(self):
+        """Atomic 3-field write may co-occur with owner changes (edge case);
+        PmApproved refinement is ordered first per dispatcher class layout
+        because PM-approval is the more explicit user-initiated signal."""
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas={
+                "pm_approval_at":  (None, "2026-06-28T22:00:00+00:00"),
+                "owner_corp_id":   ("old", "new"),
+            },
+            timestamp=None, correlation_id="c-1", derived_fields=None,
+        )
+        refined = TriggerDispatcher._refine_sub_trigger(event)
+        assert refined.sub_trigger == "PmApproved"
+
+    def test_no_pm_fields_leaves_owner_refinement_intact(self):
+        """Sanity: owner-only delta still refines to OwnerReassigned."""
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        event = TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas={"owner_corp_id": ("old", "new")},
+            timestamp=None, correlation_id="c-1", derived_fields=None,
+        )
+        refined = TriggerDispatcher._refine_sub_trigger(event)
+        assert refined.sub_trigger == "OwnerReassigned"
+
+
+class TestPMApprovalActionRegistered:
+    def test_apply_pm_approval_action_in_registry(self):
+        from core.src.rule_engine import ActionKind
+        from core.src.workflow_engine.registry import ACTION_KIND_TO_TASK
+        assert ActionKind.APPLY_PM_APPROVAL in ACTION_KIND_TO_TASK

@@ -162,6 +162,15 @@ class TriggerDispatcher:
     })
     _DEADLINE_DELTA_FIELDS = frozenset({"target_date"})
     _TAGS_DELTA_FIELD_PREFIXES = ("tag_", "tags_")
+    # Added 2026-06-28 per architect PM-approval design pass:
+    # SP UI engineer's PM Approval button atomically writes 3 fields in one SP
+    # transaction (delivery_state + pm_approval_at + pm_approval_pm_id per
+    # [D-068]). Refine sub_trigger to "PmApproved" so the rule
+    # advance_to_ready_for_submission_on_pm_approval matches via sub_trigger
+    # rather than field_deltas key-presence guesswork.
+    _PM_APPROVAL_DELTA_FIELDS = frozenset({
+        "pm_approval_at", "pm_approval_pm_id",
+    })
 
     @classmethod
     def _refine_sub_trigger(cls, event: TriggerEvent) -> TriggerEvent:
@@ -184,7 +193,14 @@ class TriggerDispatcher:
         delta_keys = set(deltas.keys())
 
         refined: str | None = None
-        if delta_keys & cls._OWNER_DELTA_FIELDS:
+        if delta_keys & cls._PM_APPROVAL_DELTA_FIELDS:
+            # Pattern A (SP-authoritative) per architect 2026-06-28: SP UI
+            # engineer's button atomically writes 3 fields; HILDA mirrors.
+            # PM-approval check ordered FIRST because it's the most explicit
+            # SP-user-initiated signal -- can't be confused with an automated
+            # owner re-assignment cascade.
+            refined = "PmApproved"
+        elif delta_keys & cls._OWNER_DELTA_FIELDS:
             refined = "OwnerReassigned"
         elif delta_keys & cls._DEADLINE_DELTA_FIELDS:
             refined = "DeadlineMoved"
