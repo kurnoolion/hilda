@@ -464,12 +464,40 @@ class SpAlertParser:
             }
             trigger = verb_to_trigger.get(parsed.action_type or "", TriggerKind.ITEM_MODIFIED)
 
+            # Synthesize delivery_item_id from the composite-key pattern used
+            # by _build_delivery_item: {customer_id}-{device_id}-{milestone_id}-{item_no}.
+            # Architect 2026-06-29: previously EntityRef carried only customer_id
+            # + milestone_id, so dispatcher._fetch_item_snapshot returned None ->
+            # _enrich_event couldn't populate derived_fields.delivery_state ->
+            # rule condition `delivery_state == UnderPMReview` for the PM-approval
+            # rule (and any other state-gated rule) fell through to field_deltas
+            # where the NEW value lives -> condition always failed -> rule never
+            # matched -> apply_pm_approval task never spawned -> state stuck at
+            # UnderPMReview after TPM clicked Approve.
+            #
+            # For ADDED alerts (Deliverables ADDED) and CHANGED alerts on item-
+            # scoped lists (Deliverables CHANGED), we have all 4 key parts in
+            # the parsed payload. For non-item-scoped lists (Milestones, etc.)
+            # device_id + item_no won't both be present -> delivery_item_id stays
+            # None, which is correct (item-less event).
+            list_suffix    = parsed.routing_key.list_suffix
+            milestone_name = parsed.routing_key.milestone_name
+            item_number    = parsed.routing_key.item_number
+            project_model  = (parsed.body_kvs or {}).get("project_model", "")
+            delivery_item_id = None
+            if list_suffix and project_model and milestone_name and item_number:
+                delivery_item_id = (
+                    f"{list_suffix}-{project_model}-{milestone_name}-{item_number}"
+                )
+
             event = TriggerEvent(
                 trigger=trigger,
                 sub_trigger=parsed.action_type,
                 entity_ref=EntityRef(
-                    customer_id=parsed.routing_key.list_suffix,
-                    milestone_id=parsed.routing_key.milestone_name,
+                    customer_id=list_suffix,
+                    device_id=project_model or None,
+                    milestone_id=milestone_name,
+                    delivery_item_id=delivery_item_id,
                 ),
                 field_deltas=dict(parsed.field_deltas) if parsed.field_deltas else None,
                 timestamp=datetime.now(timezone.utc),
