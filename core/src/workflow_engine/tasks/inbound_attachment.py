@@ -381,7 +381,17 @@ async def _persist_routed_attachment(
             if cand["item_id"] == routed.matches[0].item_id:
                 primary_item_dict = cand
                 break
-    milestone_id = (primary_item_dict or {}).get("milestone_id") or ""
+    # milestone_id resolution -- architect 2026-06-29: unrouted attachments
+    # previously fell through with milestone_id="" / NULL which made reset SQL
+    # filters miss the row and dedup short-circuit later test runs.
+    # Fix: always derive milestone_id from batch context. All items in a batch
+    # share milestone_id by construction (batch is owner-scoped, owners are
+    # TG-scoped within one milestone), so candidate_items[0] is authoritative.
+    milestone_id = (
+        (primary_item_dict or {}).get("milestone_id")
+        or (candidate_items[0].get("milestone_id") if candidate_items else None)
+        or ""
+    )
 
     try:
         deps.storage.add_document_index_row(DocumentIndexRow(
