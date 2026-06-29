@@ -299,7 +299,14 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
             # Architect 2026-06-29 race-resolution: owner shouldn't have to
             # re-confirm Closed after submitting the last required doc.
             if target_state == DeliveryState.OWNER_CLOSED:
-                from datetime import datetime, timezone
+                # datetime + timezone already imported at module top; do NOT
+                # re-import inside this branch -- a local import statement
+                # creates a LOCAL `datetime` binding for the entire function
+                # scope, which shadows the module-level import and makes
+                # earlier uses (the received_at parse at the top of
+                # _async_apply_owner_reply) fail with UnboundLocalError.
+                # Architect live test 2026-06-29: owner-reply task crashed on
+                # this exact UnboundLocalError before this fix landed.
                 try:
                     deps.storage.update_delivery_item(
                         delivery_item_id,

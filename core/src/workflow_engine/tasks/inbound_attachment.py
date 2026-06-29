@@ -224,9 +224,39 @@ def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:
     return widened
 
 
+class _AsyncStorageShim:
+    """Async wrapper for the 2 storage read paths Fr52AttachmentRouter awaits.
+
+    Fr52AttachmentRouter was designed against an async StorageBackend protocol
+    (`await self._storage.get_document_index_row_by_hash(...)`). The
+    PostgresStorage wrapper in deps.storage is SYNC (wraps async via
+    run_async_sync) -- passing it to the router would cause
+    `await <sync-return-value>` -> TypeError NoneType can't be used in await
+    expression. Architect live test 2026-06-29 crashed on this exact path.
+
+    This shim awaits the underlying async ops in document_ops directly, so the
+    router sees an async storage interface. Write-path ops are NOT proxied here
+    -- the task body uses PostgresStorage sync ops outside the router for
+    those, which is fine because they happen in our own asyncio context (we
+    drove the router via asyncio.run already).
+    """
+
+    async def get_document_index_row_by_hash(self, file_hash):
+        from core.src.storage.document_ops import get_document_index_row_by_hash as _g
+        return await _g(file_hash)
+
+    async def find_doc_id_slugs_for_item(self, delivery_item_id, doc_type):
+        from core.src.storage.document_ops import find_doc_id_slugs_for_item as _f
+        return await _f(delivery_item_id, doc_type)
+
+
 def _build_ph1_router(deps):
     """Construct Fr52AttachmentRouter in Ph-1 first-pass mode (substring only).
-    Returns None when prerequisites unavailable (e.g. storage missing methods).
+    Returns None when prerequisites unavailable.
+
+    Storage arg: passes an _AsyncStorageShim (NOT deps.storage) per the
+    protocol-mismatch fix 2026-06-29. The shim async-wraps the 2 read ops
+    the router awaits internally.
     """
     try:
         from pathlib import Path
@@ -242,7 +272,7 @@ def _build_ph1_router(deps):
                 "core/src/email_service/default_doc_type_rules.yaml"
             )
         return Fr52AttachmentRouter(
-            storage=deps.storage,
+            storage=_AsyncStorageShim(),    # async-shim per 2026-06-29 fix
             llm=None,                       # Ph-1 no LLM ROUTE_ATTACHMENT
             tg_resolver=None,
             doc_type_filename_rules_path=rules_path,
