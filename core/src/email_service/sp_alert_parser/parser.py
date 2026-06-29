@@ -398,8 +398,25 @@ class SpAlertParser:
             # Detect + strip "Edited" suffix (case-insensitive).
             edited = bool(_EDITED_SUFFIX_RE.search(raw_value))
             value = _EDITED_SUFFIX_RE.sub("", raw_value).strip()
-            # Strip leading "- " separator (Edited fields render as "- value Edited").
+            # Strip leading "- " separator. SP-version variant:
+            #   "key: - <new_value> Edited"  (dash form, single-value)
+            # Earlier docs expected this form; current SP (architect's live
+            # test 2026-06-29) emits the dash-less form:
+            #   "key: <old_value> <new_value> Edited"
+            had_dash = bool(_LEADING_DASH_RE.match(value))
             value = _LEADING_DASH_RE.sub("", value).strip()
+            # For dash-less Edited values, split on whitespace and take the
+            # LAST token as the new value. This handles the common case
+            # (numeric / short-choice fields like doc_count, review_required,
+            # sort_order, item_completion_pct). Multi-word values (item_name,
+            # customer_delivery_info) get truncated to the last word -- a
+            # best-effort compromise; downstream back-fill should re-read
+            # from SP REST for the canonical value when precise multi-word
+            # data is needed.
+            if edited and not had_dash:
+                tokens = value.split()
+                if len(tokens) >= 2:
+                    value = tokens[-1]
             all_kvs[key] = value
             if edited:
                 edited_kvs[key] = value
