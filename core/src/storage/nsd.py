@@ -67,13 +67,26 @@ class NSDPath:
     @classmethod
     def internal_classified(
         cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,
-        doc_type, doc_id_slug, rev_number: int,
+        doc_type, doc_id_slug, rev_number: int, original_filename: str = "",
     ) -> "NSDPath":
-        """Classified path: internal/<carrier>/<device>/<milestone>/<tg>/<item>/<doc_type>/<doc_id>/revN/"""
-        return cls((
+        """Classified path: internal/<carrier>/<device>/<milestone>/<tg>/<item>/<doc_type>/<doc_id>/revN/<filename>
+
+        Architect 2026-06-30: previously the factory ended at revN, so when
+        write_file used the returned NSDPath as the write target, it created
+        a FILE literally named 'rev1' at the doc_id_slug directory level
+        instead of writing the original file INTO a rev1/ directory.
+        Now matches the rendering of the staged/unrouted factories which
+        already included the filename segment. original_filename defaults to ""
+        for back-compat with rare callers that want the directory-only path
+        (e.g. relocation helpers); empty filename -> no trailing segment.
+        """
+        parts = (
             "internal", customer_id, device_id, milestone_name, tg_path_id,
             item_path_id, doc_type, doc_id_slug, f"rev{rev_number}",
-        ))
+        )
+        if original_filename:
+            parts = parts + (original_filename,)
+        return cls(parts)
 
     @classmethod
     def internal_staged_revision(

@@ -670,6 +670,7 @@ def _resolve_nsd_path(routed, attachment, candidate_items: list[dict]):
         return NSDPath.internal_classified(
             customer_id, device_id, milestone_name, tg_path_id, item_path_id,
             routed.doc_type, routed.doc_id_slug, routed.rev_number,
+            original_filename=filename,
         )
     if pt_value == NSDPathType.STAGED_NOT_REVISION.value:
         return NSDPath.internal_staged_revision(
