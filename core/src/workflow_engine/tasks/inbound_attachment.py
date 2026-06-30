@@ -525,34 +525,53 @@ async def _persist_routed_attachment(
         or ""
     )
 
-    try:
-        deps.storage.add_document_index_row(DocumentIndexRow(
-            file_hash=routed.file_hash,
-            milestone_id=milestone_id,
-            doc_type=routed.doc_type,
-            doc_id_slug=routed.doc_id_slug,
-            rev_number=routed.rev_number,
-            ingest_source=IngestSource.EMAIL.value,
-            original_filename=getattr(attachment, "filename", ""),
-            first_page_excerpt="",
-            is_final=True,                            # Ph-1: all docs final by default
-            inferred_tg_name=routed.inferred_tg_name,
-            routing_resolution=routed.routing_resolution.value
-                                if hasattr(routed.routing_resolution, "value")
-                                else str(routed.routing_resolution),
-            ingested_at=now,
-        ))
-    except Exception as exc:  # noqa: BLE001
+    # Architect 2026-06-30: bounded retry on transient asyncpg session blips
+    # (STR-E001). Each storage op opens its own session, so a one-off connection
+    # failure here is retryable -- live evidence: same-batch association write
+    # immediately after succeeded against a fresh session, proving the DB came
+    # back. On final failure, return early -- a missing index row with a
+    # successful association row creates an orphan (file_hash present in
+    # document_item_association, absent in document_index) that breaks every
+    # downstream JOIN (FR-7 doc_count gate, FR-66 is_final cascade,
+    # get_documents_for_item, list_revisions).
+    _index_row_attempts = 3
+    last_index_exc: Exception | None = None
+    for _attempt in range(_index_row_attempts):
+        try:
+            deps.storage.add_document_index_row(DocumentIndexRow(
+                file_hash=routed.file_hash,
+                milestone_id=milestone_id,
+                doc_type=routed.doc_type,
+                doc_id_slug=routed.doc_id_slug,
+                rev_number=routed.rev_number,
+                ingest_source=IngestSource.EMAIL.value,
+                original_filename=getattr(attachment, "filename", ""),
+                first_page_excerpt="",
+                is_final=True,                            # Ph-1: all docs final by default
+                inferred_tg_name=routed.inferred_tg_name,
+                routing_resolution=routed.routing_resolution.value
+                                    if hasattr(routed.routing_resolution, "value")
+                                    else str(routed.routing_resolution),
+                ingested_at=now,
+            ))
+            last_index_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_index_exc = exc
+            if _attempt < _index_row_attempts - 1:
+                await asyncio.sleep(0.2 * (2 ** _attempt))  # 0.2s, 0.4s
+    if last_index_exc is not None:
         _log.warning(
-            "DocumentIndexRow insert failed for file_hash=%s: %s",
-            routed.file_hash, str(exc)[:120],
+            "DocumentIndexRow insert failed after %d attempts for file_hash=%s: %s",
+            _index_row_attempts, routed.file_hash, str(last_index_exc)[:120],
         )
         await _audit(deps, "attachment_index_row_failed", None, {
             "batch_id": batch_id, "file_hash": routed.file_hash,
-            "error": f"{type(exc).__name__}: {str(exc)[:120]}",
+            "error": f"{type(last_index_exc).__name__}: {str(last_index_exc)[:120]}",
+            "attempts": _index_row_attempts,
             "correlation_id": correlation_id,
         })
-        # Continue -- the file bytes are written; try associations.
+        return {"match_count": 0, "item_ids": set(), "events_fired": 0}
 
     # Step F2-H: per matched item -- association + increment + event
     item_ids: set[str] = set()
