@@ -527,7 +527,7 @@ class SpAlertParser:
                 "DBG sp_alert_parser._emit_trigger_event EMIT corr_id=%s "
                 "trigger=%s sub_trigger=%s entity_ref={customer_id=%s device_id=%s "
                 "milestone_id=%s delivery_item_id=%s} field_deltas_keys=%s "
-                "body_kvs_count=%d",
+                "body_kvs_keys=%s project_model=%r tg_name=%r item_no=%r",
                 event.correlation_id,
                 getattr(event.trigger, 'value', event.trigger),
                 event.sub_trigger,
@@ -536,7 +536,10 @@ class SpAlertParser:
                 getattr(event.entity_ref, 'milestone_id', None),
                 getattr(event.entity_ref, 'delivery_item_id', None),
                 sorted((event.field_deltas or {}).keys())[:12],
-                len(parsed.body_kvs or {}),
+                sorted((parsed.body_kvs or {}).keys()),
+                (parsed.body_kvs or {}).get('project_model'),
+                (parsed.body_kvs or {}).get('tg_name'),
+                (parsed.body_kvs or {}).get('item_no'),
             )
             self._dispatcher.dispatch(event)
         except Exception as exc:
