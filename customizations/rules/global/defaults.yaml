@@ -40,6 +40,14 @@ rules:
         params: { urgency: medium }
 
   # Worked Example 3 — doc_count reached: advance state first, review second.
+  # TriggerAIReview action commented 2026-06-29 per architect direction: AI
+  # review is Ph-2 target; no TaskBinding exists, so leaving it caused
+  # WFL-E001 "registry incomplete" dispatch failure that aborted the whole
+  # RuleMatch (including the UpdateState that comes before it). With the
+  # commented-out form, the rule's actions reduce to [UpdateState], the
+  # cascade advances OutreachSent -> DocumentReceived cleanly, and the Ph-2
+  # AI review hook is preserved (just uncomment when CLASSIFY_DOC_TYPE +
+  # binding land).
   - rule_id: advance_state_on_doc_count_reached
     trigger: AttachmentReceived
     condition:
@@ -49,18 +57,23 @@ rules:
     actions:
       - kind: UpdateState                        # action 0 — state first
         params: { target_state: "DocumentReceived" }     # D-124 (α) lock 2026-06-26: PascalCase + space
-      - kind: TriggerAIReview                    # action 1 — review second (consumes the updated state)
-        params: {}
+      # - kind: TriggerAIReview                  # Ph-2 — uncomment when binding lands
+      #   params: {}
 
-  - rule_id: review_on_supplementary_attachment
-    trigger: AttachmentReceived
-    condition:
-      and:                                       # boolean composition: both must hold
-        - { field: doc_count_reached, op: eq, value: false }
-        - { field: review_required,   op: eq, value: true  }
-    actions:
-      - kind: TriggerAIReview
-        params: {}
+  # review_on_supplementary_attachment commented 2026-06-29 per architect:
+  # the entire rule was a TriggerAIReview wrapper; with AI review deferred
+  # to Ph-2 the whole rule becomes a no-op. Restore when CLASSIFY_DOC_TYPE
+  # binding lands. Rule semantics + condition tree intentionally preserved
+  # in commented form so the Ph-2 re-enable is a single un-comment.
+  # - rule_id: review_on_supplementary_attachment
+  #   trigger: AttachmentReceived
+  #   condition:
+  #     and:                                       # boolean composition: both must hold
+  #       - { field: doc_count_reached, op: eq, value: false }
+  #       - { field: review_required,   op: eq, value: true  }
+  #   actions:
+  #     - kind: TriggerAIReview
+  #       params: {}
 
 polling_schedules:                               # SEPARATE top-level shape, NOT a trigger-action rule
   - rule_id: default_polling_schedule

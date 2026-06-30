@@ -435,7 +435,14 @@ class TestLoader:
         # added reconcile_owner_intent_on_doc_count_reached to automation_rules
         # (race-resolution rule per Q1 design pass -- catches owner Closed
         # intent persisted when doc_count_not_reached guard-denied earlier).
-        assert len(rs.all_rules()) == 26
+        # Dropped to 25 on 2026-06-29 architect Ph-2 defer: commented out
+        # review_on_supplementary_attachment in defaults.yaml since it was a
+        # pure TriggerAIReview wrapper and AI review is Ph-2 (no TaskBinding;
+        # was causing WFL-E001 dispatch failures). Restore when the AI review
+        # binding lands. The advance_state_on_doc_count_reached rule's
+        # TriggerAIReview action was also commented but the rule itself stays
+        # (UpdateState remains).
+        assert len(rs.all_rules()) == 25
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):
