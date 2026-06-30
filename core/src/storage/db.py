@@ -72,7 +72,13 @@ class DocumentIndexTable(Base):
     file_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     milestone_id: Mapped[str] = mapped_column(String(64), index=True)
     doc_type: Mapped[str] = mapped_column(String(64))
-    doc_id_slug: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Widened to 256 (2026-06-30): real Samsung filenames produce slugs up to
+    # ~70 chars (e.g. SM-A176U Qualification Workspace - Qualified Product
+    # Details_approval). String(64) caused asyncpg StringDataRightTruncation,
+    # which session_scope() wrapped as the (misleading) STR-E001 "Postgres
+    # unavailable" error. 256 leaves headroom without affecting the partial
+    # unique index uq_doc_slug_rev.
+    doc_id_slug: Mapped[str | None] = mapped_column(String(256), nullable=True)
     rev_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ingest_source: Mapped[str] = mapped_column(String(32))
     original_filename: Mapped[str] = mapped_column(String(512))
@@ -348,8 +354,23 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 @asynccontextmanager
 async def session_scope() -> AsyncIterator[AsyncSession]:
     """Session context with the module's error contract: unexpected DB errors are
-    rolled back (best-effort) and re-raised as STR-E001 PipelineError; PipelineError
-    passes through untranslated. The ops modules use this exclusively."""
+    rolled back (best-effort) and re-raised as a PipelineError; PipelineError
+    passes through untranslated. The ops modules use this exclusively.
+
+    Error classification (2026-06-30):
+    - Data / integrity errors (constraint violation, NOT NULL, string truncation,
+      bad enum, FK miss, etc.) -> STR-E003. These are deterministic — retrying
+      won't help; caller logic / schema needs to change.
+    - Everything else (connection drop, asyncpg interface error, unknown) ->
+      STR-E001. These may be transient and worth a bounded retry by caller.
+
+    Pre-2026-06-30 behavior: ALL exceptions wrapped as STR-E001 ("Postgres
+    unavailable or session failure"), which falsely implied transience and
+    masked deterministic constraint bugs as retryable connection blips.
+    Surfaced when a 70-char doc_id_slug overflowed the 64-char column and the
+    caller's retry loop burned 3 attempts on what was actually a column-width
+    bug.
+    """
     if _sessionmaker is None:
         configure_engine()
     assert _sessionmaker is not None
@@ -361,7 +382,50 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
             raise
         except Exception as exc:
             await _safe_rollback(session)
+            code = _classify_db_exception(exc)
+            if code == "STR-E003":
+                raise PipelineError(
+                    "STR-E003",
+                    context={"entity": "session_scope", "reason": str(exc)[:120]},
+                    cause=exc,
+                )
             raise PipelineError("STR-E001", context={"reason": str(exc)[:120]}, cause=exc)
+
+
+def _classify_db_exception(exc: BaseException) -> str:
+    """Return 'STR-E003' for deterministic data/integrity errors, 'STR-E001'
+    for transient/unknown errors. Matches by exception class name so we don't
+    have to import asyncpg / SQLAlchemy exception hierarchies at module top.
+
+    Deterministic (STR-E003): DataError, IntegrityError, ProgrammingError,
+      StringDataRightTruncation, NotNullViolation, UniqueViolation,
+      ForeignKeyViolation, CheckViolation, InvalidTextRepresentation, ...
+    Transient/unknown (STR-E001): InterfaceError, ConnectionDoesNotExistError,
+      OperationalError (without integrity nesting), TimeoutError, ...
+
+    Walks __cause__/__context__ since SQLAlchemy wraps asyncpg errors.
+    """
+    DETERMINISTIC_TOKENS = (
+        "DataError",
+        "IntegrityError",
+        "ProgrammingError",
+        "Truncation",          # StringDataRightTruncationError
+        "NotNullViolation",
+        "UniqueViolation",
+        "ForeignKeyViolation",
+        "CheckViolation",
+        "InvalidText",         # InvalidTextRepresentationError (bad enum)
+        "Constraint",
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__
+        if any(tok in name for tok in DETERMINISTIC_TOKENS):
+            return "STR-E003"
+        current = current.__cause__ or current.__context__
+    return "STR-E001"
 
 
 async def _safe_rollback(session: AsyncSession) -> None:

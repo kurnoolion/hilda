@@ -266,7 +266,11 @@ class TestDocumentIndex:
         await add_document_index_row(make_doc(file_hash=HASH_A, slug="abc", rev=1))
         with pytest.raises(PipelineError) as exc:
             await add_document_index_row(make_doc(file_hash=HASH_B, slug="abc", rev=1))
-        assert exc.value.code_id == "STR-E001"  # IntegrityError surfaces via session wrapper
+        # IntegrityError is now classified as STR-E003 (deterministic constraint
+        # violation), not STR-E001 (transient). Pre-2026-06-30 the session
+        # wrapper bucketed all DB errors under STR-E001 which masked column-width
+        # bugs as retryable connection blips.
+        assert exc.value.code_id == "STR-E003"
 
     async def test_list_revisions_excludes_null_slug_rows(self):
         await add_document_index_row(make_doc(file_hash=HASH_A, slug="report-a", rev=1))

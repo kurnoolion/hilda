@@ -127,7 +127,12 @@ ERROR_CODES: dict[str, ErrorCode] = {
     ),
     # --- storage (STR) ---
     "STR-E001": ErrorCode(
-        "STR-E001", "Postgres unavailable or session failure: {reason}", False
+        # 2026-06-30: scope narrowed to transient/unknown DB errors only.
+        # Deterministic data/integrity errors now raise STR-E003. Old name
+        # "Postgres unavailable or session failure" was misleading — it implied
+        # transience and masked column-width / NOT NULL / enum bugs as
+        # retryable connection blips.
+        "STR-E001", "Transient or unknown DB session error: {reason}", False
     ),
     "STR-E002": ErrorCode(
         "STR-E002", "Record not found: {entity} '{key}'", False
