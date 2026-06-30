@@ -436,7 +436,25 @@ class SpAlertParser:
 
     async def handle(self, parsed: ParsedSpAlert, *, pm_id: str = "tpm_unknown") -> None:
         """Emit TriggerEvent for the SP-alert per [D-113]."""
+        # DEBUG-INSTRUMENTATION 2026-06-30
+        logger.info(
+            "DBG sp_alert_parser.handle CALLED action_type=%s routing_key=%s "
+            "field_deltas_count=%d body_kvs_count=%d",
+            getattr(parsed, 'action_type', None),
+            {
+                'list_name':     getattr(parsed.routing_key, 'list_name', None),
+                'list_suffix':   getattr(parsed.routing_key, 'list_suffix', None),
+                'milestone_name': getattr(parsed.routing_key, 'milestone_name', None),
+                'item_number':   getattr(parsed.routing_key, 'item_number', None),
+            },
+            len(parsed.field_deltas or {}),
+            len(parsed.body_kvs or {}),
+        )
         self._emit_trigger_event(parsed)
+        logger.info(
+            "DBG sp_alert_parser.handle RETURNED action_type=%s",
+            getattr(parsed, 'action_type', None),
+        )
 
     def _emit_trigger_event(self, parsed: ParsedSpAlert) -> None:
         """Emit TriggerEvent via workflow_engine.TriggerDispatcher per [D-113].
@@ -446,7 +464,17 @@ class SpAlertParser:
         Empty field_deltas dict on Added/Deleted is expected; on Changed we'd
         have already returned None from parse() (no-op guard).
         """
+        # DEBUG-INSTRUMENTATION 2026-06-30
+        logger.info(
+            "DBG sp_alert_parser._emit_trigger_event CALLED "
+            "self._dispatcher_is_None=%s action_type=%s",
+            self._dispatcher is None,
+            getattr(parsed, 'action_type', None),
+        )
         if self._dispatcher is None:
+            logger.info(
+                "DBG sp_alert_parser._emit_trigger_event EARLY_RETURN "
+                "(self._dispatcher is None) -- no event emitted, no dispatch")
             return
         try:
             # Lazy import to avoid hard dep on rule_engine at module load.
