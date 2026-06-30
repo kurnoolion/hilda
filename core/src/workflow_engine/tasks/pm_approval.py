@@ -115,6 +115,32 @@ def apply_pm_approval_task(
             new_value = delta_tuple[1]
         else:
             new_value = delta_tuple  # plain value fallback
+        # Coerce pm_approval_at: SP renders as "M/D/YYYY" string (e.g. "6/29/2026")
+        # in the Edited delta marker; the DeliveryItem column is
+        # Mapped[datetime | None] -> asyncpg rejects raw strings with STR-E001.
+        # Architect live test 2026-06-30: storage_write_failed traced to this.
+        if field_name == "pm_approval_at" and isinstance(new_value, str):
+            from datetime import datetime, timezone
+            parsed_at = None
+            for fmt in ("%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+                        "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    parsed_at = datetime.strptime(new_value.strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed_at is None:
+                _log.warning(
+                    "apply_pm_approval: could not parse pm_approval_at=%r for "
+                    "item=%s; using now() fallback",
+                    new_value, delivery_item_id,
+                )
+                parsed_at = datetime.now(timezone.utc)
+            else:
+                # Make timezone-aware (UTC) so DateTime(timezone=True) accepts it
+                if parsed_at.tzinfo is None:
+                    parsed_at = parsed_at.replace(tzinfo=timezone.utc)
+            new_value = parsed_at
         mirror_fields[field_name] = new_value
 
     if not mirror_fields:
