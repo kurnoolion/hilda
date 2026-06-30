@@ -332,6 +332,39 @@ class SpAlertParser:
         ):
             raise PipelineError("EML-E007", context={})
 
+        # -- Kickoff signal promotion (2026-06-30) --
+        # SP renders the milestone_collection_started_at field WITHOUT the
+        # "Edited" marker on the kickoff alert (architect's live test
+        # 2026-06-30: body had `milestone_collection_started_at 6/30/2026`
+        # bare -- no colon-or-multispace did parse to body_kvs via the
+        # _BODY_KV_LINE_RE \s{2,} alternative, but no Edited suffix meant it
+        # never reached field_deltas). Without that promotion the no-change
+        # drop below would kill the kickoff alert silently, leaving every
+        # delivery item stranded in Not Started state.
+        #
+        # The kickoff rule (kickoff_collection_on_milestone_started in
+        # automation_rules.yaml) requires `milestone_collection_started_at`
+        # present in field_deltas with a non-null value. Promote it here
+        # when we see it in body_kvs so the rule fires.
+        #
+        # Scope: ONLY this one tracked-trigger field on the Milestones list.
+        # Other no-change "changed" alerts still get dropped per architect
+        # 2026-06-27.
+        _KICKOFF_PROMOTE_FIELD = "milestone_collection_started_at"
+        if (
+            list_name == "Milestones"
+            and _KICKOFF_PROMOTE_FIELD in body_kvs
+            and _KICKOFF_PROMOTE_FIELD not in field_deltas
+            and body_kvs[_KICKOFF_PROMOTE_FIELD]
+        ):
+            field_deltas[_KICKOFF_PROMOTE_FIELD] = body_kvs[_KICKOFF_PROMOTE_FIELD]
+            logger.info(
+                "sp_alert_kickoff_promoted: list=Milestones title=%s "
+                "milestone_collection_started_at=%s (no Edited marker -- "
+                "promoted from body_kvs so kickoff rule can fire)",
+                title, body_kvs[_KICKOFF_PROMOTE_FIELD],
+            )
+
         # -- "Changed" with empty field_deltas: drop per architect 2026-06-27 --
         if action_type == "changed" and not field_deltas:
             logger.info(
