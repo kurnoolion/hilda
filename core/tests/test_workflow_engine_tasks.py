@@ -1301,7 +1301,10 @@ class TestPMApproval:
         assert updates, "expected storage.update_delivery_item to be called"
         fields = updates[0][1]
         assert fields["delivery_state"]    == "ReadyForSubmission"
-        assert fields["pm_approval_at"]    == "2026-06-28T22:00:00+00:00"
+        # pm_approval_at: coerced from ISO string -> datetime per 032ad19 fix
+        # (asyncpg rejects raw strings for DateTime columns -> STR-E001).
+        from datetime import datetime, timezone
+        assert fields["pm_approval_at"] == datetime(2026, 6, 28, 22, 0, 0, tzinfo=timezone.utc)
         assert fields["pm_approval_pm_id"] == "tarasu@sea.samsung.com"
 
     def test_audit_attribution_uses_pm_corp_email(self, deps):

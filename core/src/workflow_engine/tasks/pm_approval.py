@@ -115,20 +115,30 @@ def apply_pm_approval_task(
             new_value = delta_tuple[1]
         else:
             new_value = delta_tuple  # plain value fallback
-        # Coerce pm_approval_at: SP renders as "M/D/YYYY" string (e.g. "6/29/2026")
-        # in the Edited delta marker; the DeliveryItem column is
-        # Mapped[datetime | None] -> asyncpg rejects raw strings with STR-E001.
-        # Architect live test 2026-06-30: storage_write_failed traced to this.
+        # Coerce pm_approval_at string -> datetime so asyncpg accepts it
+        # against the DateTime(timezone=True) column. Architect live test
+        # 2026-06-30: storage_write_failed traced to raw "6/29/2026" string
+        # binding rejected by asyncpg with STR-E001.
+        # Try fromisoformat first (handles "2026-06-28T22:00:00+00:00" etc.
+        # incl. timezone offsets), then strptime ladder for SP's other formats.
         if field_name == "pm_approval_at" and isinstance(new_value, str):
             from datetime import datetime, timezone
-            parsed_at = None
-            for fmt in ("%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-                        "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    parsed_at = datetime.strptime(new_value.strip(), fmt)
-                    break
-                except ValueError:
-                    continue
+            raw = new_value.strip()
+            # Python's fromisoformat handles "...+00:00" natively (3.7+);
+            # trailing "Z" needs replacement to "+00:00" for 3.10 and below.
+            iso_friendly = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+            parsed_at: "datetime | None" = None
+            try:
+                parsed_at = datetime.fromisoformat(iso_friendly)
+            except ValueError:
+                pass
+            if parsed_at is None:
+                for fmt in ("%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                    try:
+                        parsed_at = datetime.strptime(raw, fmt)
+                        break
+                    except ValueError:
+                        continue
             if parsed_at is None:
                 _log.warning(
                     "apply_pm_approval: could not parse pm_approval_at=%r for "
@@ -136,10 +146,9 @@ def apply_pm_approval_task(
                     new_value, delivery_item_id,
                 )
                 parsed_at = datetime.now(timezone.utc)
-            else:
+            elif parsed_at.tzinfo is None:
                 # Make timezone-aware (UTC) so DateTime(timezone=True) accepts it
-                if parsed_at.tzinfo is None:
-                    parsed_at = parsed_at.replace(tzinfo=timezone.utc)
+                parsed_at = parsed_at.replace(tzinfo=timezone.utc)
             new_value = parsed_at
         mirror_fields[field_name] = new_value
 
