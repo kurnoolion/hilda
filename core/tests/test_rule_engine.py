@@ -435,14 +435,17 @@ class TestLoader:
         # added reconcile_owner_intent_on_doc_count_reached to automation_rules
         # (race-resolution rule per Q1 design pass -- catches owner Closed
         # intent persisted when doc_count_not_reached guard-denied earlier).
-        # Dropped to 25 on 2026-06-29 architect Ph-2 defer: commented out
-        # review_on_supplementary_attachment in defaults.yaml since it was a
-        # pure TriggerAIReview wrapper and AI review is Ph-2 (no TaskBinding;
-        # was causing WFL-E001 dispatch failures). Restore when the AI review
-        # binding lands. The advance_state_on_doc_count_reached rule's
-        # TriggerAIReview action was also commented but the rule itself stays
-        # (UpdateState remains).
-        assert len(rs.all_rules()) == 25
+        # Dropped to 24 on 2026-06-29 architect Ph-2 defer:
+        #   - defaults.yaml: review_on_supplementary_attachment commented out
+        #     (pure TriggerAIReview wrapper)
+        #   - automation_rules.yaml: trigger_ai_review_on_review_required
+        #     commented out (pure TriggerAIReview wrapper)
+        # AI review is Ph-2 (no TaskBinding for TRIGGER_AI_REVIEW), so leaving
+        # these rules in caused WFL-E001 dispatch failures. Restore both when
+        # CLASSIFY_DOC_TYPE LLM action + binding land. The
+        # advance_state_on_doc_count_reached rule's TriggerAIReview action
+        # was also commented but that rule itself stays (UpdateState remains).
+        assert len(rs.all_rules()) == 24
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):

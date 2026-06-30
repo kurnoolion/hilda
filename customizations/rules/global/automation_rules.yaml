@@ -166,16 +166,21 @@ rules:
       - kind: UpdateState
         params: { target_state: OwnerClosed }
 
-  - rule_id: trigger_ai_review_on_review_required
-    trigger: StateChange
-    condition:
-      and:
-        - { field: target_state, op: eq, value: DocumentReceived }
-        - { field: review_required, op: eq, value: true }
-        - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
-    actions:
-      - kind: TriggerAIReview
-        params: {}
+  # trigger_ai_review_on_review_required commented 2026-06-29 per architect
+  # Ph-2 defer: rule was a pure TriggerAIReview wrapper; with AI review
+  # deferred to Ph-2 (no TaskBinding registered for TRIGGER_AI_REVIEW)
+  # the WFL-E001 dispatch failure would block any rule referencing it.
+  # Restore when CLASSIFY_DOC_TYPE LLM action lands and the binding is wired.
+  # - rule_id: trigger_ai_review_on_review_required
+  #   trigger: StateChange
+  #   condition:
+  #     and:
+  #       - { field: target_state, op: eq, value: DocumentReceived }
+  #       - { field: review_required, op: eq, value: true }
+  #       - { field: item_type, op: eq, value: "test_tech_waiver_report" }   # mixed-case per [D-094]
+  #   actions:
+  #     - kind: TriggerAIReview
+  #       params: {}
 
   # AI review pass tracks via review_status field on the item -- NO intermediate state
   # per architect lock 2026-06-26. advance_to_ai_reviewed_on_pass rule DELETED;
