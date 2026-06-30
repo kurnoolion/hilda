@@ -522,6 +522,22 @@ class SpAlertParser:
                     },
                 },
             )
+            # DEBUG-INSTRUMENTATION 2026-06-30
+            logger.info(
+                "DBG sp_alert_parser._emit_trigger_event EMIT corr_id=%s "
+                "trigger=%s sub_trigger=%s entity_ref={customer_id=%s device_id=%s "
+                "milestone_id=%s delivery_item_id=%s} field_deltas_keys=%s "
+                "body_kvs_count=%d",
+                event.correlation_id,
+                getattr(event.trigger, 'value', event.trigger),
+                event.sub_trigger,
+                getattr(event.entity_ref, 'customer_id', None),
+                getattr(event.entity_ref, 'device_id', None),
+                getattr(event.entity_ref, 'milestone_id', None),
+                getattr(event.entity_ref, 'delivery_item_id', None),
+                sorted((event.field_deltas or {}).keys())[:12],
+                len(parsed.body_kvs or {}),
+            )
             self._dispatcher.dispatch(event)
         except Exception as exc:
             logger.warning("TriggerDispatcher emit skipped: %s", str(exc)[:100])

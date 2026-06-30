@@ -76,6 +76,15 @@ def apply_pm_approval_task(
 
     Returns: dict with outcome marker + mirrored field names for telemetry.
     """
+    # DEBUG-INSTRUMENTATION 2026-06-30
+    _log.info(
+        "DBG apply_pm_approval_task ENTRY corr_id=%s delivery_item_id=%s "
+        "field_deltas_keys=%s sub_trigger=%s",
+        event_context.get("correlation_id"),
+        event_context.get("delivery_item_id"),
+        sorted((event_context.get("field_deltas") or {}).keys())[:12],
+        event_context.get("sub_trigger"),
+    )
     deps = get_task_deps()
 
     delivery_item_id = event_context.get("delivery_item_id")

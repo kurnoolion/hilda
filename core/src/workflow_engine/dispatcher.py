@@ -189,10 +189,27 @@ class TriggerDispatcher:
         matches and owner edits produce zero downstream behavior (no audit
         of a matched action, no NotifyNewOwner email, no StartItemCollection).
         """
+        # DEBUG-INSTRUMENTATION 2026-06-30 -- remove after PM-approve cascade
+        # debugging is complete. See follow-up cleanup commit.
+        logger.info(
+            "DBG dispatcher._refine_sub_trigger ENTRY corr_id=%s sub_trigger=%s "
+            "field_deltas_keys=%s",
+            getattr(event, 'correlation_id', '?'),
+            event.sub_trigger,
+            sorted((event.field_deltas or {}).keys())[:12],
+        )
         if event.sub_trigger != "changed":
+            logger.info(
+                "DBG dispatcher._refine_sub_trigger SKIP non-changed corr_id=%s sub_trigger=%s",
+                getattr(event, 'correlation_id', '?'), event.sub_trigger,
+            )
             return event
         deltas = event.field_deltas or {}
         if not deltas:
+            logger.info(
+                "DBG dispatcher._refine_sub_trigger SKIP empty-deltas corr_id=%s",
+                getattr(event, 'correlation_id', '?'),
+            )
             return event
         delta_keys = set(deltas.keys())
 
@@ -212,9 +229,18 @@ class TriggerDispatcher:
             refined = "TagsModified"
 
         if refined is None:
+            logger.info(
+                "DBG dispatcher._refine_sub_trigger NO_MATCH corr_id=%s "
+                "delta_keys=%s (none of PM/OWNER/DEADLINE/TAGS sets matched)",
+                getattr(event, 'correlation_id', '?'), sorted(delta_keys)[:12],
+            )
             return event
-        logger.debug(
-            "dispatcher._refine_sub_trigger: '%s' -> '%s' (field_deltas=%s)",
+        # DEBUG: promoted from logger.debug to logger.info 2026-06-30
+        # for PM-approve cascade debugging.
+        logger.info(
+            "DBG dispatcher._refine_sub_trigger REFINED corr_id=%s '%s' -> '%s' "
+            "(field_deltas=%s)",
+            getattr(event, 'correlation_id', '?'),
             event.sub_trigger, refined, sorted(delta_keys)[:8],
         )
         from dataclasses import replace
@@ -258,6 +284,17 @@ class TriggerDispatcher:
         existing = dict(event.derived_fields) if event.derived_fields else {}
         # Caller-supplied facts take precedence over item snapshot defaults.
         merged = {**promoted, **derived, **existing}
+        # DEBUG-INSTRUMENTATION 2026-06-30
+        logger.info(
+            "DBG dispatcher._enrich_event MERGED corr_id=%s "
+            "promoted_keys=%s derived_keys=%s existing_keys=%s "
+            "merged.delivery_state=%s",
+            getattr(event, 'correlation_id', '?'),
+            sorted(promoted.keys())[:10],
+            sorted(derived.keys())[:6],
+            sorted(existing.keys())[:10],
+            merged.get('delivery_state'),
+        )
         from dataclasses import replace
         return replace(event, derived_fields=merged)
 
@@ -266,10 +303,32 @@ class TriggerDispatcher:
         item-less events (MilestoneAllClosed, CredentialExpired, etc.) or when
         no storage Protocol injected (e.g., tests)."""
         delivery_item_id = getattr(event.entity_ref, "delivery_item_id", None)
-        if delivery_item_id is None or self._storage is None:
+        # DEBUG-INSTRUMENTATION 2026-06-30 -- remove after cascade debugging
+        if delivery_item_id is None:
+            logger.info(
+                "DBG dispatcher._fetch_item_snapshot SKIP no-delivery_item_id "
+                "corr_id=%s entity_ref=%s",
+                getattr(event, 'correlation_id', '?'),
+                {k: getattr(event.entity_ref, k, None)
+                 for k in ('customer_id', 'device_id', 'milestone_id', 'delivery_item_id')},
+            )
+            return None
+        if self._storage is None:
+            logger.info(
+                "DBG dispatcher._fetch_item_snapshot SKIP no-storage corr_id=%s id=%s",
+                getattr(event, 'correlation_id', '?'), delivery_item_id,
+            )
             return None
         try:
-            return self._storage.get_delivery_item(delivery_item_id)
+            snap = self._storage.get_delivery_item(delivery_item_id)
+            logger.info(
+                "DBG dispatcher._fetch_item_snapshot RESULT corr_id=%s id=%s "
+                "found=%s delivery_state=%s",
+                getattr(event, 'correlation_id', '?'), delivery_item_id,
+                snap is not None,
+                getattr(snap, 'delivery_state', None),
+            )
+            return snap
         except Exception:
             # Snapshot fetch failure should not block dispatch -- caller already
             # has the event; we just lose the pause check.
@@ -311,6 +370,20 @@ class TriggerDispatcher:
         Item-less triggers (MilestoneAllClosed, CredentialExpired, etc.) pass
         item_snapshot=None to rule_engine; pause check is skipped automatically.
         """
+        # DEBUG-INSTRUMENTATION 2026-06-30
+        logger.info(
+            "DBG dispatcher.dispatch ENTRY corr_id=%s trigger=%s sub_trigger=%s "
+            "entity_ref={customer_id=%s device_id=%s milestone_id=%s delivery_item_id=%s} "
+            "field_deltas_keys=%s",
+            getattr(event, 'correlation_id', '?'),
+            getattr(event.trigger, 'value', event.trigger),
+            event.sub_trigger,
+            getattr(event.entity_ref, 'customer_id', None),
+            getattr(event.entity_ref, 'device_id', None),
+            getattr(event.entity_ref, 'milestone_id', None),
+            getattr(event.entity_ref, 'delivery_item_id', None),
+            sorted((event.field_deltas or {}).keys())[:12],
+        )
         # Refine 'changed' sub_trigger to semantic variants (OwnerReassigned /
         # DeadlineMoved / TagsModified) based on which fields were edited, so
         # rules keyed off specialized sub_triggers can match raw SP alerts.
@@ -322,6 +395,15 @@ class TriggerDispatcher:
         # (2026-06-27 cold-start enrichment per architect rule-walk-through).
         event = self._enrich_event(event, item_snapshot)
         matches: list[RuleMatch] = self._rule_engine.evaluate(event, item_snapshot=item_snapshot)
+        # DEBUG-INSTRUMENTATION 2026-06-30
+        logger.info(
+            "DBG dispatcher.dispatch RULE_ENGINE_RESULT corr_id=%s sub_trigger=%s "
+            "matched_count=%d rule_ids=%s",
+            getattr(event, 'correlation_id', '?'),
+            event.sub_trigger,
+            len(matches),
+            [m.rule_id for m in matches],
+        )
 
         event_context = self._build_event_context(event)
         scheduled: list[str] = []
@@ -336,9 +418,21 @@ class TriggerDispatcher:
                 skipped.append((match.rule_id, "paused"))
                 continue
             try:
+                # DEBUG-INSTRUMENTATION 2026-06-30
+                logger.info(
+                    "DBG dispatcher.dispatch DISPATCHING rule_id=%s actions=%s corr_id=%s",
+                    match.rule_id,
+                    [str(a.kind) for a in match.actions],
+                    getattr(event, 'correlation_id', '?'),
+                )
                 signature = build_chain_from_rule_match(match, event_context)
                 async_result = signature.apply_async()
                 scheduled.append(async_result.id)
+                logger.info(
+                    "DBG dispatcher.dispatch SCHEDULED rule_id=%s task_id=%s corr_id=%s",
+                    match.rule_id, async_result.id,
+                    getattr(event, 'correlation_id', '?'),
+                )
             except Exception as exc:
                 # Per workflow_engine MODULE.md Invariant: dispatch failure is
                 # surfaced via WFL-* but does not abort other RuleMatches.

@@ -137,8 +137,25 @@ class RuleEngine:
         pause check entirely."""
         matches: list[RuleMatch] = []
         resolved = resolve_rules_for_entity(self._rule_set, event.entity_ref, event.trigger, event.sub_trigger)
+        # DEBUG-INSTRUMENTATION 2026-06-30 -- remove after PM-approve cascade
+        # debugging is complete.
+        import logging as _dbg_logging
+        _dbg_log = _dbg_logging.getLogger(__name__)
+        _dbg_log.info(
+            "DBG rule_engine.evaluate ENTRY corr_id=%s trigger=%s sub_trigger=%s "
+            "resolved_rule_ids=%s",
+            getattr(event, 'correlation_id', '?'),
+            getattr(event.trigger, 'value', event.trigger),
+            event.sub_trigger,
+            [r.rule_id for r in resolved],
+        )
         for rule in resolved:
-            if not self._condition_matches(rule, event):
+            cond_ok = self._condition_matches(rule, event)
+            _dbg_log.info(
+                "DBG rule_engine.evaluate RULE corr_id=%s rule_id=%s condition_match=%s",
+                getattr(event, 'correlation_id', '?'), rule.rule_id, cond_ok,
+            )
+            if not cond_ok:
                 continue
             matches.append(
                 RuleMatch(
@@ -150,6 +167,12 @@ class RuleEngine:
                     correlation_id=event.correlation_id,
                 )
             )
+        _dbg_log.info(
+            "DBG rule_engine.evaluate RESULT corr_id=%s matches=%d rule_ids=%s",
+            getattr(event, 'correlation_id', '?'),
+            len(matches),
+            [m.rule_id for m in matches],
+        )
         return matches
 
     def explain(self, event: TriggerEvent, item_snapshot: Any = None) -> list[dict[str, Any]]:
