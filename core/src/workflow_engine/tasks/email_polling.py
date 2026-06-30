@@ -296,12 +296,30 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
 
 def _enqueue_owner_reply(msg: Any) -> None:
     """Build the serialisable payload + enqueue apply_owner_reply_task AND
-    (when attachments present) process_inbound_attachments_task.
+    (when attachments present) process_inbound_attachments_task IN SEQUENCE
+    (attachment chain link 1, owner_reply chain link 2).
 
-    Both run in parallel per architect 2026-06-29 Q1 lock (option c). Race
-    on doc_count is reconciled via owner_intent_closed_at persistence
-    (apply_owner_reply sets it on guard_denied OwnerClosed; reconcile rule
-    catches it when doc_count_reached fires from this attachment task).
+    Architect 2026-06-30 revised design: previously both tasks ran in
+    parallel (architect 2026-06-29 Q1 option c) with race-reconciliation
+    via owner_intent_closed_at. Live test surfaced a tighter race -- the
+    attachment task's state advance (which fires via rule_engine -> async
+    update_state task) could complete AFTER owner_reply's state advance,
+    causing local-vs-SP divergence (local UnderPMReview, SP DocumentReceived).
+    The 2026-06-30 fix:
+      1. attachment task INLINES the OutreachSent -> DocumentReceived advance
+         (synchronous, before the task returns) so chain-next can rely on it.
+      2. email_polling uses Celery chain(attachment, owner_reply) so
+         owner_reply only starts after attachment task succeeds, seeing
+         fresh delivery_state + doc_count_received.
+      3. If attachment task fails, owner_reply does NOT fire (architect
+         direction: owner will resend; next email re-processes both).
+    For emails without attachments, owner_reply fires directly (no chain).
+
+    owner_intent_closed_at safety net is retained for cases where owner
+    closes WHILE doc_count is still incomplete (e.g. 1 doc arrives in this
+    email, 1 more needed later) -- guard_denied path still persists intent
+    and reconcile rule still fires on subsequent StateChange to
+    DocumentReceived.
 
     Attachments are serialized as dicts (InboundAttachment is a frozen
     dataclass; Celery JSON serializes the dict shape cleanly).
@@ -333,12 +351,18 @@ def _enqueue_owner_reply(msg: Any) -> None:
         "received_at_iso": received_at.isoformat() if received_at else None,
     }
 
-    # Path 1: structural status -- table parse + per-row dispatch. Attachments
-    # are NOT in this payload; they go to the parallel task below.
-    apply_owner_reply_task.delay(base_payload)
-
-    # Path 2: per-attachment routing + storage write + AttachmentReceived
-    # event emission. Only enqueue when attachments exist.
+    # Sequential chain when attachments present, parallel-only when not.
     if attachments_payload:
+        # Chain: attachment task runs first (inlines state advance to
+        # DocumentReceived); owner_reply runs after attachment SUCCESS only.
+        # .si() = immutable signature: owner_reply doesn't consume
+        # attachment's return value as an arg.
+        from celery import chain
         attach_payload = {**base_payload, "attachments": attachments_payload}
-        process_inbound_attachments_task.delay(attach_payload)
+        chain(
+            process_inbound_attachments_task.si(attach_payload),
+            apply_owner_reply_task.si(base_payload),
+        ).apply_async()
+    else:
+        # No attachments -> no race possible; fire owner_reply directly.
+        apply_owner_reply_task.delay(base_payload)

@@ -1599,9 +1599,16 @@ class TestEmailPollingAttachmentEnqueue:
         assert m_owner.call_count == 1
         assert m_attach.call_count == 0
 
-    def test_with_attachments_both_tasks_enqueued(self):
+    def test_with_attachments_chains_attachment_then_owner_reply(self):
+        """Architect 2026-06-30: when attachments present, the cascade
+        chains attachment -> owner_reply via celery.chain (sequential)
+        instead of parallel .delay() calls. Owner_reply now runs ONLY
+        after attachment task succeeds, so it sees fresh delivery_state
+        (advanced inline by attachment task) + fresh doc_count_received.
+        Previously parallel; this test now verifies the chain shape.
+        """
         from types import SimpleNamespace
-        from unittest.mock import patch
+        from unittest.mock import patch, MagicMock
         from core.src.workflow_engine.tasks.email_polling import _enqueue_owner_reply
 
         att = SimpleNamespace(filename="r.pdf", content=b"x",
@@ -1612,18 +1619,25 @@ class TestEmailPollingAttachmentEnqueue:
             received_at=None, attachments=(att,),
         )
         with patch(
-            "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.delay"
-        ) as m_owner, patch(
+            "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.si"
+        ) as m_owner_si, patch(
             "core.src.workflow_engine.tasks.inbound_attachment."
-            "process_inbound_attachments_task.delay"
-        ) as m_attach:
+            "process_inbound_attachments_task.si"
+        ) as m_attach_si, patch("celery.chain") as m_chain:
+            m_chain.return_value = MagicMock()
             _enqueue_owner_reply(msg)
-        assert m_owner.call_count == 1
-        assert m_attach.call_count == 1
-        # Attachment payload contains the bytes
-        attach_payload = m_attach.call_args.args[0]
+        # Both .si() signatures built
+        assert m_attach_si.call_count == 1
+        assert m_owner_si.call_count == 1
+        # Chain assembled with both
+        assert m_chain.call_count == 1
+        # Attachment payload (the .si() call's first arg) carries the bytes
+        attach_payload = m_attach_si.call_args.args[0]
         assert len(attach_payload["attachments"]) == 1
         assert attach_payload["attachments"][0]["file_hash"] == "h1"
+        # owner_reply .si() did NOT include attachments (base_payload only)
+        owner_payload = m_owner_si.call_args.args[0]
+        assert "attachments" not in owner_payload
 
 
 # ===========================================================================

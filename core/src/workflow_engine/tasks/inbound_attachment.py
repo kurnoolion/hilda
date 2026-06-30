@@ -613,10 +613,64 @@ async def _persist_routed_attachment(
         })
         item_ids.add(match.item_id)
 
-        # Step H: fire AttachmentReceived TriggerEvent via dispatcher
-        if _fire_attachment_received_event(deps, match.item_id, item_dict,
-                                            routed, correlation_id, batch_id):
-            events_fired += 1
+        # Step H: INLINE state advance OutreachSent -> DocumentReceived per
+        # architect 2026-06-30 decision. Previously this fired
+        # AttachmentReceived -> rule_engine -> update_state Celery task, which
+        # was asynchronous + raced against owner_reply task that also wanted
+        # to update state. The new chain (attachment -> owner_reply in
+        # email_polling) only works if the state advance is COMPLETE before
+        # the next chain task fires; rule_engine's async dispatch broke that
+        # guarantee. By calling tracker.transitions.update_delivery_state
+        # synchronously here, state advance commits before this task returns
+        # and the chain's next link (apply_owner_reply) sees fresh state.
+        #
+        # Ph-1 scope: only OutreachSent -> DocumentReceived. Other current
+        # states (already past DocumentReceived) get the doc_count_received
+        # update + audit, but no state change. Regression-to-DocumentReceived
+        # for UnderPMReview/OwnerClosed (TPM-upload-late case) is Ph-2 work
+        # gated on owner_confirmed_closed field + reconcile-rule rework.
+        try:
+            fresh_item = deps.storage.get_delivery_item(match.item_id)
+        except Exception:  # noqa: BLE001
+            fresh_item = None
+        if fresh_item is not None:
+            current_state = getattr(fresh_item, "delivery_state", None)
+            doc_count = getattr(fresh_item, "doc_count", 0) or 0
+            doc_count_received_fresh = getattr(fresh_item, "doc_count_received", 0) or 0
+            doc_count_reached = doc_count_received_fresh >= doc_count
+            if doc_count_reached and current_state == "OutreachSent":
+                try:
+                    from core.src.tracker.transitions import update_delivery_state
+                    from core.src.template_schema.enums import DeliveryState
+                    update_delivery_state(
+                        delivery_item_id=match.item_id,
+                        target_state=DeliveryState.DOCUMENT_RECEIVED,
+                        storage=deps.storage,
+                        sp_writer=deps.sp_writer,
+                        audit=deps.audit,
+                        event_context={
+                            "correlation_id": correlation_id,
+                            "trigger_source": "automated",
+                            "modified_by": "system:process_inbound_attachments",
+                        },
+                    )
+                    events_fired += 1
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning(
+                        "inline OutreachSent->DocumentReceived advance failed "
+                        "for item=%s: %s: %s",
+                        match.item_id, type(exc).__name__, str(exc)[:120],
+                    )
+            elif doc_count_reached:
+                # Item already past DocumentReceived (OwnerClosed/UnderPMReview/
+                # ReadyForSubmission/SubmittedToCustomer/Closed). Count the doc
+                # via the existing increment + audit; no state change Ph-1.
+                await _audit(deps, "supplementary_doc_received", match.item_id, {
+                    "current_state":      current_state,
+                    "doc_count_received": doc_count_received_fresh,
+                    "doc_count":          doc_count,
+                    "correlation_id":     correlation_id,
+                })
 
     return {
         "match_count": len(routed.matches),
