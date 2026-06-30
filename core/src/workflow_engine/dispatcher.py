@@ -342,6 +342,14 @@ class TriggerDispatcher:
         Per D1 cascade 2026-06-23: uses customer_id / device_id (was customer_slug /
         device_slug)."""
         ref = event.entity_ref
+        # Architect 2026-06-30: field_deltas added so SP-alert-driven tasks
+        # (apply_pm_approval, future Pattern-A mirrors) can read the
+        # SP-authored NEW values that triggered the rule. Previously absent
+        # from event_context -> apply_pm_approval_task's
+        # `event_context.get("field_deltas")` always returned None ->
+        # skipped_no_deltas outcome -> state stayed at UnderPMReview despite
+        # the rule firing + task spawning. This was the silent drop point
+        # blocking the PM-approve cascade for the entire debug arc.
         return {
             "correlation_id":   event.correlation_id,
             "customer_id":      ref.customer_id,
@@ -356,6 +364,9 @@ class TriggerDispatcher:
             # body_kvs + routing_key here for import_deliverable_tracker_task).
             # None when event has no derived_fields (most internal events).
             "derived_fields":   dict(event.derived_fields) if event.derived_fields else None,
+            # field_deltas passed through 2026-06-30 per architect cascade
+            # debug -- Pattern-A mirror tasks need the SP-authored NEW values.
+            "field_deltas":     dict(event.field_deltas) if event.field_deltas else None,
         }
 
     def dispatch(self, event: TriggerEvent) -> DispatchResult:
