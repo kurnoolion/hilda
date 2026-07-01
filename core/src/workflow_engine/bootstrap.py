@@ -133,7 +133,15 @@ def bootstrap_task_deps(
     # create_folder / upload trace lands in stdout. Setting these AFTER the
     # build (as the earlier fix did) missed all logs emitted during the build
     # itself.
+    #
+    # ALSO promote the root logger to INFO -- at worker_init time celery hasn't
+    # finished applying --loglevel=INFO to root yet, so root defaults to
+    # WARNING and filters child INFO messages during propagation regardless
+    # of what we set on the child loggers. Live smoke 2026-07-01: customer_adapter
+    # wired (WARNING) was visible, DBG_MMK factory.BEGIN (INFO) was not until
+    # this root-level setLevel landed.
     import logging as _logging
+    _logging.getLogger().setLevel(_logging.INFO)   # root
     for _name in (
         "customizations",
         "customizations.customer_adapter",
