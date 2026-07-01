@@ -219,6 +219,16 @@ def check_transition_guards(
             # Items with no_customer_upload=True should never reach SUBMITTED_TO_CUSTOMER
             # in the first place -- the path is READY_FOR_SUBMISSION -> CLOSED direct.
             blocking.append("submitted_path_invalid_for_no_customer_upload")
+        elif trigger_source == "submit_to_carrier_task":
+            # 2026-07-01: submit_to_carrier_task IS the authority on whether
+            # the upload happened -- it only transitions after per-item
+            # all-files-success. The carrier_upload_complete field it would
+            # otherwise set doesn't exist on DeliveryItemTable, so
+            # _carrier_upload_complete always returned False and this guard
+            # falsely blocked every legitimate transition. Trust the task's
+            # own trigger_source instead; other trigger_sources still hit
+            # the fallback flag check.
+            pass
         elif not _carrier_upload_complete(item):
             blocking.append("carrier_upload_incomplete")
 

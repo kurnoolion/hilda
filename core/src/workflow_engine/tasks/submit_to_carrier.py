@@ -255,14 +255,21 @@ def submit_to_carrier_task(
 
         # -- Per-item state transition on all-files-success -------------------
         if all_ok and files_ok > 0:
-            _transition_to_submitted(
+            transitioned = _transition_to_submitted(
                 deps,
                 item_id=item_id,
                 customer_id=customer_id,
                 milestone_id=milestone_id,
                 correlation_id=correlation_id,
             )
-            uploaded_items += 1
+            if transitioned:
+                uploaded_items += 1
+            else:
+                # Files uploaded but state didn't transition -- count as
+                # partial so the caller sees the truth. Item stays in RFS;
+                # next Submit click will retry the transition (uploads are
+                # idempotent per your binding contract).
+                partial_items += 1
         else:
             partial_items += 1
             _log.info(
@@ -412,31 +419,25 @@ def _transition_to_submitted(
     customer_id: str,
     milestone_id: str,
     correlation_id: str,
-) -> None:
+) -> bool:
     """Transition item RFS -> SubmittedToCustomer via tracker.transitions.
+    Returns True on successful transition, False on failure so the caller can
+    avoid falsely counting a failed transition as an upload success.
+
     Lazy import: workflow_engine.tasks transitively imports tracker in other
     flows; keeping this local avoids circular-import friction (matches the
     kickoff_collection_task pattern).
 
-    Sets carrier_upload_complete=True FIRST so guards.py Guard 4
-    (SUBMITTED_TO_CUSTOMER requires carrier_upload_complete) permits the
-    transition. This helper is only called on per-item all-files-success,
-    so the flag is truthful."""
+    Guard 4 (guards.py) trusts trigger_source='submit_to_carrier_task' as
+    authoritative evidence of upload completion, so we don't need to write
+    a carrier_upload_complete flag first (the flag isn't a column on
+    DeliveryItemTable in this codebase; prior write attempts silently
+    no-op'd via update_delivery_item's hasattr check)."""
     from core.src.tracker import DeliveryState
     from core.src.tracker.transitions import update_delivery_state
 
     try:
-        deps.storage.update_delivery_item(
-            item_id, {"carrier_upload_complete": True},
-        )
-    except Exception as exc:  # noqa: BLE001
-        _log.warning(
-            "submit_to_carrier: carrier_upload_complete write failed for "
-            "item=%s: %s -- guard will likely reject transition",
-            item_id, type(exc).__name__,
-        )
-    try:
-        update_delivery_state(
+        transition_result = update_delivery_state(
             delivery_item_id=item_id,
             target_state=DeliveryState.SUBMITTED_TO_CUSTOMER,
             params={},
@@ -456,7 +457,7 @@ def _transition_to_submitted(
         # State transition failure is loud but non-fatal for the outer
         # iteration -- next Submit click / retry can re-run.
         _log.warning(
-            "submit_to_carrier: state transition failed for item=%s: %s",
+            "submit_to_carrier: state transition raised for item=%s: %s",
             item_id, type(exc).__name__,
         )
         _audit(deps, "submit_to_carrier_transition_failed", item_id, {
@@ -465,6 +466,25 @@ def _transition_to_submitted(
             "error":          type(exc).__name__,
             "correlation_id": correlation_id,
         })
+        return False
+    # update_delivery_state can return without raising when the transition is
+    # guard_denied. Inspect the TransitionResult.outcome so we don't falsely
+    # count a blocked transition as uploaded_items++ in the caller.
+    outcome = getattr(transition_result, "outcome", None)
+    if outcome not in ("transitioned", "no_op_idempotent"):
+        _log.warning(
+            "submit_to_carrier: state transition non-success for item=%s "
+            "outcome=%s",
+            item_id, outcome,
+        )
+        _audit(deps, "submit_to_carrier_transition_denied", item_id, {
+            "customer_id":    customer_id,
+            "milestone_id":   milestone_id,
+            "outcome":        str(outcome),
+            "correlation_id": correlation_id,
+        })
+        return False
+    return True
 
 
 def _audit(
