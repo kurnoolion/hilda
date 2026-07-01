@@ -387,8 +387,11 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
         customer_id, module_name, type(instance).__name__,
     )
 
-    # Boot-time directory pre-creation (opt-in)
-    if _env_truthy("HILDA_BOOTSTRAP_GDRIVE_DIRS"):
+    # Boot-time directory pre-creation -- default ON per architect 2026-07-01.
+    # Set HILDA_SKIP_GDRIVE_DIRS_BOOTSTRAP=1 to opt out (e.g. tests / dev boxes
+    # without a GDrive session). Idempotent: create_gdrive_dir returns True
+    # on already-exists, so N-worker restart races don't duplicate folders.
+    if not _env_truthy("HILDA_SKIP_GDRIVE_DIRS_BOOTSTRAP"):
         bootstrap_method = getattr(instance, "bootstrap_directories", None)
         if bootstrap_method is not None and callable(bootstrap_method):
             template = _load_template_yaml(customer_id, result)
@@ -404,6 +407,17 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
                         f"customer_adapter_bootstrap_dirs_failed: "
                         f"{type(exc).__name__}: {str(exc)[:120]}"
                     )
+        else:
+            _log.info(
+                "customer_adapter: bootstrap_directories method not found on "
+                "%s; skipping boot-time folder pre-creation",
+                type(instance).__name__,
+            )
+    else:
+        _log.info(
+            "customer_adapter: HILDA_SKIP_GDRIVE_DIRS_BOOTSTRAP set; "
+            "skipping boot-time folder pre-creation",
+        )
 
     return instance
 
