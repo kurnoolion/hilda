@@ -361,6 +361,20 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
     module_name = (
         f"customizations.customer_adapter.{customer_id.lower()}_adapter"
     )
+    # sys.path guard (architect 2026-07-01 live smoke): Celery's launcher
+    # doesn't put the repo root on sys.path automatically -- everything else
+    # in the codebase reaches customizations/ via file-path access
+    # (yaml.safe_load), so this is the FIRST importlib.import_module against
+    # the customizations package. Without the guard, ModuleNotFoundError:
+    # No module named 'customizations'. bootstrap.py lives at
+    # <repo_root>/core/src/workflow_engine/bootstrap.py, so parents[3] is
+    # the repo root.
+    import sys as _sys
+    from pathlib import Path as _P
+    _repo_root = str(_P(__file__).resolve().parents[3])
+    if _repo_root not in _sys.path:
+        _sys.path.insert(0, _repo_root)
+
     try:
         import importlib
         module = importlib.import_module(module_name)
