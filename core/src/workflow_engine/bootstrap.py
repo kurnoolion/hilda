@@ -112,7 +112,6 @@ def bootstrap_task_deps(
     result.storage_wired = storage is not None
     result.sp_writer_wired = sp_writer is not None
     result.audit_wired = audit is not None
-    result.customer_adapter_wired = customer_adapter is not None
     result.messenger_wired = messenger is not None
 
     # -------- 1. RuleEngine from YAML rules directory --------
@@ -123,6 +122,14 @@ def bootstrap_task_deps(
 
     # -------- 3. EmailSender --------
     email_sender = _build_email_sender(result)
+
+    # -------- 3.5 CustomerAdapter -- Ph-1 architect 2026-07-01 wire-up --------
+    # If caller pre-injected a customer_adapter, honor it (tests / special
+    # deploys). Otherwise auto-discover via HILDA_CUSTOMER_ID env var
+    # (defaults to "MMK"; single-customer Ph-1 lock -- multi-customer is Ph-2).
+    if customer_adapter is None:
+        customer_adapter = _build_customer_adapter(result, audit=audit)
+    result.customer_adapter_wired = customer_adapter is not None
 
     # -------- 4. Install --------
     deps = TaskDeps(
@@ -318,4 +325,121 @@ def _build_email_sender(result: BootstrapResult) -> Any:
         return sender
     except Exception as exc:  # noqa: BLE001
         result.warnings.append(f"email_sender_skip_build: {type(exc).__name__}: {str(exc)[:120]}")
+        return None
+
+
+def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> Any:
+    """Ph-1 architect 2026-07-01: auto-discover the per-customer adapter
+    subclass so submit_to_carrier_task gets a live customer_adapter without
+    manual injection.
+
+    Discovery convention:
+      1. HILDA_CUSTOMER_ID env var (default "MMK") -> lowercase customer id
+      2. Import `customizations.customer_adapter.<customer_id_lower>_adapter`
+      3. Call module.ADAPTER_FACTORY(audit_writer=audit) -> adapter instance
+
+    Boot-time directory pre-creation (opt-in per env var, default OFF):
+      If HILDA_BOOTSTRAP_GDRIVE_DIRS is truthy AND the adapter exposes
+      `bootstrap_directories`, load
+      customizations/template_schemas/<customer_id>/template.yaml as a raw
+      dict and pass it to the method. Best-effort -- failures leave the
+      adapter wired but skip pre-creation.
+
+    Best-effort throughout: no ImportError, missing config, or template
+    load failure fails the whole bootstrap. Missing pieces just leave the
+    slot None + record a warning; submit_to_carrier_task audits
+    'skipped_no_adapter' at run time.
+    """
+    import os
+
+    customer_id = os.environ.get("HILDA_CUSTOMER_ID", "MMK")
+    module_name = (
+        f"customizations.customer_adapter.{customer_id.lower()}_adapter"
+    )
+    try:
+        import importlib
+        module = importlib.import_module(module_name)
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"customer_adapter_no_module: {module_name}: "
+            f"{type(exc).__name__}: {str(exc)[:120]}"
+        )
+        return None
+
+    factory = getattr(module, "ADAPTER_FACTORY", None)
+    if factory is None or not callable(factory):
+        result.warnings.append(
+            f"customer_adapter_no_factory: {module_name} missing ADAPTER_FACTORY"
+        )
+        return None
+
+    try:
+        instance = factory(audit_writer=audit)
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"customer_adapter_factory_failed: {module_name}: "
+            f"{type(exc).__name__}: {str(exc)[:120]}"
+        )
+        return None
+
+    _log.info(
+        "customer_adapter wired: customer_id=%s module=%s class=%s",
+        customer_id, module_name, type(instance).__name__,
+    )
+
+    # Boot-time directory pre-creation (opt-in)
+    if _env_truthy("HILDA_BOOTSTRAP_GDRIVE_DIRS"):
+        bootstrap_method = getattr(instance, "bootstrap_directories", None)
+        if bootstrap_method is not None and callable(bootstrap_method):
+            template = _load_template_yaml(customer_id, result)
+            if template is not None:
+                try:
+                    import asyncio
+                    summary = asyncio.run(bootstrap_method(template))
+                    _log.info(
+                        "customer_adapter bootstrap_directories: %s", summary,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.warnings.append(
+                        f"customer_adapter_bootstrap_dirs_failed: "
+                        f"{type(exc).__name__}: {str(exc)[:120]}"
+                    )
+
+    return instance
+
+
+def _env_truthy(name: str) -> bool:
+    """Yes/no interpretation of a string env var. Default False (unset -> off)."""
+    import os
+    val = (os.environ.get(name) or "").strip().lower()
+    return val in ("1", "true", "yes", "on", "y")
+
+
+def _load_template_yaml(customer_id: str, result: BootstrapResult) -> Any:
+    """Load customizations/template_schemas/<customer_id>/template.yaml as
+    a raw dict (yaml.safe_load). Returns None on failure with a warning.
+
+    Raw dict passed to bootstrap_directories rather than Pydantic-validated
+    model so the walker isn't fragile against template schema drift.
+    """
+    try:
+        import yaml
+        from pathlib import Path as _P
+        # Repo root is 2 levels above this file's dir (core/src/workflow_engine)
+        repo_root = _P(__file__).resolve().parents[3]
+        template_path = (
+            repo_root / "customizations" / "template_schemas"
+            / customer_id / "template.yaml"
+        )
+        if not template_path.exists():
+            result.warnings.append(
+                f"template_yaml_missing: {template_path}"
+            )
+            return None
+        with template_path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"template_yaml_load_failed: {type(exc).__name__}: {str(exc)[:120]}"
+        )
         return None
