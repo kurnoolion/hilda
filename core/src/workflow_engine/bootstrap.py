@@ -142,12 +142,26 @@ def bootstrap_task_deps(
         dispatcher=dispatcher,
     )
     set_task_deps(deps)
-    _log.info(result.summary_line())
-    # Debuggability: dump each individual warning as its own log line so
-    # architects can see WHY a slot ended up in the skipped list without
-    # having to poke at result.warnings from a Python REPL.
+    # 2026-07-01 architect live smoke: worker_init fires BEFORE celery's
+    # --loglevel=INFO config is applied, so INFO logs from module-level
+    # loggers get filtered by Python's default WARNING root level. Promoting
+    # the boot-diagnostic summary + per-warning + customer_adapter-wired
+    # lines to WARNING level so they always land in stdout regardless of
+    # log config timing.
+    _log.warning("task_deps bootstrap: %s", result.summary_line())
     for w in result.warnings:
         _log.warning("BOOTSTRAP_WARNING %s", w)
+    # Also force customizations.* + customer_adapter.* loggers to INFO so
+    # the mmk_adapter.py DBG_MMK trace (INFO-level in the mockup) reaches
+    # stdout. Idempotent -- setting the same level twice is a no-op.
+    import logging as _logging
+    for _name in (
+        "customizations",
+        "customizations.customer_adapter",
+        "customizations.customer_adapter.mmk_adapter",
+        "core.src.customer_adapter",
+    ):
+        _logging.getLogger(_name).setLevel(_logging.INFO)
     return result
 
 
@@ -401,7 +415,9 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
         )
         return None
 
-    _log.info(
+    # WARNING level so it lands even before celery's log config finishes (see
+    # 2026-07-01 note in bootstrap_task_deps).
+    _log.warning(
         "customer_adapter wired: customer_id=%s module=%s class=%s",
         customer_id, module_name, type(instance).__name__,
     )
