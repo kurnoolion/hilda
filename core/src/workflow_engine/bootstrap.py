@@ -127,6 +127,20 @@ def bootstrap_task_deps(
     # If caller pre-injected a customer_adapter, honor it (tests / special
     # deploys). Otherwise auto-discover via HILDA_CUSTOMER_ID env var
     # (defaults to "MMK"; single-customer Ph-1 lock -- multi-customer is Ph-2).
+    #
+    # Pre-emptively force the adapter loggers to INFO BEFORE building the
+    # adapter so the mmk_adapter.py DBG_MMK factory / bootstrap_directories /
+    # create_folder / upload trace lands in stdout. Setting these AFTER the
+    # build (as the earlier fix did) missed all logs emitted during the build
+    # itself.
+    import logging as _logging
+    for _name in (
+        "customizations",
+        "customizations.customer_adapter",
+        "customizations.customer_adapter.mmk_adapter",
+        "core.src.customer_adapter",
+    ):
+        _logging.getLogger(_name).setLevel(_logging.INFO)
     if customer_adapter is None:
         customer_adapter = _build_customer_adapter(result, audit=audit)
     result.customer_adapter_wired = customer_adapter is not None
