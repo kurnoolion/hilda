@@ -332,38 +332,42 @@ class SpAlertParser:
         ):
             raise PipelineError("EML-E007", context={})
 
-        # -- Kickoff signal promotion (2026-06-30) --
-        # SP renders the milestone_collection_started_at field WITHOUT the
-        # "Edited" marker on the kickoff alert (architect's live test
-        # 2026-06-30: body had `milestone_collection_started_at 6/30/2026`
-        # bare -- no colon-or-multispace did parse to body_kvs via the
-        # _BODY_KV_LINE_RE \s{2,} alternative, but no Edited suffix meant it
-        # never reached field_deltas). Without that promotion the no-change
-        # drop below would kill the kickoff alert silently, leaving every
-        # delivery item stranded in Not Started state.
+        # -- Milestones trigger-field promotion (2026-06-30) --
+        # SP renders Milestones-list alerts WITHOUT "Edited" markers on
+        # trigger-field values (architect's live tests 2026-06-30):
+        #   - kickoff:      `milestone_collection_started_at 6/30/2026`
+        #   - submit:       `milestone_submission_triggered_at 6/30/2026`
+        # _BODY_KV_LINE_RE parses these into body_kvs via its \s{2,}
+        # alternative, but no Edited suffix means they never reach
+        # field_deltas -- and the no-change drop below would kill the
+        # alert silently, breaking kickoff (items stuck in Not Started)
+        # or submit-to-carrier (items stuck in ReadyForSubmission).
         #
-        # The kickoff rule (kickoff_collection_on_milestone_started in
-        # automation_rules.yaml) requires `milestone_collection_started_at`
-        # present in field_deltas with a non-null value. Promote it here
-        # when we see it in body_kvs so the rule fires.
+        # Promote each known trigger field from body_kvs to field_deltas
+        # so the corresponding rule (kickoff_collection_on_milestone_started
+        # / submit_to_carrier_on_milestone_submission_triggered) can match.
         #
-        # Scope: ONLY this one tracked-trigger field on the Milestones list.
+        # Scope: ONLY these named trigger fields on the Milestones list.
         # Other no-change "changed" alerts still get dropped per architect
-        # 2026-06-27.
-        _KICKOFF_PROMOTE_FIELD = "milestone_collection_started_at"
-        if (
-            list_name == "Milestones"
-            and _KICKOFF_PROMOTE_FIELD in body_kvs
-            and _KICKOFF_PROMOTE_FIELD not in field_deltas
-            and body_kvs[_KICKOFF_PROMOTE_FIELD]
-        ):
-            field_deltas[_KICKOFF_PROMOTE_FIELD] = body_kvs[_KICKOFF_PROMOTE_FIELD]
-            logger.info(
-                "sp_alert_kickoff_promoted: list=Milestones title=%s "
-                "milestone_collection_started_at=%s (no Edited marker -- "
-                "promoted from body_kvs so kickoff rule can fire)",
-                title, body_kvs[_KICKOFF_PROMOTE_FIELD],
-            )
+        # 2026-06-27. Adding a new tracked field = one tuple-entry change.
+        _MILESTONE_PROMOTE_FIELDS = (
+            "milestone_collection_started_at",       # kickoff trigger
+            "milestone_submission_triggered_at",     # submit-to-carrier trigger
+        )
+        if list_name == "Milestones":
+            for _field in _MILESTONE_PROMOTE_FIELDS:
+                if (
+                    _field in body_kvs
+                    and _field not in field_deltas
+                    and body_kvs[_field]
+                ):
+                    field_deltas[_field] = body_kvs[_field]
+                    logger.info(
+                        "sp_alert_field_promoted: list=Milestones title=%s "
+                        "%s=%s (no Edited marker -- promoted from body_kvs "
+                        "so downstream rule can fire)",
+                        title, _field, body_kvs[_field],
+                    )
 
         # -- "Changed" with empty field_deltas: drop per architect 2026-06-27 --
         if action_type == "changed" and not field_deltas:

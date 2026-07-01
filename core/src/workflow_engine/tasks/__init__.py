@@ -28,6 +28,7 @@ from . import (  # noqa: F401
     sp_alert_imports,  # added 2026-06-26: IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION per [D-118] cascade
     state,
     submission,      # added 2026-06-27: ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION
+    submit_to_carrier,  # added 2026-06-30: SUBMIT_TO_CARRIER milestone-scoped orchestrator per architect design pass
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "sp_alert_imports",
     "state",
     "submission",
+    "submit_to_carrier",
 ]

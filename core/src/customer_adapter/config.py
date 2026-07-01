@@ -5,6 +5,11 @@ session pool / upload timeout internally. HILDA-side config carries only:
 - customizations_dir (where per-customer subclass modules live)
 - ntp_skew_warn_s   (CAD-W005 threshold)
 - diagnostic_ntp_check (disable in air-gapped test rigs)
+- nsd_volume_prefix (2026-06-30 architect lock -- absolute-path composition
+  for source_dir passed to uploadAttachment; document_item_association stores
+  paths as "internal/<customer>/..." relative, but the adapter runs against
+  the host filesystem and needs full absolute paths. Prepending this prefix
+  keeps the container-vs-host topology in config rather than task code.)
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ _ENV_MAP = {
     "customizations_dir":    "HILDA_CUSTOMER_ADAPTER_CUSTOMIZATIONS_DIR",
     "ntp_skew_warn_s":       "HILDA_CUSTOMER_ADAPTER_NTP_SKEW_WARN_S",
     "diagnostic_ntp_check":  "HILDA_CUSTOMER_ADAPTER_DIAGNOSTIC_NTP_CHECK",
+    "nsd_volume_prefix":     "HILDA_CUSTOMER_ADAPTER_NSD_VOLUME_PREFIX",
 }
 
 
@@ -33,6 +39,12 @@ class CustomerAdapterConfig(BaseModel):
     customizations_dir:   Path  = Path("/etc/hilda/customizations/customer_adapter")
     ntp_skew_warn_s:      float = 25.0     # CAD-W005 threshold; TOTP window ~30s
     diagnostic_ntp_check: bool  = True     # disable in air-gapped test rigs
+    # 2026-06-30: host-side absolute-path prefix for NSD volume. Prepended to
+    # `local_nsd_path` from document_item_association (which stores relative
+    # paths like "internal/MMK/SM-S671U1/...") before passing source_dir to
+    # the adapter's uploadAttachment(). Empty string = no prefix (tests /
+    # already-absolute paths / same-container adapter).
+    nsd_volume_prefix:    str   = ""
 
     @classmethod
     def from_sources(

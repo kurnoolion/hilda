@@ -855,17 +855,19 @@ class TestRegistryIntegration:
         assert ActionKind.IMPORT_DELIVERABLE_TRACKER in ACTION_KIND_TO_TASK
         assert ActionKind.KICKOFF_COLLECTION in ACTION_KIND_TO_TASK
 
-    def test_19_of_21_action_kinds_registered_now(self):
+    def test_20_of_22_action_kinds_registered_now(self):
         # state(2) + milestone(3) + routing_resolution(3) + escalation(2) +
         # outreach(3: SEND_INITIAL_OUTREACH, SEND_REMINDER, NOTIFY_NEW_OWNER) +
         # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) +
         # sp_alert_imports(2: IMPORT_DELIVERABLE_TRACKER, KICKOFF_COLLECTION
         #                  added 2026-06-26 per [D-118] cascade) +
         # pm_approval(1: APPLY_PM_APPROVAL added 2026-06-28 per architect
-        #             Pattern A design lock) = 19.
+        #             Pattern A design lock) +
+        # submit_to_carrier(1: SUBMIT_TO_CARRIER added 2026-06-30 per architect
+        #             submit-to-carrier milestone orchestrator design pass) = 20.
         # Remaining 2 await downstream module integration:
         # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
-        assert len(ACTION_KIND_TO_TASK) == 19
+        assert len(ACTION_KIND_TO_TASK) == 20
 
     def test_outreach_actions_registered(self):
         assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK
@@ -1693,3 +1695,335 @@ class TestPh1RouterSubstringOnlyMode:
         result = asyncio.run(router.route(attachment, "BATCH-x", candidates))
         # Empty matches => routed to default-unrouted (no fuzzy fallback ran)
         assert len(result.matches) == 0
+
+
+# ===========================================================================
+# TestSubmitToCarrier -- milestone-scoped upload orchestrator per architect
+# 2026-06-30 design pass. Pattern A (SP-authoritative) per [D-068] -- HILDA
+# trusts SP-side button visibility guard; task iterates items in RFS state,
+# uploads all classified files per item, transitions each item to
+# SubmittedToCustomer on all-files-success.
+# ===========================================================================
+
+
+class _RichFakeAdapter:
+    """Per-call configurable customer adapter mock.
+
+    register(device_id, milestone_name, target_dir, filename, kind)
+      kind='true'  -> success=True
+      kind='false' -> success=False (post-verify failed)
+      kind='raise' -> raises RuntimeError (infra failure; task should abort)
+    Any unregistered tuple falls back to default_kind (default 'true').
+    """
+    def __init__(self, default_kind="true"):
+        self._registered: dict[tuple[str, str, str, str], str] = {}
+        self._default_kind = default_kind
+        self.calls: list[dict] = []
+
+    def register(self, device_id, milestone_name, target_dir, filename, kind):
+        self._registered[(device_id, milestone_name, target_dir, filename)] = kind
+
+    async def upload_attachment(self, *, device_id, milestone_name, source_dir,
+                                target_dir, filename, customer_delivery_info):
+        self.calls.append({
+            "device_id": device_id, "milestone_name": milestone_name,
+            "source_dir": str(source_dir), "target_dir": target_dir,
+            "filename": filename,
+            "customer_delivery_info": customer_delivery_info,
+        })
+        kind = self._registered.get(
+            (device_id, milestone_name, target_dir, filename), self._default_kind,
+        )
+        if kind == "raise":
+            raise RuntimeError("infra failure -- browser died")
+        return SimpleNamespace(
+            success=(kind == "true"),
+            error_code=None if kind == "true" else "CAD-E005",
+        )
+
+
+def _mk_stc_item(state, item_id, *, target_folder="Documentation/Compliance",
+                 no_customer_upload=False, device_id="SM-S671U1",
+                 customer_delivery_info="drive.google.com"):
+    return SimpleNamespace(
+        item_id=item_id,
+        delivery_item_id=item_id,
+        delivery_state=state,
+        target_folder=target_folder,
+        no_customer_upload=no_customer_upload,
+        device_id=device_id,
+        customer_delivery_info=customer_delivery_info,
+        # tracker.guards Guard 4 for SUBMITTED_TO_CUSTOMER: requires
+        # carrier_upload_complete=True (task sets this before transition).
+        # Initial value False; task flips to True after all-files-success.
+        carrier_upload_complete=False,
+        # Fields consulted by other guards / transition path:
+        item_type="test_tech_waiver_report",
+        doc_count=1, doc_count_received=1, review_required=False,
+        review_status="not_required", pm_approval_at=datetime.now(timezone.utc),
+        prior_delivery_state=None,
+    )
+
+
+def _mk_assoc(file_hash, delivery_item_id, local_nsd_path,
+              nsd_path_type="classified"):
+    return SimpleNamespace(
+        file_hash=file_hash,
+        delivery_item_id=delivery_item_id,
+        local_nsd_path=local_nsd_path,
+        nsd_path_type=nsd_path_type,
+    )
+
+
+def _stc_ctx(**kw):
+    base = dict(
+        correlation_id="stc-corr-001",
+        customer_id="MMK",
+        milestone_id="P1",
+        device_id="SM-S671U1",
+        trigger_source="automated",
+        field_deltas={"milestone_submission_triggered_at": "6/30/2026"},
+    )
+    base.update(kw)
+    return base
+
+
+class TestSubmitToCarrier:
+    """SUBMIT_TO_CARRIER milestone-scoped orchestrator."""
+
+    def test_action_registered(self):
+        # SUBMIT_TO_CARRIER binding registered via tasks/__init__.py import.
+        assert ActionKind.SUBMIT_TO_CARRIER in ACTION_KIND_TO_TASK
+
+    def test_happy_path_all_files_true(self, deps):
+        """Two items with two classified files each; all uploads return True.
+        Both items transition RFS -> SubmittedToCustomer."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item_a = _mk_stc_item("ReadyForSubmission", "I-A")
+        item_b = _mk_stc_item("ReadyForSubmission", "I-B",
+                              target_folder="TestReports/Power")
+        deps.storage.items["I-A"] = item_a
+        deps.storage.items["I-B"] = item_b
+        deps.storage.list_items_response = [item_a, item_b]
+
+        assocs_by_item = {
+            "I-A": [
+                _mk_assoc("h1", "I-A", "internal/MMK/SM-S671U1/P1/CPM/item_2/foo/rev1/a1.pdf"),
+                _mk_assoc("h2", "I-A", "internal/MMK/SM-S671U1/P1/CPM/item_2/foo/rev1/a2.pdf"),
+            ],
+            "I-B": [
+                _mk_assoc("h3", "I-B", "internal/MMK/SM-S671U1/P1/MNO-ETM/item_5/foo/rev1/b1.pdf"),
+                _mk_assoc("h4", "I-B", "internal/MMK/SM-S671U1/P1/MNO-ETM/item_5/foo/rev1/b2.pdf"),
+            ],
+        }
+        deps.storage.list_classified_associations_for_item = (
+            lambda item_id: assocs_by_item.get(item_id, [])
+        )
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["outcome"] == "fired"
+        assert result["uploaded_items"] == 2
+        assert result["partial_items"] == 0
+        # 4 upload calls (2 items * 2 files)
+        assert len(adapter.calls) == 4
+        # Each item transitions to SubmittedToCustomer via update_delivery_state.
+        # Mock storage.write_delivery_state records ("state", item_id, new_state).
+        states_written = [w for w in deps.storage.writes
+                          if w[0] == "state" and w[2] == "SubmittedToCustomer"]
+        assert {w[1] for w in states_written} == {"I-A", "I-B"}
+
+    def test_skip_already_submitted(self, deps):
+        """Item already in SubmittedToCustomer state -> skipped (idempotency)."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("SubmittedToCustomer", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_classified_associations_for_item = lambda _id: []
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_already"] == 1
+        assert result["uploaded_items"] == 0
+        assert adapter.calls == []
+
+    def test_skip_state_not_rfs(self, deps):
+        """Item in DocumentReceived (not RFS) -> skipped."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("DocumentReceived", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+
+        adapter = _RichFakeAdapter()
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_state"] == 1
+        assert result["uploaded_items"] == 0
+        assert adapter.calls == []
+
+    def test_skip_no_customer_upload(self, deps):
+        """Item with no_customer_upload=True (Confirmation, default WI) -> skipped."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A",
+                            no_customer_upload=True, target_folder=None)
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+
+        adapter = _RichFakeAdapter()
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_upload"] == 1
+        assert result["uploaded_items"] == 0
+        assert adapter.calls == []
+
+    def test_skip_null_target_folder(self, deps):
+        """Item with target_folder=None but no_customer_upload=False -> skipped
+        (defensive against misconfigured template.yaml)."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A", target_folder=None)
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+
+        adapter = _RichFakeAdapter()
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_upload"] == 1
+        assert adapter.calls == []
+
+    def test_skip_zero_classified_files(self, deps):
+        """Item eligible but has zero classified associations -> skipped with audit."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_classified_associations_for_item = lambda _id: []
+
+        adapter = _RichFakeAdapter()
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_no_files"] == 1
+        assert adapter.calls == []
+        assert any(a[0] == "submit_to_carrier_no_files" for a in deps.audit.logs)
+
+    def test_false_keeps_item_in_rfs(self, deps):
+        """One file returns False -> item stays in RFS; other files still tried."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_classified_associations_for_item = lambda _id: [
+            _mk_assoc("h1", "I-A", "internal/MMK/SM-S671U1/P1/x/rev1/f1.pdf"),
+            _mk_assoc("h2", "I-A", "internal/MMK/SM-S671U1/P1/x/rev1/f2.pdf"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        # f2.pdf returns False
+        adapter.register("SM-S671U1", "P1", "Documentation/Compliance", "f2.pdf",
+                         "false")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["uploaded_items"] == 0
+        assert result["partial_items"] == 1
+        # Both files still attempted (best-effort on False)
+        assert len(adapter.calls) == 2
+        # No state transition to SubmittedToCustomer for this item
+        states_written = [w for w in deps.storage.writes
+                          if w[0] == "state" and w[2] == "SubmittedToCustomer"]
+        assert states_written == []
+        # Post-verify-failed audit written
+        assert any(a[0] == "submit_to_carrier_file_post_verify_failed"
+                   for a in deps.audit.logs)
+
+    def test_raise_triggers_retry(self, deps):
+        """Adapter raise -> task aborts; Celery would retry (autoretry_for)."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_classified_associations_for_item = lambda _id: [
+            _mk_assoc("h1", "I-A", "internal/MMK/SM-S671U1/P1/x/rev1/f1.pdf"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="raise")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            # Under task_always_eager + task_eager_propagates, autoretry_for
+            # eventually surfaces the underlying exception after retries
+            # exhaust (or immediately if max_retries=0 in eager mode).
+            with pytest.raises(Exception):
+                submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+        # The raise audit was written on the failing file
+        assert any(a[0] == "submit_to_carrier_upload_raised"
+                   for a in deps.audit.logs)
+
+    def test_missing_identity_no_op(self, deps):
+        """No customer_id/milestone_id in event_context -> skipped."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        adapter = _RichFakeAdapter()
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(
+                args=({}, _stc_ctx(customer_id=None))
+            ).get()
+        assert result["outcome"] == "skipped_missing_identity"
+        assert adapter.calls == []
+
+    def test_no_adapter_wired_no_op(self, deps):
+        """deps.customer_adapter=None -> skipped_no_adapter."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+        with override_task_deps(deps):  # deps has no customer_adapter wired
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+        assert result["outcome"] == "skipped_no_adapter"
+        assert any(a[0] == "submit_to_carrier_skipped" for a in deps.audit.logs)

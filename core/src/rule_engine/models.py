@@ -88,6 +88,16 @@ class ActionKind(str, Enum):
     # side (SP/TPM is authoritative; guards enforced on SP-side button
     # visibility + TPM judgment before click).
     APPLY_PM_APPROVAL = "ApplyPMApproval"
+    # Submit-to-Carrier milestone orchestrator added 2026-06-30 per architect
+    # design pass: TPM clicks Submit-to-Carrier in SP UI; SP engineer sets
+    # milestone_submission_triggered_at on the Milestone row + sends CHANGED
+    # alert. Parser promotes the field into field_deltas (same treatment as
+    # kickoff). This ActionKind's task iterates delivery items in RFS state,
+    # uploads all classified files per item via customer_adapter, and
+    # transitions each item to SubmittedToCarrier on all-files-success.
+    # SP-authoritative guard per [D-068]: HILDA trusts the SP-side button
+    # visibility (all items RFS) -- no HILDA guard duplication.
+    SUBMIT_TO_CARRIER = "SubmitToCarrier"
 
 
 class RuleKind(str, Enum):

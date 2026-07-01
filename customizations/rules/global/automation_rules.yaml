@@ -334,6 +334,26 @@ rules:
       - kind: KickoffCollection                           # groups items by owner; sends batch outreach; transitions NS->Open->OutreachSent
         params: {}
 
+  # Submit-to-Carrier trigger per architect design pass 2026-06-30.
+  # TPM clicks the SP UI button after all items are in ReadyForSubmission
+  # (SP UI engineer guards visibility). Button sets milestone_submission_triggered_at
+  # on the Milestone row; SP sends CHANGED alert; sp_alert_parser promotes the
+  # field into field_deltas (parser.py _MILESTONE_PROMOTE_FIELDS tuple). This
+  # rule fires the SubmitToCarrier action which iterates in-milestone items in
+  # RFS state, uploads all classified documents per item via customer_adapter,
+  # and transitions each item to SubmittedToCarrier on all-files-success.
+  # Pattern A (SP-authoritative) per [D-068] -- HILDA trusts the SP-side guard.
+  - rule_id: submit_to_carrier_on_milestone_submission_triggered
+    trigger: ItemModified
+    sub_trigger: changed
+    condition:
+      and:
+        - { field: list_name,                         op: eq,  value: Milestones }
+        - { field: milestone_submission_triggered_at, op: neq, value: null }
+    actions:
+      - kind: SubmitToCarrier
+        params: {}
+
 # =====================================================================================
 # POLLING SCHEDULES -- FR-23 (email IMAP) + FR-26 (corp PLM) deadline-tiered.
 # Consumed on-demand by workflow_engine via resolve_polling_schedule_for_item();

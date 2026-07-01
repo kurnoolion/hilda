@@ -88,12 +88,15 @@ class TestEnums:
             "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
         }
 
-    def test_action_kind_has_21_members(self):
+    def test_action_kind_has_22_members(self):
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
         # (added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION). Bumped
         # 20 -> 21 on 2026-06-28 per architect PM-approval design pass:
         # added APPLY_PM_APPROVAL (Pattern A SP-authoritative mirror per [D-068]).
-        assert len(ActionKind) == 21
+        # Bumped 21 -> 22 on 2026-06-30 per architect submit-to-carrier design pass:
+        # added SUBMIT_TO_CARRIER (milestone-scoped orchestrator; per-item
+        # RFS->SubmittedToCarrier transition on all-files-success).
+        assert len(ActionKind) == 22
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",
@@ -445,7 +448,11 @@ class TestLoader:
         # CLASSIFY_DOC_TYPE LLM action + binding land. The
         # advance_state_on_doc_count_reached rule's TriggerAIReview action
         # was also commented but that rule itself stays (UpdateState remains).
-        assert len(rs.all_rules()) == 24
+        # Bumped 24 -> 25 on 2026-06-30 per architect submit-to-carrier design
+        # pass: added submit_to_carrier_on_milestone_submission_triggered rule
+        # (Milestones list + milestone_submission_triggered_at delta ->
+        # SubmitToCarrier action).
+        assert len(rs.all_rules()) == 25
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):
@@ -841,7 +848,9 @@ class TestCLI:
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] cascade.
         # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
         # (APPLY_PM_APPROVAL added).
-        assert "action_kinds=21" in out
+        # Bumped 21 -> 22 on 2026-06-30 per architect submit-to-carrier design pass
+        # (SUBMIT_TO_CARRIER added).
+        assert "action_kinds=22" in out
         assert "postgres_overrides=0" in out
 
     def test_explain_emits_met_and_trace(self, rules_tree, capsys):

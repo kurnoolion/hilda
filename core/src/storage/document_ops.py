@@ -43,6 +43,7 @@ __all__ = [
     "get_documents_for_item",
     "list_associations_for_file",
     "list_associations_for_item",
+    "list_classified_associations_for_item",
     "list_documents_for_milestone",
     "list_revisions",
     "make_download_token",
@@ -337,6 +338,27 @@ async def list_associations_for_item(delivery_item_id: str) -> list[DocumentItem
         result = await session.execute(
             select(DocumentItemAssociationTable)
             .where(DocumentItemAssociationTable.delivery_item_id == delivery_item_id)
+            .order_by(DocumentItemAssociationTable.file_hash)
+        )
+        return [_assoc_to_model(r) for r in result.scalars().all()]
+
+
+async def list_classified_associations_for_item(
+    delivery_item_id: str,
+) -> list[DocumentItemAssociation]:
+    """Filter of list_associations_for_item returning only nsd_path_type=CLASSIFIED
+    rows -- the submit-to-carrier upload scope per architect 2026-06-30.
+
+    Ordered by file_hash for deterministic sequencing across task runs.
+    Non-classified rows (staged_*, default_workitem, unrouted) are excluded --
+    those shouldn't reach a carrier."""
+    async with _session() as session:
+        result = await session.execute(
+            select(DocumentItemAssociationTable)
+            .where(
+                DocumentItemAssociationTable.delivery_item_id == delivery_item_id,
+                DocumentItemAssociationTable.nsd_path_type == NSDPathType.CLASSIFIED.value,
+            )
             .order_by(DocumentItemAssociationTable.file_hash)
         )
         return [_assoc_to_model(r) for r in result.scalars().all()]

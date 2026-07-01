@@ -244,6 +244,17 @@ class PostgresStorage:
     # Inbound attachment ops (Step 5.5 cascade, architect 2026-06-29)
     # ----------------------------------------------------------------------
 
+    def list_classified_associations_for_item(
+        self, delivery_item_id: str,
+    ) -> list[Any]:
+        """Sync wrapper for submit_to_carrier cascade -- returns only
+        DocumentItemAssociation rows with nsd_path_type='classified',
+        ordered by file_hash for deterministic sequencing."""
+        from core.src.storage.document_ops import (
+            list_classified_associations_for_item as _list,
+        )
+        return run_async_sync(lambda: _list(delivery_item_id))
+
     def add_document_index_row(self, row: Any) -> None:
         """Sync wrapper around document_ops.add_document_index_row."""
         from core.src.storage.document_ops import add_document_index_row as _add
