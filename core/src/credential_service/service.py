@@ -26,7 +26,12 @@ from core.src.credential_service.protocol import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["CredentialService", "SopsCredentialService", "OPS_TEAM_PM_ID"]
+__all__ = [
+    "CredentialService",
+    "SopsCredentialService",
+    "JsonFileCredentialService",
+    "OPS_TEAM_PM_ID",
+]
 
 # Ph-1/Ph-2 shared ops-team attribution token per [D-019] impl note 2026-05-24.
 # Overridable per system via HILDA_<PREFIX>_PM_ID in the credential file.
@@ -389,3 +394,141 @@ class SopsCredentialService:
             logger.info("Event loop lacks add_signal_handler; reload() handler not installed")
             return False
         return True
+
+
+# ---------------------------------------------------------------------------
+# JsonFileCredentialService -- Ph-1 JSON path per architect 2026-07-01
+# ---------------------------------------------------------------------------
+
+
+class JsonFileCredentialService:
+    """CredentialService Protocol impl backed by CustomerAdapterConfig.customers.
+
+    Ph-1 architect lock 2026-07-01 -- replaces the sops-encrypted env file
+    pattern with a plaintext JSON entry per customer inside
+    `~hilda/config/customer_adapter.json`. Mirrors the simplicity of
+    `sharepoint_integration.json`; caller side (GoogleDriveBaseAdapter) sees
+    the same CredentialService Protocol, so the adapter code path is
+    unchanged.
+
+    Scope: SystemType.CUSTOMER only. Lookups for any other system_type raise
+    CRD-E001 so the SopsCredentialService remains the canonical source for
+    non-customer credentials (SharePoint, PLM, corp LLM, etc.).
+
+    Confidentiality: this class enforces nothing at rest. Confidentiality is
+    a filesystem-permission responsibility (chmod 600, owned by hilda-svc).
+    Trade-off explicitly named in the architect design pass 2026-07-01.
+
+    NFR-2: NEVER log password, totp_seed. __repr__ shows only the customer
+    ids present, not values.
+    """
+
+    def __init__(
+        self, customers: "dict[str, object]",
+    ) -> None:
+        """customers: mapping customer_id -> CustomerCredEntry-like object.
+
+        Accepted shapes (all yield the same 4 attributes):
+          - dict: {"pm_id": "...", "username": "...", "password": "...", "totp_seed": "..."}
+          - CustomerCredEntry Pydantic model
+          - Any object with pm_id/username/password/totp_seed attributes
+
+        Copies internally to a defensive dict of extracted 4-tuples so a
+        later config-object mutation cannot leak into an already-served
+        credential.
+        """
+        self._entries: dict[str, tuple[str, str, str, str]] = {}
+        for customer_id, entry in (customers or {}).items():
+            pm_id, username, password, totp_seed = self._extract(entry)
+            self._entries[customer_id] = (pm_id, username, password, totp_seed)
+
+    @staticmethod
+    def _extract(entry: object) -> tuple[str, str, str, str]:
+        """Duck-typed extraction supporting dict / Pydantic model / SimpleNamespace."""
+        if isinstance(entry, dict):
+            return (
+                entry.get("pm_id", ""),
+                entry.get("username", ""),
+                entry.get("password", ""),
+                entry.get("totp_seed", ""),
+            )
+        return (
+            getattr(entry, "pm_id", ""),
+            getattr(entry, "username", ""),
+            getattr(entry, "password", ""),
+            getattr(entry, "totp_seed", ""),
+        )
+
+    def __repr__(self) -> str:
+        # Only surface customer ids -- never secret material.
+        return (
+            f"JsonFileCredentialService(customers=[{','.join(sorted(self._entries))}])"
+        )
+
+    __str__ = __repr__
+
+    async def get_credential(
+        self,
+        pm_id: str,
+        system_type: str,
+        customer_id: str | None = None,
+    ) -> Credential:
+        """Resolve a Credential for the customer_adapter Google Drive flow.
+
+        Returns a Credential(auth_type='basic_totp', ...) when
+        (system_type='customer', customer_id in customers). The pm_id
+        argument is treated as an attribution hint; the returned
+        Credential.pm_id comes from the JSON entry so
+        GoogleDriveBaseAdapter's audit logs attribute the correct owner
+        even if the caller passes 'ops-team'.
+
+        Raises:
+          CRD-E003 -- unknown system_type
+          CRD-E001 -- system_type != CUSTOMER; or customer_id missing;
+                      or customer_id not in JSON.
+        """
+        try:
+            system = SystemType(system_type)
+        except ValueError:
+            raise PipelineError("CRD-E003", context={"system": system_type})
+        if system != SystemType.CUSTOMER:
+            # Non-customer lookups belong to SopsCredentialService.
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id":       pm_id,
+                    "system":      system.value,
+                    "customer_id": customer_id or "",
+                    "reason":      "JsonFileCredentialService only serves system=customer",
+                },
+            )
+        if not customer_id:
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id":       pm_id,
+                    "system":      system.value,
+                    "customer_id": "",
+                    "reason":      "customer_id required for JSON customer creds",
+                },
+            )
+        entry = self._entries.get(customer_id)
+        if entry is None:
+            raise PipelineError(
+                "CRD-E001",
+                context={
+                    "pm_id":       pm_id,
+                    "system":      system.value,
+                    "customer_id": customer_id,
+                    "reason":      "customer_id not in customer_adapter.json 'customers' map",
+                },
+            )
+        entry_pm_id, username, password, totp_seed = entry
+        return Credential(
+            pm_id=entry_pm_id or pm_id,
+            system_type=system.value,
+            auth_type="basic_totp",
+            username=username,
+            password=password,
+            totp_seed=totp_seed,
+        )

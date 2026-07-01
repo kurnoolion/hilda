@@ -630,3 +630,189 @@ class TestCli:
         with pytest.raises(PipelineError) as exc:
             asyncio.run(cli._cmd_validate("run-test", "vault", tmp_path, tmp_path / "age.key"))
         assert exc.value.code_id == "CRD-E003"
+
+
+# ---------------------------------------------------------------------------
+# JsonFileCredentialService -- Ph-1 JSON path per architect 2026-07-01
+# ---------------------------------------------------------------------------
+
+
+class TestJsonFileCredentialService:
+    """CredentialService Protocol impl backed by CustomerAdapterConfig.customers.
+    Ph-1 plaintext-JSON path replacing sops for customer_adapter creds."""
+
+    @staticmethod
+    def _dict_entry(pm_id="ops-mmk", username="mmk@corp.example",
+                    password="p4ss", totp_seed="JBSWY3DPEHPK3PXP"):
+        return {
+            "pm_id": pm_id, "username": username,
+            "password": password, "totp_seed": totp_seed,
+        }
+
+    def test_get_credential_happy_path_from_dict(self):
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({"MMK": self._dict_entry()})
+        cred = asyncio.run(svc.get_credential(
+            pm_id="ignored-attribution-hint",
+            system_type=SystemType.CUSTOMER.value,
+            customer_id="MMK",
+        ))
+        assert cred.auth_type == "basic_totp"
+        assert cred.system_type == SystemType.CUSTOMER.value
+        assert cred.username == "mmk@corp.example"
+        assert cred.password == "p4ss"
+        assert cred.totp_seed == "JBSWY3DPEHPK3PXP"
+        # pm_id comes from the JSON entry, not from the caller's hint --
+        # ensures audit attribution stays consistent per customer.
+        assert cred.pm_id == "ops-mmk"
+
+    def test_get_credential_from_pydantic_entry(self):
+        from core.src.customer_adapter.config import CustomerCredEntry
+        from core.src.credential_service.service import JsonFileCredentialService
+        entry = CustomerCredEntry(
+            pm_id="ops-mmk", username="u", password="p", totp_seed="s",
+        )
+        svc = JsonFileCredentialService({"MMK": entry})
+        cred = asyncio.run(svc.get_credential(
+            pm_id="hint", system_type=SystemType.CUSTOMER.value, customer_id="MMK",
+        ))
+        assert cred.username == "u"
+        assert cred.totp_seed == "s"
+
+    def test_unknown_customer_raises_e001(self):
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({"MMK": self._dict_entry()})
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(svc.get_credential(
+                pm_id="hint", system_type=SystemType.CUSTOMER.value,
+                customer_id="UNKNOWN",
+            ))
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_missing_customer_id_raises_e001(self):
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({"MMK": self._dict_entry()})
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(svc.get_credential(
+                pm_id="hint", system_type=SystemType.CUSTOMER.value,
+                customer_id=None,
+            ))
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_non_customer_system_raises_e001(self):
+        """JsonFileCredentialService only serves system=customer; other systems
+        fall through to SopsCredentialService per bootstrap wiring."""
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({"MMK": self._dict_entry()})
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(svc.get_credential(
+                pm_id="hint",
+                system_type=SystemType.SHAREPOINT.value,
+                customer_id="MMK",
+            ))
+        assert exc.value.code_id == "CRD-E001"
+
+    def test_unknown_system_type_raises_e003(self):
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({})
+        with pytest.raises(PipelineError) as exc:
+            asyncio.run(svc.get_credential(
+                pm_id="hint", system_type="fictitious_system", customer_id="MMK",
+            ))
+        assert exc.value.code_id == "CRD-E003"
+
+    def test_repr_hides_secrets(self):
+        from core.src.credential_service.service import JsonFileCredentialService
+        svc = JsonFileCredentialService({
+            "MMK":       self._dict_entry(password="TOP-SECRET-PASS-1"),
+            "OtherCust": self._dict_entry(password="TOP-SECRET-PASS-2",
+                                          totp_seed="TOP-SECRET-SEED"),
+        })
+        r = repr(svc)
+        # Customer ids visible for diagnostics
+        assert "MMK" in r and "OtherCust" in r
+        # Secrets never surface
+        assert "TOP-SECRET-PASS-1" not in r
+        assert "TOP-SECRET-PASS-2" not in r
+        assert "TOP-SECRET-SEED" not in r
+
+    def test_defensive_copy_on_construction(self):
+        """Later mutation of the source dict must not leak into served creds."""
+        from core.src.credential_service.service import JsonFileCredentialService
+        source: dict = {"MMK": self._dict_entry(password="original")}
+        svc = JsonFileCredentialService(source)
+        # Mutate source AFTER construction
+        source["MMK"]["password"] = "compromised"
+        source["NEW"] = self._dict_entry(password="new-cust")
+        cred = asyncio.run(svc.get_credential(
+            pm_id="hint", system_type=SystemType.CUSTOMER.value, customer_id="MMK",
+        ))
+        assert cred.password == "original"
+        # New source key isn't served either
+        with pytest.raises(PipelineError):
+            asyncio.run(svc.get_credential(
+                pm_id="hint", system_type=SystemType.CUSTOMER.value,
+                customer_id="NEW",
+            ))
+
+
+# ---------------------------------------------------------------------------
+# CustomerCredEntry Pydantic model
+# ---------------------------------------------------------------------------
+
+
+class TestCustomerCredEntry:
+    def test_required_fields_all_present(self):
+        from core.src.customer_adapter.config import CustomerCredEntry
+        entry = CustomerCredEntry(
+            pm_id="ops-mmk", username="u@corp",
+            password="p", totp_seed="JBSWY",
+        )
+        assert entry.pm_id == "ops-mmk"
+
+    def test_missing_field_raises(self):
+        from pydantic import ValidationError
+        from core.src.customer_adapter.config import CustomerCredEntry
+        with pytest.raises(ValidationError):
+            CustomerCredEntry(pm_id="x", username="y", password="z")  # missing totp_seed
+
+    def test_repr_hides_password_and_totp_seed(self):
+        from core.src.customer_adapter.config import CustomerCredEntry
+        entry = CustomerCredEntry(
+            pm_id="ops-mmk", username="u@corp",
+            password="TOP-SECRET-PW", totp_seed="TOP-SECRET-SEED",
+        )
+        r = repr(entry)
+        assert "TOP-SECRET-PW" not in r
+        assert "TOP-SECRET-SEED" not in r
+
+
+# ---------------------------------------------------------------------------
+# build_credential_service factory
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCredentialServiceFactory:
+    def test_returns_json_when_customers_populated(self):
+        from core.src.customer_adapter import (
+            CustomerAdapterConfig, CustomerCredEntry, build_credential_service,
+        )
+        from core.src.credential_service.service import JsonFileCredentialService
+        cfg = CustomerAdapterConfig(
+            customers={
+                "MMK": CustomerCredEntry(
+                    pm_id="ops-mmk", username="u", password="p", totp_seed="s",
+                ),
+            },
+        )
+        svc = build_credential_service(cfg)
+        assert isinstance(svc, JsonFileCredentialService)
+
+    def test_returns_sops_when_customers_empty(self):
+        from core.src.customer_adapter import (
+            CustomerAdapterConfig, build_credential_service,
+        )
+        from core.src.credential_service.service import SopsCredentialService
+        cfg = CustomerAdapterConfig()  # customers={} default
+        svc = build_credential_service(cfg)
+        assert isinstance(svc, SopsCredentialService)
