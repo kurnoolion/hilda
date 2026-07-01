@@ -143,6 +143,11 @@ def bootstrap_task_deps(
     )
     set_task_deps(deps)
     _log.info(result.summary_line())
+    # Debuggability: dump each individual warning as its own log line so
+    # architects can see WHY a slot ended up in the skipped list without
+    # having to poke at result.warnings from a Python REPL.
+    for w in result.warnings:
+        _log.warning("BOOTSTRAP_WARNING %s", w)
     return result
 
 
