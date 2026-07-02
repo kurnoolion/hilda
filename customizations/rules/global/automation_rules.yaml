@@ -267,6 +267,27 @@ rules:
   # cleanup chain.
   # =====================================================================================
 
+  # Close-All-Items trigger per architect 2026-07-02.
+  # TPM clicks the SP UI "Close All Items" button on the Milestone row after
+  # all items are in SubmittedToCustomer (or RFS + no_customer_upload=True).
+  # Button sets closed_all_items_triggered_at on the Milestone row; SP sends
+  # CHANGED alert; sp_alert_parser promotes the field into field_deltas
+  # (parser.py _MILESTONE_PROMOTE_FIELDS tuple). This rule fires the
+  # CloseAllItems action which iterates CLOSE-eligible items in the milestone
+  # and transitions each per-item to Closed (via tracker.update_delivery_state
+  # with trigger_source="tpm_button"; SP write-back handled by transitions).
+  # Pattern A (SP-authoritative) per [D-068] -- HILDA trusts the SP-side guard.
+  - rule_id: close_all_items_on_milestone_closure_triggered
+    trigger: ItemModified
+    sub_trigger: changed
+    condition:
+      and:
+        - { field: list_name,                     op: eq,  value: Milestones }
+        - { field: closed_all_items_triggered_at, op: neq, value: null }
+    actions:
+      - kind: CloseAllItems
+        params: {}
+
   - rule_id: milestone_storage_cleanup_on_all_closed
     trigger: MilestoneAllClosed
     condition: null

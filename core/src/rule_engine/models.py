@@ -71,6 +71,7 @@ class ActionKind(str, Enum):
     NOTIFY_HILDA_OPS = "NotifyHildaOps"
     INSTANTIATE_DEFAULT_WORK_ITEM = "InstantiateDefaultWorkItem"
     MILESTONE_STORAGE_CLEANUP = "MilestoneStorageCleanup"
+    CLOSE_ALL_ITEMS = "CloseAllItems"
     HALT_MILESTONE_POLLING = "HaltMilestonePolling"
     FINAL_SWEEP = "FinalSweep"
     REASSIGN_DOCUMENT_TO_WORK_ITEM = "ReassignDocumentToWorkItem"

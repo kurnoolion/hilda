@@ -189,3 +189,8 @@ register_task_binding(TaskBinding(
     celery_task=final_sweep_task,
     queue="default",
 ))
+register_task_binding(TaskBinding(
+    action_kind=ActionKind.CLOSE_ALL_ITEMS,
+    celery_task=close_all_items_task,
+    queue="default",
+))

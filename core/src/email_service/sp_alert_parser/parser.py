@@ -353,6 +353,7 @@ class SpAlertParser:
         _MILESTONE_PROMOTE_FIELDS = (
             "milestone_collection_started_at",       # kickoff trigger
             "milestone_submission_triggered_at",     # submit-to-carrier trigger
+            "closed_all_items_triggered_at",         # close-all-items trigger (FR-64 (b))
         )
         if list_name == "Milestones":
             for _field in _MILESTONE_PROMOTE_FIELDS:
