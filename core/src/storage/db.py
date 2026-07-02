@@ -316,10 +316,16 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 def configure_engine(url: str | None = None, *, echo: bool = False) -> AsyncEngine:
     """(Re)configure the module-level engine. Tests pass sqlite+aiosqlite URLs;
-    deployment reads HILDA_STORAGE_DB_URL (postgresql+asyncpg)."""
+    deployment reads HILDA_STORAGE_DB_URL (canonical) or falls back to
+    HILDA_DB_URL (used by deploy/docker-compose.yml env blocks).
+
+    Both names are accepted per architect live smoke 2026-07-02: hilda-api
+    container had HILDA_DB_URL set but not HILDA_STORAGE_DB_URL, so
+    PostgresStorage was defaulting to localhost:5432 and every dashboard
+    request 500'd with STR-E001 [Errno 111] Connect call failed."""
     global _engine, _sessionmaker
-    resolved = url or os.environ.get(
-        "HILDA_STORAGE_DB_URL", "postgresql+asyncpg://hilda@localhost:5432/hilda"
+    resolved = url or os.environ.get("HILDA_STORAGE_DB_URL") or os.environ.get(
+        "HILDA_DB_URL", "postgresql+asyncpg://hilda@localhost:5432/hilda"
     )
     kwargs: dict = {"echo": echo}
     if resolved.startswith("sqlite") and ":memory:" in resolved:
