@@ -187,6 +187,16 @@ def build_app(
     templates.env.filters["humanize_doc_type"] = _humanize_doc_type
 
     app = FastAPI(title="HILDA Dashboard", version="0.1.0")
+    # Auto-wire PostgresStorage when nothing was injected (production path --
+    # uvicorn --factory calls build_app() with no kwargs). Best-effort: if
+    # storage construction fails (missing env, etc.) the Ph-1 handler still
+    # returns a clean 503 rather than crashing at boot.
+    if storage is None:
+        try:
+            from core.src.storage.delivery_item_ops import PostgresStorage
+            storage = PostgresStorage()
+        except Exception:
+            storage = None
     # Stash sp_crud + storage on app.state so route handlers + tests can introspect.
     app.state.sp_crud = sp_crud
     app.state.storage = storage

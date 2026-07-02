@@ -796,7 +796,13 @@ class TestPh1DocSection:
         r = client.get("/docs/MMK/999")
         assert r.status_code == 404
 
-    def test_ph1_503_when_storage_not_wired(self, cfg_ph1):
+    def test_ph1_503_when_storage_not_wired(self, cfg_ph1, monkeypatch):
+        """Simulate the storage-unavailable case by making PostgresStorage
+        auto-wire raise (as it would if DB creds/env aren't set at boot)."""
+        import core.src.storage.delivery_item_ops as _di_ops
+        def _boom(*a, **kw):
+            raise RuntimeError("simulated DB init failure")
+        monkeypatch.setattr(_di_ops, "PostgresStorage", _boom)
         client = TestClient(build_app(cfg_ph1, storage=None))
         r = client.get("/docs/MMK/42")
         assert r.status_code == 503
