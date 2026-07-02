@@ -309,6 +309,53 @@ def import_deliverable_tracker_task(
     )
     new_id = deps.storage.create_delivery_item(item)
 
+    # -- Populate sp_id (SP Deliverables list row Id) via natural-key READ --
+    # 2026-07-01 architect lock: sp_id is not carried in the ADDED alert body,
+    # so we do a single SP READ post-import to resolve it. Powers the dashboard
+    # /docs/<customer_id>/<sp_id> URL. Best-effort -- import succeeds even when
+    # this fails; sp_id stays NULL and dashboard is unreachable for that row
+    # until a backfill runs. Import failure would falsely block the whole
+    # tracker for a dashboard-only concern.
+    if deps.sp_writer is not None:
+        try:
+            from core.src.sharepoint_integration.config import ListScope
+            sp_rows = deps.sp_writer.get_items(
+                entity="delivery_items",
+                scope=ListScope(customer_id=customer_id),
+                canonical_filters={
+                    "project_model": device_id,
+                    "item_no":       item_no,
+                },
+            )
+            resolved_sp_id = None
+            for r in sp_rows or []:
+                v = r.get("_sp_id") or r.get("Id") or r.get("ID")
+                if v is not None:
+                    try:
+                        resolved_sp_id = int(v)
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            if resolved_sp_id is not None:
+                deps.storage.update_delivery_item(new_id, {"sp_id": resolved_sp_id})
+                logger.info(
+                    "import_deliverable_tracker_sp_id_resolved: item_id=%s sp_id=%s",
+                    new_id, resolved_sp_id,
+                )
+            else:
+                logger.warning(
+                    "import_deliverable_tracker_sp_id_absent: item_id=%s -- "
+                    "SP returned %d rows for (project_model=%s, item_no=%s) but "
+                    "none carried _sp_id/Id/ID; dashboard link unreachable "
+                    "until backfill.",
+                    new_id, len(sp_rows or []), device_id, item_no,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "import_deliverable_tracker_sp_id_failed: item_id=%s: %s: %s",
+                new_id, type(exc).__name__, str(exc)[:120],
+            )
+
     deps.audit.write_communication_log(
         action_type="deliverable_tracker_imported",
         delivery_item_id=new_id,

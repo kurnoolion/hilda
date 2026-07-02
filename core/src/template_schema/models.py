@@ -243,6 +243,13 @@ class DeliveryItemBase(_Base):
 
     item_id:                         str
     item_no:                         int
+    # 2026-07-01 architect lock -- dashboard /docs/<customer_id>/<sp_id> lookup.
+    # sp_id is SP's Deliverables list row Id; HILDA's delivery_item_id is a
+    # composite string primary key -- the two are NOT the same integer.
+    # Populated in import_deliverable_tracker_task via SP READ by natural key
+    # (carrier + project_model + item_no). Nullable for rows created before this
+    # cascade + defensive against transient SP READ failures at import time.
+    sp_id:                           int | None = None
     milestone_id:                    str   # reparented from deliverable_id per [D-028]
     item_name:                       str
     item_description:                list[list[str]] | None = None  # nested tag-sets per FR-82 lock 2026-06-20

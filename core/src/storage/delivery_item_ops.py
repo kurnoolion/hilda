@@ -152,6 +152,21 @@ async def list_default_workitem_for_milestone(
         return _row_to_pydantic(row) if row is not None else None
 
 
+async def get_by_customer_and_sp_id(
+    customer_id: str, sp_id: int,
+) -> DeliveryItemBase | None:
+    """Dashboard /docs/<customer_id>/<sp_id> lookup per architect lock 2026-07-01.
+    Returns the DeliveryItem whose sp_id matches SP's Deliverables list row Id.
+    Returns None when no row matches -- dashboard responds 404."""
+    async with session_scope() as session:
+        stmt = select(DeliveryItemTable).where(
+            DeliveryItemTable.customer_id == customer_id,
+            DeliveryItemTable.sp_id == sp_id,
+        ).limit(1)
+        row = (await session.execute(stmt)).scalars().first()
+        return _row_to_pydantic(row) if row is not None else None
+
+
 async def find_items_by_natural_key(
     customer_id: str, tg_name: str, item_no: int
 ) -> list[DeliveryItemBase]:
@@ -240,6 +255,14 @@ class PostgresStorage:
             lambda: find_items_by_natural_key(customer_id, tg_name, item_no)
         )
 
+    def get_by_customer_and_sp_id(
+        self, customer_id: str, sp_id: int,
+    ) -> DeliveryItemBase | None:
+        """Sync wrapper for the dashboard's /docs/<customer_id>/<sp_id> lookup."""
+        return run_async_sync(
+            lambda: get_by_customer_and_sp_id(customer_id, sp_id)
+        )
+
     # ----------------------------------------------------------------------
     # Inbound attachment ops (Step 5.5 cascade, architect 2026-06-29)
     # ----------------------------------------------------------------------
@@ -252,6 +275,16 @@ class PostgresStorage:
         ordered by file_hash for deterministic sequencing."""
         from core.src.storage.document_ops import (
             list_classified_associations_for_item as _list,
+        )
+        return run_async_sync(lambda: _list(delivery_item_id))
+
+    def list_documents_for_item_display(
+        self, delivery_item_id: str,
+    ) -> list[Any]:
+        """Sync wrapper for dashboard Ph-1: (original_filename, doc_type,
+        ingested_at) tuples ordered by ingested_at DESC, classified-only."""
+        from core.src.storage.document_ops import (
+            list_documents_for_item_display as _list,
         )
         return run_async_sync(lambda: _list(delivery_item_id))
 

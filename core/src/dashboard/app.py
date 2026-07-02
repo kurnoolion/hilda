@@ -155,6 +155,7 @@ def build_app(
     refresh_state: MilestoneRefreshState | None = None,
     dispatcher: Any = None,                       # workflow_engine.TriggerDispatcher
     sp_crud: Any | None = None,                   # SpCrud per Gap 8 (None = mock_sp_rows fallback)
+    storage: Any | None = None,                   # StorageProtocol for Ph-1 dashboard lookup
 ) -> FastAPI:
     """Construct the dashboard FastAPI app.
 
@@ -166,16 +167,33 @@ def build_app(
     `sp_crud`: optional SpCrud instance for per-load SP READ per Gap 8. If None,
         the /docs/<customer_id>/<sp_id> handler falls back to
         request.app.state.mock_sp_rows (dict keyed by (customer_id, sp_id)).
+    `storage`: StorageProtocol per architect lock 2026-07-01 -- Ph-1 dashboard
+        lookup goes local Postgres via get_by_customer_and_sp_id +
+        list_documents_for_item_display, skipping per-load SP READ (which cost
+        a roundtrip per page view in prior design). None falls back to
+        request.app.state.mock_storage in test mode.
     """
     cfg = config or DashboardConfig.from_sources()
     state = refresh_state or MilestoneRefreshState()
     templates = Jinja2Templates(directory=str(cfg.jinja_templates_dir))
 
+    # 2026-07-01 architect lock: doc_type humanizer for Ph-1 template display.
+    # Turns snake_case enum values ("compliance_certification_release_notes")
+    # into title-case labels ("Compliance Certification Release Notes").
+    def _humanize_doc_type(value: str | None) -> str:
+        if not value:
+            return ""
+        return str(value).replace("_", " ").title()
+    templates.env.filters["humanize_doc_type"] = _humanize_doc_type
+
     app = FastAPI(title="HILDA Dashboard", version="0.1.0")
-    # Stash sp_crud on app.state so route handlers + tests can introspect.
+    # Stash sp_crud + storage on app.state so route handlers + tests can introspect.
     app.state.sp_crud = sp_crud
+    app.state.storage = storage
     if not hasattr(app.state, "mock_sp_rows"):
         app.state.mock_sp_rows = {}
+    if not hasattr(app.state, "mock_storage"):
+        app.state.mock_storage = None
 
     # ---- Liveness probe for container orchestration ----
     @app.get("/healthz")
@@ -207,11 +225,73 @@ def build_app(
     ):
         """FR-57 -- Document section. HTML default; JSON if Accept: application/json.
 
-        Per architect lock 2026-06-26: URL is 2-segment `/docs/<customer_id>/<sp_id>`
-        where `<sp_id>` IS SP's `Id` (auto-counter PK) AND HILDA's `delivery_item_id`
-        (same integer, same key per [D-074]). HILDA does direct pattern-(a) SP fetch
-        via SpCrud per Gap 7; no caching Ph-1.
+        2026-07-01 architect lock supersedes prior [D-074] Variant A design:
+          - sp_id is SP's Deliverables list row Id (int); HILDA's delivery_item_id
+            is a composite string primary key -- the two are NOT the same integer.
+          - Ph-1 (cfg.ph1_minimal=True): local Postgres lookup by (customer_id,
+            sp_id); no per-load SP READ; render 3-column table (#, filename,
+            humanized doc_type) via doc_section.html with FR-60/61/87 blocks
+            gated {% if not cfg.ph1_minimal %}.
+          - Ph-2 (cfg.ph1_minimal=False): retains the prior SP-READ + FR-60/61/87
+            code path -- no template changes needed to flip.
         """
+        # -------- Ph-1 branch: local Postgres, no SP READ --------
+        if cfg.ph1_minimal:
+            store = getattr(request.app.state, "storage", None) or getattr(
+                request.app.state, "mock_storage", None,
+            )
+            if store is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="storage_not_wired",
+                )
+            item = store.get_by_customer_and_sp_id(customer_id, sp_id)
+            if item is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"no delivery_item for {customer_id}/{sp_id}",
+                )
+
+            # Confirmation items: no document table; explicit placeholder message.
+            item_type = getattr(item, "item_type", "")
+            is_confirmation = item_type == ItemType.CONFIRMATION.value
+
+            docs_ph1: list[dict[str, Any]] = []
+            if not is_confirmation:
+                try:
+                    rows = store.list_documents_for_item_display(
+                        getattr(item, "item_id", None)
+                        or getattr(item, "delivery_item_id", None)
+                        or "",
+                    )
+                except Exception:
+                    rows = []
+                docs_ph1 = [
+                    {
+                        "original_filename": r[0],
+                        "doc_type":          r[1],
+                        "ingested_at":       r[2],
+                    }
+                    for r in (rows or [])
+                ]
+
+            return templates.TemplateResponse(
+                request=request,
+                name="doc_section.html",
+                context={
+                    "cfg":                cfg,
+                    "ph1_minimal":        True,
+                    "customer_id":        customer_id,
+                    "sp_id":              sp_id,
+                    "item":               item,
+                    "docs":               docs_ph1,
+                    "is_confirmation":    is_confirmation,
+                    "principal":          principal,
+                    "confirmation_value": ItemType.CONFIRMATION.value,
+                },
+            )
+
+        # -------- Ph-2 branch: original SP-READ + full FR-60/61/87 path --------
         # Gap 7: per-load SP READ via SpCrud per [D-074]
         sp_row = await _fetch_sp_row(app, sp_crud, customer_id, sp_id)
         if sp_row is None:
@@ -270,6 +350,8 @@ def build_app(
             request=request,
             name="doc_section.html",
             context={
+                "cfg":                cfg,
+                "ph1_minimal":        False,
                 "delivery_item_id":   delivery_item_id,
                 "customer_id":        customer_id,
                 "sp_id":              sp_id,

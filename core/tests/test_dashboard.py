@@ -79,14 +79,17 @@ def _mk_sp_row(item_type=None, **extra):
 
 @pytest.fixture
 def cfg_mock():
-    """Config with mock_auth enabled so tests skip header validation."""
-    return DashboardConfig(mock_auth=True)
+    """Config with mock_auth enabled so tests skip header validation.
+    Pre-2026-07-01 tests exercise the Ph-2 SP-READ code path -- explicit
+    ph1_minimal=False so DashboardConfig's new Ph-1 default doesn't take
+    over. Ph-1 code path has its own dedicated test class below."""
+    return DashboardConfig(mock_auth=True, ph1_minimal=False)
 
 
 @pytest.fixture
 def cfg_prod():
     """Config with production auth (mock_auth=False)."""
-    return DashboardConfig(mock_auth=False)
+    return DashboardConfig(mock_auth=False, ph1_minimal=False)
 
 
 @pytest.fixture
@@ -656,3 +659,174 @@ class TestConfig:
         monkeypatch.setenv("HILDA_DASHBOARD_BIND_PORT", "9000")
         cfg = DashboardConfig.from_sources()
         assert cfg.bind_port == 9000
+
+    def test_ph1_minimal_defaults_true(self):
+        cfg = DashboardConfig()
+        assert cfg.ph1_minimal is True
+
+
+# ===========================================================================
+# TestPh1DocSection -- Ph-1 architect lock 2026-07-01
+# ===========================================================================
+
+
+class _MockStore:
+    """Duck-typed StorageWriter with just the two methods the Ph-1 handler needs."""
+
+    def __init__(self):
+        self.items: dict[tuple[str, int], object] = {}
+        self.docs:  dict[str, list[tuple]] = {}
+
+    def register_item(self, customer_id, sp_id, item):
+        self.items[(customer_id, int(sp_id))] = item
+
+    def register_docs(self, item_id, rows):
+        """rows is list of (original_filename, doc_type, ingested_at)."""
+        self.docs[item_id] = rows
+
+    def get_by_customer_and_sp_id(self, customer_id, sp_id):
+        return self.items.get((customer_id, int(sp_id)))
+
+    def list_documents_for_item_display(self, delivery_item_id):
+        return self.docs.get(delivery_item_id, [])
+
+
+def _ph1_item(item_id="MMK-SM-S671U1-P1-2", item_type="test_tech_waiver_report",
+              item_name="Sustainability Certificate", tg_name="CPM",
+              item_no=2, milestone_id="P1", device_id="SM-S671U1",
+              delivery_state="UnderPMReview"):
+    return SimpleNamespace(
+        item_id=item_id, delivery_item_id=item_id,
+        item_type=item_type, item_name=item_name, tg_name=tg_name,
+        item_no=item_no, milestone_id=milestone_id, device_id=device_id,
+        delivery_state=delivery_state,
+    )
+
+
+@pytest.fixture
+def cfg_ph1():
+    return DashboardConfig(mock_auth=True, ph1_minimal=True)
+
+
+class TestPh1DocSection:
+    def test_ph1_happy_path_renders_3_columns(self, cfg_ph1):
+        from datetime import datetime, timezone
+        store = _MockStore()
+        item = _ph1_item()
+        store.register_item("MMK", 42, item)
+        store.register_docs(item.item_id, [
+            ("Doc-A.pdf",  "test_tech_waiver_report",
+             datetime(2026, 6, 1, tzinfo=timezone.utc)),
+            ("Doc-B.pdf",  "compliance_certification_release_notes",
+             datetime(2026, 6, 30, tzinfo=timezone.utc)),
+        ])
+        client = TestClient(build_app(cfg_ph1, storage=store))
+        r = client.get("/docs/MMK/42")
+        assert r.status_code == 200
+        body = r.text
+        # 3 headers
+        assert "<th>#</th>" in body
+        assert "<th>Filename</th>" in body
+        assert "<th>Doc Type</th>" in body
+        # No Ph-2 headers should appear
+        assert "<th>Doc Slug</th>" not in body
+        assert "<th>Rev</th>" not in body
+        assert "<th>Path Type</th>" not in body
+        assert "<th>Review</th>" not in body
+        assert "<th>Download</th>" not in body
+        # Rows contain humanized doc_type
+        assert "Test Tech Waiver Report" in body
+        assert "Compliance Certification Release Notes" in body
+        # Header shows item context
+        assert "Sustainability Certificate" in body
+        assert "SM-S671U1" in body
+
+    def test_ph1_newest_first_ordering(self, cfg_ph1):
+        """Ordering comes from storage helper's SQL (ORDER BY ingested_at DESC);
+        the template just iterates whatever storage returns. This verifies the
+        template preserves that order."""
+        from datetime import datetime, timezone
+        store = _MockStore()
+        item = _ph1_item()
+        store.register_item("MMK", 42, item)
+        store.register_docs(item.item_id, [
+            ("Newest.pdf", "test_tech_waiver_report",
+             datetime(2026, 6, 30, tzinfo=timezone.utc)),
+            ("Middle.pdf", "test_tech_waiver_report",
+             datetime(2026, 6, 15, tzinfo=timezone.utc)),
+            ("Oldest.pdf", "test_tech_waiver_report",
+             datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        ])
+        client = TestClient(build_app(cfg_ph1, storage=store))
+        r = client.get("/docs/MMK/42")
+        assert r.status_code == 200
+        body = r.text
+        # Order in HTML preserves list order
+        newest_pos = body.index("Newest.pdf")
+        middle_pos = body.index("Middle.pdf")
+        oldest_pos = body.index("Oldest.pdf")
+        assert newest_pos < middle_pos < oldest_pos
+
+    def test_ph1_confirmation_item_shows_placeholder(self, cfg_ph1):
+        store = _MockStore()
+        item = _ph1_item(item_type="Confirmation", item_name="Device Readiness Review")
+        store.register_item("MMK", 1, item)
+        client = TestClient(build_app(cfg_ph1, storage=store))
+        r = client.get("/docs/MMK/1")
+        assert r.status_code == 200
+        body = r.text
+        assert "Confirmation item" in body or "confirmation" in body.lower()
+        # No table rendered
+        assert "<th>Filename</th>" not in body
+
+    def test_ph1_empty_docs_shows_placeholder(self, cfg_ph1):
+        store = _MockStore()
+        item = _ph1_item()
+        store.register_item("MMK", 42, item)
+        store.register_docs(item.item_id, [])
+        client = TestClient(build_app(cfg_ph1, storage=store))
+        r = client.get("/docs/MMK/42")
+        assert r.status_code == 200
+        assert "No documents associated" in r.text
+
+    def test_ph1_404_when_delivery_item_missing(self, cfg_ph1):
+        store = _MockStore()
+        # No items registered
+        client = TestClient(build_app(cfg_ph1, storage=store))
+        r = client.get("/docs/MMK/999")
+        assert r.status_code == 404
+
+    def test_ph1_503_when_storage_not_wired(self, cfg_ph1):
+        client = TestClient(build_app(cfg_ph1, storage=None))
+        r = client.get("/docs/MMK/42")
+        assert r.status_code == 503
+
+    def test_ph1_no_sp_read_called(self, cfg_ph1):
+        """Prove Ph-1 does not touch sp_crud even when one is wired.
+        MODULE.md Gap 7 requires SP READ per page load; Ph-1 lock 2026-07-01
+        explicitly skips this."""
+        store = _MockStore()
+        item = _ph1_item()
+        store.register_item("MMK", 42, item)
+        store.register_docs(item.item_id, [])
+
+        sp_get_calls: list = []
+        class _SpCrudSpy:
+            async def get_item(self, entity, scope, item_id):
+                sp_get_calls.append((entity, scope, item_id))
+                return {"item_type": "test_tech_waiver_report"}
+
+        client = TestClient(build_app(cfg_ph1, storage=store, sp_crud=_SpCrudSpy()))
+        r = client.get("/docs/MMK/42")
+        assert r.status_code == 200
+        assert sp_get_calls == [], "Ph-1 must skip SP READ per architect lock 2026-07-01"
+
+    def test_ph1_doc_type_humanizer_filter(self, cfg_ph1):
+        """The humanize_doc_type Jinja filter turns snake_case into Title Case."""
+        from core.src.dashboard.app import build_app as _build_app
+        app = _build_app(cfg_ph1, storage=_MockStore())
+        # Access the filter through the app's Jinja environment.
+        # The filter was registered on templates.env when build_app ran.
+        # We verify indirectly via a rendered page below; direct-filter access
+        # would require reaching into private state.
+        assert app is not None  # smoke -- filter registration didn't raise

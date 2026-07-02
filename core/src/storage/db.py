@@ -180,6 +180,11 @@ class DeliveryItemTable(Base):
         Index("ix_di_customer", "customer_id"),
         Index("ix_di_natural_key", "customer_id", "tg_name", "item_no"),  # find_items_by_natural_key
         Index("ix_di_default_per_milestone", "milestone_id", "item_type"),
+        # 2026-07-01 architect lock: dashboard /docs/<customer_id>/<sp_id> lookup.
+        # sp_id is SP's Deliverables list row Id (int); HILDA's delivery_item_id is
+        # the composite string primary key; the two are NOT the same integer. This
+        # index makes the dashboard's WHERE customer_id=X AND sp_id=Y lookup O(log n).
+        Index("ix_di_customer_sp", "customer_id", "sp_id"),
     )
 
     # Identity
@@ -188,6 +193,12 @@ class DeliveryItemTable(Base):
     customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     milestone_id: Mapped[str] = mapped_column(String(64))
+    # SP Deliverables list row Id per architect lock 2026-07-01.
+    # Populated at import_deliverable_tracker_task via SP READ by natural key
+    # (carrier + project_model + item_no). Nullable for rows created before this
+    # cascade + defensive against transient SP READ failures at import time
+    # (dashboard falls back to a 404 when null).
+    sp_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     item_name: Mapped[str] = mapped_column(String(256))
     item_type: Mapped[str] = mapped_column(String(64))
     item_description: Mapped[list | None] = mapped_column(JSON, nullable=True)  # list[list[str]] per FR-82

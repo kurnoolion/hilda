@@ -1,8 +1,25 @@
 {% extends "base.html" %}
 {% block title %}HILDA — Documents for {{ customer_id }}/{{ sp_id }}{% endblock %}
 {% block content %}
+{# Header + item context.
+   Ph-1: source is the local delivery_item row (no per-load SP READ).
+   Ph-2: sp_row from SpCrud is authoritative. #}
+{% if ph1_minimal %}
+<h1>Documents — {{ customer_id }} / SP row {{ sp_id }}</h1>
+{% if item %}
+<div class="sp-row-meta">
+    <strong>Item #:</strong> {{ item.item_no or "&mdash;" }}
+    | <strong>Item Name:</strong> {{ item.item_name or "&mdash;" }}
+    | <strong>Item Type:</strong> {{ item.item_type or "&mdash;" }}
+    | <strong>TG:</strong> {{ item.tg_name or "&mdash;" }}
+    | <strong>Milestone:</strong> {{ item.milestone_id or "&mdash;" }}
+    | <strong>Device:</strong> {{ item.device_id or "&mdash;" }}
+    | <strong>State:</strong> {{ item.delivery_state or "&mdash;" }}
+    | <strong>Docs:</strong> {{ docs | length }}
+</div>
+{% endif %}
+{% else %}
 <h1>Documents for {{ customer_id }} / item {{ sp_id }}</h1>
-
 {# SP row metadata header per Gap 7 architect lock 2026-06-26 (per-load fresh fetch via SpCrud). #}
 {% if sp_row %}
 <div class="sp-row-meta">
@@ -11,17 +28,24 @@
     | <strong>Modified:</strong> {{ sp_row.get("Modified", "&mdash;") }}
 </div>
 {% endif %}
+{% endif %}
 
-{# FR-58 Confirmation skip: item_type="Confirmation" AUTHORITATIVE per Gap 6 cascade 2026-06-26
-   (was no-docs heuristic; now driven by freshly-fetched SP row item_type). #}
+{# FR-58 Confirmation skip: item_type="Confirmation" AUTHORITATIVE per Gap 6 cascade
+   2026-06-26 (was no-docs heuristic; now driven by freshly-fetched SP row item_type
+   OR the local Postgres row's item_type in Ph-1 per architect lock 2026-07-01). #}
 {% if is_confirmation %}
-<p class="placeholder">No documents -- this is a Confirmation item (no document section per FR-58).</p>
+<p class="placeholder">No documents &mdash; this is a Confirmation item (no document section per FR-58).</p>
 {% elif not docs %}
 <p class="placeholder">No documents associated with this item yet.</p>
 {% else %}
 <table>
     <thead>
         <tr>
+            {% if ph1_minimal %}
+            <th>#</th>
+            <th>Filename</th>
+            <th>Doc Type</th>
+            {% else %}
             <th>Doc Type</th>
             <th>Doc Slug</th>
             <th>Rev</th>
@@ -29,11 +53,20 @@
             <th>Path Type</th>
             <th>Review</th>
             <th>Download</th>
+            {% endif %}
         </tr>
     </thead>
     <tbody>
         {% for doc in docs %}
-        {% include "doc_row.html" %}
+            {% if ph1_minimal %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ doc.original_filename }}</td>
+                <td>{{ doc.doc_type | humanize_doc_type }}</td>
+            </tr>
+            {% else %}
+            {% include "doc_row.html" %}
+            {% endif %}
         {% endfor %}
     </tbody>
 </table>

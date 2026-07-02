@@ -25,6 +25,7 @@ _ENV_MAP = {
     "static_files_dir":           "HILDA_DASHBOARD_STATIC_FILES_DIR",
     "jinja_templates_dir":        "HILDA_DASHBOARD_JINJA_TEMPLATES_DIR",
     "mock_auth":                  "HILDA_DASHBOARD_MOCK_AUTH",
+    "ph1_minimal":                "HILDA_DASHBOARD_PH1_MINIMAL",
 }
 
 
@@ -43,6 +44,12 @@ class DashboardConfig(BaseModel):
     mock_auth:                  bool        = False                    # Ph-1 mock harness flag; production = False
     # Ph-1 per D6 cascade 2026-06-23: CORS allowlist empty; future JSON consumers add via this field
     cors_origins:               tuple[str, ...] = ()
+    # 2026-07-01 architect lock: Ph-1 renders a minimal document table
+    # (#, filename, humanized doc_type) with NO FR-60 review findings,
+    # FR-61 mediated download, FR-87 TPM buttons, revision-resolution, or
+    # per-load SP READ. Flip to False in Ph-2 without touching templates --
+    # the FR-60/61/87 blocks are gated with {% if not cfg.ph1_minimal %}.
+    ph1_minimal:                bool        = True
 
     @classmethod
     def from_sources(

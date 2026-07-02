@@ -44,6 +44,7 @@ __all__ = [
     "list_associations_for_file",
     "list_associations_for_item",
     "list_classified_associations_for_item",
+    "list_documents_for_item_display",
     "list_documents_for_milestone",
     "list_revisions",
     "make_download_token",
@@ -341,6 +342,42 @@ async def list_associations_for_item(delivery_item_id: str) -> list[DocumentItem
             .order_by(DocumentItemAssociationTable.file_hash)
         )
         return [_assoc_to_model(r) for r in result.scalars().all()]
+
+
+async def list_documents_for_item_display(
+    delivery_item_id: str,
+) -> list[tuple[str, str, "datetime"]]:
+    """Dashboard Ph-1 helper per architect lock 2026-07-01.
+
+    Returns per-item classified documents as a list of
+    (original_filename, doc_type, ingested_at) tuples ordered by
+    ingested_at DESC (newest first).
+
+    Cheap projection -- no DocumentIndexRow / Association object hydration --
+    since the dashboard only renders these three columns in Ph-1.
+    Non-classified (staged / default_workitem / unrouted) rows are excluded
+    because Ph-1 dashboard shows what's ACTUALLY delivered, not what's in
+    triage.
+    """
+    async with _session() as session:
+        stmt = (
+            select(
+                DocumentIndexTable.original_filename,
+                DocumentIndexTable.doc_type,
+                DocumentIndexTable.ingested_at,
+            )
+            .join(
+                DocumentItemAssociationTable,
+                DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash,
+            )
+            .where(
+                DocumentItemAssociationTable.delivery_item_id == delivery_item_id,
+                DocumentItemAssociationTable.nsd_path_type == NSDPathType.CLASSIFIED.value,
+            )
+            .order_by(DocumentIndexTable.ingested_at.desc())
+        )
+        result = await session.execute(stmt)
+        return list(result.all())
 
 
 async def list_classified_associations_for_item(
