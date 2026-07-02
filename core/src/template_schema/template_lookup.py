@@ -36,6 +36,8 @@ __all__ = [
     "load_all_customer_templates",
     "load_customer_template",
     "get_workitem",
+    "get_customer_delivery_info",
+    "get_delivery_path_template",
     "clear_cache",
 ]
 
@@ -193,4 +195,32 @@ def get_workitem(
     for wi in work_items:
         if isinstance(wi, dict) and int(wi.get("item_no", -1)) == int(item_no):
             return wi
+    return None
+
+
+def get_customer_delivery_info(customer_id: str) -> str | None:
+    """Return customer-level `customer_delivery_info` (GDrive base URL) from
+    template.yaml root. Denormalized onto each DeliveryItem at import time so
+    submit_to_carrier can pass it to the customer_adapter (which raises
+    CAD-E010 if the field is missing/empty on the item).
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+    val = template.get("customer_delivery_info")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def get_delivery_path_template(customer_id: str) -> str | None:
+    """Return customer-level `delivery_path_template` from template.yaml root.
+    Used by submit_to_carrier + customer_adapter for path composition.
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+    val = template.get("delivery_path_template")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
     return None

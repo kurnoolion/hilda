@@ -196,6 +196,16 @@ def _build_delivery_item(
         # template-seeded + SP-editable:
         ingress_folder=(body_kvs.get("ingress_folder") or None),
         target_folder=_tmpl_str(tmpl, "target_folder", body_kvs),
+        # Customer-level GDrive base URL denormalized per-item at import.
+        # Fix 2026-07-02: previously not populated at import -- customer_adapter's
+        # google_drive_base.upload_attachment raises CAD-E010 when this field is
+        # empty on the item (data-config error per D-126 architect Q3 lock
+        # 2026-06-26). Seeded from customer-level `customer_delivery_info` in
+        # template.yaml; body_kvs override if SP row carries a per-row value.
+        customer_delivery_info=(
+            (body_kvs.get("customer_delivery_info") or None)
+            or template_lookup.get_customer_delivery_info(customer_id)
+        ),
         # Path components per FR-78 -- template-authoritative:
         path_id=(tmpl.get("path_id") if tmpl else None) or body_kvs.get("path_id") or f"item_{item_no}",
         tg_path_id=_tmpl_str(tmpl, "tg_path_id", body_kvs),

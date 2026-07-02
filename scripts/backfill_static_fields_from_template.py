@@ -122,6 +122,15 @@ def _compute_updates(row, tmpl: dict, *, seeded_defaults: dict[str, object]) -> 
     if _is_list_empty(cur_desc) and isinstance(tmpl_desc, list) and tmpl_desc:
         updates["item_description"] = tmpl_desc
 
+    # customer_delivery_info: customer-level template value (denormalized per-item).
+    # Fix 2026-07-02: field wasn't populated by import task historically ->
+    # submit_to_carrier saw empty -> customer_adapter raised CAD-E010 ->
+    # every upload failed post-verify. Seeded from customer-level value.
+    cust_delivery_info = seeded_defaults.get("__customer_delivery_info__")
+    cur_cdi = getattr(row, "customer_delivery_info", None)
+    if _is_str_empty(cur_cdi) and cust_delivery_info:
+        updates["customer_delivery_info"] = cust_delivery_info
+
     # Template-seeded + SP-editable: only backfill if Postgres value matches
     # the pre-cascade model default (i.e., untouched since import; no TPM edit).
     for key in _STR_FIELDS_SEEDED:
@@ -203,7 +212,14 @@ def main() -> int:
                 if tmpl is None:
                     skipped_no_template += 1
                     continue
-                updates = _compute_updates(row, tmpl, seeded_defaults=seeded_defaults)
+                # Attach customer-level customer_delivery_info to seeded_defaults
+                # for the row's _compute_updates call (per-row, since customer_id
+                # can vary across rows in multi-customer deployments).
+                per_row_defaults = dict(seeded_defaults)
+                per_row_defaults["__customer_delivery_info__"] = (
+                    template_lookup.get_customer_delivery_info(customer_id)
+                )
+                updates = _compute_updates(row, tmpl, seeded_defaults=per_row_defaults)
                 if not updates:
                     skipped_no_updates += 1
                     continue
