@@ -29,6 +29,7 @@ from . import (  # noqa: F401
     state,
     submission,      # added 2026-06-27: ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION
     submit_to_carrier,  # added 2026-06-30: SUBMIT_TO_CARRIER milestone-scoped orchestrator per architect design pass
+    sync_deliverable_fields,  # added 2026-07-02: SYNC_DELIVERABLE_FIELDS null-guarded merge for Deliverables CHANGED alerts
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "state",
     "submission",
     "submit_to_carrier",
+    "sync_deliverable_fields",
 ]

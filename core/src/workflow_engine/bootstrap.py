@@ -114,6 +114,13 @@ def bootstrap_task_deps(
     result.audit_wired = audit is not None
     result.messenger_wired = messenger is not None
 
+    # -------- 0.5 Template lookup cache -- runtime work-item resolver --------
+    # Added 2026-07-02 per architect design pass: SP alert emails miss template-
+    # defined fields at setup time (doc_count, target_folder, item_description,
+    # etc.). Import task + Deliverables-CHANGED sync merge body_kvs with template
+    # values via null-guard. Eager load at startup so hot paths never hit disk.
+    _bootstrap_template_lookup(result)
+
     # -------- 1. RuleEngine from YAML rules directory --------
     rule_engine = _build_rule_engine(rules_dir, result)
 
@@ -477,6 +484,37 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
         )
 
     return instance
+
+
+def _bootstrap_template_lookup(result: BootstrapResult) -> None:
+    """Eager-load all customer templates into template_lookup._CACHE.
+
+    Best-effort: missing base_dir / malformed YAMLs get logged as warnings on
+    the result; hot paths (import task, sync task) degrade to body_kvs-only
+    behavior when a lookup misses. Idempotent: re-run at re-bootstrap replaces
+    cached templates in place.
+    """
+    try:
+        from core.src.template_schema import template_lookup
+        loaded = template_lookup.load_all_customer_templates()
+        wired = [cid for cid, ok in loaded.items() if ok]
+        skipped = [cid for cid, ok in loaded.items() if not ok]
+        if wired:
+            _log.warning(
+                "template_lookup wired: customers=%s", wired,
+            )
+        if skipped:
+            result.warnings.append(
+                f"template_lookup_partial: failed customers={skipped}"
+            )
+        if not wired and not skipped:
+            result.warnings.append(
+                "template_lookup_empty: no customer templates found"
+            )
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"template_lookup_skip: {type(exc).__name__}: {str(exc)[:120]}"
+        )
 
 
 def _env_truthy(name: str) -> bool:

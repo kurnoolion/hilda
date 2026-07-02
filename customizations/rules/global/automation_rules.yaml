@@ -344,6 +344,28 @@ rules:
       - kind: ImportDeliverableTracker                    # task reads body_kvs + routing_key from event.derived_fields
         params: {}
 
+  # Deliverables CHANGED sync per architect design pass 2026-07-02.
+  # TPM directly edits a Deliverables row in SP (target_folder, doc_count,
+  # no_customer_upload, force_tracking_enabled, review_required, or any other
+  # template-seeded field). SP fires a CHANGED alert carrying the edited value
+  # in body_kvs. This rule fires the SyncDeliverableFields task which applies
+  # null-guarded merge: SP non-null values overwrite Postgres; SP null values
+  # are SKIPPED so a stray null in an unrelated alert can't erase seeded values.
+  # Sub-trigger "changed" only fires when the dispatcher hasn't refined to a
+  # specific sub_trigger (PmApproved / OwnerReassigned / DeadlineMoved /
+  # TagsModified) -- those have dedicated tasks that write their specific
+  # fields; this task's field bucket doesn't overlap with theirs.
+  - rule_id: sync_deliverable_fields_on_changed
+    trigger: ItemModified
+    sub_trigger: changed
+    condition:
+      field: list_name
+      op: eq
+      value: Deliverables
+    actions:
+      - kind: SyncDeliverableFields
+        params: {}
+
   - rule_id: kickoff_collection_on_milestone_started
     trigger: ItemModified
     sub_trigger: changed

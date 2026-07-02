@@ -88,7 +88,7 @@ class TestEnums:
             "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
         }
 
-    def test_action_kind_has_22_members(self):
+    def test_action_kind_has_24_members(self):
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
         # (added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION). Bumped
         # 20 -> 21 on 2026-06-28 per architect PM-approval design pass:
@@ -96,7 +96,12 @@ class TestEnums:
         # Bumped 21 -> 22 on 2026-06-30 per architect submit-to-carrier design pass:
         # added SUBMIT_TO_CARRIER (milestone-scoped orchestrator; per-item
         # RFS->SubmittedToCarrier transition on all-files-success).
-        assert len(ActionKind) == 22
+        # Bumped 22 -> 23 on 2026-07-02 per architect close-all-items cascade:
+        # added CLOSE_ALL_ITEMS (per-item CLOSED transitions on TPM button click).
+        # Bumped 23 -> 24 on 2026-07-02 per architect template-merge design pass:
+        # added SYNC_DELIVERABLE_FIELDS (Deliverables CHANGED alert null-guarded
+        # merge from body_kvs to Postgres).
+        assert len(ActionKind) == 24
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",
@@ -452,7 +457,13 @@ class TestLoader:
         # pass: added submit_to_carrier_on_milestone_submission_triggered rule
         # (Milestones list + milestone_submission_triggered_at delta ->
         # SubmitToCarrier action).
-        assert len(rs.all_rules()) == 25
+        # Bumped 25 -> 26 on 2026-07-02 per architect close-all-items cascade:
+        # added close_all_items_on_milestone_closure_triggered rule (Milestones
+        # list + closed_all_items_triggered_at delta -> CloseAllItems action).
+        # Bumped 26 -> 27 on 2026-07-02 per architect template-merge design pass:
+        # added sync_deliverable_fields_on_changed rule (Deliverables CHANGED
+        # alert -> SyncDeliverableFields action with null-guarded merge).
+        assert len(rs.all_rules()) == 27
         assert not rs.collision_findings
 
     def test_duplicate_rule_id_same_bucket_raises_e001(self, rules_tree):
@@ -850,7 +861,9 @@ class TestCLI:
         # (APPLY_PM_APPROVAL added).
         # Bumped 21 -> 22 on 2026-06-30 per architect submit-to-carrier design pass
         # (SUBMIT_TO_CARRIER added).
-        assert "action_kinds=22" in out
+        # Bumped 22 -> 23 on 2026-07-02 (CLOSE_ALL_ITEMS added).
+        # Bumped 23 -> 24 on 2026-07-02 (SYNC_DELIVERABLE_FIELDS added).
+        assert "action_kinds=24" in out
         assert "postgres_overrides=0" in out
 
     def test_explain_emits_met_and_trace(self, rules_tree, capsys):

@@ -110,21 +110,43 @@ def _build_delivery_item(
     body_kvs: dict[str, str],
     item_title: str,
 ) -> DeliveryItemBase:
-    """Map body_kvs (parsed SP ADDED alert) to a DeliveryItemBase Pydantic
-    model. Critical fields are mapped from body; non-critical fields use
-    sensible defaults (most are Optional[None] or have model-defined defaults).
+    """Map body_kvs (parsed SP ADDED alert) + template.yaml (cached lookup)
+    to a DeliveryItemBase Pydantic model.
 
-    Per [D-118] Chunk 3 Ph-1 first-pass: covers the fields needed for
-    end-to-end outreach + classification + routing test. Remaining 25+
-    fields (form-factor flags, JIRA polling state, PM-approval timestamps,
-    FR-87 TPM-resolution fields, etc.) use DeliveryItemBase model defaults
-    -- mapping from body_kvs is Ph-1 next pass enhancement when those fields
-    are operationally exercised.
+    Sourcing rules per architect design pass 2026-07-02:
+      - Template-authoritative fields (doc_count, tracking_modality,
+        milestone_gating, item_type, item_description, tg_path_id,
+        item_path_id, form-factor flags): read from template.yaml at import.
+        SP alert body_kvs values are unreliable at setup time (SP omits them
+        from the ADDED alert body). Later CHANGED alerts with Edited markers
+        can still override via the sync task (chunk 4) with a null-guard.
+      - Template-seeded + SP-editable (no_customer_upload, force_tracking_enabled,
+        review_required, target_folder): read from template.yaml at import;
+        SP CHANGED alerts override at runtime.
+      - SP-only fields (delivery_state, owner_*, tg_* identity fields,
+        owner_status_note, pm_approval_*): sourced from body_kvs; no template
+        involvement.
+
+    Graceful degradation: if template lookup misses (customer without a
+    template file, template load failure, milestone/item not in template),
+    fall back to body_kvs-only mapping -- matches pre-2026-07-02 behavior so
+    we never fail-hard the import for a lookup miss.
     """
     item_no = _to_int(body_kvs.get("item_no"))
     # Synthesize composite-key item_id per [D-091] (customer_id-device_id-
     # milestone_id-item_no); storage may override with its own scheme.
     item_id = f"{customer_id}-{device_id}-{milestone_id}-{item_no}"
+
+    # -- Template lookup (2026-07-02 architect design pass) -------------------
+    # Best-effort: falls back to None if template not cached / not found. Every
+    # helper below tolerates tmpl=None and reverts to body_kvs / model defaults.
+    from core.src.template_schema import template_lookup
+    tmpl = template_lookup.get_workitem(
+        customer_id=customer_id,
+        device_id=device_id,
+        milestone_id=milestone_id,
+        item_no=item_no,
+    )
 
     return DeliveryItemBase(
         # Identity:
@@ -141,52 +163,121 @@ def _build_delivery_item(
         # then early-exited because item.customer_id was None.
         customer_id=customer_id,
         device_id=device_id,
-        item_name=item_title or body_kvs.get("Title", f"Item {item_no}"),
-        item_type=body_kvs.get("item_type", "Default"),
-        # State:
+        # -- SP-only: item_name is SP-editable at runtime; body wins --
+        item_name=item_title or body_kvs.get("Title") or (tmpl.get("item_name") if tmpl else None) or f"Item {item_no}",
+        # -- Template-authoritative: item_type, item_description, tracking_modality,
+        #    milestone_gating, tg_path_id, item_path_id, form-factor flags. --
+        item_type=(tmpl.get("item_type") if tmpl else None) or body_kvs.get("item_type") or "Default",
+        # -- SP-only state fields (dynamic; never in template) --
         delivery_state=body_kvs.get("delivery_state", "Not Started"),
         item_completion_pct=_to_int(body_kvs.get("item_completion_pct"), 0),
-        # Owner identity per [D-105] 4-field:
+        # Owner identity per [D-105] 4-field -- SP-authoritative (TPM reassignable):
         owner_corp_usa_email=(body_kvs.get("owner_corp_usa_email") or None),
         owner_corp_email=(body_kvs.get("owner_corp_email") or None),
         owner_corp_id=(body_kvs.get("owner_corp_id") or None),
         owner_name=(body_kvs.get("owner_name") or None),
-        # TG-denormalized per [D-106]:
+        # TG-denormalized per [D-106] -- SP-authoritative (Owner-Group cascade):
         tg_name=(body_kvs.get("tg_name") or None),
         tg_email_group_alias=(body_kvs.get("tg_email_group_alias") or None),
         tg_owner_name=(body_kvs.get("tg_owner_name") or None),
         tg_owner_corp_usa_email=(body_kvs.get("tg_owner_corp_usa_email") or None),
         tg_owner_corp_email=(body_kvs.get("tg_owner_corp_email") or None),
         tg_owner_corp_id=(body_kvs.get("tg_owner_corp_id") or None),
-        # Tracking gates per FR-81 + FR-78:
-        tracking_modality=_modality_to_list(body_kvs.get("tracking_modality")),
-        force_tracking_enabled=_yn_to_bool(body_kvs.get("force_tracking_enabled"), default=True),
-        no_customer_upload=_yn_to_bool(body_kvs.get("no_customer_upload"), default=False),
-        # Review gates per FR-7 / FR-53 / FR-70:
-        review_required=_yn_to_bool(body_kvs.get("review_required"), default=False),
-        # Milestone gating per FR-78:
-        milestone_gating=_yn_to_bool(body_kvs.get("milestone_gating"), default=True),
-        # Routing fields per FR-77:
+        # Tracking gates per FR-81 + FR-78 -- template-authoritative (modality) +
+        # template-seeded + SP-editable (force_tracking_enabled, no_customer_upload):
+        tracking_modality=_tmpl_list(tmpl, "tracking_modality") or _modality_to_list(body_kvs.get("tracking_modality")),
+        force_tracking_enabled=_tmpl_bool(tmpl, "force_tracking_enabled", body_kvs, default=True),
+        no_customer_upload=_tmpl_bool(tmpl, "no_customer_upload", body_kvs, default=False),
+        # Review gates per FR-7 / FR-53 / FR-70 -- template-seeded + SP-editable:
+        review_required=_tmpl_bool(tmpl, "review_required", body_kvs, default=False),
+        # Milestone gating per FR-78 -- template-authoritative:
+        milestone_gating=_tmpl_bool(tmpl, "milestone_gating", body_kvs, default=True),
+        # Routing fields per FR-77 -- ingress_folder SP-only; target_folder
+        # template-seeded + SP-editable:
         ingress_folder=(body_kvs.get("ingress_folder") or None),
-        target_folder=(body_kvs.get("target_folder") or None),
-        # Path components per FR-78:
-        path_id=body_kvs.get("path_id", f"item_{item_no}"),
-        tg_path_id=(body_kvs.get("tg_path_id") or None),
-        item_path_id=(body_kvs.get("item_path_id") or None),
-        # FR-82 item_description tags (AND-of-OR groups for FR-52 Step B1):
-        # parsed from SP's literal-text rendering of the Note column. Architect
-        # 2026-06-29: previously missing -> HILDA's local row had NULL tags ->
-        # substring matcher skipped every candidate -> attachments always
-        # landed in default_workitem (_unrouted).
-        item_description=_parse_item_description(body_kvs.get("item_description")),
-        # FR-7 doc_count + sort_order:
-        doc_count=_to_int(body_kvs.get("doc_count"), 1),
-        sort_order=_to_int(body_kvs.get("sort_order"), item_no),
+        target_folder=_tmpl_str(tmpl, "target_folder", body_kvs),
+        # Path components per FR-78 -- template-authoritative:
+        path_id=(tmpl.get("path_id") if tmpl else None) or body_kvs.get("path_id") or f"item_{item_no}",
+        tg_path_id=_tmpl_str(tmpl, "tg_path_id", body_kvs),
+        item_path_id=_tmpl_str(tmpl, "item_path_id", body_kvs),
+        # FR-82 item_description tags (AND-of-OR groups for FR-52 Step B1) --
+        # template-authoritative. TSC-W008: doc_count MUST equal len(item_description)
+        # for deliverable items; template.yaml validation guarantees this, so sourcing
+        # both from template naturally cures the "doc_count=0 but len(item_description)=N"
+        # consistency warnings observed in 2026-07-02 live smoke.
+        item_description=_parse_item_description(tmpl.get("item_description")) if tmpl else _parse_item_description(body_kvs.get("item_description")),
+        # FR-7 doc_count -- template-authoritative:
+        doc_count=(int(tmpl["doc_count"]) if tmpl and tmpl.get("doc_count") is not None else _to_int(body_kvs.get("doc_count"), 1)),
+        # sort_order -- template-seeded (falls back to item_no):
+        sort_order=(int(tmpl["sort_order"]) if tmpl and tmpl.get("sort_order") is not None else _to_int(body_kvs.get("sort_order"), item_no)),
+        # Form-factor flags per [D-084] -- template-authoritative:
+        handset=_tmpl_bool(tmpl, "handset", body_kvs, default=False),
+        tablet=_tmpl_bool(tmpl, "tablet", body_kvs, default=False),
+        wearable=_tmpl_bool(tmpl, "wearable", body_kvs, default=False),
+        ir=_tmpl_bool(tmpl, "ir", body_kvs, default=False),
+        osmr=_tmpl_bool(tmpl, "osmr", body_kvs, default=False),
+        rmr=_tmpl_bool(tmpl, "rmr", body_kvs, default=False),
+        hmr_smr=_tmpl_bool(tmpl, "hmr_smr", body_kvs, default=False),
         # Timestamps:
         last_updated=datetime.now(timezone.utc),
-        # FR-87 / FR-83 + form-factor flags + JIRA / PM-approval fields all
-        # use model defaults (None / False / 0) until operationally exercised.
+        # FR-87 / FR-83 + JIRA / PM-approval fields use model defaults
+        # (None / False / 0) until operationally exercised.
     )
+
+
+# ---------------------------------------------------------------------------
+# Template-vs-body merge helpers (2026-07-02 architect design pass)
+# ---------------------------------------------------------------------------
+# Each helper follows the same pattern: TEMPLATE wins at import time; body_kvs
+# is fallback when template is missing OR template doesn't carry the key.
+# Type-aware "null" detection:
+#   - int: 0 treated as null (indistinguishable from parser default)
+#   - str: None or "" treated as null
+#   - list: empty list treated as null
+#   - bool: template value used verbatim if present (False is legitimate);
+#           body_kvs fallback checks key presence to distinguish missing from
+#           explicit "No".
+
+
+def _tmpl_bool(
+    tmpl: dict[str, Any] | None,
+    key: str,
+    body_kvs: dict[str, str],
+    *,
+    default: bool,
+) -> bool:
+    """Template value wins if present (True or False both count as present).
+    Body_kvs fallback via key presence (distinguishes missing from explicit
+    'No' -> False). Model default is last resort.
+    """
+    if tmpl is not None and key in tmpl and tmpl[key] is not None:
+        return bool(tmpl[key])
+    if key in body_kvs and body_kvs[key]:
+        return _yn_to_bool(body_kvs[key], default=default)
+    return default
+
+
+def _tmpl_str(
+    tmpl: dict[str, Any] | None,
+    key: str,
+    body_kvs: dict[str, str],
+) -> str | None:
+    """Template string wins if non-empty; body_kvs fallback; None if both empty."""
+    if tmpl is not None:
+        v = tmpl.get(key)
+        if v:
+            return str(v)
+    return body_kvs.get(key) or None
+
+
+def _tmpl_list(tmpl: dict[str, Any] | None, key: str) -> list[str]:
+    """Template list wins if non-empty; caller falls back to body_kvs parse."""
+    if tmpl is None:
+        return []
+    v = tmpl.get(key)
+    if isinstance(v, list) and v:
+        return [str(x) for x in v]
+    return []
 
 
 # ---------------------------------------------------------------------------

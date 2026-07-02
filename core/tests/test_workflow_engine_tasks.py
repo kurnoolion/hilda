@@ -855,8 +855,10 @@ class TestRegistryIntegration:
         assert ActionKind.IMPORT_DELIVERABLE_TRACKER in ACTION_KIND_TO_TASK
         assert ActionKind.KICKOFF_COLLECTION in ACTION_KIND_TO_TASK
 
-    def test_20_of_22_action_kinds_registered_now(self):
-        # state(2) + milestone(3) + routing_resolution(3) + escalation(2) +
+    def test_22_of_24_action_kinds_registered_now(self):
+        # state(2) + milestone(4: MILESTONE_STORAGE_CLEANUP, HALT_MILESTONE_POLLING,
+        #             FINAL_SWEEP, CLOSE_ALL_ITEMS added 2026-07-02 per architect
+        #             close-all-items cascade) + routing_resolution(3) + escalation(2) +
         # outreach(3: SEND_INITIAL_OUTREACH, SEND_REMINDER, NOTIFY_NEW_OWNER) +
         # submission(3: ESCALATE, START_ITEM_COLLECTION, QUEUE_SUBMISSION) +
         # sp_alert_imports(2: IMPORT_DELIVERABLE_TRACKER, KICKOFF_COLLECTION
@@ -864,10 +866,12 @@ class TestRegistryIntegration:
         # pm_approval(1: APPLY_PM_APPROVAL added 2026-06-28 per architect
         #             Pattern A design lock) +
         # submit_to_carrier(1: SUBMIT_TO_CARRIER added 2026-06-30 per architect
-        #             submit-to-carrier milestone orchestrator design pass) = 20.
+        #             submit-to-carrier milestone orchestrator design pass) +
+        # sync_deliverable_fields(1: SYNC_DELIVERABLE_FIELDS added 2026-07-02
+        #             per architect template-merge null-guard design pass) = 22.
         # Remaining 2 await downstream module integration:
         # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
-        assert len(ACTION_KIND_TO_TASK) == 20
+        assert len(ACTION_KIND_TO_TASK) == 22
 
     def test_outreach_actions_registered(self):
         assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK

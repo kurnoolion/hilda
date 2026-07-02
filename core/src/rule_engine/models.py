@@ -82,6 +82,13 @@ class ActionKind(str, Enum):
     # Collection click (kickoff) via these two ActionKinds.
     IMPORT_DELIVERABLE_TRACKER = "ImportDeliverableTracker"
     KICKOFF_COLLECTION = "KickoffCollection"
+    # 2026-07-02 architect design pass: Deliverables CHANGED alerts carry
+    # edited-field values (target_folder, doc_count, no_customer_upload, etc.)
+    # from TPM SP-side edits. This action fires the sync task which applies a
+    # null-guarded merge -- SP non-null values overwrite Postgres; SP null/
+    # empty values are skipped to prevent accidental erasure of template-
+    # seeded fields.
+    SYNC_DELIVERABLE_FIELDS = "SyncDeliverableFields"
     # PM-approval Pattern A added 2026-06-28 per architect design pass:
     # SP UI engineer's button atomically writes 3 fields (delivery_state +
     # pm_approval_at + pm_approval_pm_id per [D-068]); HILDA's task body mirrors
