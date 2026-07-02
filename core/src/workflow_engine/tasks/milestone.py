@@ -147,7 +147,7 @@ def close_all_items_task(
     per_item_ctx["trigger_source"] = "tpm_button"
     per_item_ctx["pm_id"] = pm_id
     for item in eligible:
-        item_id = getattr(item, "delivery_item_id", None)
+        item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
         if item_id is None:
             skipped += 1
             continue
@@ -160,7 +160,7 @@ def close_all_items_task(
             sp_writer=deps.sp_writer,
             audit=deps.audit,
         )
-        if result.outcome == "transitioned":
+        if result.outcome in ("transitioned", "no_op_idempotent"):
             closed += 1
         else:
             skipped += 1
