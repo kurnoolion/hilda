@@ -51,6 +51,17 @@ def _eval_leaf(cond: dict[str, Any], event: TriggerEvent, rule_id: str) -> bool:
     field_name = str(cond.get("field"))
     actual = _event_field(event, field_name)
     if actual is _MISSING:
+        # 2026-07-02 refinement: a missing field on `eq null` / `neq null`
+        # comparisons is semantically null, NOT a typo. Return the natural
+        # evaluation without warning. This eliminates spurious RUL-W006 noise
+        # on every Milestones CHANGED alert where a sibling trigger rule
+        # (kickoff / submit / close-all-items) checks `field neq null` for a
+        # field that simply wasn't set in THIS alert -- the rule correctly
+        # doesn't fire, but the warning misleadingly says "possible typo'd
+        # field name" when the field itself is valid.
+        expected_null_check = cond.get("value") is None
+        if expected_null_check and op in ("eq", "neq"):
+            return op == "eq"  # missing == null -> True; missing != null -> False
         # Fail-closed, but visibly — a typo'd field name must not silently kill a rule
         # forever (RUL-W006 per architect ruling 2026-06-12).
         logger.warning("RUL-W006: " + format_code("RUL-W006", rule_id=rule_id, field=field_name))
