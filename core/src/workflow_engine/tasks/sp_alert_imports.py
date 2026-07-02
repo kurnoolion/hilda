@@ -532,12 +532,26 @@ def kickoff_collection_task(
         )
         return {"outcome": "fired", "emails_sent": 0, "items_scanned": 0}
 
-    # Eligibility filter: force_tracking_enabled=true AND delivery_state="Not Started".
+    # Eligibility filter: force_tracking_enabled=true AND delivery_state="Not Started"
+    # AND item_type != "Default".
+    #
     # Confirmation items are INCLUDED per FR-58 corrected 2026-06-28.
+    #
+    # Default work items EXCLUDED per architect 2026-07-02: default WI has FR-78
+    # hardcoded invariant force_tracking_enabled=False, no owner, no outreach
+    # surface. But the SP UI engineer's script that creates the default WI row
+    # may leave force_tracking_enabled at the SP column default (True per
+    # FR-81) instead of explicitly setting False, and the parser can't
+    # distinguish "field missing from body_kvs" from "field explicitly True".
+    # Result: default WI leaked into eligible, transitioned NS -> Open ->
+    # OutreachSent silently (no email sent because __no_owner__ bucket).
+    # Explicit item_type guard here is defense-in-depth against SP-side
+    # field-default drift.
     eligible = [
         item for item in items
         if getattr(item, "force_tracking_enabled", False) is True
         and (getattr(item, "delivery_state", None) or "") == "Not Started"
+        and (getattr(item, "item_type", None) or "") != "Default"
     ]
     if not eligible:
         logger.info(
