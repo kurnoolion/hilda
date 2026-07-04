@@ -3476,3 +3476,147 @@ Per architect direction 2026-06-28: "at this time, SP UI list values cannot be c
 - (i) Reusable pattern: when SP UI engineer adds a new state, HILDA enum mirrors the value verbatim; no separate translation table to maintain.
 
 **Anchors**: `[D-118]` (SP UI engineer owns SP definitions; HILDA aligns), `[D-124]` (Decision-block intent re-codified; title-wording superseded), `[D-135]` (strict-boundary cascade complete -- D-138 is the value-string companion piece), `[D-137]` (SP writeback two-step pattern -- D-138 is the value-string the pattern writes), commits `f9542fa` (D-137 implementation that surfaced this) + the D-138 cascade commit.
+
+## D-139: PM approval Pattern A doctrine — SP-authoritative multi-field atomic mirror
+
+**Date**: 2026-06-28
+**Status**: Ratified
+
+**Context**: SP UI engineer's Approve button on the Deliverables SP UI needs to atomically transition an item to `ReadyForSubmission` with PM identity attribution. HILDA's rule engine would normally require state-machine transitions through guards. Whether HILDA or SP is the state-transition authority for approval determines the whole plumbing shape.
+
+**Decision**: SP is state-authoritative for PM approval. SP UI engineer's button writes atomically to 3 fields (`delivery_state=ReadyForSubmission` + `pm_approval_at` + `pm_approval_pm_id`) in a single SP POST. HILDA reads the CHANGED alert, dispatcher `_PM_APPROVAL_DELTA_FIELDS` refinement discriminates the sub-trigger into `PmApproved`, `apply_pm_approval_task` mirrors the 3-tuple into Postgres WITHOUT invoking state-machine guards. Generalized as **"Pattern A doctrine"** — reusable for other SP-atomic-write flows.
+
+**Why**:
+- (a) **HILDA-authoritative rejected**: SP writes "TPM wants to approve" flag → HILDA runs guards → HILDA writes final state back to SP. Round-trip latency for TPM feedback; guard failures at HILDA leave SP in inconsistent visible state; atomicity of the 3-field write only holds at SP-side (single POST); if HILDA is authoritative, guards may pass but writeback may fail, producing asymmetric state.
+- (b) **HILDA-drives-approval-workflow entirely rejected**: would require HILDA-native TPM UI, which is Path B (deferred post-Ph-1 per [D-143] discussion).
+- (c) **Extension of [D-068]** (SP is source of truth for state) into a complete implementation doctrine.
+
+**Consequences**:
+- (a) HILDA's state-machine guards are NOT the authority for PM-approval-driven transitions; SP UI engineer's button visibility logic IS the guard.
+- (b) Pattern applies to other SP-authoritative multi-field writes; PM approval is the reference case.
+- (c) Documentation of when-to-use-Pattern-A becomes an architectural rule going forward.
+- (d) `apply_pm_approval_task` becomes the exemplar for Pattern A tasks; future SP-authoritative mirror tasks follow the same shape (read delta → mirror to Postgres → no guards).
+
+**Anchors**: `[D-068]` (SP is source of truth for state), `[D-138]` (DeliveryState enum values verbatim), `[D-140]` (companion — HILDA-authoritative pattern for submit-to-carrier). Commits `3874041`, `2ca7a2a`, `032ad19`, `3ffcddb`.
+
+## D-140: Guard 4 trusts `trigger_source` — HILDA-authoritative submit-to-carrier authority
+
+**Date**: 2026-07-01
+**Status**: Ratified
+
+**Context**: `submit_to_carrier_task` performs per-item file uploads via `customer_adapter`; after all-files-success, transitions item RFS → SubmittedToCustomer. Guard 4 needs to know upload completed successfully before permitting the transition. Initial implementation wrote `carrier_upload_complete=True` to storage before transitioning; the field is not a column on DeliveryItemTable; `update_delivery_item`'s hasattr guard silently skipped the write; Guard 4 read False; blocked the transition; task's counter still incremented — a silent-failure chain hidden across 6 layers (surfaced by live smoke 2026-07-01 as "uploaded_items=9 but DB rows stayed in RFS").
+
+**Decision**: Guard 4 trusts `trigger_source='submit_to_carrier_task'` (and by extension `'sync_backfill_submit_to_carrier'` per [D-142] reconciler) as authoritative evidence of upload completion. The task IS the authority — per-item transitions happen only after `all_ok and files_ok > 0` at the task-body level. Other trigger_sources still hit the fallback `carrier_upload_complete` flag check for defensive purposes.
+
+**Why**:
+- (a) **Adding a real `carrier_upload_complete` column rejected**: (i) the flag is derived data (function of upload attempts + all-files-success), storing it makes it a persistence surface with sync burden; (ii) reconciler-driven syncs would still need trigger_source discrimination anyway; (iii) test surface is simpler when the "authority" is a code path, not a data column.
+- (b) **Removing Guard 4 entirely rejected**: guards are the type-safety layer for state transitions; removing = losing invariant enforcement for all callers, including future ones.
+- (c) **Companion to [D-139]** — where D-139 handles SP-authoritative transitions (SP writes atomically, HILDA mirrors), D-140 handles HILDA-authoritative transitions (HILDA task drives the workflow, HILDA task is the guard authority).
+
+**Consequences**:
+- (a) Guard 4 now inspects `trigger_source`. Adding new authoritative-transition contexts requires appending to the trust-list.
+- (b) Establishes a pattern for other guards to follow — trigger_source-driven trust vs data-column trust.
+- (c) Trigger_source spoofing risk is bounded to internal task authors, not external inputs (SP alerts can't inject trigger_source).
+- (d) Reconciliation cascade tasks per [D-142] can safely re-invoke submit_to_carrier_task with `trigger_source='sync_backfill_submit_to_carrier'` and expect Guard 4 to accept.
+
+**Anchors**: `[D-068]`, `[D-139]` (SP-authoritative companion), `[D-142]` (reconciliation cascade uses this trust pattern). Commit `5cbc383`.
+
+## D-141: template.yaml is authoritative for structural DeliveryItem fields at import; body_kvs is fallback
+
+**Date**: 2026-07-02
+**Status**: Ratified
+
+**Context**: SP ADDED alert body_kvs is missing template-defined fields at Deliverables setup time (SP UI engineer's setup script may leave fields at column defaults; SP alert body may drop them entirely for various reasons per [D-143] SP-alert lossiness). Import task previously mapped body_kvs to DeliveryItemBase fields directly; result: `doc_count=0`, `target_folder=None`, `tracking_modality=[]`, `milestone_gating=default`, etc. → downstream cascades broken (FR-82 doc_count consistency violation warnings; CAD-E010 upload-guard failures; kickoff eligibility miscalculated).
+
+**Decision**: At import time, HILDA reads `template.yaml` as the authoritative source for structural DeliveryItem fields. Three-bucket split:
+
+**Template-authoritative** (template value wins; body_kvs is fallback if template lookup misses):
+`doc_count`, `tracking_modality`, `milestone_gating`, `item_type`, `item_description`, `tg_path_id`, `item_path_id`, form-factor flags (`handset` / `tablet` / `wearable` / `ir` / `osmr` / `rmr` / `hmr_smr`), `customer_delivery_info` (root-level, denormalized per item), `delivery_path_template` (root-level).
+
+**Template-seeded + SP-editable** (template seeds initial value; SP CHANGED alerts override at runtime subject to null-guard):
+`no_customer_upload`, `force_tracking_enabled`, `review_required`, `target_folder`.
+
+**SP-only** (body_kvs authoritative; template does not participate):
+`delivery_state`, `owner_*` (4-field identity), `tg_*` (identity fields), `owner_status_note`, `pm_approval_*`, milestone `*_triggered_at`, `last_updated`, `item_name`, `item_completion_pct`.
+
+body_kvs is fallback for the first two buckets when template lookup misses. SP CHANGED alerts continue to override at runtime for the second bucket subject to null-guard (int=0 / str=None|`""` / list=[] / bool=key-missing → skip; skip preserves current value).
+
+**Why**:
+- (a) **SP-authoritative for everything rejected**: SP alerts are lossy per [D-143]; SP UI engineer's setup script may not populate every field; template.yaml is the design-time source of truth for what a work item structurally IS.
+- (b) **"Fetch structural fields from SP on demand at import" rejected**: SP throttling at high volume; template.yaml is already loaded in memory for other purposes; adds SP round-trip per import for data that doesn't change.
+- (c) **Using SP as fallback and template as primary WITHOUT null-guard rejected**: TPM's legitimate edits post-import would be silently ignored on any Deliverables CHANGED alert that omitted the edited field.
+- (d) **Enables Path B evaluation** (per [D-143] Consequences): template.yaml is already the source; a HILDA-native TPM UI writes to template.yaml OR to a HILDA-native structural store, no data-model change required.
+
+**Consequences**:
+- (a) All structural fields must be authored in template.yaml; SP UI engineer's setup script becomes a projection layer that translates template.yaml into SP rows.
+- (b) Any TPM edit of a structural field in SP UI post-setup is silently ignored by the import path (propagated by `sync_deliverable_fields_task` for the editable bucket only).
+- (c) Backfill script must run once for existing Postgres rows imported pre-cascade.
+- (d) `template_lookup` module becomes a load-bearing runtime component; template.yaml loading failure at boot degrades import to fallback-only path (documented in module).
+- (e) New ActionKind `SYNC_DELIVERABLE_FIELDS` + rule + task cover the runtime edit path with null-guarded merge.
+- (f) FR-82 doc_count consistency warnings self-resolve post backfill run (template.yaml enforces `doc_count == len(item_description)` at validation time).
+
+**Anchors**: `[D-068]`, `[D-118]` (SP UI engineer owns row creation), `[D-142]` (reconciliation cascade for lost ADDED alerts), `[D-143]` (SP alerts are best-effort). Commits `8a60abb`, `5b09af4`.
+
+## D-142: 5-sync reconciliation architecture — email fast-path + reconciliation backstop
+
+**Date**: 2026-07-02
+**Status**: Ratified (design; implementation deferred to next session)
+
+**Context**: Per [D-143], SharePoint alert emails are lossy at burst (250 concurrent alerts = 3-15% expected loss). No delivery SLA from Microsoft. Current architecture fails silently when alerts are dropped: no Postgres row created, no kickoff fires, no state transitions happen. TPM has no visible signal — the milestone just doesn't progress. Manual re-trigger by TPM is UX-unacceptable for compliance work.
+
+**Decision**: 5 reconciliation sync tasks running on Celery beat schedule, each covering one drift class:
+
+| Sync | Detects | Fires |
+|---|---|---|
+| sync-1 `delivery_item_count` | SP Deliverables_<customer_id> has rows not in Postgres | `import_deliverable_tracker_task` per missing item |
+| sync-2 `milestone-start-collection` | SP `milestone_collection_started_at` set >5min but items still Not Started | `kickoff_collection_task` for the milestone |
+| sync-3 `deliverable-approved` | SP delivery_state=RFS + `pm_approval_at` set + >5min elapsed but Postgres still UnderPMReview | `apply_pm_approval_task` per item |
+| sync-4 `milestone-submit-to-carrier` | SP `milestone_submission_triggered_at` set >5min but items still RFS | `submit_to_carrier_task` for the milestone |
+| sync-5 `milestone-close-all-items` | SP `closed_all_items_triggered_at` set >5min but items still SubmittedToCustomer (or RFS + no_customer_upload) | `close_all_items_task` for the milestone |
+
+Each is a Celery beat task with 5-min default interval (2-min for sync-3). Each invokes the SAME task body the email path invokes, with `trigger_source="sync_backfill_*"` for audit differentiation. Each terminates naturally when the drift condition doesn't apply (no persistent stopped flag needed — task naturally no-ops on next tick when in sync).
+
+Trigger predicate: "**at least one** item still in the pre-transition state" (not "all") so partial-completion cases converge cleanly on subsequent ticks.
+
+**Why**:
+- (a) **SP REST Change Notifications (webhooks) rejected**: requires public HTTPS endpoint HILDA doesn't have (corp reverse-proxy provisioning, TLS cert, IT ticket, cross-team scope).
+- (b) **SP-side polling as the only path (drop emails) rejected**: HILDA's mailbox is the natural funnel for corp Exchange; polling SP directly is redundant for the 85-97% happy path.
+- (c) **Manual TPM re-trigger rejected**: unacceptable UX for compliance tracking.
+- (d) **Full HILDA-native UI (Path B) deferred**: correct long-term but out-of-scope for Ph-1; reconciliation is the Ph-1 backstop.
+- (e) **Per-sync-type beat entries chosen over single-reconciler beat entry**: simpler to configure/toggle each independently; per-sync interval tuning; per-sync retry-limit policy.
+
+**Consequences**:
+- (a) HILDA now formally assumes SP alerts are lossy (companion to [D-143]).
+- (b) All future SP-driven features need reconciliation coverage or explicit rationale for skipping.
+- (c) Config file `reconcile.json` becomes ops surface; interval + retry-limit + escalation policy are ops-tunable.
+- (d) Retry-limit + ops_alerts escalation needed for sync-4/5 to prevent infinite loops on permanently failing uploads / transitions (open question flagged for cascade implementation).
+- (e) Post-cascade rollout, HILDA is materially more resilient to SP alert delivery variance.
+- (f) Establishes pattern: any authoritative-recovery task pairs an email-driven task with a reconciler that invokes the same task body via a distinct trigger_source.
+- (g) Each task body must be idempotent (already is; validated via existing state-filter guards); reconciler safe to re-invoke.
+
+**Anchors**: `[D-068]`, `[D-139]`, `[D-140]` (both provide the trigger_source trust patterns reconciler uses), `[D-141]`, `[D-143]` (SP-alerts-are-best-effort stance this cascade implements).
+
+## D-143: SP alerts are best-effort — email fast-path + reconciliation backstop as architectural stance
+
+**Date**: 2026-07-02
+**Status**: Ratified
+
+**Context**: Multi-week live-testing on corp Exchange + corp SP surfaced repeated instances of SP alert delivery variance: alert coalescing, body truncation, delayed delivery, occasional drops, no-Edited-marker forms. Corp Exchange has no IMAP/SMTP; EWS via basic auth against service account is the only channel. Microsoft's SP alerts are documented as best-effort. Setup-Deliverables at 5-carrier × 50-item burst is projected to lose 3-15% of alerts.
+
+**Decision**: HILDA officially treats SP alerts as best-effort notification signal, not authoritative delivery contract. Email is fast-path (sub-minute latency when it works, covers 85-97% of alerts). Reconciliation is authoritative backstop (5-min drift window at worst per [D-142]). Every SP-driven state transition needs BOTH an email-path handler AND a reconciliation sweep.
+
+**Why**:
+- (a) **Continuing to trust email alerts as authoritative rejected**: real-world losses observed at even low volume; 250-concurrent-alert burst will drop 3-15%; silent data loss is unacceptable for compliance tracking; no operational visibility into which alerts were dropped.
+- (b) **Reconciliation-only (drop email fast-path entirely) rejected**: email latency IS acceptable for the 85-97% happy path; adding reconciliation on top doesn't preclude the fast-path; reconciliation-only would push all state transitions to a 5-min floor.
+- (c) **Delivery acknowledgment protocol between SP and HILDA (mail-received handshake) rejected**: out of scope; SP has no such API.
+
+**Consequences**:
+- (a) Formalization of "SP alert is a hint, not a contract" throughout HILDA architecture.
+- (b) Every new SP-driven feature reviewed for reconciliation coverage.
+- (c) **Path B (HILDA-native TPM UI) becomes strategically attractive** because it eliminates this whole class of problem — the "SP alert reliability" concern doesn't exist for HILDA-owned state. Ph-1 ships on Path A (this ADR + [D-142]); Path B evaluation flagged for post-Ph-1.
+- (d) Short-term: ship Ph-1 with reconciliation cascade per [D-142] + operate for months to gather data on real loss rate.
+- (e) Long-term: Path B evaluation based on operational experience (STATUS Flag captured).
+- (f) This ADR is the architectural stance; [D-142] is the specific implementation.
+- (g) Companion to [D-141] — SP alerts being lossy is why template.yaml at import is authoritative for structural fields (SP might not deliver them).
+
+**Anchors**: `[D-047]` (SP-alert email channel), `[D-118]`, `[D-141]` (template.yaml authority as a consequence of this stance), `[D-142]` (reconciliation cascade as the implementation).

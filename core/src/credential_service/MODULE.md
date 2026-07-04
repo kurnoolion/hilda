@@ -6,6 +6,8 @@
 
 **Workload assignment**: In-process import in `hilda-api`, `hilda-worker`, `hilda-beat`, and `hilda-llm-gateway` per `[D-021]`. No dedicated container; decryption happens once at each container's startup. The age key is mounted read-only from the host into every workload container per `[D-038]`.
 
+**2026-07-02 update — JsonFileCredentialService added for Ph-1 corp GDrive auth path**: NEW concrete impl `JsonFileCredentialService` parallels the existing `SopsCredentialService`. Loads credentials from plaintext JSON at `config/customer_adapter.json` (no sops decryption). Conforms to the same `CredentialService` Protocol as SopsCredentialService — `get_credential(pm_id, system_type, customer_id=...)` returns `Credential(auth_type, username, password, totp_seed, ...)`. Wired at bootstrap via `workflow_engine.bootstrap._build_customer_adapter` when the per-customer adapter subclass requests `SystemType.CUSTOMER` credentials. Ph-1 architect direction 2026-07-01 accepts plaintext-JSON for corp GDrive auth as a shipping expedient; Ph-2 revisit to route through sops (same age-key infrastructure). Config-file layout: `{"customers": {"<customer_id>": {"pm_id": "...", "username": "...", "password": "...", "totp_seed": "..."}}}`. Loader validates each entry through `CustomerCredEntry` Pydantic model; missing customer → CRD-E001 "credential not found for (customer_id, system_type)". Public surface should reference `JsonFileCredentialService` on next full-file curation pass. Commits: `e5e955b` (initial impl), `9072194` (bootstrap wiring).
+
 ---
 
 ## Public surface
