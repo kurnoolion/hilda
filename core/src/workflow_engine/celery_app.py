@@ -79,6 +79,18 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             # expires=55 -> if beat fires while previous poll still running,
             # the newer one expires before reaching worker (avoids backlog).
         },
+        # Reconciliation meta-reconciler per [D-142]/[D-143]. Single beat entry
+        # dispatches 5 sync sub-tasks serially per (customer x device x milestone)
+        # tuple. Interval default 300s (5 min) tunable via config/reconcile.json
+        # or HILDA_RECONCILE_INTERVAL_SEC env. expires=290 avoids beat backlog.
+        # Missed-SP-email backstop; task naturally no-ops per tick when drift
+        # conditions don't apply (see reconcile_config.py + strand
+        # reconcile-sync-cascade for design rationale).
+        "reconcile_all_300s": {
+            "task":     "core.src.workflow_engine.tasks.reconcile.reconcile_all",
+            "schedule": 300.0,
+            "options":  {"queue": "default", "expires": 290},
+        },
     }
     return app
 

@@ -30,6 +30,7 @@ from . import (  # noqa: F401
     submission,      # added 2026-06-27: ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION
     submit_to_carrier,  # added 2026-06-30: SUBMIT_TO_CARRIER milestone-scoped orchestrator per architect design pass
     sync_deliverable_fields,  # added 2026-07-02: SYNC_DELIVERABLE_FIELDS null-guarded merge for Deliverables CHANGED alerts
+    reconcile,  # added 2026-07-02: meta-reconciler + 5 sync sub-tasks per D-142/D-143 (strand reconcile-sync-cascade)
 )
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "outreach",
     "owner_reply",
     "pm_approval",
+    "reconcile",
     "routing_resolution",
     "sp_alert_imports",
     "state",
