@@ -369,9 +369,16 @@ def import_deliverable_tracker_task(
         }
 
     # -- Idempotency check via natural key --
+    # Fix 2026-07-03: device_id added to prevent cross-device dedup at import.
+    # Prior (customer, tg, item_no) key incorrectly matched item_no=1 across
+    # 10 devices, dropping 9 of 10 ADDED alerts as "already_exists" per live
+    # test (SM-S671U1 + 9 more Samsung SKUs setup burst -> 105 emails arrived
+    # but only 11 rows landed in Postgres). Same natural key without device_id
+    # is still used by FR-82 tag_propagation which INTENTIONALLY spans devices.
     tg_name = body_kvs.get("tg_name", "")
     existing = deps.storage.find_items_by_natural_key(
         customer_id=customer_id,
+        device_id=device_id,
         tg_name=tg_name,
         item_no=item_no,
     )

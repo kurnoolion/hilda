@@ -87,7 +87,10 @@ class StorageWriter(Protocol):
         tg_name: str,
         item_no: int,
         only_active: bool = True,
-    ) -> list[DeliveryItemBase]: ...    # customer_id per [D-091] slug->id rename
+        device_id: str | None = None,
+    ) -> list[DeliveryItemBase]: ...    # customer_id per [D-091] slug->id rename;
+    # device_id added 2026-07-03 for import-idempotency; None preserves FR-82
+    # tag_propagation cross-device semantics.
 
     def list_default_workitem_for_milestone(
         self,

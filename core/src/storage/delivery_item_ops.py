@@ -15,7 +15,7 @@ Surface (StorageWriter Protocol-aligned, 6 methods):
 - update_delivery_item(item_id, fields) -> None
 - list_items_for_milestone(milestone_id, states=None) -> list[DeliveryItemBase]
 - list_default_workitem_for_milestone(milestone_id) -> DeliveryItemBase | None
-- find_items_by_natural_key(customer_id, tg_name, item_no) -> list[DeliveryItemBase]
+- find_items_by_natural_key(customer_id, tg_name, item_no, device_id=None) -> list[DeliveryItemBase]
 """
 from __future__ import annotations
 
@@ -168,17 +168,33 @@ async def get_by_customer_and_sp_id(
 
 
 async def find_items_by_natural_key(
-    customer_id: str, tg_name: str, item_no: int
+    customer_id: str, tg_name: str, item_no: int,
+    device_id: str | None = None,
 ) -> list[DeliveryItemBase]:
-    """Idempotency lookup per [D-118] Chunk 3:
-    (customer_id, tg_name, item_no) is the natural key SP uses to identify a
-    Deliverable row pre-import."""
+    """Idempotency lookup per [D-118] Chunk 3.
+
+    Two callers with DIFFERENT semantics:
+      - sp_alert_imports (import idempotency): pass device_id -- lookup is
+        scoped to (customer, device, tg, item_no). Prevents cross-device
+        dedup when TPM sets up N devices and SP fires N ADDED alerts per
+        work_item -- previously the (customer, tg, item_no)-only lookup
+        treated device 2..N as duplicates and dropped them.
+      - tag_propagation (FR-82): pass device_id=None -- INTENTIONALLY spans
+        devices so a tag update propagates to all devices' copies of the
+        matching work_item per tracker/MODULE.md.
+
+    device_id is keyword-only when supplied and defaults to None to preserve
+    backward compat with the FR-82 caller.
+    """
     async with session_scope() as session:
-        stmt = select(DeliveryItemTable).where(
+        conditions = [
             DeliveryItemTable.customer_id == customer_id,
             DeliveryItemTable.tg_name == tg_name,
             DeliveryItemTable.item_no == item_no,
-        )
+        ]
+        if device_id is not None:
+            conditions.append(DeliveryItemTable.device_id == device_id)
+        stmt = select(DeliveryItemTable).where(*conditions)
         rows = (await session.execute(stmt)).scalars().all()
         return [_row_to_pydantic(r) for r in rows]
 
@@ -249,10 +265,13 @@ class PostgresStorage:
         return run_async_sync(lambda: list_default_workitem_for_milestone(milestone_id))
 
     def find_items_by_natural_key(
-        self, *, customer_id: str, tg_name: str, item_no: int
+        self, *, customer_id: str, tg_name: str, item_no: int,
+        device_id: str | None = None,
     ) -> list[DeliveryItemBase]:
         return run_async_sync(
-            lambda: find_items_by_natural_key(customer_id, tg_name, item_no)
+            lambda: find_items_by_natural_key(
+                customer_id, tg_name, item_no, device_id=device_id,
+            )
         )
 
     def get_by_customer_and_sp_id(

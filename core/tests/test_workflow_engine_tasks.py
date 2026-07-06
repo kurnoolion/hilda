@@ -96,11 +96,16 @@ class MockStorage:
     def update_document_index_row(self, *a, **k):
         pass
 
-    def find_items_by_natural_key(self, customer_id, tg_name, item_no, only_active=True):
+    def find_items_by_natural_key(self, customer_id, tg_name, item_no,
+                                    only_active=True, device_id=None):
+        # device_id added 2026-07-03 for import-idempotency cross-device fix;
+        # None preserves FR-82 tag_propagation cross-device semantics.
         return [i for i in self.items.values()
                 if getattr(i, "customer_id", None) == customer_id
                 and getattr(i, "tg_name", None) == tg_name
-                and getattr(i, "item_no", None) == item_no]
+                and getattr(i, "item_no", None) == item_no
+                and (device_id is None
+                     or getattr(i, "device_id", None) == device_id)]
 
     def list_default_workitem_for_milestone(self, milestone_id):
         return self.default_wi_by_milestone.get(milestone_id)
@@ -975,10 +980,12 @@ class TestImportDeliverableTracker:
             import_deliverable_tracker_task,
         )
         # Pre-seed an existing item matching the natural key
-        # (customer_id=MMK, tg_name=MNO-ETM, item_no=5):
+        # (customer_id=MMK, device_id=SM-S671U1, tg_name=MNO-ETM, item_no=5).
+        # device_id added 2026-07-03 per import-idempotency cross-device fix.
         existing = SimpleNamespace(
             item_id="MMK-SM-S671U1-P1-5",
             customer_id="MMK",
+            device_id="SM-S671U1",
             tg_name="MNO-ETM",
             item_no=5,
         )
