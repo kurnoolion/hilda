@@ -327,6 +327,14 @@ class PostgresStorage:
         from core.src.storage.document_ops import find_doc_id_slugs_for_item as _find
         return run_async_sync(lambda: _find(delivery_item_id, doc_type))
 
+    def get_local_nsd_path_for_file_hash(self, file_hash: str) -> str | None:
+        """Sync wrapper for get_local_nsd_path_for_file_hash. Added 2026-07-07
+        for cross-device shared-file fix: when the same file re-arrives for
+        new items, _persist_routed_attachment reuses the original NSD path so
+        associations point at the actual stored bytes."""
+        from core.src.storage.document_ops import get_local_nsd_path_for_file_hash as _get
+        return run_async_sync(lambda: _get(file_hash))
+
     def write_attachment_bytes(self, nsd_path: Any, content: bytes) -> Any:
         """Sync wrapper around attachment_ops.write_attachment_bytes."""
         from core.src.storage.attachment_ops import write_attachment_bytes as _write

@@ -59,6 +59,7 @@ class StorageBackend(Protocol):
     async def add_document_index_row(self, row: Any) -> None: ...
     async def add_document_item_association(self, assoc: Any) -> None: ...
     async def find_doc_id_slugs_for_item(self, delivery_item_id: str, doc_type: Any) -> list[str]: ...
+    async def item_has_association(self, file_hash: str, delivery_item_id: str) -> bool: ...
     async def write_file(self, path: Any, content: Any) -> None: ...
     async def log_communication(self, row: Any) -> None: ...
 
@@ -176,31 +177,50 @@ class Fr52AttachmentRouter:
         decisions; the file write + index-row write + associations are
         performed against the injected storage.
         """
-        # ---- Step 0: file_hash dedup ([D-039] Step 0) ---------------------
+        # ---- Step 0: file_hash lookup ([D-039] Step 0) --------------------
+        # Split into 0a (file-bytes-existence check for storage skip) and 0b
+        # (item-association filter). Fix 2026-07-07 cross-device shared docs:
+        # a single regulatory certificate legitimately re-arrives for items on
+        # multiple devices within the same milestone. The prior early-return
+        # short-circuited routing entirely, blocking new device associations.
+        # Now: file bytes get skipped (already stored), but item routing still
+        # runs and creates associations for items on this device that don't
+        # yet carry the file.
         existing = await self._storage.get_document_index_row_by_hash(
             attachment.file_hash
         )
-        if existing is not None:
-            return RoutedAttachment(
-                file_hash=attachment.file_hash,
-                matches=(),
-                doc_type=str(getattr(existing, "doc_type", DocType.UNRESOLVED.value)),
-                doc_id_slug=getattr(existing, "doc_id_slug", None),
-                rev_number=getattr(existing, "rev_number", None),
-                classification_resolution=ClassificationResolution.FILENAME_REGEX,
-                routing_resolution=RoutingResolution.SUBSTRING_MATCH,
-                inferred_tg_name=getattr(existing, "inferred_tg_name", None),
-                nsd_path_type=NSDPathType.CLASSIFIED,
-                is_duplicate=True,
-            )
+        is_duplicate_bytes = existing is not None
 
         # ---- Branch A: FR-85 doc_type classification ----------------------
-        doc_type_value, cls_resolution = self._classify_doc_type(attachment.filename)
+        # When duplicate, reuse the cached doc_type from the index row to avoid
+        # a redundant regex/LLM pass. Router-side classification is derived
+        # from the FILE, not the delivery context, so caching is correct.
+        if is_duplicate_bytes:
+            doc_type_value = str(getattr(existing, "doc_type", DocType.UNRESOLVED.value))
+            cls_resolution = ClassificationResolution.FILENAME_REGEX
+        else:
+            doc_type_value, cls_resolution = self._classify_doc_type(attachment.filename)
 
         # ---- Branch B: FR-52 item routing ---------------------------------
         matches, routing_resolution = await self._route_to_items(
             attachment, candidate_items
         )
+
+        # ---- Step 0b: filter out items that already carry this file -------
+        # (per cross-device fix 2026-07-07): duplicate-bytes only means "the
+        # file exists in the doc index"; each item still needs its own filter
+        # to prevent double-counting doc_count_received when an owner resends
+        # the same email OR re-attaches the same file to items already
+        # associated on this device.
+        if is_duplicate_bytes and matches:
+            filtered: list[AttachmentItemMatch] = []
+            for m in matches:
+                has_assoc = await self._storage.item_has_association(
+                    attachment.file_hash, m.item_id
+                )
+                if not has_assoc:
+                    filtered.append(m)
+            matches = filtered
 
         # FR-79 over-routing warning
         if len(matches) > self._max_matches_threshold:
@@ -281,6 +301,15 @@ class Fr52AttachmentRouter:
         # all decisions; the caller does add_document_index_row +
         # add_document_item_association per match. Tests verify the routing
         # decision and the storage call counts.
+        # When the file bytes are already on disk (is_duplicate_bytes=True),
+        # reuse the existing index row's slug/rev so downstream persist skips
+        # the redundant DocumentIndexRow insert (which is idempotent but the
+        # explicit skip keeps telemetry clean and avoids a wasted round-trip).
+        if is_duplicate_bytes and existing is not None:
+            doc_id_slug = getattr(existing, "doc_id_slug", doc_id_slug)
+            rev_number = getattr(existing, "rev_number", rev_number)
+            inferred_tg = getattr(existing, "inferred_tg_name", inferred_tg)
+
         return RoutedAttachment(
             file_hash=attachment.file_hash,
             matches=tuple(matches),
@@ -291,7 +320,7 @@ class Fr52AttachmentRouter:
             routing_resolution=routing_resolution,
             inferred_tg_name=inferred_tg,
             nsd_path_type=nsd_path_type,
-            is_duplicate=False,
+            is_duplicate=is_duplicate_bytes,
         )
 
     # ------------------------------------------------------------------

@@ -41,6 +41,8 @@ __all__ = [
     "get_document_index_row_by_hash",
     "get_document_index_row_by_slug",
     "get_documents_for_item",
+    "get_local_nsd_path_for_file_hash",
+    "item_has_association",
     "list_associations_for_file",
     "list_associations_for_item",
     "list_classified_associations_for_item",
@@ -322,6 +324,43 @@ async def delete_document_item_association(
                 pass  # missing copy is not an error for index cleanup
 
         await asyncio.to_thread(_rm)
+
+
+async def item_has_association(file_hash: str, delivery_item_id: str) -> bool:
+    """Return True iff a DocumentItemAssociation already exists for this
+    (file_hash, delivery_item_id) pair.
+
+    Consumed by Fr52AttachmentRouter Step 0 per the cross-device-shared-file
+    fix 2026-07-07: when a file_hash is already indexed and re-arrives (e.g.
+    same regulatory certificate attached across multiple devices' work items),
+    the router still routes to items on the current device -- but must filter
+    out items that already carry an association for this file so they don't
+    get double-counted in doc_count_received.
+    """
+    async with _session() as session:
+        row = await session.get(
+            DocumentItemAssociationTable, (file_hash, delivery_item_id)
+        )
+        return row is not None
+
+
+async def get_local_nsd_path_for_file_hash(file_hash: str) -> str | None:
+    """Return any existing local_nsd_path recorded for this file_hash.
+
+    Consumed by inbound_attachment._persist_routed_attachment per the
+    cross-device-shared-file fix 2026-07-07: when is_duplicate=True and new
+    items need associations, the new rows should point at the ORIGINAL stored
+    location (bytes were written on first arrival, not re-written on the
+    duplicate). Returns None when no association exists yet (caller falls
+    back to normal _resolve_nsd_path).
+    """
+    async with _session() as session:
+        result = await session.execute(
+            select(DocumentItemAssociationTable.local_nsd_path)
+            .where(DocumentItemAssociationTable.file_hash == file_hash)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
 
 async def list_associations_for_file(file_hash: str) -> list[DocumentItemAssociation]:

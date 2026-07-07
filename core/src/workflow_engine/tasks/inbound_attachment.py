@@ -136,7 +136,14 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
             attachment = InboundAttachment(**a) if isinstance(a, dict) else a
             routed = await router.route(attachment, batch_id, candidate_items)
             processed += 1
-            if routed.is_duplicate:
+            # Cross-device shared-file fix 2026-07-07: is_duplicate=True means
+            # the file bytes are already stored. If matches is empty as well,
+            # it's a true no-op (all target items already carry an association
+            # -- accidental resend). If matches is non-empty, the file is a
+            # legitimate cross-device / cross-item re-use and the persist step
+            # will skip the bytes write + index row but still create new
+            # associations + increment doc_count_received for each match.
+            if routed.is_duplicate and not routed.matches:
                 duplicates += 1
                 await _audit(deps, "attachment_duplicate", None, {
                     "batch_id": batch_id, "file_hash": routed.file_hash,
@@ -144,6 +151,18 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
                     "correlation_id": correlation_id,
                 })
                 continue
+
+            if routed.is_duplicate:
+                # Non-empty matches on a duplicate = legitimate re-use. Count
+                # separately for telemetry visibility -- these advance state
+                # for new items without re-storing bytes.
+                duplicates += 1
+                await _audit(deps, "attachment_duplicate_reroute", None, {
+                    "batch_id": batch_id, "file_hash": routed.file_hash,
+                    "filename": getattr(attachment, "filename", "")[:120],
+                    "new_item_matches": [m.item_id for m in routed.matches],
+                    "correlation_id": correlation_id,
+                })
 
             # Steps E + F + G + H (per design pass)
             counts = await _persist_routed_attachment(
@@ -388,6 +407,13 @@ class _AsyncStorageShim:
         from core.src.storage.document_ops import find_doc_id_slugs_for_item as _f
         return await _f(delivery_item_id, doc_type)
 
+    async def item_has_association(self, file_hash, delivery_item_id):
+        # Added 2026-07-07 for cross-device shared-file fix. Router calls this
+        # inside Step 0 to filter out items that already carry an association
+        # for a re-arriving file hash.
+        from core.src.storage.document_ops import item_has_association as _i
+        return await _i(file_hash, delivery_item_id)
+
 
 def _resolve_doc_type_rules_path(customer_id: str):
     """Resolve doc_type_filename_rules.yaml per architect direction 2026-06-29.
@@ -476,8 +502,26 @@ async def _persist_routed_attachment(
     )
     from core.src.template_schema.enums import IngestSource, DocType
 
-    # Resolve NSD path. Choose constructor based on nsd_path_type + match count.
-    nsd_path = _resolve_nsd_path(routed, attachment, candidate_items)
+    # Resolve NSD path. When is_duplicate=True the file bytes are already on
+    # disk from a prior arrival; reuse that ORIGINAL path so new associations
+    # point at the actual location (otherwise submit_to_carrier would try to
+    # upload from a path where nothing was ever written).
+    nsd_path = None
+    if routed.is_duplicate:
+        try:
+            existing_path = deps.storage.get_local_nsd_path_for_file_hash(routed.file_hash)
+        except Exception:  # noqa: BLE001
+            existing_path = None
+        if existing_path:
+            # Reconstruct NSDPath from the stored relative path so downstream
+            # segment logic works identically to the fresh-write case.
+            try:
+                from core.src.storage.nsd import NSDPath
+                nsd_path = NSDPath.from_relative(existing_path)
+            except Exception:  # noqa: BLE001
+                nsd_path = None
+    if nsd_path is None:
+        nsd_path = _resolve_nsd_path(routed, attachment, candidate_items)
     if nsd_path is None:
         await _audit(deps, "attachment_path_resolution_failed", None, {
             "batch_id": batch_id, "file_hash": routed.file_hash,
@@ -489,21 +533,24 @@ async def _persist_routed_attachment(
         })
         return {"match_count": 0, "item_ids": set(), "events_fired": 0}
 
-    # Step E: write file bytes to NSD
-    try:
-        deps.storage.write_attachment_bytes(nsd_path, attachment.content)
-    except Exception as exc:  # noqa: BLE001
-        _log.warning(
-            "attachment write failed for file_hash=%s: %s: %s",
-            routed.file_hash, type(exc).__name__, str(exc)[:120],
-        )
-        await _audit(deps, "attachment_write_failed", None, {
-            "batch_id": batch_id, "file_hash": routed.file_hash,
-            "filename": getattr(attachment, "filename", "")[:120],
-            "error": f"{type(exc).__name__}: {str(exc)[:120]}",
-            "correlation_id": correlation_id,
-        })
-        return {"match_count": 0, "item_ids": set(), "events_fired": 0}
+    # Step E: write file bytes to NSD (skip when duplicate -- bytes already
+    # stored on disk from a prior arrival; re-writing would be wasteful I/O
+    # and re-writing to a per-device path would create duplicate copies).
+    if not routed.is_duplicate:
+        try:
+            deps.storage.write_attachment_bytes(nsd_path, attachment.content)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "attachment write failed for file_hash=%s: %s: %s",
+                routed.file_hash, type(exc).__name__, str(exc)[:120],
+            )
+            await _audit(deps, "attachment_write_failed", None, {
+                "batch_id": batch_id, "file_hash": routed.file_hash,
+                "filename": getattr(attachment, "filename", "")[:120],
+                "error": f"{type(exc).__name__}: {str(exc)[:120]}",
+                "correlation_id": correlation_id,
+            })
+            return {"match_count": 0, "item_ids": set(), "events_fired": 0}
 
     # Step F1: write DocumentIndexRow
     now = datetime.now(timezone.utc)
@@ -534,8 +581,14 @@ async def _persist_routed_attachment(
     # document_item_association, absent in document_index) that breaks every
     # downstream JOIN (FR-7 doc_count gate, FR-66 is_final cascade,
     # get_documents_for_item, list_revisions).
+    #
+    # Cross-device fix 2026-07-07: skip the insert entirely on duplicate.
+    # add_document_index_row is already idempotent (returns silently when the
+    # row exists), so the skip is telemetry hygiene rather than correctness.
     _index_row_attempts = 3
     last_index_exc: Exception | None = None
+    if routed.is_duplicate:
+        _index_row_attempts = 0
     for _attempt in range(_index_row_attempts):
         try:
             deps.storage.add_document_index_row(DocumentIndexRow(
