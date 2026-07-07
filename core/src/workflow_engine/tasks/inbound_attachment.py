@@ -664,14 +664,15 @@ async def _persist_routed_attachment(
                     update_delivery_state(
                         delivery_item_id=match.item_id,
                         target_state=DeliveryState.DOCUMENT_RECEIVED,
-                        storage=deps.storage,
-                        sp_writer=deps.sp_writer,
-                        audit=deps.audit,
+                        params={},
                         event_context={
                             "correlation_id": correlation_id,
                             "trigger_source": "automated",
                             "modified_by": "system:process_inbound_attachments",
                         },
+                        storage=deps.storage,
+                        sp_writer=deps.sp_writer,
+                        audit=deps.audit,
                     )
                     events_fired += 1
                 except Exception as exc:  # noqa: BLE001
