@@ -104,6 +104,12 @@ def close_all_items_task(
     if milestone_id is None:
         raise ValueError("close_all_items requires milestone_id")
 
+    # device_id scoping per fix 2026-07-06: SP Milestones has ONE row per
+    # (customer, device, milestone) triple; TPM's Close All Items click
+    # updates ONE row -> ONE alert -> HILDA should close only THAT device's
+    # items. Without device_id filter, all devices' items in the milestone
+    # get closed on a single-device Close-All click.
+    device_id = event_context.get("device_id")
     pm_id = params.get("pm_id") or event_context.get("pm_id") or "tpm_unknown"
 
     # Storage Protocol optional helper: list_items_for_milestone(milestone_id, states=...)
@@ -135,6 +141,9 @@ def close_all_items_task(
 
     eligible = []
     for item in candidates:
+        # Device-scope filter per fix 2026-07-06 (see identity block above).
+        if device_id and (getattr(item, "device_id", None) or "") != device_id:
+            continue
         state = getattr(item, "delivery_state", None)
         if state == DeliveryState.SUBMITTED_TO_CUSTOMER:
             eligible.append(item)

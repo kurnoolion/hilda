@@ -529,6 +529,15 @@ def kickoff_collection_task(
 
     customer_id = event_context.get("customer_id")
     milestone_id = event_context.get("milestone_id")
+    # Fix 2026-07-06: device_id scoping. SP Milestones has ONE row per
+    # (customer, device, milestone) triple; TPM clicking Start Collection
+    # updates only ONE row (one device) -> ONE alert -> HILDA should kick
+    # off only THAT device's items in the milestone. Without device_id
+    # scoping, list_items_for_milestone(milestone_id) returns ALL devices'
+    # items and outreach fires for all of them -- observed on live test
+    # 2026-07-06 (TPM started collection for SM-R921U only; kickoff
+    # transitioned all 10 devices' items to OutreachSent).
+    device_id = event_context.get("device_id")
     if not customer_id or not milestone_id:
         logger.warning(
             "kickoff_collection_skip_missing_identity: customer_id=%r milestone_id=%r",
@@ -569,6 +578,13 @@ def kickoff_collection_task(
         if getattr(item, "force_tracking_enabled", False) is True
         and (getattr(item, "delivery_state", None) or "") == "Not Started"
         and (getattr(item, "item_type", None) or "") != "Default"
+        # device_id scoping per fix 2026-07-06 (see top-of-function comment):
+        # kickoff only touches items for the device whose Milestone row was
+        # edited. When device_id is None in event_context (defensive; the
+        # dispatcher always populates it for Milestones alerts), fall back
+        # to milestone-wide behavior to preserve historical semantics.
+        and (device_id is None
+             or (getattr(item, "device_id", None) or "") == device_id)
     ]
     if not eligible:
         logger.info(

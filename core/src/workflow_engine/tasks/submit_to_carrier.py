@@ -87,6 +87,12 @@ def submit_to_carrier_task(
     correlation_id = event_context.get("correlation_id", "")
     customer_id    = event_context.get("customer_id")
     milestone_id   = event_context.get("milestone_id")
+    # device_id scoping per fix 2026-07-06: SP Milestones has ONE row per
+    # (customer, device, milestone) triple; TPM's Submit-to-Carrier click
+    # updates ONE row -> ONE alert -> HILDA should upload only THAT device's
+    # items. Without device_id filter, all devices' items in the milestone
+    # get uploaded on a single-device Submit click.
+    device_id      = event_context.get("device_id")
 
     # -- Identity guard -------------------------------------------------------
     if not customer_id or not milestone_id:
@@ -120,10 +126,16 @@ def submit_to_carrier_task(
 
     # -- Item iteration -------------------------------------------------------
     items = list_method(milestone_id, None) or []
+    # Apply device_id filter per fix 2026-07-06 (see identity block above).
+    if device_id:
+        items = [
+            it for it in items
+            if (getattr(it, "device_id", None) or "") == device_id
+        ]
     if not items:
         _log.info(
-            "submit_to_carrier_empty_milestone: customer_id=%s milestone_id=%s",
-            customer_id, milestone_id,
+            "submit_to_carrier_empty_milestone: customer_id=%s milestone_id=%s device_id=%s",
+            customer_id, milestone_id, device_id,
         )
         return {"outcome": "fired", "items_scanned": 0, "uploaded_items": 0}
 

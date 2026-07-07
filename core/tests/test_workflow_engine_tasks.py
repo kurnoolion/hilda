@@ -177,6 +177,11 @@ def mk_item(state, **kw):
         no_customer_upload=False, doc_count=1, doc_count_received=1,
         review_required=False, pm_approval_at=None, prior_delivery_state=None,
         carrier_upload_complete=False, review_status="not_required",
+        # device_id default 2026-07-06: matches ctx()'s default device_id
+        # so device-scoped tasks (kickoff / submit_to_carrier / close_all_items
+        # per fix 2026-07-06) find the item as eligible. Tests exercising a
+        # cross-device scenario override this explicitly.
+        device_id="MODEL-A",
     )
     base.update(kw)
     return SimpleNamespace(**base)
