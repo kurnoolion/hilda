@@ -268,22 +268,49 @@ def build_app(
 
             docs_ph1: list[dict[str, Any]] = []
             if not is_confirmation:
+                # Cross fetch: document index rows + associations (needed for
+                # FR-61 download tokens). Async ops called directly since the
+                # endpoint handler is already async. Fix 2026-07-08: previously
+                # this path used the sync `list_documents_for_item_display`
+                # tuple helper which didn't carry file_hash -> no download URL
+                # could be generated for the Ph-1 template. TPMs asked for a
+                # per-doc download button; enable by generating mediated-download
+                # tokens per doc same way as the Ph-2 branch.
+                item_key = (
+                    getattr(item, "item_id", None)
+                    or getattr(item, "delivery_item_id", None)
+                    or ""
+                )
                 try:
-                    rows = store.list_documents_for_item_display(
-                        getattr(item, "item_id", None)
-                        or getattr(item, "delivery_item_id", None)
-                        or "",
-                    )
+                    docs = await get_documents_for_item(item_key)
                 except Exception:
-                    rows = []
-                docs_ph1 = [
-                    {
-                        "original_filename": r[0],
-                        "doc_type":          r[1],
-                        "ingested_at":       r[2],
-                    }
-                    for r in (rows or [])
-                ]
+                    docs = []
+                try:
+                    assocs = await list_associations_for_item(item_key)
+                except Exception:
+                    assocs = []
+                assoc_by_hash = {a.file_hash: a for a in assocs}
+                for doc in docs:
+                    assoc = assoc_by_hash.get(doc.file_hash)
+                    # Skip docs with no association (orphan index row -- rare;
+                    # can't build a download token without the NSD path).
+                    if assoc is None:
+                        continue
+                    try:
+                        token = await make_download_token(
+                            doc.file_hash, item_key,
+                            ttl_seconds=cfg.token_ttl_seconds,
+                        )
+                    except Exception:
+                        token = None
+                    docs_ph1.append({
+                        "original_filename": doc.original_filename,
+                        "doc_type":          (doc.doc_type.value
+                                              if hasattr(doc.doc_type, "value")
+                                              else str(doc.doc_type)),
+                        "ingested_at":       doc.ingested_at,
+                        "download_url":      f"/dl/{token}" if token else None,
+                    })
 
             return templates.TemplateResponse(
                 request=request,

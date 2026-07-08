@@ -55,11 +55,23 @@ _BATCH_ANCHOR_RE = re.compile(r"HILDA-BATCH-ID:\s*(BATCH-[A-Za-z0-9]+)", re.IGNO
 
 # Header cell text -> canonical column name. Owners shouldn't edit the header
 # row, but be tolerant to case + whitespace + surrounding HTML entities.
+#
+# 2026-07-08: added friendly-header aliases so the parser accepts the new
+# human-readable outreach headers ("Item No" / "Item Title" / "Current Status"
+# / "Owner Comment") introduced in outreach_table.j2. Existing in-flight
+# batches sent with the old snake_case headers still parse correctly.
 _HEADER_ALIASES = {
+    # Legacy snake_case (still emitted by any outreach batch sent before the
+    # 2026-07-08 template change AND used by the reply parser tests).
     "item_no":           "item_no",
     "item_title":        "item_title",
     "status":            "status",
     "owner_status_note": "owner_status_note",
+    # Friendly headers per TPM ask 2026-07-08.
+    "item no":           "item_no",
+    "item title":        "item_title",
+    "current status":    "status",
+    "owner comment":     "owner_status_note",
 }
 
 # Owner-facing status cell -> PerItemReplyUpdate.delivery_state symbol.

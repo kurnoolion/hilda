@@ -45,6 +45,7 @@
             <th>#</th>
             <th>Filename</th>
             <th>Doc Type</th>
+            <th>Download</th>
             {% else %}
             <th>Doc Type</th>
             <th>Doc Slug</th>
@@ -63,6 +64,19 @@
                 <td>{{ loop.index }}</td>
                 <td>{{ doc.original_filename }}</td>
                 <td>{{ doc.doc_type | humanize_doc_type }}</td>
+                <td>
+                    {% if doc.download_url %}
+                    <a href="{{ doc.download_url }}"
+                       download="{{ doc.original_filename }}"
+                       class="download-btn"
+                       style="display:inline-block; padding:4px 10px;
+                              background:#0b6cff; color:#fff;
+                              text-decoration:none; border-radius:4px;
+                              font-size:13px;">Download</a>
+                    {% else %}
+                    <span style="color:#999;">unavailable</span>
+                    {% endif %}
+                </td>
             </tr>
             {% else %}
             {% include "doc_row.html" %}

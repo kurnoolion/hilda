@@ -230,10 +230,26 @@ def send_initial_outreach_task(
                 items=[item_for_template] if item_for_template else [],
                 batch_id=batch_id,
             )
+            # Subject enriched 2026-07-08: TPM asked for customer/device/milestone
+            # in the subject line so inbox scans surface routing context without
+            # opening the email. All values sourced from event_context populated
+            # by the dispatcher (customer_id/milestone_id) or the fetched item
+            # for template (device_id).
+            _cust = event_context.get("customer_id") or ""
+            _mile = event_context.get("milestone_id") or ""
+            _dev = ""
+            if item_for_template:
+                _dev = (
+                    item_for_template.get("device_id")
+                    or item_for_template.get("project_model")
+                    or ""
+                )
+            _ctx = " / ".join(p for p in (_cust, _dev, _mile) if p)
+            _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
             message_id = _send_email(
                 deps,
                 to=recipient,
-                subject=f"[HILDA] Status request -- {batch_id}",
+                subject=f"{_subject_prefix} -- Status request -- {batch_id}",
                 body_marker=body_html,
             )
         except Exception as e:  # noqa: BLE001 -- audit-best-effort
@@ -362,11 +378,21 @@ def _send_batch_outreach_email(
         items=items,
         batch_id=batch_id,
     )
+    # Subject enriched 2026-07-08 (parity with per-item send_initial_outreach):
+    # customer / device / milestone taken from items[0]. All items in the batch
+    # share (customer, device, milestone) by construction -- kickoff groups by
+    # owner AND (implicitly) by device+milestone since it iterates the milestone.
+    _first = items[0] if items else {}
+    _cust = _first.get("customer_id") or ""
+    _dev = _first.get("device_id") or _first.get("project_model") or ""
+    _mile = _first.get("milestone_id") or ""
+    _ctx = " / ".join(p for p in (_cust, _dev, _mile) if p)
+    _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
     try:
         return _send_email(
             deps,
             to=recipient,
-            subject=f"[HILDA] Status request -- {batch_id}",
+            subject=f"{_subject_prefix} -- Status request -- {batch_id}",
             body_marker=body_html,
         )
     except Exception as e:  # noqa: BLE001
