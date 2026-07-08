@@ -685,10 +685,22 @@ def kickoff_collection_task(
             "owner_name":           sample_owner_info.get("owner_name"),
         }
         # Build item dicts for the table render.
+        # 2026-07-08: propagate customer_id / device_id / milestone_id per-row
+        # so the outreach subject enrichment in _send_batch_outreach_email can
+        # surface them without a signature change. All items in the batch
+        # share the same triple by construction (kickoff scopes to the
+        # milestone alert's (customer, device, milestone) triple), but the
+        # per-row copy is harmless and keeps the template + email code
+        # independent of the surrounding task's scope.
         item_dicts = [
             {
-                "item_no":   getattr(it, "item_no", None),
-                "item_name": getattr(it, "item_name", None) or f"Item {getattr(it, 'item_no', '?')}",
+                "item_no":      getattr(it, "item_no", None),
+                "item_name":    getattr(it, "item_name", None) or f"Item {getattr(it, 'item_no', '?')}",
+                "customer_id":  customer_id,
+                "device_id":    device_id
+                                or getattr(it, "device_id", None)
+                                or getattr(it, "project_model", None),
+                "milestone_id": milestone_id,
             }
             for it in group_items
         ]
