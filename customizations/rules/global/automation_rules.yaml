@@ -226,10 +226,17 @@ rules:
       op: eq
       value: UnderPMReview                                # D-138 spelling (no space)
     actions:
-      - kind: ApplyPMApproval                             # mirror SP fields to Postgres
+      - kind: ApplyPMApproval                             # mirror SP fields to Postgres + drive RFS transition
         params: {}
-      - kind: QueueSubmission                             # FR-18 carrier submission
-        params: { channel: customer_adapter }
+      # QueueSubmission removed 2026-07-15 per architect ask: carrier upload
+      # is TPM-triggered via the milestone-level Submit-to-Customer button
+      # (submit_to_carrier_on_milestone_submission_triggered rule -> SubmitToCarrier
+      # -> submit_to_carrier_task), NOT per-item on PM approval. Firing both
+      # paths caused (a) doubled carrier uploads when both eventually resolved
+      # to real files, and (b) races with apply_pm_approval's RFS writeback
+      # since QueueSubmission would attempt upload on an item still at
+      # UnderPMReview in Postgres. Task binding (submission.queue_submission)
+      # remains registered for any future rule that needs the per-item path.
 
   # NOTE: `handle_owner_reassignment` is defined in defaults.yaml (seeded from
   # rule_engine MODULE.md Worked Example 1). Not redefined here per RUL-E001.

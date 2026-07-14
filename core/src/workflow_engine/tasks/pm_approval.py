@@ -160,8 +160,11 @@ def apply_pm_approval_task(
         )
         return {"outcome": "skipped_no_pm_fields", "fields_mirrored": []}
 
-    # Mirror to local Postgres. Field-level patch; SP-side already wrote the
-    # canonical values per [D-068] atomic 3-field discipline.
+    # Mirror to local Postgres. Field-level patch; when SP writes delivery_state
+    # atomically (legacy Pattern A [D-068] 3-field write), it's included here
+    # and Postgres reflects RFS immediately. Under the 2026-07-15 serialization
+    # ask, SP writes only pm_approval_at + pm_approval_pm_id; HILDA drives the
+    # delivery_state transition below.
     try:
         deps.storage.update_delivery_item(delivery_item_id, mirror_fields)
     except Exception as exc:  # noqa: BLE001
@@ -174,6 +177,76 @@ def apply_pm_approval_task(
             "delivery_item_id": delivery_item_id,
             "error": f"{type(exc).__name__}: {str(exc)[:120]}",
         }
+
+    # -- Delivery-state serialization per architect 2026-07-15 -----------------
+    # SP UI Approve button now writes only pm_approval_at + pm_approval_pm_id.
+    # HILDA drives delivery_state:
+    #   * Non-Confirmation items: UnderPMReview -> ReadyForSubmission (single hop).
+    #     SP UI gates Submit-to-Carrier button on delivery_state == RFS being
+    #     visible on the SP row, which requires HILDA's SP writeback to land.
+    #   * Confirmation items: UnderPMReview -> ReadyForSubmission -> Closed
+    #     (2-hop). Confirmation has no carrier upload so it never dwells at RFS;
+    #     the transient hop through RFS uses the state_machine's existing legal
+    #     UNDER_PM_REVIEW -> READY_FOR_SUBMISSION edge and then the existing
+    #     READY_FOR_SUBMISSION -> CLOSED edge (guarded by no_customer_upload=True
+    #     OR tpm_button attribution per DEF-20; PM approval on a Confirmation
+    #     item satisfies the intent -- trigger_source='tpm_button'). No state
+    #     machine schema change needed.
+    #
+    # Backward compat: if SP still writes delivery_state=RFS (legacy 3-field
+    # atomic), Postgres already reflects RFS from the mirror above; the RFS
+    # transition below returns no_op_idempotent (target == current) and skips
+    # the SP writeback. Confirmation items in that case would still get the
+    # RFS -> Closed second hop, which is the new behavior.
+    from core.src.tracker import DeliveryState as _DS
+    from core.src.tracker.transitions import update_delivery_state as _uds
+    from core.src.template_schema.enums import ItemType as _IT
+
+    def _fresh_item_type() -> str:
+        try:
+            fresh = deps.storage.get_delivery_item(delivery_item_id)
+            return (getattr(fresh, "item_type", None) or "") if fresh else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    is_confirmation = _fresh_item_type() == _IT.CONFIRMATION.value
+    transitions_completed: list[str] = []
+
+    def _run_transition(target_state, marker: str) -> bool:
+        try:
+            _uds(
+                delivery_item_id=delivery_item_id,
+                target_state=target_state,
+                params={},
+                event_context={
+                    "correlation_id":   event_context.get("correlation_id", "?"),
+                    "delivery_item_id": delivery_item_id,
+                    "trigger_source":   "tpm_button" if marker.endswith(":closed") else "automated",
+                    "rule_id":          f"apply_pm_approval:{marker}",
+                    "pm_id":            pm_id_email,
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+            )
+            transitions_completed.append(marker)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "apply_pm_approval: %s transition failed for item=%s: %s: %s",
+                marker, delivery_item_id, type(exc).__name__, str(exc)[:120],
+            )
+            return False
+
+    # Hop 1 -- always: UnderPMReview -> ReadyForSubmission (idempotent if already
+    # at RFS from legacy SP 3-field write).
+    _run_transition(_DS.READY_FOR_SUBMISSION, "rfs")
+
+    # Hop 2 -- Confirmation items only: RFS -> Closed. Guard requires
+    # no_customer_upload=True OR tpm_button attribution; PM approval on
+    # Confirmation carries tpm_button semantically.
+    if is_confirmation:
+        _run_transition(_DS.CLOSED, "confirmation:closed")
 
     # Audit per architect lock: action_type=pm_approval; attribution.modified_by
     # = pm_approval_pm_id (PM corp email, e.g. abc@corp.com); details capture
@@ -205,14 +278,17 @@ def apply_pm_approval_task(
         )
 
     _log.info(
-        "apply_pm_approval: item=%s mirrored=%s pm_id=%s",
+        "apply_pm_approval: item=%s mirrored=%s pm_id=%s transitions=%s",
         delivery_item_id, sorted(mirror_fields.keys()), pm_id_email,
+        transitions_completed,
     )
     return {
-        "outcome":          "applied",
-        "delivery_item_id": delivery_item_id,
-        "fields_mirrored":  sorted(mirror_fields.keys()),
-        "pm_approval_pm_id": pm_id_email,
+        "outcome":             "applied",
+        "delivery_item_id":    delivery_item_id,
+        "fields_mirrored":     sorted(mirror_fields.keys()),
+        "pm_approval_pm_id":   pm_id_email,
+        "transitions":         transitions_completed,
+        "is_confirmation_close": is_confirmation and "confirmation:closed" in transitions_completed,
     }
 
 
