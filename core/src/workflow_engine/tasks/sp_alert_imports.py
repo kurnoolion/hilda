@@ -464,6 +464,53 @@ def import_deliverable_tracker_task(
                 new_id, type(exc).__name__, str(exc)[:120],
             )
 
+    # -- Auto-transition Not Started -> Open (serialization per architect
+    # 2026-07-15). Two-phase Ph-1 setup flow:
+    #   1. TPM clicks Setup Deliverables in SP -> SP creates Deliverables
+    #      rows with delivery_state=Not Started per FR-81 default -> SP fires
+    #      ADDED alerts -> HILDA imports (this task) -> HILDA transitions
+    #      each item to Open in BOTH Postgres AND SP (via update_delivery_state).
+    #   2. SP UI engineer gates Start Tracking button visibility on all items
+    #      being Open -> TPM clicks Start Tracking -> SP sets
+    #      milestone_collection_started_at -> HILDA kickoff_collection_task
+    #      transitions Open -> OutreachSent and sends outreach.
+    #
+    # Applies to ALL item types including Confirmation and Default work items
+    # per architect ask (moves everything to Open uniformly; kickoff still
+    # excludes Default from outreach eligibility per FR-78, and Confirmation
+    # items also get outreach per FR-58 corrected 2026-06-28).
+    #
+    # Best-effort: transition failure logs a warning but does NOT roll back
+    # the import. Postgres row exists at delivery_state=Not Started; a manual
+    # bump / reconcile can recover.
+    try:
+        from core.src.tracker import DeliveryState as _DS
+        from core.src.tracker.transitions import update_delivery_state as _uds
+        _uds(
+            delivery_item_id=new_id,
+            target_state=_DS.OPEN,
+            params={},
+            event_context={
+                "correlation_id":  event_context.get("correlation_id", "?"),
+                "customer_id":     customer_id,
+                "milestone_id":    milestone_id,
+                "delivery_item_id": new_id,
+                "trigger_source":  "automated",
+                "rule_id":         "import_deliverable_tracker",
+            },
+            storage=deps.storage,
+            sp_writer=deps.sp_writer,
+            audit=deps.audit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "import_deliverable_tracker: NS->Open transition failed for "
+            "item_id=%s: %s: %s (postgres row remains at Not Started; "
+            "kickoff filter accepts both states as of 2026-07-15 so this "
+            "does not block the milestone cascade)",
+            new_id, type(exc).__name__, str(exc)[:120],
+        )
+
     deps.audit.write_communication_log(
         action_type="deliverable_tracker_imported",
         delivery_item_id=new_id,
@@ -558,10 +605,21 @@ def kickoff_collection_task(
         )
         return {"outcome": "fired", "emails_sent": 0, "items_scanned": 0}
 
-    # Eligibility filter: force_tracking_enabled=true AND delivery_state="Not Started"
-    # AND item_type != "Default".
+    # Eligibility filter: force_tracking_enabled=true AND delivery_state in
+    # ("Not Started", "Open") AND item_type != "Default".
     #
     # Confirmation items are INCLUDED per FR-58 corrected 2026-06-28.
+    #
+    # Not Started + Open accepted per architect 2026-07-15 serialization ask:
+    # import_deliverable_tracker_task now auto-transitions Not Started -> Open
+    # on ADDED alert so SP UI can gate Start Tracking button on items being at
+    # Open. Kickoff must therefore treat Open as eligible; the internal
+    # transition step still runs NS->Open which becomes an idempotent no-op
+    # for items already advanced. Leaving Not Started in the filter preserves
+    # backward compat with rows imported before this change AND handles the
+    # rare case where import's auto-transition partially failed (Postgres
+    # write ok, SP write failed) -- the item stays at Not Started in Postgres
+    # and would otherwise be stranded here.
     #
     # Default work items EXCLUDED per architect 2026-07-02: default WI has FR-78
     # hardcoded invariant force_tracking_enabled=False, no owner, no outreach
@@ -573,10 +631,11 @@ def kickoff_collection_task(
     # OutreachSent silently (no email sent because __no_owner__ bucket).
     # Explicit item_type guard here is defense-in-depth against SP-side
     # field-default drift.
+    _ELIGIBLE_START_STATES = ("Not Started", "Open")
     eligible = [
         item for item in items
         if getattr(item, "force_tracking_enabled", False) is True
-        and (getattr(item, "delivery_state", None) or "") == "Not Started"
+        and (getattr(item, "delivery_state", None) or "") in _ELIGIBLE_START_STATES
         and (getattr(item, "item_type", None) or "") != "Default"
         # device_id scoping per fix 2026-07-06 (see top-of-function comment):
         # kickoff only touches items for the device whose Milestone row was
@@ -589,7 +648,7 @@ def kickoff_collection_task(
     if not eligible:
         logger.info(
             "kickoff_collection_no_eligible_items: customer_id=%s milestone_id=%s "
-            "items_scanned=%d (none in Not Started)",
+            "items_scanned=%d (none in Not Started/Open)",
             customer_id, milestone_id, len(items),
         )
         return {
