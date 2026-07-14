@@ -58,6 +58,7 @@ class EwsSender:
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
         """Send one outbound email; returns the Message-ID of the sent message.
 
@@ -79,7 +80,7 @@ class EwsSender:
                 self._send_sync,
                 cred,
                 message_id,
-                to, cc, subject, body, in_reply_to,
+                to, cc, subject, body, in_reply_to, attachments,
             )
         except PipelineError:
             raise
@@ -108,6 +109,7 @@ class EwsSender:
         subject: str,
         body: str,
         in_reply_to: str | None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> None:
         """Sync EWS send via exchangelib Message + send_and_save.
 
@@ -177,6 +179,21 @@ class EwsSender:
             to_recipients=[Mailbox(email_address=addr) for addr in to],
             cc_recipients=[Mailbox(email_address=addr) for addr in cc] if cc else None,
         )
+
+        # Optional attachments per 2026-07-15 TPM DRR closure ask.
+        if attachments:
+            try:
+                from exchangelib import FileAttachment   # type: ignore[import-not-found]
+            except ImportError:
+                logger.warning(
+                    "ews_send_attachment_skipped: exchangelib.FileAttachment not "
+                    "importable; sending body-only"
+                )
+            else:
+                msg.attachments = [
+                    FileAttachment(name=_fname, content=_content)
+                    for _fname, _content, _mime in attachments
+                ]
 
         # in_reply_to is preserved as a custom header via msg.message_id only
         # at receive-time; exchangelib's outbound Message exposes Message-ID

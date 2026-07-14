@@ -161,8 +161,16 @@ class EmailSender(Protocol):
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
-        """Returns Message-ID of sent email."""
+        """Returns Message-ID of sent email.
+
+        attachments (added 2026-07-15 for TPM DRR closure email per architect ask):
+            optional list of (filename, content_bytes, mime_type) tuples.
+            Each tuple gets attached to the outbound message. Callers that
+            don't need attachments pass None (default) -- backward-compatible
+            with all existing call sites.
+        """
         ...
 
 

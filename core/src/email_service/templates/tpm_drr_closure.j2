@@ -1,0 +1,61 @@
+<!--
+  DRR closure final-status email body per architect 2026-07-15.
+  Fired twice per (customer, device, milestone): target_date-1 and target_date
+  at 00:00 US/Eastern by workflow_engine.tasks.tpm_notification.
+
+  Body composition (no "DRR closure final status for X/Y/Z" line -- subject
+  already carries the routing context, per architect edit 2026-07-15):
+    * Greeting to TPM by name (falls back to "TPM").
+    * Aggregate summary table: Open count, Closed count, Completion Percentage.
+      Closed = delivery_state in {Closed, ReadyForSubmission, SubmittedToCustomer}
+      Open = all other states
+      Completion% = Closed / (Open + Closed), rounded to whole percent.
+    * Per-TG pending table: rows filtered to only #items_pending > 0.
+      (Empty section suppressed entirely when nothing is pending.)
+    * Excel attachment reference sentence.
+  Signature block.
+-->
+<html>
+<body style="font-family: Arial, sans-serif; font-size: 14px;">
+
+<p>Dear {{ tpm_name or "TPM" }},</p>
+
+<p>Please find the DRR closure final status below. Full item-level detail is
+attached as an Excel report.</p>
+
+<table border="1" cellpadding="6" cellspacing="0"
+       style="border-collapse: collapse; margin: 12px 0;">
+  <tbody>
+    <tr><td>Open</td><td align="right">{{ summary.open_count }}</td></tr>
+    <tr><td>Closed</td><td align="right">{{ summary.closed_count }}</td></tr>
+    <tr style="background-color: #F4CFB1;">
+      <td>Completion Percentage</td>
+      <td align="right">{{ summary.completion_percent }}%</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if pending_by_tg %}
+<table border="1" cellpadding="6" cellspacing="0"
+       style="border-collapse: collapse; margin: 12px 0;">
+  <thead style="background-color: #F4CFB1;">
+    <tr>
+      <th align="left">TG Name</th>
+      <th align="right">#items pending</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for row in pending_by_tg %}
+    <tr>
+      <td>{{ row.tg_name }}</td>
+      <td align="right">{{ row.pending_count }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p>Regards,<br/>HILDA</p>
+
+</body>
+</html>

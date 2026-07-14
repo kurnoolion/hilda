@@ -1,0 +1,9 @@
+{
+    "enabled": true,
+    "beat_interval_seconds": 300,
+    "timezone": "America/New_York",
+    "window_minutes": 10,
+    "strict_only": true,
+    "ops_alert_on_missed_window": true,
+    "ops_alert_on_missing_target_date": true
+}

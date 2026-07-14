@@ -91,6 +91,20 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "schedule": 300.0,
             "options":  {"queue": "default", "expires": 290},
         },
+        # TPM DRR closure notification tick per architect 2026-07-15 Phase C.
+        # Fires every 300s by default; task body computes US/Eastern now,
+        # walks Milestones per customer, and sends the DRR closure email at
+        # 00:00 Eastern on target_date-1 and target_date. Send window +
+        # strict-only + ops-alert-on-miss all tunable via
+        # config/tpm_notification.json. Task no-ops when config.enabled=false.
+        # expires=290 avoids beat backlog if a tick takes longer than the
+        # interval (unlikely -- most ticks read a few SP rows and finish
+        # in seconds).
+        "tpm_notification_tick_300s": {
+            "task":     "core.src.workflow_engine.tasks.tpm_notification.tick",
+            "schedule": 300.0,
+            "options":  {"queue": "default", "expires": 290},
+        },
     }
     return app
 

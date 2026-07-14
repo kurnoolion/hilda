@@ -66,6 +66,7 @@ class SmtpSender:
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
         """Send one outbound email; returns RFC 5322 Message-ID of the sent message.
 
@@ -94,6 +95,19 @@ class SmtpSender:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
         msg.set_content(body)
+
+        # Optional attachments per 2026-07-15 TPM DRR closure ask. Tuple form
+        # (filename, content_bytes, mime_type) e.g. ('DRR.xlsx', b'<bytes>',
+        # 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').
+        if attachments:
+            for _fname, _content, _mime in attachments:
+                _maintype, _subtype = (_mime.split("/", 1) + ["octet-stream"])[:2]
+                msg.add_attachment(
+                    _content,
+                    maintype=_maintype,
+                    subtype=_subtype,
+                    filename=_fname,
+                )
 
         try:
             await asyncio.to_thread(self._send_sync, msg, to + cc)
