@@ -248,6 +248,118 @@ def apply_pm_approval_task(
     if is_confirmation:
         _run_transition(_DS.CLOSED, "confirmation:closed")
 
+    # -- Default WI auto-close sweep per architect 2026-07-15 -----------------
+    # After this item's PM-approval transitions land, check the milestone-
+    # device scope: if all non-Default items are in {ReadyForSubmission,
+    # Closed}, auto-close the Default WI (Open -> Closed). Default WI
+    # has no owner/PM-approval/carrier lifecycle -- closing it is the
+    # terminal cleanup that signals the (customer, device, milestone)
+    # cascade is "done".
+    #
+    # Ph-2 gate: if the Default WI carries any classified attachments
+    # (documents pending routing / doc_type classification / revision
+    # resolution), skip auto-close and log 'default_wi_close_deferred_ph2_pending'
+    # -- those cases need TPM/dashboard resolution before terminal close.
+    #
+    # This block is best-effort: any failure (storage read, missing scope,
+    # transition denial) logs a warning but does not fail the outer
+    # apply_pm_approval task. The task's primary contract (mirror + transition
+    # the approved item) has already succeeded above.
+    default_wi_close_outcome: str | None = None
+    try:
+        _fresh = deps.storage.get_delivery_item(delivery_item_id)
+        _milestone_id = getattr(_fresh, "milestone_id", None) if _fresh else None
+        _device_id = getattr(_fresh, "device_id", None) if _fresh else None
+        _customer_id = getattr(_fresh, "customer_id", None) if _fresh else None
+        if _milestone_id and _device_id and _customer_id:
+            _all_items = deps.storage.list_items_for_milestone(_milestone_id) or []
+            _scope_items = [
+                it for it in _all_items
+                if getattr(it, "customer_id", None) == _customer_id
+                and getattr(it, "device_id", None) == _device_id
+            ]
+            _non_default = [
+                it for it in _scope_items
+                if (getattr(it, "item_type", None) or "") != _IT.DEFAULT.value
+            ]
+            _terminal_states = {
+                _DS.READY_FOR_SUBMISSION.value,
+                _DS.SUBMITTED_TO_CUSTOMER.value,
+                _DS.CLOSED.value,
+            }
+            _all_terminal = bool(_non_default) and all(
+                (getattr(it, "delivery_state", None) or "") in _terminal_states
+                for it in _non_default
+            )
+            if _all_terminal:
+                _default_wis = [
+                    it for it in _scope_items
+                    if (getattr(it, "item_type", None) or "") == _IT.DEFAULT.value
+                ]
+                for _dwi in _default_wis:
+                    _dwi_id = (
+                        getattr(_dwi, "item_id", None)
+                        or getattr(_dwi, "delivery_item_id", None)
+                    )
+                    if not _dwi_id:
+                        continue
+                    if (getattr(_dwi, "delivery_state", None) or "") == _DS.CLOSED.value:
+                        default_wi_close_outcome = "already_closed"
+                        continue
+                    # Ph-2 gate: pending routing / classification / revision
+                    try:
+                        _classified = deps.storage.list_classified_associations_for_item(_dwi_id) or []
+                    except Exception:  # noqa: BLE001
+                        _classified = []
+                    if _classified:
+                        _log.info(
+                            "default_wi_close_deferred_ph2_pending: default_wi=%s "
+                            "classified_count=%d (customer=%s device=%s milestone=%s)",
+                            _dwi_id, len(_classified),
+                            _customer_id, _device_id, _milestone_id,
+                        )
+                        default_wi_close_outcome = "deferred_ph2_pending"
+                        continue
+                    # Auto-close: OPEN -> CLOSED (guard 5 carve-out accepts
+                    # automated trigger for Default WI OPEN->CLOSED).
+                    _closed_ok = False
+                    try:
+                        _uds(
+                            delivery_item_id=_dwi_id,
+                            target_state=_DS.CLOSED,
+                            params={},
+                            event_context={
+                                "correlation_id":   event_context.get("correlation_id", "?"),
+                                "delivery_item_id": _dwi_id,
+                                "trigger_source":   "automated",
+                                "rule_id":          "default_wi_auto_close_on_all_ready",
+                            },
+                            storage=deps.storage,
+                            sp_writer=deps.sp_writer,
+                            audit=deps.audit,
+                        )
+                        _closed_ok = True
+                        default_wi_close_outcome = "closed"
+                    except Exception as _exc:  # noqa: BLE001
+                        _log.warning(
+                            "default_wi_auto_close_failed: default_wi=%s: %s: %s",
+                            _dwi_id, type(_exc).__name__, str(_exc)[:120],
+                        )
+                        default_wi_close_outcome = "failed"
+                    if _closed_ok:
+                        _log.info(
+                            "default_wi_auto_closed: default_wi=%s "
+                            "(customer=%s device=%s milestone=%s) after item=%s "
+                            "PM-approval sweep",
+                            _dwi_id, _customer_id, _device_id, _milestone_id,
+                            delivery_item_id,
+                        )
+    except Exception as _exc:  # noqa: BLE001
+        _log.warning(
+            "default_wi_close_sweep_failed for item=%s: %s: %s",
+            delivery_item_id, type(_exc).__name__, str(_exc)[:120],
+        )
+
     # Audit per architect lock: action_type=pm_approval; attribution.modified_by
     # = pm_approval_pm_id (PM corp email, e.g. abc@corp.com); details capture
     # the 3 mirrored values + source marker for SQL discoverability.
@@ -283,12 +395,13 @@ def apply_pm_approval_task(
         transitions_completed,
     )
     return {
-        "outcome":             "applied",
-        "delivery_item_id":    delivery_item_id,
-        "fields_mirrored":     sorted(mirror_fields.keys()),
-        "pm_approval_pm_id":   pm_id_email,
-        "transitions":         transitions_completed,
+        "outcome":              "applied",
+        "delivery_item_id":     delivery_item_id,
+        "fields_mirrored":      sorted(mirror_fields.keys()),
+        "pm_approval_pm_id":    pm_id_email,
+        "transitions":          transitions_completed,
         "is_confirmation_close": is_confirmation and "confirmation:closed" in transitions_completed,
+        "default_wi_close":     default_wi_close_outcome,
     }
 
 

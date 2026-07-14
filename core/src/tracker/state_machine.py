@@ -35,7 +35,19 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
 
     # Open: HILDA has armed tracking; outreach not yet sent. Owner cannot report
     # Delayed/Blocked because they haven't been contacted yet.
-    DeliveryState.OPEN: frozenset({DeliveryState.OUTREACH_SENT}),
+    #
+    # OPEN -> CLOSED added 2026-07-15 for the Default WI auto-close shortcut:
+    # Default work items go Not Started -> Open at import time (import task's
+    # auto-transition), then straight to Closed when all non-Default items in
+    # the (customer, device, milestone) scope reach ReadyForSubmission
+    # (apply_pm_approval_task's post-transition sweep). Default WI has no
+    # OutreachSent/DocumentReceived/OwnerClosed/UnderPMReview lifecycle since
+    # it has no owner and no PM approval flow; the shortcut avoids fabricating
+    # artificial intermediate states. Guard 4 for CLOSED (DEF-20) requires
+    # trigger_source='tpm_button' | 'manual_tpm_override' | 'automated' with
+    # rule_id='default_wi_auto_close_on_all_ready' -- the sweep uses the
+    # last form (attribution captured in the audit row).
+    DeliveryState.OPEN: frozenset({DeliveryState.OUTREACH_SENT, DeliveryState.CLOSED}),
 
     # OutreachSent: owner can now report status (Delayed/Blocked) or send docs
     # (DocumentReceived) or close intent (OwnerClosed — Confirmation items).

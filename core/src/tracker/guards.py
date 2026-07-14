@@ -169,7 +169,23 @@ def check_transition_guards(
 
     # ---------- Guard 5: CLOSED in Ph-1 requires TPM attribution (DEF-20) ----------
     if target_state == DeliveryState.CLOSED:
-        if trigger_source not in ("manual_tpm_override", "tpm_button"):
+        # Carve-out 2026-07-15: Default WI auto-close per architect. When all
+        # non-Default items in the (customer, device, milestone) scope reach
+        # ReadyForSubmission, HILDA closes the Default WI automatically as
+        # the terminal cleanup step. Default WI has no owner, no TPM button,
+        # and no lifecycle beyond "created + closed" -- requiring TPM
+        # attribution would demand a TPM-clickable button that serves no
+        # user purpose. Accepted here via item_type + from_state + trigger
+        # discipline (attribution captured in the audit row via rule_id).
+        _is_default_wi_auto_close = (
+            getattr(item, "item_type", None) == ItemType.DEFAULT.value
+            and from_state == DeliveryState.OPEN
+            and trigger_source == "automated"
+        )
+        if (
+            not _is_default_wi_auto_close
+            and trigger_source not in ("manual_tpm_override", "tpm_button")
+        ):
             return GuardResult(
                 allowed=False,
                 reason="closed_requires_tpm_attribution",
