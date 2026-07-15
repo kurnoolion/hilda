@@ -46,6 +46,16 @@ import json
 import sys
 from pathlib import Path
 
+# Ensure the container's /app root is on sys.path even when python is invoked
+# from /tmp (as happens with `podman exec ... python /tmp/list_sp_columns.py`).
+# celery is launched with WORKDIR=/app which puts /app on sys.path implicitly;
+# ad-hoc `podman exec python <script>` runs from the exec CWD (usually /) and
+# would otherwise fail with `ModuleNotFoundError: No module named 'core'`.
+# Silently no-op outside the container (dev machine, non-/app deployment).
+for _candidate in ("/app", str(Path(__file__).resolve().parents[1])):
+    if Path(_candidate).is_dir() and _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
+
 
 def _resolve_config_path() -> Path | None:
     """Find sharepoint_integration.json in the standard + container paths."""
