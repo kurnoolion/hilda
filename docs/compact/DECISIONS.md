@@ -3620,3 +3620,129 @@ Trigger predicate: "**at least one** item still in the pre-transition state" (no
 - (g) Companion to [D-141] — SP alerts being lossy is why template.yaml at import is authoritative for structural fields (SP might not deliver them).
 
 **Anchors**: `[D-047]` (SP-alert email channel), `[D-118]`, `[D-141]` (template.yaml authority as a consequence of this stance), `[D-142]` (reconciliation cascade as the implementation).
+
+## D-144: Setup Deliverables serialization — HILDA auto-transitions Not Started → Open at import + widens kickoff filter
+
+**Date**: 2026-07-15
+**Status**: Ratified
+
+**Context**: SP alerts are delivered out of order. TPM setting up a milestone clicks Setup Deliverables (SP creates Deliverables rows + fires ADDED alerts) then clicks Start Tracking (SP sets `milestone_collection_started_at` + fires Milestones CHANGED alert). If the Milestones alert arrives before HILDA has finished importing all Deliverables ADDED alerts, `kickoff_collection_task` scans zero items in Postgres and silently no-ops — architect saw this on the 2026-07-07 fresh-restart smoke test (7 items imported AFTER kickoff fired, kickoff emitted `kickoff_collection_empty_milestone`). Manual re-click of Start Tracking recovers, but the flow is fragile.
+
+**Decision**: HILDA's `import_deliverable_tracker_task` after `create_delivery_item` + sp_id populate now calls `tracker.update_delivery_state(target=OPEN)` which writes Open to both Postgres AND SP-side via `_sp_writeback_field_updates`. Applies to ALL item types — Confirmation, non-Confirmation, and Default work item — uniformly. `kickoff_collection_task` eligibility filter widened from `delivery_state == "Not Started"` to `delivery_state in ("Not Started", "Open")` so items already advanced by import are still picked up. SP UI engineer coordinates on the other side: Start Tracking button visibility gates on all items being Open (not Not Started).
+
+**Why**:
+- (a) **Leave Not Started as-is + wait for retry (rejected)**: fragile UX; TPM sees "click, nothing happens, click again" as broken system; not acceptable for compliance workflow.
+- (b) **Serialize on HILDA side by blocking Milestones alert processing until Deliverables imports settle (rejected)**: SP alerts are not ordered; there's no reliable "all Deliverables done" signal from SP side; HILDA would need a timer that could race just as badly.
+- (c) **SP UI engineer gates Start Tracking button on all items Open (chosen with this ADR)**: shifts the "wait" to the SP UI, which has the actual visibility on all rows in the list; HILDA does its part by making Open visible on SP as soon as import finishes; SP UI can enforce the invariant deterministically.
+- (d) Applies to Default WI + Confirmation uniformly per architect ask: keeps SP UI button-gating logic simple (single state check across all items) rather than special-casing item types.
+
+**Consequences**:
+- (a) SP UI engineer must implement the Start Tracking button gate. Communicated per architect ask 2026-07-15; flagged in STATUS as pending coordination.
+- (b) `kickoff_collection_task` becomes idempotent-safe for items already advanced to Open (existing `no_op_idempotent` state machine handles the NS→Open re-attempt cleanly).
+- (c) Setup Deliverables now writes to SP twice per item: once by SP UI to create the row, once by HILDA to advance delivery_state to Open. Extra SP writes at burst risk hitting SP throttling; mitigated by the fact that each write is a separate alert-triggered task, spread over seconds.
+- (d) Partial-transition failure mode: if HILDA writes Open to Postgres but SP writeback fails, Postgres shows Open and SP shows Not Started. Kickoff filter accepting both states covers this — the item is still eligible; reconcile task (per [D-142]) would repair the SP divergence later.
+- (e) Setup for Path B (HILDA-native TPM UI per [D-143]): when HILDA owns the workflow, this pattern (HILDA-driven state writeback to SP for UI gating) generalizes to Submit-to-Customer and Close-All-Items too — see [D-145] and [D-146] following.
+
+**Anchors**: `[D-068]`, `[D-118]` (SP UI engineer owns SP-side row creation), `[D-141]` (template.yaml is authoritative for structural fields), `[D-143]` (SP alerts are best-effort — motivates HILDA taking over serialization). Commit `a29859c`.
+
+## D-145: PM Approval — HILDA drives ReadyForSubmission writeback + Confirmation 2-hop close + QueueSubmission removed from rule
+
+**Date**: 2026-07-15
+**Status**: Ratified
+
+**Context**: Under original Pattern A per [D-068]/[D-139], SP UI's Approve button atomically writes 3 fields (`delivery_state=ReadyForSubmission` + `pm_approval_at` + `pm_approval_pm_id`); HILDA mirrors passively to Postgres. Consequence: Submit-to-Customer button on SP becomes clickable immediately after Approve, before HILDA's mirror has landed. Architect 2026-07-08 live test showed the race: TPM approved 10 items then clicked Submit-to-Customer immediately; `submit_to_carrier_task` scanned 5 items still at UnderPMReview locally (mirror not yet done), skipped them, uploaded only 5. Confirmation items also had no clean route to Closed — sitting at UnderPMReview / ReadyForSubmission indefinitely, out of sync with reality. And the PM-approval rule fired both `ApplyPMApproval` + `QueueSubmission` per item, meaning per-item carrier uploads on approval AND per-milestone upload on Submit-to-Customer click — double-upload risk.
+
+**Decision**:
+1. **SP UI Approve button now writes only 2 fields**: `pm_approval_at` + `pm_approval_pm_id` (no delivery_state).
+2. **HILDA's `apply_pm_approval_task` drives delivery_state**: after mirroring the 2 SP fields to Postgres, calls `tracker.update_delivery_state(target=ReadyForSubmission)` which writes RFS to both Postgres and SP via `_sp_writeback_field_updates`.
+3. **Confirmation items get an additional 2nd hop**: RFS → Closed with `trigger_source='tpm_button'` (satisfies DEF-20; passes `no_customer_upload=True` guard). Confirmation items never dwell at RFS since they have no carrier upload.
+4. **`QueueSubmission` action removed** from `advance_to_ready_for_submission_on_pm_approval` rule. `ApplyPMApproval` is the sole action. Carrier upload is now solely TPM-triggered via the milestone-level Submit-to-Customer button (`submit_to_carrier_on_milestone_submission_triggered` rule).
+5. Backward-compat: if SP writes delivery_state atomically (legacy 3-field path), HILDA's mirror sets Postgres to RFS; the follow-on `update_delivery_state(target=RFS)` returns `no_op_idempotent` and skips SP writeback. Both paths converge.
+
+**Why**:
+- (a) **Keep legacy 3-field atomic write (rejected)**: race between per-item Approve mirrors and milestone-level Submit-to-Customer click was observed in production. SP UI has no way to gate the Submit button on all items being at RFS if SP writes RFS itself immediately — the state IS RFS on SP the moment Approve is clicked, before HILDA even sees the alert.
+- (b) **Serialize on HILDA side by adding a lock/queue (rejected)**: adds complexity + timeout / recovery paths; doesn't solve the core problem of SP UI needing visible state for button gating.
+- (c) **HILDA drives delivery_state (chosen)**: same pattern as [D-144] for Setup Deliverables. SP UI can gate Submit-to-Customer button visibility on delivery_state=RFS being visible on SP; that's only true after HILDA has finished its per-item mirror + transition. Deterministic ordering guaranteed by SP UI gate.
+- (d) **Direct UnderPMReview → Closed edge for Confirmation (rejected)**: would require state machine schema change. Existing UnderPMReview → RFS → Closed edges both exist and both have appropriate guards; 2-hop uses them cleanly. `trigger_source='tpm_button'` on the RFS → Closed hop satisfies Guard 5 DEF-20 attribution (PM approval on Confirmation carries TPM intent semantically).
+- (e) **Keep QueueSubmission fired per-item on approval (rejected)**: pre-Ph-1 rationale was FR-18-per-item; but the actual production carrier upload path is `submit_to_carrier_task` triggered by the milestone-level Submit-to-Customer button. Firing both = double upload risk (mitigated only by the fact that `QueueSubmission` per-item params usually didn't resolve to real files under this rule's minimal params). Regression scan confirmed: task binding + enum + ActionKind + tests all intact; only the YAML action line removed. Any future rule can still dispatch QUEUE_SUBMISSION.
+
+**Consequences**:
+- (a) SP UI engineer must update Approve button behavior to write 2 fields instead of 3, AND update Submit-to-Customer button visibility to gate on all items showing delivery_state=RFS. Communicated per architect ask 2026-07-15; flagged in STATUS as pending coordination.
+- (b) Pattern A boundary shifts: previously "SP writes atomic 3-field; HILDA mirrors" per [D-068]; now "SP writes intent (2 fields); HILDA drives state writeback (delivery_state)". Successor pattern under the same Pattern A doctrine (SP-authoritative for the intent signal, HILDA-authoritative for state machine). D-068/D-139 remain valid as the doctrine; this is the Ph-1-specific mechanism refinement.
+- (c) Guards.py Guard 5 (DEF-20 TPM attribution) continues to require `no_customer_upload=True` on RFS → Closed; Confirmation items have this template-invariant so the transition passes cleanly (confirmed in MMK template.yaml + mock_customer template.yaml).
+- (d) `advance_to_ready_for_submission_on_pm_approval` rule now has 1 action (`ApplyPMApproval`) instead of 2. Rule engine + workflow_engine dispatch continue to work.
+- (e) Backward compat means existing customer deployments where SP still writes 3 fields (legacy) continue to work without SP UI engineer coordination — HILDA's second transition is a no-op idempotent. Migration can be phased per customer.
+- (f) If HILDA writeback to SP fails after Postgres transition succeeds: Postgres shows RFS, SP shows UnderPMReview, Submit-to-Customer button never appears on SP. Recovery via reconcile task per [D-142]/[D-143] OR manual SP field edit.
+
+**Anchors**: `[D-068]`, `[D-139]` (Pattern A doctrine), `[D-140]` (HILDA-authoritative Guard 4 trust pattern that this ADR extends), `[D-143]` (SP alerts best-effort motivates HILDA taking over state writeback), `[D-144]` (companion serialization at Setup Deliverables). Commit `339bf6a`.
+
+## D-146: Default WI auto-close via state_machine OPEN → CLOSED edge + Guard 5 carve-out + PM-approval sweep
+
+**Date**: 2026-07-15
+**Status**: Ratified
+
+**Context**: Under [D-144] all item types (including Default work item) transition Not Started → Open at import. Default WI has no owner, no PM approval, no carrier upload — it's a placeholder for unrouted attachments. Once all non-Default items in the (customer, device, milestone) scope reach terminal states (ReadyForSubmission / SubmittedToCustomer / Closed), Default WI should also close as the terminal cleanup step. Without automation, Default WI sits at Open forever and the milestone is never "done" from SP's or HILDA's view.
+
+**Decision**:
+1. **state_machine.LEGAL_TRANSITIONS[OPEN]** gains CLOSED as legal target (in addition to existing OUTREACH_SENT). Default WI takes the OPEN → CLOSED shortcut since it has no OutreachSent / DocumentReceived / OwnerClosed / UnderPMReview lifecycle.
+2. **guards.py Guard 5** (DEF-20 TPM-attribution required for CLOSED) gets a carve-out: accept `trigger_source='automated'` specifically for `item_type=='Default' AND from_state==OPEN`. Rationale: Default WI has no TPM-clickable button; requiring TPM attribution would demand a button that serves no user purpose. Attribution captured via `rule_id='default_wi_auto_close_on_all_ready'` in the audit row.
+3. **`apply_pm_approval_task` gains an end-of-task sweep**: after per-item transitions land (RFS or Confirmation-close), scan Postgres for the (customer, device, milestone) triple; if all non-Default items are in `{ReadyForSubmission, SubmittedToCustomer, Closed}`, locate the Default WI and transition Open → Closed via automated trigger.
+4. **Ph-2 gate**: skip auto-close if Default WI has any classified attachments (documents pending routing / doc_type classification / revision resolution); log `default_wi_close_deferred_ph2_pending`. Those cases need TPM/dashboard resolution before terminal close.
+
+**Why**:
+- (a) **Leave Default WI at Open indefinitely (rejected)**: milestone would never appear "done"; SP UI's Close-All-Items button + status reporting would show inconsistent state.
+- (b) **Transition Default WI through full 8-state lifecycle (Open → OutreachSent → ... → Closed) (rejected)**: Default WI has no owner, no outreach, no docs by design; the intermediate states are fabricated and add noise.
+- (c) **Add direct UnderPMReview → CLOSED edge to state machine for Default WI (rejected)**: Default WI never reaches UnderPMReview under [D-144] because it's excluded from kickoff outreach (per prior `kickoff_collection_task` filter). It sits at Open. Adding an edge from UnderPMReview would be a phantom path.
+- (d) **OPEN → CLOSED direct edge (chosen)**: minimal state machine amendment; single new edge; guarded by Guard 5 carve-out to prevent misuse (only automated + Default from Open, everyone else still needs TPM attribution).
+- (e) **Fire auto-close via a new rule + `DefaultWIAutoClose` ActionKind (considered)**: cleaner conceptually but adds new rule + new action + new task + rule condition logic. Inline sweep in `apply_pm_approval_task` is 40 lines and reuses the existing transition machinery. Trade-off: sweep runs per PM-approval alert (idempotent no-op except on the last item's approval); rule-based would fire once on a milestone-terminal event. Inline chosen for Ph-1 minimality; can refactor to rule-based post-Ph-1 without changing the state machine.
+- (f) **Ph-2 gate on classified attachments**: Default WI is the destination for unrouted attachments today. If any land there, they need TPM to reassign or resolve doc_type before Default WI can close. Auto-closing on top of unresolved documents would strand them.
+
+**Consequences**:
+- (a) New `state_machine.LEGAL_TRANSITIONS[OPEN]` value visible to guards + `transition_legal` + dashboard preflight queries. Callers that only expected OUTREACH_SENT from OPEN now see CLOSED as legal too — but they'd only ever hit that transition via the specific Default-WI + automated + Guard 5 path.
+- (b) Guard 5 carve-out is item-type-scoped + from-state-scoped + trigger-source-scoped. Non-Default items still require `manual_tpm_override` or `tpm_button` for CLOSED. DEF-20 policy intact for the general case.
+- (c) `apply_pm_approval_task` end-of-task sweep runs per PM-approval alert. On approvals 1-9 of 10 items, the sweep detects "not all non-Default at terminal" and no-ops. On the 10th item's approval, the sweep transitions Default WI. If the 10th approval was for a Confirmation item (which goes straight to Closed via 2-hop per [D-145]), the sweep still runs and detects the terminal condition.
+- (d) Race consideration: if two PM-approval alerts land near-simultaneously (both are the "last" non-Default item to transition), both sweeps could try to close Default WI. `update_delivery_state(target=Closed)` returns `no_op_idempotent` on the second call (item already at Closed). Safe.
+- (e) Default WI attachments feature Ph-2 gate — when TPM reassigns unrouted docs to non-Default items in Ph-2, the reassignment code path should re-invoke the sweep OR fire a milestone-level completion check. Deferred to Ph-2 implementation of unrouted-doc TPM triage.
+- (f) SP-side: Default WI now shows Closed on SP row when the milestone completes. SP UI's milestone-status roll-up (if implemented) will correctly reflect "all items closed".
+
+**Anchors**: `[D-100]` (FR-64 Close-All-Items HILDA-owned per-item cascade — same architectural pattern of HILDA-driven bulk state transitions on milestone terminal events), `[D-144]` (Default WI reaches Open at import), `[D-145]` (companion PM-approval writeback — sweep executes at the end of the same task). Commit `ca1f108`.
+
+## D-147: Scheduled TPM DRR closure notification — cron-based, target_date-anchored, US/Eastern, two-fire window, WOPI-agnostic
+
+**Date**: 2026-07-15
+**Status**: Ratified
+
+**Context**: TPMs need a summary email at the DRR (Deliverable Readiness Review) closure milestone target date so they can catch pending items before the deadline hits. Two fires per (customer, device, milestone): on `target_date - 1` at 00:00 US/Eastern (day-before nag) and on `target_date` at 00:00 US/Eastern (day-of final status). Body must show aggregate Open/Closed counts + Completion% + per-TG pending breakdown (rows with count > 0 only); Excel attachment must show per-item detail with columns Item No / Item Title / Open-or-Closed Status / Owner Comment. Subject format: `[<Carrier>]\[<Device>][<Milestone>] DRR closure final status`. TPM email lives on the Projects_<customer_id> SP list keyed on `project_model=device_id`. "Closed" for the aggregate math counts states in {Closed, ReadyForSubmission, SubmittedToCustomer} — i.e., any item that has passed PM approval, not just terminal-Closed.
+
+**Decision**:
+1. **Cron-based Celery beat task** (`tpm_notification.tick`) runs every 300s per `config/tpm_notification.json.beat_interval_seconds`.
+2. **Task iterates customer YAMLs** under `customizations/sharepoint_config/customers/`, reads Milestones list per customer via `sp_writer.get_items(entity="milestones", ...)`, per-row parses `target_date` and classifies now-in-US/Eastern vs the two send windows.
+3. **Window classifier**: for each phase date (`target_date - 1` and `target_date`), compares `now_local` vs `[phase_date 00:00, phase_date 00:00 + window_minutes]`. `not_yet` / `in_window` / `missed`. Strict mode (default): past window → missed. Lenient mode: same-day-past-window → still in_window.
+4. **Idempotency** via `CommunicationLog` `action_type='tpm_drr_notification_sent'` lookup keyed on details containing `{customer_id, device_id, milestone_id, phase}`. If audit query surface is unavailable, defaults to allowing re-send (safer than skipping forever).
+5. **Missed-window and missing-target_date behavior**: opt-in ops alerts via distinct audit action types (`tpm_drr_notification_missed_window` / `tpm_drr_notification_missing_target_date`) so ops can grep. Both default on.
+6. **Excel via openpyxl** (already declared in requirements.txt from earlier era). Body via new Jinja template `tpm_drr_closure.j2`. TPM email/name resolved from Projects_<customer_id> list keyed on `project_model=device_id`.
+7. **EmailSender protocol extended** with optional `attachments=[(filename, bytes, mime)]` parameter. Backward-compatible (default None). SmtpSender uses `EmailMessage.add_attachment`; EwsSender uses `exchangelib.FileAttachment`. All existing call sites unaffected.
+
+**Why**:
+- (a) **Event-driven (fire when Default WI closes per [D-146]) (rejected as sole mechanism)**: fires at most once per milestone; TPM has no day-before nag; doesn't help TPMs with late items. Also fires whenever the last item lands regardless of clock — not target-date-anchored.
+- (b) **Both event-driven AND scheduled (rejected as premature)**: adds complexity of two paths + reconciliation between them. Ph-1 uses scheduled only; can add event-triggered path in Ph-2 if data shows TPMs need it sooner than target_date.
+- (c) **Scheduled + target_date-anchored (chosen)**: matches architect ask literally; two fires give day-before nag + day-of final status; cron backing means no dependency on any specific state-transition event landing on time; TPM sees a predictable ritual.
+- (d) **US/Eastern timezone hardcoded (rejected)**: corp may deploy in other timezones later; config-driven timezone is trivially cheap.
+- (e) **Strict window with configurable `strict_only` toggle**: strict-only default matches architect ask ("keep it 12 A.M."); lenient toggle preserves flexibility if ops finds hilda-beat missing 00:00 fires repeatedly.
+- (f) **"Closed" for the aggregate includes RFS + SubmittedToCustomer (chosen per architect)**: architect specified `open=5, closed=45` example math where 45/(5+45)=90% completion. Non-Confirmation items sitting at RFS after PM approval are "as done as they'll get before carrier submission" and should count as closed from TPM's perspective.
+- (g) **Body has no "DRR closure final status for X/Y/Z" narrative line (chosen per architect)**: subject already carries routing context; body opens straight to the summary tables.
+- (h) **Per-TG pending table filters to count > 0 (chosen per architect)**: matches screenshot format; zero-pending TGs don't need TPM attention.
+- (i) **Attachments parameter on EmailSender protocol (chosen)**: 3 alternatives considered: (i.a) bypass the sender abstraction and use smtplib directly in the notification task — leaks SMTP details out of the abstraction and complicates EWS-based deployments; (i.b) new SecondarySender protocol just for attachments — over-engineered for one call site; (i.c) extend the existing Send() signature — chosen; smallest surface change, backward-compatible default, both SmtpSender and EwsSender have well-known APIs for adding attachments.
+- (j) **Config kill switch (`enabled=false`)**: any scheduled outbound-email feature needs an ops-flippable off switch. Same pattern as `config/reconcile.json` per [D-142].
+
+**Consequences**:
+- (a) hilda-beat container gains a new scheduled task; existing beat entries (`poll_ews_inbox_60s`, `reconcile_all_300s`) unaffected. Beat interval configurable per environment.
+- (b) EmailSender protocol change is minor but IS a public API change — any HILDA-internal or future 3rd-party sender implementation must accept the optional parameter. Backward-compat via default None preserves existing behavior for callers who don't pass it.
+- (c) Ops alerts on missed window write audit rows but do not currently dispatch NotifyHildaOps action — the ops-alert surface here is grep-based rather than push-based. If push-notification is needed later, upgrade to `NotifyHildaOps` action_kind dispatch (existing binding).
+- (d) TPM email lookup requires Projects_<customer_id> list to have `tpm_email` column populated and a row keyed on `project_model=device_id`. If missing, task logs warning + skips send. No new SP list creation required — Projects list already exists per [D-104].
+- (e) Timezone dependency on `zoneinfo` (Python 3.9+ stdlib) + IANA timezone data. Container image already includes both.
+- (f) `openpyxl` dependency was already in requirements.txt from earlier Excel-spec-ingest work — no new dep.
+- (g) Test surface: no baseline notification tests exist. First real fire is at 00:00 US/Eastern on some milestone's target_date-1. Smoke test path documented in STATUS Flags (window_minutes=1440 + strict_only=false + beat_interval=60 for early trigger).
+- (h) Corp SP 2017 deployment must expose `target_date` on the Milestones list body (verified via [D-085] cascade; parser promotes it into field_deltas per Milestones-promoted-tuple mechanism).
+
+**Anchors**: `[D-085]` (Milestones target_date field), `[D-104]` (Projects_<customer_id> list — TPM email source), `[D-144]`, `[D-145]`, `[D-146]` (companion serialization ADRs from this session). Commit `e33e2cf`.
