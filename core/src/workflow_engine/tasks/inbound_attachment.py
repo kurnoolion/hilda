@@ -179,6 +179,24 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
                 routed_unrouted += 1
             items_incremented.update(counts["item_ids"])
             events_fired += counts["events_fired"]
+
+            # D-150 Chunk 3 hook: also persist to the HILDA-side documents
+            # view tree (tg-scoped, distinct from FR-86 internal/ tree).
+            # Deduped by (customer, device, milestone, tg_name) so multi-item
+            # associations with same tg don't re-write. Default WI items and
+            # empty-tg items are excluded by write_attachment_to_view_tree.
+            # Best-effort: any failure logs; does not fail the outer task.
+            try:
+                await _write_matches_to_view_tree(
+                    attachment=attachment,
+                    matched_item_ids=counts.get("item_ids", set()),
+                    candidate_items=candidate_items,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "process_inbound_attachments: view-tree write failed: %s: %s",
+                    type(exc).__name__, str(exc)[:120],
+                )
         except Exception as exc:  # noqa: BLE001
             failed += 1
             _log.warning(
@@ -856,6 +874,61 @@ def _fire_attachment_received_event(
             delivery_item_id, str(exc)[:120],
         )
         return False
+
+
+async def _write_matches_to_view_tree(
+    *,
+    attachment,
+    matched_item_ids: set,
+    candidate_items: list[dict],
+) -> None:
+    """D-150 Chunk 3 hook: persist attachment bytes to the HILDA-side documents
+    view tree, one write per DISTINCT (customer, device, milestone, tg_name)
+    across the matched items.
+
+    Filters:
+      * Only items whose item_id appears in matched_item_ids are considered.
+      * Items with item_type='default' are dropped inside write_attachment_to_view_tree.
+      * Items with empty tg_name are dropped inside write_attachment_to_view_tree.
+
+    Best-effort: individual writes' failures are logged inside
+    write_attachment_to_view_tree; this outer loop keeps going.
+    """
+    from core.src.storage import write_attachment_to_view_tree
+
+    if not matched_item_ids:
+        return
+    content = getattr(attachment, "content", None)
+    filename = getattr(attachment, "filename", None) or "attachment.bin"
+    if content is None or not isinstance(content, (bytes, bytearray)):
+        return
+
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in candidate_items:
+        item_id = item.get("item_id") if isinstance(item, dict) else getattr(item, "item_id", None)
+        if not item_id or item_id not in matched_item_ids:
+            continue
+        cust = _row_field(item, "customer_id") or ""
+        dev = _row_field(item, "device_id") or ""
+        mil = _row_field(item, "milestone_id") or ""
+        tg = _row_field(item, "tg_name") or ""
+        item_type = _row_field(item, "item_type") or ""
+        key = (cust, dev, mil, tg)
+        if key in seen:
+            continue
+        seen.add(key)
+        await write_attachment_to_view_tree(
+            customer_id=cust, device_id=dev, milestone_id=mil, tg_name=tg,
+            item_type=item_type, filename=filename, content=bytes(content),
+            saved_by="auto",
+        )
+
+
+def _row_field(row, key: str):
+    """Read a field from either a dict-shaped or dataclass/pydantic-shaped item row."""
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
 
 
 async def _audit(deps, action_type: str, delivery_item_id, details: dict) -> None:

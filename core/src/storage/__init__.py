@@ -44,6 +44,10 @@ from core.src.storage.document_ops import (
     update_association_plm_attachment,
     update_review_findings,
 )
+from core.src.storage.document_view_writer import (
+    MAX_ZIP_SIZE_BYTES,
+    write_attachment_to_view_tree,
+)
 from core.src.storage.document_view_ops import (
     TgFileEntry,
     TgFolderEntry,
@@ -101,6 +105,7 @@ __all__ = [
     "DocumentItemAssociation",
     "DocumentVersionRow",
     "MAX_CACHE_TTL_SECONDS",
+    "MAX_ZIP_SIZE_BYTES",
     "NSDPath",
     "NSDPathType",
     "PLMFanOutTarget",
@@ -169,5 +174,6 @@ __all__ = [
     "update_association_plm_attachment",
     "update_review_findings",
     "upsert_tag",
+    "write_attachment_to_view_tree",
     "write_file",
 ]
