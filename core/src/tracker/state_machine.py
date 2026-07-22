@@ -31,7 +31,16 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # Not Started: TPM has loaded the customer template into SP and the item row
     # exists, but HILDA tracking has not yet been kicked off. Start Collection
     # (FR-8) transitions to Open.
-    DeliveryState.NOT_STARTED: frozenset({DeliveryState.OPEN}),
+    #
+    # NOT_STARTED -> CLOSED added 2026-07-21 per D-149: TPM early-close of
+    # not-applicable items during the brief window between "Setup Deliverables"
+    # click and HILDA's D-144 auto-transition (NS -> Open). Guard 5 already
+    # accepts trigger_source in ('tpm_button', 'manual_tpm_override') from any
+    # from-state (except the RFS + no_customer_upload=False block), so no
+    # guard change is needed. Symmetric belt-and-suspenders with the
+    # OPEN -> CLOSED path used for the same early-close intent when auto-
+    # transition has already landed.
+    DeliveryState.NOT_STARTED: frozenset({DeliveryState.OPEN, DeliveryState.CLOSED}),
 
     # Open: HILDA has armed tracking; outreach not yet sent. Owner cannot report
     # Delayed/Blocked because they haven't been contacted yet.

@@ -3785,3 +3785,46 @@ Trigger predicate: "**at least one** item still in the pre-transition state" (no
 - (h) Template-authoring dependency: the DRR template.yaml (or equivalent SP `Deliverables_Template_<customer_id>` row) MUST include an item with `item_name = "Final DRR status excel deliverable for carrier"` AND `no_customer_upload = False` (else Guard 4 line 236 rejects the transition). If the item is missing entirely, the day-of send still succeeds and audits, but the state transition + Default WI close silently skip with a WARNING log. This is a template-configuration concern, not a runtime failure.
 
 **Anchors**: `[D-140]` (Guard 4 trust list pattern — `submit_to_carrier_task` precedent), `[D-142]` (config kill-switch + `sync_backfill` trust extension pattern), `[D-146]` (companion Default WI auto-close via pm_approval sweep — same Ph-2 gate; semantics differ on gating condition), `[D-147]` (parent scheduled TPM DRR notification — this ADR is the post-send side effect).
+
+## D-149: TPM early-close of not-applicable items — NOT_STARTED → CLOSED legal edge
+
+**Date**: 2026-07-21
+**Status**: Ratified
+
+**Context**: Some template work items are not applicable to a given (customer, device, milestone) triple — e.g., an LTE test item on a WiFi-only device, or a PLM item on a milestone that skips the PLM gate this cycle. TPM knows this at Setup Deliverables time and needs to close such items BEFORE Start Tracking fires outreach to the assigned owner. Two possible SP UI states at the moment of TPM's Close click:
+
+1. **`Open`** — HILDA's [D-144] auto-transition (Not Started → Open, inside `import_deliverable_tracker_task`) has already landed and written back to SP. Normal case.
+2. **`Not Started`** — brief race window between "TPM Setup Deliverables click writes rows with default `delivery_state=Not Started`" and "HILDA's D-144 auto-transition writeback lands". Typically <1 second, but SP UI polling / TPM click speed can hit it.
+
+State (1) is already legal per [D-146]'s `OPEN → CLOSED` edge (added for Default WI auto-close, but Guard 5 explicitly accepts `trigger_source in ('tpm_button', 'manual_tpm_override')` from any from-state, so a TPM click from OPEN passes cleanly). State (2) is blocked at the structural layer: `LEGAL_TRANSITIONS[NOT_STARTED] = {OPEN}` per pre-D-149 state machine, and `transition_legal` returns False before guards even run.
+
+**Decision**:
+1. **Extend `state_machine.LEGAL_TRANSITIONS[NOT_STARTED]`** from `frozenset({OPEN})` to `frozenset({OPEN, CLOSED})`. Single-line state-machine amendment.
+2. **Guard 5 needs no change**. Existing carve-out logic:
+   - `_is_default_wi_auto_close` = `item_type='Default' AND from=OPEN AND trigger='automated'` — unchanged; doesn't fire for TPM early-close from NOT_STARTED because from-state and trigger both differ.
+   - `trigger_source in ('manual_tpm_override', 'tpm_button')` allowed from any from-state (except the RFS + `no_customer_upload=False` block that only checks `from_state == READY_FOR_SUBMISSION`).
+   - TPM click from `NOT_STARTED` with `trigger_source='tpm_button'` passes Guard 5 unchanged.
+3. **SP UI engineer coordination remains valuable but no longer strictly required**: SP UI still SHOULD gate the Close button on `delivery_state in ('Not Started', 'Open')` for UX clarity, but HILDA now accepts the transition from either state — belt-and-suspenders coverage of the race.
+
+**Why**:
+- (a) **State-machine edge (chosen) vs SP-UI gate only (rejected)**: SP-UI-gate-only leaves HILDA structurally rejecting a semantically-valid TPM intent during the race window; the button would need to become greyed-out briefly, or the click would silently fail. Belt-and-suspenders is cheap (one line) and eliminates any race-window ambiguity.
+- (b) **No new trusted `trigger_source` needed**: unlike [D-140] (`submit_to_carrier_task`) or [D-148] (`tpm_drr_final_deliverable`), this transition IS driven by the TPM's own click via the existing `tpm_button` trigger source. Adding a new named trigger would fragment attribution for what is semantically the same operator action as `OPEN → CLOSED`.
+- (c) **No Guard 5 rewrite (chosen) vs restructuring Guard 5 around from-state (rejected)**: current Guard 5 is compact and already models the correct policy — "CLOSED requires TPM attribution unless Default-WI-auto-close carve-out applies". A restructure would risk regressing tested transitions.
+- (d) **Symmetry with [D-146]'s OPEN → CLOSED edge**: [D-146] added that edge primarily for Default WI auto-close, but its Guard 5 carve-out is item-type-scoped; the general OPEN → CLOSED path for non-Default items via TPM button was implicitly usable. D-149 formalizes the NOT_STARTED analogue for the pre-D-144-window case, keeping the policy symmetric across the two pre-outreach states.
+- (e) **Explicit rejection of "let TPMs Delete SP rows for not-applicable items" (alternative)**: SP row deletion would drop the template-authored intent (making it invisible that this item was ever considered), lose the audit trail, and confuse downstream reporting (item counts wouldn't match template expectations). TPM early-close preserves the row + audit + reporting, marks it Closed, and excludes it from outreach/PM-approval/carrier-upload cascades.
+
+**Consequences**:
+- (a) `LEGAL_TRANSITIONS[NOT_STARTED]` gains one legal target. Every consumer of the matrix (guards, dashboard preflight queries, admin CLIs) now sees CLOSED as reachable from NOT_STARTED. Only the specific Guard 5 policy path (`tpm_button` + non-RFS from-state) actually permits the transition; automated triggers still get rejected at Guard 5 with `closed_requires_tpm_attribution`.
+- (b) **Downstream cascade behaviors validated** for early-closed items (whether via OPEN or NOT_STARTED path):
+   - `kickoff_collection_task` filter (`{Not Started, Open}` per [D-144]) naturally excludes CLOSED — no outreach fires.
+   - [D-146] `apply_pm_approval_task` sweep counts CLOSED as terminal — early-closed items don't block Default WI auto-close.
+   - [D-147] TPM DRR Excel counts CLOSED via `CLOSED_LIKE_STATES = {Closed, ReadyForSubmission, SubmittedToCustomer}` — early-closed items show as Closed in the report.
+   - [D-148] Final DRR deliverable transition doesn't touch these items (they don't match the configured `final_deliverable_item_name`).
+   - FR-64 Close All Items filter `{ReadyForSubmission, SubmittedToCustomer}` doesn't attempt to re-close already-Closed items.
+- (c) **Ph-2 concern surfaced** (logged as STATUS Flag, not part of D-149 scope): attachment router (`_persist_routed_attachment` + `_classify_doc_type`) does not currently check `delivery_state == Closed` before associating an attachment. If an owner sends a late reply after TPM early-close with an attachment matching the item's item_no/subject regex, the attachment would associate to the Closed item (invisible in TPM dashboard's active-item view) or fall through to Default WI. Ph-2 fix: skip Closed items in the router; re-fall-back to Default WI classification. Rare — TPM early-close implies "owner won't send anything for this" — but worth fixing for hygiene.
+- (d) **Audit-log attribution preserved**: TPM's click generates a normal `state_transition` audit row with `trigger_source='tpm_button'` + PM/TPM ID captured in `attribution.modified_by`. Same greppability as OPEN → CLOSED early-closes; both anchor to the same operator intent.
+- (e) **No config knob needed**: the transition is entirely policy-driven (state machine + Guard 5), no configurable behavior. If a future customer required blocking early-close (e.g., strict template-inflexibility policy), that would be a new Guard predicate + config, not a rollback of this edge.
+- (f) **Confirmation items early-close cleanly**: [D-145] 2-hop UnderPMReview → RFS → Closed for Confirmation items assumes PM approval fired; early-close skips that chain entirely. Correct — the item was never applicable, so there's no owner-reply-closes semantic to honor.
+- (g) **Default WI early-close**: TPM CAN early-close a Default WI via this path (item_type check happens only in the auto-close carve-out, not in the TPM-attribution acceptance). Would only happen if TPM decides the milestone doesn't need a catch-all for unrouted docs — unusual but not forbidden. Risk: any attachments arriving later that would have gone to Default WI now have nowhere to land. Consistent with the Ph-2 attachment-router Flag above.
+
+**Anchors**: `[D-144]` (import task NS → Open auto-transition — creates the race window this ADR closes), `[D-146]` (companion OPEN → CLOSED edge — symmetric coverage of the pre-outreach window), Guard 5 in [guards.py](core/src/tracker/guards.py) (DEF-20 TPM-attribution policy — unchanged).
