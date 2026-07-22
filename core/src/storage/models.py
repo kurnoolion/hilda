@@ -96,6 +96,10 @@ class RoutingResolution(str, Enum):
     LLM_ROUTE_ATTACHMENT = "LLMRouteAttachment" # step 4 — LLM TaskKind.ROUTE_ATTACHMENT
     STAGED_DEFAULT = "StagedDefault"            # step 5 / FR-78 — milestone default work-item
     TPM_REASSIGNED = "TPMReassigned"            # FR-83 — TPM-manual reassignment
+    # Per architect 2026-07-22 refinements to Ph-1 substring-only routing:
+    TG_SINGLE_ITEM = "TgSingleItem"             # TG has exactly 1 work item; skip item_description parsing entirely
+    TG_DEFAULT_MULTIMATCH = "TgDefaultMultimatch"  # Step 1 substring produced N>1 matches within a TG; item with ["default"] tag-set wins
+    TG_DEFAULT_NOMATCH = "TgDefaultNomatch"     # Step 1 substring produced 0 matches within a TG; the TG's ["default"]-tagged item catches
 
 
 class DocumentIndexRow(BaseModel):

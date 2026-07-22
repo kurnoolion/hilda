@@ -396,6 +396,41 @@ class DeliveryItemBase(_Base):
         return self
 
     @model_validator(mode="after")
+    def _v_default_tag_isolation(self) -> "DeliveryItemBase":
+        """Per architect 2026-07-22 refinement to Ph-1 attachment routing:
+        the reserved literal "default" tag MUST appear as its own singleton
+        tag-set entry (i.e., `["default"]`) — never mixed with other tags in
+        the same tag-set.
+
+        Valid:
+          [["waiver"], ["default"]]              — two tag-sets; "default" is standalone
+          [["default"]]                          — single "default" tag-set
+        Invalid:
+          [["waiver", "default"]]                — "default" mixed with "waiver"
+          [["default", "sig_report"]]            — "default" mixed with "sig_report"
+
+        Runtime routing treats an item with `["default"]` as its own tag-set
+        entry as the TG-scoped default catch-all (TG_DEFAULT_MULTIMATCH /
+        TG_DEFAULT_NOMATCH resolutions).
+        """
+        if not self.item_description:
+            return self
+        for i, tag_set in enumerate(self.item_description):
+            if not isinstance(tag_set, list):
+                continue
+            has_default = any(
+                isinstance(t, str) and t.strip().lower() == "default"
+                for t in tag_set
+            )
+            if has_default and len(tag_set) > 1:
+                raise ValueError(
+                    f"item {self.item_id}: item_description[{i}]={tag_set!r} — "
+                    f"reserved literal 'default' tag must appear as a standalone "
+                    f"tag-set entry (e.g. `[\"default\"]`), never mixed with other tags"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _v_doc_count_consistency(self) -> "DeliveryItemBase":
         """Per FR-82 architect lock 2026-06-20 — doc_count must equal len(item_description).
         Emits TSC-W008 warning (not blocking). Skipped for confirmation items + default WI

@@ -365,30 +365,33 @@ class Fr52AttachmentRouter:
         #   [["5G", "LC"]]                             -> match if filename contains both "5G" AND "LC"
         # Earlier flat-AND impl was incorrect; broke architect live test 2026-06-29
         # ("Sustainability" file didn't match item with [["Sustainability"]] tag).
-        b1_matches: list[AttachmentItemMatch] = []
-        for cand in candidate_items:
-            groups = self._extract_tag_groups(cand.get("item_description"))
-            if not groups:
-                continue
-            if any(
-                all(tag.lower() in filename for tag in group)
-                for group in groups
-            ):
-                b1_matches.append(
-                    AttachmentItemMatch(
-                        item_id=cand["item_id"],
-                        confidence=1.0,
-                        source=RoutingResolution.SUBSTRING_MATCH,
-                    )
-                )
+        #
+        # Per architect 2026-07-22 refinement (D-151): TG-scoped shortcuts +
+        # `["default"]` tag semantics. See _tg_scoped_route for details.
+        b1_matches, b1_resolution = self._tg_scoped_route(filename, candidate_items)
         if b1_matches:
-            return b1_matches, RoutingResolution.SUBSTRING_MATCH
+            return b1_matches, b1_resolution
 
-        # Ph-1 first pass per architect 2026-06-29: substring-only mode.
-        # Skip B2-B5 entirely; return empty matches (Step D routes to
-        # unrouted NSD path via _select_nsd_path_type fallback).
+        # Ph-1 first pass per architect 2026-06-29 + D-151 2026-07-22:
+        # substring-only mode. Skip B2/B3/B4 entirely; jump straight to
+        # milestone Default WI (B5) — TG-scoped routing already ran above.
         if self._ph1_first_pass_substring_only:
-            return [], RoutingResolution.SUBSTRING_MATCH
+            default_item = next(
+                (c for c in candidate_items if c.get("item_type") == ItemType.DEFAULT.value),
+                None,
+            )
+            if default_item is not None:
+                return (
+                    [
+                        AttachmentItemMatch(
+                            item_id=default_item["item_id"],
+                            confidence=0.0,
+                            source=RoutingResolution.STAGED_DEFAULT,
+                        )
+                    ],
+                    RoutingResolution.STAGED_DEFAULT,
+                )
+            return [], RoutingResolution.STAGED_DEFAULT
 
         # ---- Step B2: fuzzy match via rapidfuzz ----
         b2_matches: list[AttachmentItemMatch] = []
@@ -480,6 +483,170 @@ class Fr52AttachmentRouter:
         # No candidate Default item -- empty matches (caller decides; storage
         # invariant requires at least one association)
         return [], RoutingResolution.STAGED_DEFAULT
+
+    def _tg_scoped_route(
+        self, filename: str, candidate_items: list[dict],
+    ) -> tuple[list[AttachmentItemMatch], RoutingResolution]:
+        """D-151 per architect 2026-07-22 — 4-stage TG-scoped substring routing.
+
+        Groups candidates by tg_name and applies, per TG independently:
+          Stage 0: TG has exactly 1 work item (excluding Default WIs; Default
+                   WI is milestone-level) → route to it. Resolution:
+                   TG_SINGLE_ITEM.
+          Stage 1: Step B1 substring match on item_description tag-sets in the TG.
+                     * Exactly 1 match → route. Resolution: SUBSTRING_MATCH.
+                     * N>1 matches AND one has ["default"] tag-set →
+                       route to it. Resolution: TG_DEFAULT_MULTIMATCH.
+                     * N>1 matches AND none has ["default"] → fall through
+                       (no match returned for this TG).
+                     * 0 matches → Stage 2.
+          Stage 2: TG-default fallback: if any item in the TG has ["default"]
+                   tag-set → route to it. Resolution: TG_DEFAULT_NOMATCH.
+
+        Returns the FIRST TG that produced a match, ranked by:
+          TG_DEFAULT_MULTIMATCH > SUBSTRING_MATCH > TG_SINGLE_ITEM > TG_DEFAULT_NOMATCH.
+        If no TG produced a match, returns ([], SUBSTRING_MATCH) — caller
+        falls through to milestone Default WI (Step B5).
+
+        Multiple `["default"]` items in the same TG: template validator
+        rejects at load (per architect Q5). Runtime defensively takes the
+        first-in-iteration-order winner + logs a warning.
+        """
+        # Group by tg_name; Default WIs (item_type='default') are milestone-
+        # level and excluded from the TG-scoped pass.
+        by_tg: dict[str, list[dict]] = {}
+        for c in candidate_items:
+            if (c.get("item_type") or "").lower() == ItemType.DEFAULT.value.lower():
+                continue
+            tg = c.get("tg_name") or ""
+            if not tg:
+                continue
+            by_tg.setdefault(tg, []).append(c)
+
+        results_by_precedence: dict[RoutingResolution, list[AttachmentItemMatch]] = {}
+
+        for tg_name, items in by_tg.items():
+            match, resolution = self._route_within_tg(filename, tg_name, items)
+            if match is None:
+                continue
+            # Accumulate per resolution so we can pick the strongest tie-break.
+            results_by_precedence.setdefault(resolution, []).append(match)
+
+        # Precedence per D-151: strong evidence beats fallback signals.
+        for res in (
+            RoutingResolution.TG_DEFAULT_MULTIMATCH,
+            RoutingResolution.SUBSTRING_MATCH,
+            RoutingResolution.TG_SINGLE_ITEM,
+            RoutingResolution.TG_DEFAULT_NOMATCH,
+        ):
+            if res in results_by_precedence and results_by_precedence[res]:
+                return list(results_by_precedence[res]), res
+
+        return [], RoutingResolution.SUBSTRING_MATCH
+
+    def _route_within_tg(
+        self,
+        filename: str,
+        tg_name: str,
+        items: list[dict],
+    ) -> tuple[AttachmentItemMatch | None, RoutingResolution]:
+        """Apply the 4-stage TG-scoped routing WITHIN a single TG's items.
+        Returns (winning_match_or_None, resolution).
+        """
+        # Stage 0: TG=1 shortcut — implicit routing.
+        if len(items) == 1:
+            return (
+                AttachmentItemMatch(
+                    item_id=items[0]["item_id"],
+                    confidence=1.0,
+                    source=RoutingResolution.TG_SINGLE_ITEM,
+                ),
+                RoutingResolution.TG_SINGLE_ITEM,
+            )
+
+        # Stage 1: substring match on item_description tag-sets.
+        matches: list[dict] = []
+        for cand in items:
+            groups = self._extract_tag_groups(cand.get("item_description"))
+            if not groups:
+                continue
+            if any(
+                all(tag.lower() in filename for tag in group)
+                for group in groups
+            ):
+                matches.append(cand)
+
+        if len(matches) == 1:
+            return (
+                AttachmentItemMatch(
+                    item_id=matches[0]["item_id"],
+                    confidence=1.0,
+                    source=RoutingResolution.SUBSTRING_MATCH,
+                ),
+                RoutingResolution.SUBSTRING_MATCH,
+            )
+
+        if len(matches) > 1:
+            # Multi-match: TG-default tiebreaker per D-151.
+            default_items = [c for c in matches if self._has_default_tag_set(c)]
+            if len(default_items) >= 1:
+                if len(default_items) > 1:
+                    logger.warning(
+                        "attachment_router: TG %r has %d items marked with ['default'] "
+                        "tag-set — template config error; taking first (item_id=%s)",
+                        tg_name, len(default_items), default_items[0]["item_id"],
+                    )
+                return (
+                    AttachmentItemMatch(
+                        item_id=default_items[0]["item_id"],
+                        confidence=1.0,
+                        source=RoutingResolution.TG_DEFAULT_MULTIMATCH,
+                    ),
+                    RoutingResolution.TG_DEFAULT_MULTIMATCH,
+                )
+            # Multi-match with no ["default"] item → let caller fall through
+            # so B5 (milestone Default WI) can catch. Returning None here
+            # collapses the ambiguous case into Default WI per architect ask.
+            return (None, RoutingResolution.SUBSTRING_MATCH)
+
+        # Stage 2 (matches == 0): TG-default fallback.
+        default_items = [c for c in items if self._has_default_tag_set(c)]
+        if len(default_items) >= 1:
+            if len(default_items) > 1:
+                logger.warning(
+                    "attachment_router: TG %r has %d items marked with ['default'] "
+                    "tag-set — template config error; taking first (item_id=%s)",
+                    tg_name, len(default_items), default_items[0]["item_id"],
+                )
+            return (
+                AttachmentItemMatch(
+                    item_id=default_items[0]["item_id"],
+                    confidence=1.0,
+                    source=RoutingResolution.TG_DEFAULT_NOMATCH,
+                ),
+                RoutingResolution.TG_DEFAULT_NOMATCH,
+            )
+
+        # No match, no TG-default → this TG rejects.
+        return (None, RoutingResolution.SUBSTRING_MATCH)
+
+    @staticmethod
+    def _has_default_tag_set(cand: dict) -> bool:
+        """True if candidate item's item_description contains ["default"] as
+        a standalone tag-set entry (per D-151). The literal "default" must
+        appear alone; the DeliveryItemBase model validator rejects mixed
+        tag-sets like ["waiver", "default"] at template load, so runtime
+        can trust the shape."""
+        desc = cand.get("item_description")
+        if not isinstance(desc, list):
+            return False
+        for tag_set in desc:
+            if not isinstance(tag_set, list):
+                continue
+            if len(tag_set) == 1 and isinstance(tag_set[0], str) \
+                    and tag_set[0].strip().lower() == "default":
+                return True
+        return False
 
     @staticmethod
     def _extract_tag_groups(item_description: Any) -> list[list[str]]:

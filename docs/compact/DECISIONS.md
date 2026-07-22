@@ -3871,3 +3871,53 @@ State (1) is already legal per [D-146]'s `OPEN → CLOSED` edge (added for Defau
 - (j) Chunk 1 deploy topology (nginx sidecar + OnlyOffice) landed as manual config on corp box, not in git. Dockerfile.hilda-api hardcodes --port 8443; workaround via compose command: override.
 
 **Anchors**: [D-013] (NSD share convention), [D-114] (dashboard reverse-proxy header), [D-148] / [D-149] (companion ADRs in this session cluster). Commits: beded18 (Chunk 2 storage), fa188fb (Chunk 3 zip extract), plus Chunks 4-7 in the followup commit.
+
+
+## D-151: TG-scoped attachment routing refinements — TG=1 shortcut + `["default"]` tiebreaker/fallback
+
+**Date**: 2026-07-22
+**Status**: Ratified
+
+**Context**: The Ph-1 substring-only attachment router (`ph1_first_pass_substring_only=True` per prior architect direction) currently runs one substring pass on all candidate items. Two operationally-common cases produce poor outcomes:
+1. A TG with exactly 1 work item still requires the doc to match one of that item's `item_description` tags to route to it — but semantically, if there is only 1 target, the routing is implicit.
+2. When Step 1 matches multiple items within a TG (all sharing a distinctive tag) or matches none of them, the doc falls to the milestone-level Default WI — burying it in the unrouted-triage path when the TG author intended a specific catch-all inside the TG.
+
+**Decision**: 4-stage TG-scoped routing per architect 2026-07-22.
+
+1. **Stage 0 — TG=1 shortcut**: if a TG contains exactly 1 non-Default work item, route directly to it. Skip `item_description` parsing entirely. Resolution: `TG_SINGLE_ITEM`.
+2. **Stage 1 — substring match within TG**:
+   - Single match → route to it. Resolution: `SUBSTRING_MATCH`.
+   - N>1 matches AND one has `["default"]` tag-set entry → route to it. Resolution: `TG_DEFAULT_MULTIMATCH`.
+   - N>1 matches AND none has `["default"]` → fall through (return no match for this TG).
+   - 0 matches → Stage 2.
+3. **Stage 2 — TG-default fallback**: if any item in this TG has `["default"]` as a standalone tag-set entry → route to it. Resolution: `TG_DEFAULT_NOMATCH`.
+4. **Stage 3 — milestone Default WI (legacy)**: only reached if no TG produced a match. Resolution: `STAGED_DEFAULT`.
+
+**`"default"` tag semantics** (per architect Q6 lock):
+- Reserved literal — no legitimate document filename should contain the string `"default"`.
+- Must appear as its OWN singleton tag-set entry: `["default"]`. Cannot be mixed with other tags in the same tag-set.
+- Valid: `[["waiver"], ["default"]]` (two tag-sets, `["default"]` standalone), `[["default"]]` (single tag-set).
+- Invalid: `[["waiver", "default"]]`, `[["default", "sig_report"]]` — reject at template load via `DeliveryItemBase._v_default_tag_isolation` model validator.
+- Case-insensitive: `"Default"`, `"DEFAULT"` also reserved.
+
+**Precedence across multiple TGs**: `TG_DEFAULT_MULTIMATCH` > `SUBSTRING_MATCH` > `TG_SINGLE_ITEM` > `TG_DEFAULT_NOMATCH`. Strong evidence (a tie broken by TG-default in a matched TG) beats weaker evidence (a TG catching purely as fallback). If multiple TGs return matches at the same precedence tier, all matches accumulate — caller decides via existing over-routing threshold.
+
+**Why**:
+- (a) **TG=1 shortcut over always-parse (rejected)**: for TGs with a single item, requiring the doc filename to match one of the item's `item_description` tags before routing is friction with no upside — the destination is unambiguous. Shortcut simplifies the mental model for template authors ("if there's only one item, don't bother tagging").
+- (b) **`["default"]` tag semantics over `default_item: bool` field (rejected)**: keeping it as a tag-set entry means the same YAML structure (item_description) drives all routing decisions. A separate boolean would fragment the template author mental model.
+- (c) **Reserved literal for `"default"` (chosen)**: the word "default" is unlikely to appear in real document filenames (per architect Q6 assertion); reserving it lets the runtime treat `["default"]` as an unambiguous marker. If a filename does contain "default" and matches only the TG-default item, that's a clean single match under Stage 1 and wins — consistent with Q4.
+- (d) **Must be standalone tag-set (chosen)**: forbids `["waiver", "default"]` because it creates ambiguity — is that "a waiver document that is also the TG default", or "a specific waiver match"? Standalone enforcement makes the marker unambiguous.
+- (e) **Reject multiple `["default"]`-tagged items per TG at template load (Q5-a)**: >1 "default"-tagged items in the same TG is a template configuration error. Runtime defensively takes the first-in-iteration-order winner + logs a warning; formal load-time validator deferred.
+- (f) **Stage 2 fires BEFORE milestone Default WI (chosen)**: TG-default is a REAL work item (typed `test_tech_waiver_report`, `waiver`, etc.) inside the TG — the TG author intended it as the catch-all for that TG. Milestone Default WI is a global unrouted-triage path, semantically weaker.
+- (g) **Under `ph1_first_pass_substring_only=True`, Stages 2-4 (fuzzy / folder / LLM) remain skipped**: no change to Ph-1 first-pass scope; new TG-scoped logic sits entirely within the substring pass.
+
+**Consequences**:
+- (a) **`RoutingResolution` enum grows by 3**: `TG_SINGLE_ITEM` / `TG_DEFAULT_MULTIMATCH` / `TG_DEFAULT_NOMATCH`. Grep-friendly for ops observability.
+- (b) **`DeliveryItemBase` gets a new model_validator** (`_v_default_tag_isolation`) that rejects mixed tag-sets containing "default". Existing valid templates unchanged.
+- (c) **Router core method `_tg_scoped_route` inserted before Step B1**. Groups candidates by `tg_name`; per TG runs the 4-stage pipeline via `_route_within_tg`. Under `ph1_first_pass_substring_only=True`, if `_tg_scoped_route` returns empty, the router jumps directly to milestone Default WI (B5), skipping B2/B3/B4.
+- (d) **Test suite update**: 4 existing router tests had implicit TG=1 (single item in candidates); now require a decoy sibling to exercise Step 1 / fuzzy / LLM / Default-WI-fallback paths as before. 18 new tests cover the 4-stage pipeline + validator.
+- (e) **No SP schema change, no NSD path change, no DB migration**. All refinement lives in the router + template validator.
+- (f) **Multiple `["default"]`-tagged items in same TG**: runtime accepts (with first-wins + warning); template-load-time rejection deferred to a follow-up cleanup — current runtime is safe.
+- (g) **Interaction with future fuzzy / LLM stages (Ph-2)**: when `ph1_first_pass_substring_only=False` in Ph-2, `_tg_scoped_route` still runs first. If empty, fuzzy / folder / LLM run as before. TG-default becomes an intermediate fallback layer between substring and fuzzy.
+
+**Anchors**: **FR-52** (5-step routing pipeline), **FR-78** (milestone Default WI legacy fallback), **FR-82** (item_description nested tag-set model).

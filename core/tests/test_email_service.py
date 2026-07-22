@@ -545,17 +545,34 @@ class TestFr52AttachmentRouter:
         storage.index["h1"] = existing
         router = _make_router(storage=storage)
         att = _attachment("test_report.pdf", file_hash="h1")
-        result = await router.route(att, "BATCH-x", [_candidate_test_item()])
+        # Post-D-151: 2 items in TG so TG=1 shortcut doesn't fire and the
+        # dedup path can be exercised without needing item_has_association
+        # on the mock storage. Neither item has matching tags -> Stage 1
+        # returns 0 matches -> no TG-default -> caller falls through.
+        cand = _candidate_test_item(item_description=None, item_name="zzz1")
+        decoy = _candidate_test_item(
+            item_id="ITEM-2", item_no=2, item_name="zzz2", item_description=None,
+        )
+        result = await router.route(att, "BATCH-x", [cand, decoy])
         assert result.is_duplicate is True
         assert result.file_hash == "h1"
 
     async def test_happy_path_substring_match_classified(self):
         """Basic flow: test_report.pdf -> test_tech_waiver_report item ->
-        SubstringMatch + FilenameRegex + CLASSIFIED."""
+        SubstringMatch + FilenameRegex + CLASSIFIED.
+
+        Post-D-151 (2026-07-22): needs 2 items in the TG so the TG=1 shortcut
+        (Stage 0) doesn't preempt Stage 1 substring match. Decoy item has
+        non-matching tags so only ITEM-1 wins Stage 1.
+        """
         router = _make_router()
         att = _attachment("device_5g_n78_test_report.pdf")
-        item = _candidate_test_item(item_description=["5g", "n78"])
-        result = await router.route(att, "BATCH-1", [item])
+        item = _candidate_test_item(item_description=[["5g"], ["n78"]])
+        decoy = _candidate_test_item(
+            item_id="ITEM-2", item_no=2, item_name="decoy",
+            item_description=[["decoy_tag"]],
+        )
+        result = await router.route(att, "BATCH-1", [item, decoy])
         assert result.classification_resolution == ClassificationResolution.FILENAME_REGEX
         assert result.doc_type == DocType.TEST_REPORT.value
         assert result.routing_resolution == RoutingResolution.SUBSTRING_MATCH
@@ -567,23 +584,33 @@ class TestFr52AttachmentRouter:
 
     async def test_fuzzy_match_when_substring_fails(self):
         router = _make_router()
-        # Filename doesn't contain item_description tags, but item_name is close
+        # Filename doesn't contain item_description tags, but item_name is close.
+        # Post-D-151: needs 2 items in TG so TG=1 shortcut doesn't fire.
         att = _attachment("test_report_v2.pdf")
         item = _candidate_test_item(
             item_name="test_report_v2_for_handset",
             item_description=None,
         )
-        result = await router.route(att, "BATCH-1", [item])
+        decoy = _candidate_test_item(
+            item_id="ITEM-2", item_no=2, item_name="unrelated_zzz",
+            item_description=None,
+        )
+        result = await router.route(att, "BATCH-1", [item, decoy])
         assert result.routing_resolution == RoutingResolution.FUZZY_MATCH
         assert len(result.matches) == 1
 
     async def test_staged_default_when_no_match(self):
         router = _make_router()
         att = _attachment("random_attachment.pdf")
-        # Only Default item available; no tags
+        # Post-D-151: needs 2 items in TG so shortcut doesn't fire, and
+        # no ["default"]-tagged item so no TG-default fallback either.
         item = _candidate_test_item(item_description=None, item_name="zzzz_nothing")
+        decoy = _candidate_test_item(
+            item_id="ITEM-2", item_no=2, item_name="also_zzz_nothing",
+            item_description=None,
+        )
         default = _default_item()
-        result = await router.route(att, "BATCH-1", [item, default])
+        result = await router.route(att, "BATCH-1", [item, decoy, default])
         assert result.routing_resolution == RoutingResolution.STAGED_DEFAULT
         assert result.matches[0].item_id == "ITEM-DEFAULT"
         assert result.nsd_path_type == NSDPathType.UNROUTED
@@ -597,13 +624,18 @@ class TestFr52AttachmentRouter:
             {"matches": [{"item_id": "ITEM-1", "confidence": 0.92}]},
         )
         router = _make_router(llm=mock_llm)
-        # Force a fall-through past substring + fuzzy: blank filename + non-matching item
+        # Force a fall-through past substring + fuzzy: blank filename + non-matching item.
+        # Post-D-151: 2 items in TG so TG=1 shortcut doesn't preempt.
         att = _attachment("ambiguous.pdf")
         item = _candidate_test_item(
             item_name="totally_different_zzz",
             item_description=None,
         )
-        result = await router.route(att, "BATCH-1", [item])
+        decoy = _candidate_test_item(
+            item_id="ITEM-2", item_no=2, item_name="also_zzz",
+            item_description=None,
+        )
+        result = await router.route(att, "BATCH-1", [item, decoy])
         assert result.routing_resolution == RoutingResolution.LLM_ROUTE_ATTACHMENT
         assert result.matches[0].confidence == pytest.approx(0.92)
 
