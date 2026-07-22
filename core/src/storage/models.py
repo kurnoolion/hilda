@@ -24,6 +24,7 @@ __all__ = [
     "Direction",
     "DocumentIndexRow",
     "DocumentItemAssociation",
+    "DocumentVersionRow",
     "NSDPathType",
     "PLMFanOutTarget",
     "RevisionResolution",
@@ -235,6 +236,33 @@ class AutomationRuleOverride(BaseModel):
     set_by_pm_id: str
     set_at: datetime
     expires_at: datetime | None = None
+
+
+class DocumentVersionRow(BaseModel):
+    """Per D-150 — one row per save event in the HILDA-side documents view tree.
+
+    Ph-1: version resolution deferred; this row just maintains history so that
+    (a) audit knows which version was written when and by whom, and (b) Ph-2
+    restore-UI has the metadata to rebuild older versions from the `<path>.v<N>`
+    sibling files stored alongside the current file on NSD.
+    """
+
+    model_config = ConfigDict(frozen=False)
+
+    version_id: str                          # UUID; primary key
+    view_relative_path: str                  # NSDPath.to_relative() of CURRENT file location
+    customer_id: str
+    device_id: str
+    milestone_id: str
+    tg_name: str
+    filename: str                            # basename of file
+    version_num: int                         # 1-indexed; monotonically increasing per view_relative_path
+    is_current: bool = True                  # exactly one True per view_relative_path (the current-version row)
+    size_bytes: int
+    sha256: str                              # SHA-256 hex digest of the bytes AT SAVE TIME
+    saved_at: datetime
+    saved_by: str                            # user id (X-Authenticated-User), or "auto" for router-driven saves
+    source: str = "editor"                   # "editor" | "router" | "zip_extract"
 
 
 # UNC path sanity helper used by NSD layer — kept here so models stay IO-free.

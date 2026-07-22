@@ -147,6 +147,55 @@ class NSDPath:
             "_unrouted_zip", original_zip_filename,
         ))
 
+    # --- HILDA-side documents view tree (Ph-1 per D-150) ----------------------
+
+    @classmethod
+    def view_tree(
+        cls,
+        customer_id: str,
+        device_id: str,
+        milestone_id: str,
+        tg_name: str,
+        *relative_parts: str,
+    ) -> "NSDPath":
+        """HILDA-side documents view tree per D-150. Path:
+        view/<customer_id>/<device_id>/<milestone_id>/<tg_name>/<*relative_parts>
+
+        Distinct from the FR-86 internal/ tree (item-scoped): this tree is
+        tg-scoped and populated after successful attachment routing + zip
+        extraction. Each `relative_parts` segment is a folder/filename
+        preserved from the source (e.g. a zip's internal directory tree).
+        Empty relative_parts is legal — points to the tg_name directory itself
+        for landing-page listings.
+        """
+        return cls(("view", customer_id, device_id, milestone_id, tg_name, *relative_parts))
+
+    @classmethod
+    def view_version_sibling(cls, current: "NSDPath", version_num: int) -> "NSDPath":
+        """Given a `view/...` NSDPath pointing at the CURRENT version of a file,
+        return the sibling path used to store the archived prior version.
+
+        Format: append `.v<N>` to the filename. Example:
+          current  = view/c/d/m/tg/subdir/report.xlsx
+          returned = view/c/d/m/tg/subdir/report.xlsx.v3
+
+        Prior versions are stored alongside the current file; version_num=1 is
+        the first save (no prior versions exist), version_num=2 is the sibling
+        that holds what was current at the time of the second save, and so on.
+        """
+        if not current.segments:
+            raise PipelineError(
+                "STR-E004",
+                context={"reason": "view_version_sibling: empty segments"},
+            )
+        if version_num < 1:
+            raise PipelineError(
+                "STR-E004",
+                context={"version_num": version_num, "reason": "version_num must be >= 1"},
+            )
+        *head, filename = current.segments
+        return cls(tuple(head) + (f"{filename}.v{version_num}",))
+
     @classmethod
     def internal_outbound(
         cls, customer_id, device_id, milestone_name, tg_path_id, item_path_id,

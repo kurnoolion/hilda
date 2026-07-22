@@ -38,6 +38,7 @@ __all__ = [
     "DeliveryItemTable",
     "DocumentIndexTable",
     "DocumentItemAssociationTable",
+    "DocumentVersionTable",
     "TGFolderRoutingTable",
     "TagCatalogTable",
     "configure_engine",
@@ -293,6 +294,44 @@ class DeliveryItemTable(Base):
 
     # TPM-resolution per FR-83 / FR-87
     tpm_reassignment_target_item_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class DocumentVersionTable(Base):
+    """One row per save event in the HILDA-side documents view tree per D-150.
+
+    The view tree lives at NSD `view/<customer>/<device>/<milestone>/<tg>/...`
+    and holds documents received by tg_name (plus extracted zip contents,
+    preserving folder structure). Every save creates a new version_num row;
+    the file on disk with no suffix is the CURRENT version; prior versions
+    live in sibling files named `<filename>.v<N>` per NSDPath.view_version_sibling.
+
+    Ph-1: version resolution / restore UI deferred; this table just maintains
+    the history so audit and future Ph-2 restore have data to work with.
+    """
+    __tablename__ = "document_version"
+    __table_args__ = (
+        # Scope lookup: landing page ("give me all tg_names for this scope"),
+        # per-tg browse ("give me all files under this tg"), history query
+        # ("all versions of this exact file").
+        Index("ix_dv_scope", "customer_id", "device_id", "milestone_id", "tg_name"),
+        Index("ix_dv_path", "view_relative_path"),
+        Index("ix_dv_saved_at", "saved_at"),
+    )
+
+    version_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # UUID
+    view_relative_path: Mapped[str] = mapped_column(String(1024))  # NSDPath.to_relative() of CURRENT-version location
+    customer_id: Mapped[str] = mapped_column(String(64))
+    device_id: Mapped[str] = mapped_column(String(64))
+    milestone_id: Mapped[str] = mapped_column(String(64))
+    tg_name: Mapped[str] = mapped_column(String(128))
+    filename: Mapped[str] = mapped_column(String(512))  # basename of the file, e.g. "report.xlsx"
+    version_num: Mapped[int] = mapped_column(Integer)   # 1 = first save; increments on each save
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)  # exactly one True per view_relative_path
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    saved_by: Mapped[str] = mapped_column(String(128))  # user id from X-Authenticated-User; "auto" for router-driven saves
+    source: Mapped[str] = mapped_column(String(32), default="editor")  # "editor" | "router" | "zip_extract"
 
 
 class AutomationRuleOverrideTable(Base):
