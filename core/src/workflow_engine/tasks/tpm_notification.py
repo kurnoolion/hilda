@@ -429,6 +429,25 @@ def _send_notification(
         customer_id, device_id, milestone_id, phase, message_id,
         summary["open_count"], summary["closed_count"], summary["completion_percent"],
     )
+
+    # -- Final DRR deliverable state transition per architect 2026-07-18 -----
+    # On day-of send for configured milestones (DRR by default), transition
+    # the item named cfg.final_deliverable_item_name to SubmittedToCustomer;
+    # if that succeeds, close the Default WI (Ph-2 gate respected).
+    # Semantics: HILDA-generated Excel sent to TPM == carrier deliverable
+    # submitted from HILDA's perspective (TPM forwards to carrier).
+    # Best-effort: any failure logs a warning but does not fail the send.
+    if phase == _PHASE_DAY_OF and milestone_id in cfg.final_deliverable_milestone_names:
+        _transition_final_deliverable_and_close_default_wi(
+            deps=deps,
+            cfg=cfg,
+            items=items,
+            customer_id=customer_id,
+            device_id=device_id,
+            milestone_id=milestone_id,
+            correlation_id=f"tpm_notification:{customer_id}:{device_id}:{milestone_id}:day_of",
+        )
+
     return True
 
 
@@ -464,6 +483,184 @@ def _send_via_email_sender(
             return new_loop.run_until_complete(coro)
         finally:
             new_loop.close()
+
+
+# ---------------------------------------------------------------------------
+# Final DRR deliverable transition + Default WI close (day-of side effect)
+# ---------------------------------------------------------------------------
+
+
+def _transition_final_deliverable_and_close_default_wi(
+    *,
+    deps: Any,
+    cfg: TpmNotificationConfig,
+    items: list[Any],
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+    correlation_id: str,
+) -> None:
+    """After a successful day-of DRR send: transition the "Final DRR status
+    excel deliverable for carrier" item to SubmittedToCustomer, then close
+    the Default WI in scope. Per architect 2026-07-18.
+
+    Behavior:
+      1. Find item(s) with item_name == cfg.final_deliverable_item_name in
+         the (customer, device, milestone) scope. Transition to
+         SUBMITTED_TO_CUSTOMER via trigger_source='tpm_drr_final_deliverable'
+         (Guard 4 trust list per 2026-07-18). If already at
+         SubmittedToCustomer/Closed, treat as success (idempotent).
+      2. If step 1 produced at least one successful (or already-terminal)
+         transition, close all Default WIs in scope (Open -> Closed).
+         Ph-2 gate: Default WI with classified attachments -> skip + log
+         'default_wi_close_deferred_ph2_pending' (matching pm_approval.py's
+         sweep semantics).
+
+    Unlike apply_pm_approval_task's sweep (which gates Default WI close on
+    all non-Default items being terminal), this close is UNCONDITIONAL --
+    "rest" items still at OutreachSent/DocumentReceived are expected at
+    DRR target_date per architect 2026-07-18. Close All Items (FR-64) is
+    the TPM's later trigger to close the remaining pipeline items.
+
+    Best-effort throughout: exceptions are logged, not raised. The outer
+    email send has already succeeded and been audited.
+    """
+    from core.src.tracker import DeliveryState as _DS
+    from core.src.tracker.transitions import update_delivery_state as _uds
+    from core.src.template_schema.enums import ItemType as _IT
+
+    target_name = cfg.final_deliverable_item_name
+
+    matched = [
+        it for it in items
+        if (getattr(it, "item_name", None) or "") == target_name
+    ]
+    if not matched:
+        _log.warning(
+            "tpm_drr_final_deliverable: item name %r not found in scope "
+            "customer=%s device=%s milestone=%s -- template may be missing "
+            "this row; skipping transition + Default WI close",
+            target_name, customer_id, device_id, milestone_id,
+        )
+        return
+    if len(matched) > 1:
+        _log.warning(
+            "tpm_drr_final_deliverable: %d items match name %r in scope "
+            "customer=%s device=%s milestone=%s -- transitioning all",
+            len(matched), target_name, customer_id, device_id, milestone_id,
+        )
+
+    transition_ok = False
+    for final_item in matched:
+        fi_id = (
+            getattr(final_item, "item_id", None)
+            or getattr(final_item, "delivery_item_id", None)
+        )
+        if not fi_id:
+            continue
+        current_state = getattr(final_item, "delivery_state", None) or ""
+        if current_state in (_DS.SUBMITTED_TO_CUSTOMER.value, _DS.CLOSED.value):
+            _log.info(
+                "tpm_drr_final_deliverable: item=%s already at %s; "
+                "treating as success (idempotent)",
+                fi_id, current_state,
+            )
+            transition_ok = True
+            continue
+        try:
+            _uds(
+                delivery_item_id=fi_id,
+                target_state=_DS.SUBMITTED_TO_CUSTOMER,
+                params={},
+                event_context={
+                    "correlation_id":   correlation_id,
+                    "delivery_item_id": fi_id,
+                    "trigger_source":   "tpm_drr_final_deliverable",
+                    "rule_id":          "tpm_drr_final_deliverable_on_day_of_send",
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+            )
+            transition_ok = True
+            _log.info(
+                "tpm_drr_final_deliverable_transitioned: item=%s "
+                "(customer=%s device=%s milestone=%s) %s -> SubmittedToCustomer",
+                fi_id, customer_id, device_id, milestone_id, current_state,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "tpm_drr_final_deliverable_transition_failed: item=%s "
+                "(customer=%s device=%s milestone=%s) from=%s: %s: %s",
+                fi_id, customer_id, device_id, milestone_id, current_state,
+                type(exc).__name__, str(exc)[:120],
+            )
+
+    if not transition_ok:
+        _log.info(
+            "tpm_drr_final_deliverable: no successful transitions; "
+            "skipping Default WI close (customer=%s device=%s milestone=%s)",
+            customer_id, device_id, milestone_id,
+        )
+        return
+
+    # Default WI close -- unconditional per architect 2026-07-18 (Ph-2 gate
+    # respected). "Rest" items still at OutreachSent are expected at DRR
+    # target_date; Close All Items (FR-64) closes them later.
+    default_wis = [
+        it for it in items
+        if (getattr(it, "item_type", None) or "") == _IT.DEFAULT.value
+    ]
+    for dwi in default_wis:
+        dwi_id = (
+            getattr(dwi, "item_id", None)
+            or getattr(dwi, "delivery_item_id", None)
+        )
+        if not dwi_id:
+            continue
+        if (getattr(dwi, "delivery_state", None) or "") == _DS.CLOSED.value:
+            continue
+        # Ph-2 gate -- classified attachments pending routing.
+        try:
+            classified = deps.storage.list_classified_associations_for_item(dwi_id) or []
+        except Exception:  # noqa: BLE001
+            classified = []
+        if classified:
+            _log.info(
+                "default_wi_close_deferred_ph2_pending: default_wi=%s "
+                "classified_count=%d (customer=%s device=%s milestone=%s) "
+                "-- deferred on DRR day-of send",
+                dwi_id, len(classified),
+                customer_id, device_id, milestone_id,
+            )
+            continue
+        try:
+            _uds(
+                delivery_item_id=dwi_id,
+                target_state=_DS.CLOSED,
+                params={},
+                event_context={
+                    "correlation_id":   correlation_id,
+                    "delivery_item_id": dwi_id,
+                    "trigger_source":   "automated",
+                    "rule_id":          "default_wi_auto_close_on_drr_final_deliverable_send",
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+            )
+            _log.info(
+                "default_wi_auto_closed_on_drr_send: default_wi=%s "
+                "(customer=%s device=%s milestone=%s)",
+                dwi_id, customer_id, device_id, milestone_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "default_wi_auto_close_on_drr_send_failed: default_wi=%s "
+                "(customer=%s device=%s milestone=%s): %s: %s",
+                dwi_id, customer_id, device_id, milestone_id,
+                type(exc).__name__, str(exc)[:120],
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -18,20 +18,22 @@ import json
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 __all__ = ["TpmNotificationConfig"]
 
 _DEFAULT_CONFIG_PATH = Path("config/tpm_notification.json")
 
 _ENV_MAP = {
-    "enabled":                        "HILDA_TPM_NOTIFICATION_ENABLED",
-    "beat_interval_seconds":          "HILDA_TPM_NOTIFICATION_BEAT_INTERVAL_SECONDS",
-    "timezone":                       "HILDA_TPM_NOTIFICATION_TIMEZONE",
-    "window_minutes":                 "HILDA_TPM_NOTIFICATION_WINDOW_MINUTES",
-    "strict_only":                    "HILDA_TPM_NOTIFICATION_STRICT_ONLY",
-    "ops_alert_on_missed_window":     "HILDA_TPM_NOTIFICATION_OPS_ALERT_ON_MISSED_WINDOW",
+    "enabled":                          "HILDA_TPM_NOTIFICATION_ENABLED",
+    "beat_interval_seconds":            "HILDA_TPM_NOTIFICATION_BEAT_INTERVAL_SECONDS",
+    "timezone":                         "HILDA_TPM_NOTIFICATION_TIMEZONE",
+    "window_minutes":                   "HILDA_TPM_NOTIFICATION_WINDOW_MINUTES",
+    "strict_only":                      "HILDA_TPM_NOTIFICATION_STRICT_ONLY",
+    "ops_alert_on_missed_window":       "HILDA_TPM_NOTIFICATION_OPS_ALERT_ON_MISSED_WINDOW",
     "ops_alert_on_missing_target_date": "HILDA_TPM_NOTIFICATION_OPS_ALERT_ON_MISSING_TARGET_DATE",
+    "final_deliverable_item_name":      "HILDA_TPM_NOTIFICATION_FINAL_DELIVERABLE_ITEM_NAME",
+    "final_deliverable_milestone_names": "HILDA_TPM_NOTIFICATION_FINAL_DELIVERABLE_MILESTONE_NAMES",
 }
 
 
@@ -49,6 +51,22 @@ class TpmNotificationConfig(BaseModel):
     strict_only:                    bool  = True                   # per architect ask
     ops_alert_on_missed_window:     bool  = True
     ops_alert_on_missing_target_date: bool = True
+
+    # Final DRR status deliverable transition per architect 2026-07-18:
+    # on day-of Excel send, the work item named `final_deliverable_item_name`
+    # in each (customer, device, milestone) scope where milestone_id is in
+    # `final_deliverable_milestone_names` is transitioned SubmittedToCustomer
+    # (and the matching Default WI is closed, Ph-2 gate respected).
+    final_deliverable_item_name:      str       = "Final DRR status excel deliverable for carrier"
+    final_deliverable_milestone_names: list[str] = ["DRR"]
+
+    @field_validator("final_deliverable_milestone_names", mode="before")
+    @classmethod
+    def _parse_milestone_names(cls, v):
+        """Accept comma-separated string (from env var) or list."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
     @classmethod
     def from_sources(

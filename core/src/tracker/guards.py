@@ -235,7 +235,7 @@ def check_transition_guards(
             # Items with no_customer_upload=True should never reach SUBMITTED_TO_CUSTOMER
             # in the first place -- the path is READY_FOR_SUBMISSION -> CLOSED direct.
             blocking.append("submitted_path_invalid_for_no_customer_upload")
-        elif trigger_source == "submit_to_carrier_task":
+        elif trigger_source in ("submit_to_carrier_task", "tpm_drr_final_deliverable"):
             # 2026-07-01: submit_to_carrier_task IS the authority on whether
             # the upload happened -- it only transitions after per-item
             # all-files-success. The carrier_upload_complete field it would
@@ -244,6 +244,14 @@ def check_transition_guards(
             # falsely blocked every legitimate transition. Trust the task's
             # own trigger_source instead; other trigger_sources still hit
             # the fallback flag check.
+            #
+            # 2026-07-18 add tpm_drr_final_deliverable per architect: the
+            # scheduled DRR closure Excel email (tpm_notification_tick_task)
+            # sending on target_date at 00:00 US/Eastern IS the "excel sent
+            # to carrier" event for the Final DRR status deliverable item.
+            # Beat task carries the authority; carrier_upload_complete flag
+            # isn't set on this path (no carrier_adapter dispatch) so the
+            # fallback branch would falsely block.
             pass
         elif not _carrier_upload_complete(item):
             blocking.append("carrier_upload_incomplete")
