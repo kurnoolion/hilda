@@ -1,0 +1,492 @@
+"""D-150 HILDA-side documents view — FastAPI routes.
+
+Chunk 4 (browse UI):
+  * GET  /browse/{customer_id}/{device_id}/{milestone_id}/
+        Landing page — list tg_names as directories.
+  * GET  /browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/
+        Flat file list under a tg_name (per architect Q4 lock).
+
+Chunk 5 (WOPI Host + editor embed):
+  * GET  /browse/edit/{token}
+        Loads an HTML page that embeds the OnlyOffice editor iframe with a
+        signed WOPI URL. `token` is a short-lived scoped token identifying
+        the file to open. Auth: X-Authenticated-User (same as dashboard).
+  * GET  /wopi/files/{file_id}
+        CheckFileInfo per WOPI protocol. Called BY OnlyOffice server (not
+        browser); JWT-signed. Returns metadata JSON.
+  * GET  /wopi/files/{file_id}/contents
+        Returns raw file bytes. Called by OnlyOffice server; JWT-signed.
+  * POST /wopi/files/{file_id}/contents
+        Save handler. Body = new file bytes. Creates a new version_num row
+        via save_view_document. Called by OnlyOffice server on save; JWT-signed.
+
+Chunk 6 (view-only PDF/HTML + download):
+  * GET  /browse/download/{token}
+        Direct download link — streams file bytes with Content-Disposition
+        attachment. Same tokenization as edit.
+  * GET  /browse/view/{token}
+        Native browser view (inline Content-Disposition). Used for PDF/HTML
+        rendering (no OnlyOffice needed).
+
+Chunk 7 (audit): every open/edit/save/download event logs to
+CommunicationLog with the D-150 action_type set:
+  * document_viewed          (file opened via /browse/view or /browse/edit view mode)
+  * document_edit_opened     (file opened in edit mode via /browse/edit)
+  * document_saved           (OnlyOffice PUT to /wopi/files/*/contents)
+  * document_downloaded      (file streamed via /browse/download)
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import time
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from typing import Any
+
+from fastapi import (
+    APIRouter, Body, Depends, FastAPI, Header, HTTPException, Request, status,
+)
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+__all__ = ["register_document_view_routes"]
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Token: HMAC-signed scope + path bundle for /browse/edit + /browse/download
+# ---------------------------------------------------------------------------
+
+
+_TOKEN_TTL_SECONDS = 30 * 60   # 30 min
+
+
+def _make_scoped_token(*, secret: str, view_relative_path: str, mode: str,
+                       user_id: str, ttl_seconds: int = _TOKEN_TTL_SECONDS) -> str:
+    """URL-safe token containing view_relative_path + mode + user_id + expires_at.
+    HMAC-SHA256 signed with dashboard.wopi_jwt_secret so tampering is detected."""
+    payload = {
+        "p":  view_relative_path,
+        "m":  mode,             # "view" | "edit" | "download"
+        "u":  user_id,
+        "x":  int(time.time()) + ttl_seconds,
+    }
+    body = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    sig = _hmac_hex(secret, body)
+    return f"{body}.{sig}"
+
+
+def _resolve_scoped_token(*, secret: str, token: str) -> dict[str, Any]:
+    """Verify HMAC + expiry. Raises HTTPException(401) on any failure."""
+    try:
+        body, sig = token.rsplit(".", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="malformed token") from exc
+    if not hmac.compare_digest(sig, _hmac_hex(secret, body)):
+        raise HTTPException(status_code=401, detail="bad signature")
+    try:
+        pad = "=" * (-len(body) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(body + pad).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="bad payload") from exc
+    if payload.get("x", 0) < int(time.time()):
+        raise HTTPException(status_code=401, detail="token expired")
+    return payload
+
+
+def _hmac_hex(secret: str, body: str) -> str:
+    return hmac.new(
+        (secret or "unset-secret").encode("utf-8"),
+        body.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+# ---------------------------------------------------------------------------
+# WOPI JWT — for HILDA <-> OnlyOffice back-channel authentication
+# ---------------------------------------------------------------------------
+
+
+def _make_wopi_jwt(*, secret: str, view_relative_path: str, exp_seconds: int = 3600) -> str:
+    """Minimal JWT (HS256) — the shared secret is the same one OnlyOffice
+    container has as JWT_SECRET. OnlyOffice validates on inbound; HILDA
+    validates on inbound. RFC 7519.
+    """
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "path": view_relative_path,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + exp_seconds,
+    }
+    h = base64.urlsafe_b64encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    p = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    sig_b = hmac.new(
+        (secret or "unset-secret").encode("utf-8"),
+        f"{h}.{p}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    sig = base64.urlsafe_b64encode(sig_b).rstrip(b"=").decode("ascii")
+    return f"{h}.{p}.{sig}"
+
+
+def _verify_wopi_jwt(*, secret: str, token: str) -> dict[str, Any]:
+    """Verify inbound WOPI JWT from OnlyOffice. Raises HTTPException(401)."""
+    try:
+        h, p, sig = token.split(".")
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="malformed WOPI JWT") from exc
+    expected = hmac.new(
+        (secret or "unset-secret").encode("utf-8"),
+        f"{h}.{p}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    provided_sig_bytes = _urlsafe_b64_decode(sig)
+    if not hmac.compare_digest(expected, provided_sig_bytes):
+        raise HTTPException(status_code=401, detail="bad WOPI JWT signature")
+    try:
+        payload = json.loads(_urlsafe_b64_decode(p).decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="bad WOPI JWT payload") from exc
+    if payload.get("exp", 0) < int(time.time()):
+        raise HTTPException(status_code=401, detail="WOPI JWT expired")
+    return payload
+
+
+def _urlsafe_b64_decode(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+# ---------------------------------------------------------------------------
+# File-type dispatch
+# ---------------------------------------------------------------------------
+
+
+_EDITOR_EXTENSIONS = {".docx", ".xlsx", ".xlsm", ".doc", ".xls", ".pptx", ".ppt"}
+_NATIVE_VIEW_EXTENSIONS = {".pdf", ".html", ".htm", ".txt", ".csv", ".md"}
+_DOWNLOAD_ONLY_EXTENSIONS: set[str] = set()  # everything else -> download
+
+
+def _open_mode_for(filename: str) -> str:
+    """Return 'editor' | 'native' | 'download' based on extension."""
+    ext = _ext(filename)
+    if ext in _EDITOR_EXTENSIONS:
+        return "editor"
+    if ext in _NATIVE_VIEW_EXTENSIONS:
+        return "native"
+    return "download"
+
+
+def _ext(filename: str) -> str:
+    if "." not in filename:
+        return ""
+    return "." + filename.rsplit(".", 1)[-1].lower()
+
+
+def _mime_for(filename: str) -> str:
+    ext = _ext(filename)
+    return {
+        ".pdf":  "application/pdf",
+        ".html": "text/html",
+        ".htm":  "text/html",
+        ".txt":  "text/plain",
+        ".csv":  "text/csv",
+        ".md":   "text/markdown",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif":  "image/gif",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }.get(ext, "application/octet-stream")
+
+
+# ---------------------------------------------------------------------------
+# Audit
+# ---------------------------------------------------------------------------
+
+
+def _audit(request: Request, action_type: str, view_relative_path: str, user_id: str,
+           details: dict[str, Any] | None = None) -> None:
+    """Log to CommunicationLog. Best-effort; failure is logged locally."""
+    deps = getattr(request.app.state, "task_deps", None)
+    if deps is None or getattr(deps, "audit", None) is None:
+        return
+    d = {"view_relative_path": view_relative_path, "user_id": user_id}
+    if details:
+        d.update(details)
+    try:
+        deps.audit.write_communication_log(
+            action_type=action_type,
+            delivery_item_id=None,
+            attribution={
+                "trigger_source": "dashboard:document_view",
+                "correlation_id": view_relative_path,
+                "modified_by":    user_id,
+            },
+            details=d,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("document_view audit failed action=%s: %s", action_type, str(exc)[:120])
+
+
+# ---------------------------------------------------------------------------
+# Route registration
+# ---------------------------------------------------------------------------
+
+
+def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
+    """Wire the /browse/* + /wopi/* routes onto an existing FastAPI app.
+
+    `cfg` is the dashboard config (has wopi_jwt_secret + onlyoffice_public_url +
+    onlyoffice_internal_url). `templates` is the Jinja2Templates instance
+    already configured by the caller.
+    """
+    from .auth import require_authenticated_principal
+
+    def _auth(request: Request):
+        return require_authenticated_principal(request, cfg)
+
+    # ----- Chunk 4: browse landing + folder listing ------------------------
+
+    @app.get(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/",
+        response_class=HTMLResponse,
+    )
+    async def browse_landing(
+        customer_id: str, device_id: str, milestone_id: str,
+        request: Request,
+        principal=Depends(_auth),
+    ):
+        from core.src.storage import list_tg_names_for_scope
+        entries = await list_tg_names_for_scope(
+            customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        )
+        return templates.TemplateResponse(
+            request,
+            "view_tree_landing.html",
+            {
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+                "tg_entries":   entries,
+            },
+        )
+
+    @app.get(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/",
+        response_class=HTMLResponse,
+    )
+    async def browse_tg_files(
+        customer_id: str, device_id: str, milestone_id: str, tg_name: str,
+        request: Request,
+        principal=Depends(_auth),
+    ):
+        from core.src.storage import list_files_in_tg
+        files = await list_files_in_tg(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id, tg_name=tg_name,
+        )
+        # For each file, compute open-mode + a scoped token for that mode
+        secret = cfg.wopi_jwt_secret
+        user_id = getattr(principal, "corp_id", None) or getattr(principal, "user_id", "unknown")
+        rendered = []
+        for f in files:
+            mode = _open_mode_for(f.filename)
+            tok_mode = "edit" if mode == "editor" else ("view" if mode == "native" else "download")
+            tok = _make_scoped_token(
+                secret=secret, view_relative_path=f.view_relative_path,
+                mode=tok_mode, user_id=user_id,
+            )
+            rendered.append({
+                "filename":            f.filename,
+                "view_relative_path":  f.view_relative_path,
+                "size_bytes":          f.size_bytes,
+                "version_count":       f.version_count,
+                "last_saved_at":       f.last_saved_at,
+                "last_saved_by":       f.last_saved_by,
+                "open_mode":           mode,
+                "open_token":          tok,
+            })
+        return templates.TemplateResponse(
+            request,
+            "view_tree_tg.html",
+            {
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+                "tg_name":      tg_name,
+                "files":        rendered,
+            },
+        )
+
+    # ----- Chunk 6: view + download (native browser) -----------------------
+
+    @app.get("/browse/view/{token}")
+    async def browse_view(token: str, request: Request):
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] not in ("view", "edit"):
+            raise HTTPException(status_code=403, detail="token not a view/edit token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+        _audit(request, "document_viewed", view_relative_path, user_id)
+        from core.src.storage import read_current_version_bytes
+        content = await read_current_version_bytes(view_relative_path)
+        filename = PurePosixPath(view_relative_path).name
+        return StreamingResponse(
+            iter((content,)),
+            media_type=_mime_for(filename),
+            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        )
+
+    @app.get("/browse/download/{token}")
+    async def browse_download(token: str, request: Request):
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] not in ("download", "view", "edit"):
+            raise HTTPException(status_code=403, detail="token not a download token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+        _audit(request, "document_downloaded", view_relative_path, user_id)
+        from core.src.storage import read_current_version_bytes
+        content = await read_current_version_bytes(view_relative_path)
+        filename = PurePosixPath(view_relative_path).name
+        return StreamingResponse(
+            iter((content,)),
+            media_type=_mime_for(filename),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # ----- Chunk 5: OnlyOffice edit embed -----
+
+    @app.get("/browse/edit/{token}", response_class=HTMLResponse)
+    async def browse_edit(token: str, request: Request):
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "edit":
+            raise HTTPException(status_code=403, detail="token not an edit token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+
+        filename = PurePosixPath(view_relative_path).name
+        if _open_mode_for(filename) != "editor":
+            raise HTTPException(status_code=415, detail="file type not editable")
+
+        if not cfg.onlyoffice_public_url or not cfg.wopi_jwt_secret:
+            return HTMLResponse(
+                "<html><body><h1>OnlyOffice not configured</h1>"
+                "<p>Set dashboard.onlyoffice_public_url + wopi_jwt_secret in "
+                "config/dashboard.json to enable in-browser editing.</p></body></html>",
+                status_code=503,
+            )
+
+        _audit(request, "document_edit_opened", view_relative_path, user_id)
+
+        # WOPI src URL — OnlyOffice fetches file bytes from HILDA at this URL.
+        # Use the reverse-proxy public origin so OnlyOffice can reach us.
+        wopi_src = f"{cfg.reverse_proxy_origin.rstrip('/')}/wopi/files/{_encode_file_id(view_relative_path)}"
+        wopi_jwt = _make_wopi_jwt(secret=cfg.wopi_jwt_secret,
+                                   view_relative_path=view_relative_path)
+
+        return templates.TemplateResponse(
+            request,
+            "view_tree_editor.html",
+            {
+                "onlyoffice_public_url": cfg.onlyoffice_public_url.rstrip("/"),
+                "filename":             filename,
+                "wopi_src":             wopi_src,
+                "wopi_jwt":             wopi_jwt,
+                "user_id":              user_id,
+            },
+        )
+
+    # ----- Chunk 5: WOPI Host endpoints -----
+
+    @app.get("/wopi/files/{file_id}")
+    async def wopi_check_file_info(file_id: str, request: Request):
+        """CheckFileInfo — WOPI protocol metadata GET."""
+        view_relative_path = _decode_file_id(file_id)
+        _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
+        from core.src.storage import get_current_version
+        row = await get_current_version(view_relative_path)
+        if row is None:
+            raise HTTPException(status_code=404, detail="no such file")
+        return JSONResponse({
+            "BaseFileName":     row.filename,
+            "Size":             row.size_bytes,
+            "OwnerId":          row.saved_by,
+            "UserId":           row.saved_by,
+            "UserFriendlyName": row.saved_by,
+            "Version":          str(row.version_num),
+            "SupportsUpdate":   True,
+            "UserCanWrite":     True,
+            "UserCanRename":    False,
+            "ReadOnly":         False,
+            "SHA256":           row.sha256,
+        })
+
+    @app.get("/wopi/files/{file_id}/contents")
+    async def wopi_get_file_contents(file_id: str, request: Request):
+        view_relative_path = _decode_file_id(file_id)
+        _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
+        from core.src.storage import read_current_version_bytes
+        content = await read_current_version_bytes(view_relative_path)
+        return StreamingResponse(iter((content,)),
+                                 media_type="application/octet-stream")
+
+    @app.post("/wopi/files/{file_id}/contents")
+    async def wopi_put_file_contents(file_id: str, request: Request):
+        """OnlyOffice saves back here on user Ctrl+S / auto-save. Body is raw
+        file bytes. We save as a new version_num via save_view_document."""
+        view_relative_path = _decode_file_id(file_id)
+        _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
+        new_bytes = await request.body()
+        # Parse scope from view_relative_path: view/<cust>/<dev>/<mile>/<tg>/<...rel>
+        parts = view_relative_path.split("/")
+        if len(parts) < 6 or parts[0] != "view":
+            raise HTTPException(status_code=400, detail="malformed view path")
+        _, cust, dev, mile, tg, *rel = parts
+        # Prefer the WOPI JWT's user id when supplied via 'user' query param;
+        # OnlyOffice includes this. Otherwise "wopi-save".
+        user_id = request.query_params.get("user") or "wopi-save"
+        from core.src.storage import save_view_document
+        row = await save_view_document(
+            customer_id=cust, device_id=dev, milestone_id=mile, tg_name=tg,
+            relative_parts=tuple(rel),
+            content=new_bytes, saved_by=user_id, source="editor",
+        )
+        _audit(request, "document_saved", view_relative_path, user_id,
+               details={"version_num": row.version_num, "size_bytes": row.size_bytes})
+        return JSONResponse({
+            "LastModifiedTime": row.saved_at.isoformat(),
+            "Version":          str(row.version_num),
+        })
+
+
+def _verify_wopi_from_headers(request: Request, secret: str) -> None:
+    """Look for WOPI JWT on Authorization: Bearer <token> or ?access_token=..."""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        _verify_wopi_jwt(secret=secret, token=auth[7:])
+        return
+    tok = request.query_params.get("access_token")
+    if tok:
+        _verify_wopi_jwt(secret=secret, token=tok)
+        return
+    raise HTTPException(status_code=401, detail="WOPI JWT required")
+
+
+def _encode_file_id(view_relative_path: str) -> str:
+    return base64.urlsafe_b64encode(view_relative_path.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+def _decode_file_id(file_id: str) -> str:
+    return _urlsafe_b64_decode(file_id).decode("utf-8")

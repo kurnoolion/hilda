@@ -718,4 +718,8 @@ def build_app(
             },
         )
 
+    # D-150 HILDA-side documents view routes: /browse/* + /wopi/*
+    from .document_view_routes import register_document_view_routes
+    register_document_view_routes(app, cfg, templates)
+
     return app

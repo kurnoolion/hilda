@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — {{ tg_name }} · {{ milestone_id }}{% endblock %}
+
+{% block content %}
+<p><a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
+
+<h1>{{ tg_name }} — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
+
+<p>All documents received for this technology group. Zip archives were
+auto-extracted preserving folder structure; every save creates a new version.</p>
+
+{% if files|length == 0 %}
+  <p><em>No documents in this group yet.</em></p>
+{% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Size</th>
+        <th>Versions</th>
+        <th>Last saved</th>
+        <th>By</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in files %}
+      <tr>
+        <td><code>{{ f.view_relative_path.split('/' + tg_name + '/', 1)[1] if ('/' + tg_name + '/') in f.view_relative_path else f.filename }}</code></td>
+        <td>{{ f.size_bytes }}</td>
+        <td>{{ f.version_count }}</td>
+        <td>{{ f.last_saved_at.strftime('%Y-%m-%d %H:%M UTC') }}</td>
+        <td>{{ f.last_saved_by }}</td>
+        <td>
+          {% if f.open_mode == 'editor' %}
+            <a href="/browse/edit/{{ f.open_token }}">Edit</a>
+          {% elif f.open_mode == 'native' %}
+            <a href="/browse/view/{{ f.open_token }}">View</a>
+          {% endif %}
+          <a href="/browse/download/{{ f.open_token }}">Download</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

@@ -26,6 +26,9 @@ _ENV_MAP = {
     "jinja_templates_dir":        "HILDA_DASHBOARD_JINJA_TEMPLATES_DIR",
     "mock_auth":                  "HILDA_DASHBOARD_MOCK_AUTH",
     "ph1_minimal":                "HILDA_DASHBOARD_PH1_MINIMAL",
+    "wopi_jwt_secret":            "HILDA_DASHBOARD_WOPI_JWT_SECRET",
+    "onlyoffice_public_url":      "HILDA_DASHBOARD_ONLYOFFICE_PUBLIC_URL",
+    "onlyoffice_internal_url":    "HILDA_DASHBOARD_ONLYOFFICE_INTERNAL_URL",
 }
 
 
@@ -50,6 +53,16 @@ class DashboardConfig(BaseModel):
     # per-load SP READ. Flip to False in Ph-2 without touching templates --
     # the FR-60/61/87 blocks are gated with {% if not cfg.ph1_minimal %}.
     ph1_minimal:                bool        = True
+
+    # D-150 HILDA-side documents view (Ph-1). Empty defaults keep the /browse
+    # + /wopi endpoints functional at the routing layer; the OnlyOffice editor
+    # embed short-circuits with a "Configure OnlyOffice URL" message when
+    # onlyoffice_public_url is empty. Set both URLs + wopi_jwt_secret at
+    # deploy time (Chunk 1 topology already has JWT_SECRET on the OnlyOffice
+    # container; paste the same value into wopi_jwt_secret below).
+    wopi_jwt_secret:            str        = ""
+    onlyoffice_public_url:      str        = ""
+    onlyoffice_internal_url:    str        = ""
 
     @classmethod
     def from_sources(

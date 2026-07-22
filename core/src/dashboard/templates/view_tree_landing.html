@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — Documents ({{ milestone_id }}){% endblock %}
+
+{% block content %}
+<h1>Documents — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
+
+<p>Choose a technology group (tg) to browse its documents. Every document
+received for items in this milestone under that tg_name lives inside — zip
+archives are auto-extracted preserving folder structure.</p>
+
+{% if tg_entries|length == 0 %}
+  <p><em>No documents received yet for this milestone.</em></p>
+{% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Technology Group</th>
+        <th>Files</th>
+        <th>Last Activity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tg in tg_entries %}
+      <tr>
+        <td>
+          <a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg.tg_name }}/">
+            {{ tg.tg_name }}
+          </a>
+        </td>
+        <td>{{ tg.file_count }}</td>
+        <td>{{ tg.last_saved_at.strftime('%Y-%m-%d %H:%M UTC') if tg.last_saved_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

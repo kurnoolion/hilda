@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{{ filename }} — HILDA</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    #placeholder { width: 100vw; height: 100vh; }
+  </style>
+  <script type="text/javascript" src="{{ onlyoffice_public_url }}/web-apps/apps/api/documents/api.js"></script>
+</head>
+<body>
+  <div id="placeholder"></div>
+  <script>
+    // OnlyOffice DocsAPI config per WOPI editor embed.
+    // The `wopi_src` is the URL OnlyOffice's server uses to fetch/save file
+    // bytes via the WOPI protocol; HILDA answers it at /wopi/files/<file_id>.
+    // The `wopi_jwt` proves the WOPI URL was minted by HILDA (shared secret).
+    var docEditor = new DocsAPI.DocEditor("placeholder", {
+      documentType: (function () {
+        var ext = "{{ filename }}".split('.').pop().toLowerCase();
+        if (ext === "docx" || ext === "doc" || ext === "odt") return "word";
+        if (ext === "xlsx" || ext === "xls" || ext === "xlsm" || ext === "ods") return "cell";
+        if (ext === "pptx" || ext === "ppt" || ext === "odp") return "slide";
+        return "word";
+      })(),
+      document: {
+        fileType: "{{ filename }}".split('.').pop().toLowerCase(),
+        key:      "{{ wopi_src|replace('/', '_')|replace(':', '_') }}",
+        title:    "{{ filename }}",
+        url:      "{{ wopi_src }}/contents?access_token={{ wopi_jwt }}"
+      },
+      editorConfig: {
+        mode:  "edit",
+        user:  { id: "{{ user_id }}", name: "{{ user_id }}" },
+        callbackUrl: "{{ wopi_src }}/contents?access_token={{ wopi_jwt }}&user={{ user_id }}"
+      },
+      token: "{{ wopi_jwt }}"
+    });
+  </script>
+</body>
+</html>

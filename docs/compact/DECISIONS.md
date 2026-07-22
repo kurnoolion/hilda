@@ -3828,3 +3828,46 @@ State (1) is already legal per [D-146]'s `OPEN → CLOSED` edge (added for Defau
 - (g) **Default WI early-close**: TPM CAN early-close a Default WI via this path (item_type check happens only in the auto-close carve-out, not in the TPM-attribution acceptance). Would only happen if TPM decides the milestone doesn't need a catch-all for unrouted docs — unusual but not forbidden. Risk: any attachments arriving later that would have gone to Default WI now have nowhere to land. Consistent with the Ph-2 attachment-router Flag above.
 
 **Anchors**: `[D-144]` (import task NS → Open auto-transition — creates the race window this ADR closes), `[D-146]` (companion OPEN → CLOSED edge — symmetric coverage of the pre-outreach window), Guard 5 in [guards.py](core/src/tracker/guards.py) (DEF-20 TPM-attribution policy — unchanged).
+
+
+## D-150: HILDA-side documents view -- tg-scoped browser with OnlyOffice editor embed + versioned NSD storage
+
+**Date**: 2026-07-22
+**Status**: Ratified
+
+**Context**: TPMs need a browser-based view of documents received per milestone, organized by tg_name. Zip archives auto-extract preserving folder structure. Files open in the browser: Word/Excel via OnlyOffice; PDF/HTML native; others download. Every save = new version. Every view/edit/save/download logs to audit. Ph-1 scope: no version resolution UI, no concurrent-edit UX beyond WOPI single-editor lock, no .msg handling, no PDF edit. Deploy: OnlyOffice Community 8.0 in Podman behind local nginx sidecar on corp-allowed 8443 port.
+
+**Decision**:
+1. Storage tg-scoped view tree at NSD view/<customer>/<device>/<milestone>/<tg>/<relative-parts>. NSDPath.view_tree() factory + NSDPath.view_version_sibling() for <name>.v<N> archived naming.
+2. Versioning via new document_version table (Alembic 0002) with is_current + version_num per view_relative_path. save_view_document() archives current to .v<N> sibling, writes new bytes, flips is_current, inserts new row.
+3. Zip auto-extract via write_attachment_to_view_tree() called from inbound_attachment post-persist. Deduped by (customer, device, milestone, tg_name). Zip magic detect, 300MB cap, zip-slip guard (skip .. or absolute). item_type=default and empty tg_name skipped.
+4. Deploy: OnlyOffice Community 8.0 + nginx-hilda sidecar on 8443. Shared JWT_SECRET between OnlyOffice env and HILDA dashboard.wopi_jwt_secret. proxy_redirect / /office/ + sub_filter for OnlyOffices absolute-path redirects.
+5. UI: /browse/{c}/{d}/{m}/ (landing), /browse/{c}/{d}/{m}/tg/{tg}/ (flat file list per architect Q4 lock), /browse/edit|view|download/{token}. Extension dispatch: xlsx/docx/xlsm/doc/xls/pptx/ppt -> editor; pdf/html/htm/txt/csv/md -> native; else download-only. HMAC-signed 30-min scoped tokens.
+6. WOPI Host: 3 endpoints under /wopi/files/{file_id} (CheckFileInfo GET / bytes GET / bytes POST-save). HS256 JWT verification. file_id is urlsafe-base64 of view_relative_path.
+7. Audit: 4 new CommunicationLog action_types: document_viewed, document_edit_opened, document_saved, document_downloaded. Once per file-open per architect Q8 lock; per-save; per-download.
+
+**Why**:
+- (a) tg-scoped chosen over item-scoped: architect Q4 lock -- TPMs think tg_name, not per-item; item-scoped would duplicate FR-56 Doc Section.
+- (b) OnlyOffice over Collabora/MS-Web/PDF-convert: AGPL acceptable; lighter container; better xlsx/docx fidelity; documented WOPI tutorial. Others fail requirement or need Volume License Server.
+- (c) nginx sub-path proxying over subdomain: corp VPN allowlist only has 8443; no DNS/cert for subdomain. Tradeoff: sub_filter for asset paths + proxy_redirect for absolute redirects; fragile if OnlyOffice ships new paths, works on 8.0.
+- (d) HMAC scoped tokens over session cookies: WOPI needs access_token query param; matches FR-61 download-token pattern. Cookies would need CORS/SameSite negotiation.
+- (e) Single-editor WOPI lock: OnlyOffice built-in; Ph-1. Optimistic would need diff/merge UI out of Ph-1 scope.
+- (f) Every save = new version, no restore Ph-1: monotonic version_num; prior current becomes .v<N> sibling; audit intact. Ph-2 adds restore UI.
+- (g) Default WI excluded: architect Q5. Default WI is unrouted-triage path, not tg-organized deliverables.
+- (h) Original zip preserved AND extracted: architect Q7. Same-name inside zip = new version.
+- (i) 300MB cap: architect Q7 zip-bomb defense. Adjustable via MAX_ZIP_SIZE_BYTES.
+- (j) .msg skipped: architect Q6. No browser stack renders .msg; extract-msg not worth Ph-1 effort.
+
+**Consequences**:
+- (a) ~2150 lines added across storage + workflow_engine + dashboard; 47 new tests; 3 Jinja templates.
+- (b) OnlyOffice JWT_SECRET MUST be pasted into BOTH docker-compose.yml OnlyOffice env AND dashboard.json wopi_jwt_secret. Mismatch = 401 on every save.
+- (c) NSD storage grows: raw + extracted + every .v<N> sibling. No auto-prune Ph-1.
+- (d) OnlyOffice built-in lock guards single-user edit; second user sees banner.
+- (e) WOPI callback URL is HILDA public origin (reverse_proxy_origin). OnlyOffice server-side fetch goes over same nginx path.
+- (f) HILDA_DASHBOARD_REVERSE_PROXY_ORIGIN load-bearing for WOPI URL construction; must be set at deploy (http://105.52.91.33:8443).
+- (g) Ph-2: attachment router skip Closed items per D-149 STATUS Flag; view-tree writer inherits same behavior.
+- (h) New audit action_types in CommunicationLog; ops greps need updating.
+- (i) Pre-existing TestPh1DocSection failures (2) verified unrelated to D-150 via git stash.
+- (j) Chunk 1 deploy topology (nginx sidecar + OnlyOffice) landed as manual config on corp box, not in git. Dockerfile.hilda-api hardcodes --port 8443; workaround via compose command: override.
+
+**Anchors**: [D-013] (NSD share convention), [D-114] (dashboard reverse-proxy header), [D-148] / [D-149] (companion ADRs in this session cluster). Commits: beded18 (Chunk 2 storage), fa188fb (Chunk 3 zip extract), plus Chunks 4-7 in the followup commit.
