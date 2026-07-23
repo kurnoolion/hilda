@@ -97,9 +97,15 @@ class RoutingResolution(str, Enum):
     STAGED_DEFAULT = "StagedDefault"            # step 5 / FR-78 — milestone default work-item
     TPM_REASSIGNED = "TPMReassigned"            # FR-83 — TPM-manual reassignment
     # Per architect 2026-07-22 refinements to Ph-1 substring-only routing:
-    TG_SINGLE_ITEM = "TgSingleItem"             # TG has exactly 1 work item; skip item_description parsing entirely
+    TG_SINGLE_ITEM = "TgSingleItem"             # TG has exactly 1 work item; substring miss falls through to implicit routing
     TG_DEFAULT_MULTIMATCH = "TgDefaultMultimatch"  # Step 1 substring produced N>1 matches within a TG; item with ["default"] tag-set wins
-    TG_DEFAULT_NOMATCH = "TgDefaultNomatch"     # Step 1 substring produced 0 matches within a TG; the TG's ["default"]-tagged item catches
+    # PH-2 DEFERRED per architect 2026-07-22 Q3: TG_DEFAULT_NOMATCH resolution
+    # (a TG's ["default"]-tagged item catching Stage-1-missed docs) is defined
+    # here but excluded from the Ph-1 runtime precedence in
+    # Fr52AttachmentRouter._tg_scoped_route. Restore path: uncomment the
+    # commented block in Fr52AttachmentRouter._route_within_tg + the
+    # precedence loop entry in _tg_scoped_route. STATUS.md Flag tracks.
+    TG_DEFAULT_NOMATCH = "TgDefaultNomatch"     # PH-2: Step 1 substring produced 0 matches within a TG; the TG's ["default"]-tagged item catches
 
 
 class DocumentIndexRow(BaseModel):

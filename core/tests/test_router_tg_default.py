@@ -116,7 +116,13 @@ class TestTgScopedRoute:
         assert matches == []           # falls through -> caller uses B5 default
         assert res == RoutingResolution.SUBSTRING_MATCH
 
-    def test_stage2_no_match_uses_tg_default(self):
+    @pytest.mark.skip(reason=(
+        "Ph-2 deferred per architect 2026-07-22 Q3: TG_DEFAULT_NOMATCH "
+        "(a TG's [\"default\"]-tagged item catching Stage-1-missed docs) "
+        "is excluded from Ph-1 runtime. Restore this test when the "
+        "commented block in _route_within_tg is re-enabled in Ph-2."
+    ))
+    def test_stage2_no_match_uses_tg_default_PH2(self):
         r = _mk_router()
         matches, res = r._tg_scoped_route(
             "zzz_random.pdf",
@@ -139,6 +145,57 @@ class TestTgScopedRoute:
         )
         assert matches == []
         assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_two_tg1_tgs_substring_disambiguates(self):
+        """Q1/Q2 architect 2026-07-22: same-owner-multi-TG early-access case.
+        Two TGs each with 1 item + item_description tags. Doc filename matches
+        only one TG's tag. Substring runs FIRST (Ph-1 refinement) so:
+          - matched TG returns SUBSTRING_MATCH
+          - unmatched TG returns TG_SINGLE_ITEM
+        Precedence SUBSTRING_MATCH > TG_SINGLE_ITEM picks the correct TG only.
+        """
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "5g_report.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["5g"]]),
+                _item("B", tg_name="TG-B", item_description=[["wifi"]]),
+            ],
+        )
+        assert res == RoutingResolution.SUBSTRING_MATCH
+        assert len(matches) == 1
+        assert matches[0].item_id == "A"
+
+    def test_two_tg1_tgs_no_substring_hits_both_via_fallback(self):
+        """When filename matches NEITHER TG's tags, both TG=1 shortcuts fire
+        at TG_SINGLE_ITEM tier → doc fans out to both. This is expected Ph-1
+        behavior (matches FR-79 multi-item pattern). Tester's filename choice
+        eliminates the fan-out when needed.
+        """
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "random_zzz.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["5g"]]),
+                _item("B", tg_name="TG-B", item_description=[["wifi"]]),
+            ],
+        )
+        assert res == RoutingResolution.TG_SINGLE_ITEM
+        assert {m.item_id for m in matches} == {"A", "B"}
+
+    def test_tg1_with_tags_but_no_hit_still_captures(self):
+        """TG has 1 item with tags. Doc filename doesn't match the tags.
+        Substring produces 0 matches → TG=1 fallback fires → item captured
+        via implicit routing (TG_SINGLE_ITEM). Preserves original TG=1
+        semantic for production shape (1 owner = 1 TG).
+        """
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "no_matching_tags.pdf",
+            [_item("A", tg_name="TG-A", item_description=[["compliance"]])],
+        )
+        assert res == RoutingResolution.TG_SINGLE_ITEM
+        assert matches[0].item_id == "A"
 
     def test_multi_tg_matched_tg_default_wins(self):
         r = _mk_router()

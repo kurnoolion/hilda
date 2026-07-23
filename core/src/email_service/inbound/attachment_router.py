@@ -532,12 +532,16 @@ class Fr52AttachmentRouter:
             # Accumulate per resolution so we can pick the strongest tie-break.
             results_by_precedence.setdefault(resolution, []).append(match)
 
-        # Precedence per D-151: strong evidence beats fallback signals.
+        # Precedence per D-151 + architect Q3 2026-07-22 refinement:
+        # strong evidence beats fallback signals; TG_DEFAULT_NOMATCH excluded
+        # (Ph-2 deferred — see _route_within_tg docstring). Falls through to
+        # milestone Default WI (STAGED_DEFAULT) in the caller when this
+        # method returns empty.
         for res in (
             RoutingResolution.TG_DEFAULT_MULTIMATCH,
             RoutingResolution.SUBSTRING_MATCH,
             RoutingResolution.TG_SINGLE_ITEM,
-            RoutingResolution.TG_DEFAULT_NOMATCH,
+            # RoutingResolution.TG_DEFAULT_NOMATCH,   # Ph-2 deferred
         ):
             if res in results_by_precedence and results_by_precedence[res]:
                 return list(results_by_precedence[res]), res
@@ -550,20 +554,37 @@ class Fr52AttachmentRouter:
         tg_name: str,
         items: list[dict],
     ) -> tuple[AttachmentItemMatch | None, RoutingResolution]:
-        """Apply the 4-stage TG-scoped routing WITHIN a single TG's items.
-        Returns (winning_match_or_None, resolution).
-        """
-        # Stage 0: TG=1 shortcut — implicit routing.
-        if len(items) == 1:
-            return (
-                AttachmentItemMatch(
-                    item_id=items[0]["item_id"],
-                    confidence=1.0,
-                    source=RoutingResolution.TG_SINGLE_ITEM,
-                ),
-                RoutingResolution.TG_SINGLE_ITEM,
-            )
+        """Apply the TG-scoped routing WITHIN a single TG's items per D-151
+        Ph-1 refinement 2026-07-22 architect Q1/Q2 answers.
 
+        Ph-1 ordering (substring first, TG=1 shortcut second):
+          Stage 1: substring match on item_description tag-sets.
+                     * Exactly 1 match → SUBSTRING_MATCH.
+                     * N>1 matches + one has ["default"] → TG_DEFAULT_MULTIMATCH.
+                     * N>1 matches, none has ["default"] → ambiguous, return None
+                       (caller falls to milestone Default WI).
+                     * 0 matches → try Stage 0 fallback below.
+          Stage 0 (fallback): TG=1 implicit routing.
+                     * TG has exactly 1 non-Default item → route to it,
+                       resolution=TG_SINGLE_ITEM.
+                     * Otherwise → return None.
+
+        Substring-first ordering per architect Q1 2026-07-22: when the same
+        owner spans multiple TGs (early-access Ph-1 test scenario), TG=1
+        short-circuits without checking tags would over-fire. Running substring
+        first lets a doc with distinctive tags win in the correct TG via
+        SUBSTRING_MATCH (which beats TG_SINGLE_ITEM per precedence in
+        _tg_scoped_route); a TG with 1 item + no tag hit still catches via
+        the TG_SINGLE_ITEM fallback. Under production shape (1 owner = 1 TG),
+        the reorder is idempotent-in-decision.
+
+        Ph-2 deferred: TG_DEFAULT_NOMATCH (a TG's ["default"]-tagged item
+        catching Stage-0-missed docs) is out of scope in Ph-1 per architect
+        2026-07-22 to keep the fan-out surface small during early-access
+        testing. STATUS.md Flag tracks the Ph-2 restore. Enum value
+        RoutingResolution.TG_DEFAULT_NOMATCH remains defined but unused
+        at runtime; test coverage is skipped with pytest.skip pending Ph-2.
+        """
         # Stage 1: substring match on item_description tag-sets.
         matches: list[dict] = []
         for cand in items:
@@ -604,30 +625,45 @@ class Fr52AttachmentRouter:
                     ),
                     RoutingResolution.TG_DEFAULT_MULTIMATCH,
                 )
-            # Multi-match with no ["default"] item → let caller fall through
-            # so B5 (milestone Default WI) can catch. Returning None here
-            # collapses the ambiguous case into Default WI per architect ask.
+            # Multi-match with no ["default"] item → ambiguous; let caller
+            # fall through so B5 (milestone Default WI) can catch.
             return (None, RoutingResolution.SUBSTRING_MATCH)
 
-        # Stage 2 (matches == 0): TG-default fallback.
-        default_items = [c for c in items if self._has_default_tag_set(c)]
-        if len(default_items) >= 1:
-            if len(default_items) > 1:
-                logger.warning(
-                    "attachment_router: TG %r has %d items marked with ['default'] "
-                    "tag-set — template config error; taking first (item_id=%s)",
-                    tg_name, len(default_items), default_items[0]["item_id"],
-                )
+        # Stage 0 fallback (was Stage 0 shortcut in initial D-151):
+        # TG=1 implicit routing per architect Q2 2026-07-22 refinement.
+        # Only fires when Stage 1 substring produced 0 matches AND the TG has
+        # exactly 1 non-Default work item.
+        if len(items) == 1:
             return (
                 AttachmentItemMatch(
-                    item_id=default_items[0]["item_id"],
+                    item_id=items[0]["item_id"],
                     confidence=1.0,
-                    source=RoutingResolution.TG_DEFAULT_NOMATCH,
+                    source=RoutingResolution.TG_SINGLE_ITEM,
                 ),
-                RoutingResolution.TG_DEFAULT_NOMATCH,
+                RoutingResolution.TG_SINGLE_ITEM,
             )
 
-        # No match, no TG-default → this TG rejects.
+        # Stage 2 TG_DEFAULT_NOMATCH deferred to Ph-2 per architect 2026-07-22.
+        # Restore path when re-enabling:
+        # default_items = [c for c in items if self._has_default_tag_set(c)]
+        # if len(default_items) >= 1:
+        #     if len(default_items) > 1:
+        #         logger.warning(
+        #             "attachment_router: TG %r has %d items marked with "
+        #             "['default'] tag-set — template config error; taking first "
+        #             "(item_id=%s)",
+        #             tg_name, len(default_items), default_items[0]["item_id"],
+        #         )
+        #     return (
+        #         AttachmentItemMatch(
+        #             item_id=default_items[0]["item_id"],
+        #             confidence=1.0,
+        #             source=RoutingResolution.TG_DEFAULT_NOMATCH,
+        #         ),
+        #         RoutingResolution.TG_DEFAULT_NOMATCH,
+        #     )
+
+        # No match, TG=1 shortcut didn't apply → this TG rejects.
         return (None, RoutingResolution.SUBSTRING_MATCH)
 
     @staticmethod
