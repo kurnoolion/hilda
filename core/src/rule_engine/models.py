@@ -96,6 +96,14 @@ class ActionKind(str, Enum):
     # side (SP/TPM is authoritative; guards enforced on SP-side button
     # visibility + TPM judgment before click).
     APPLY_PM_APPROVAL = "ApplyPMApproval"
+    # TPM SP-side close per architect 2026-07-23: TPM clicks Close on an item
+    # in SP UI, SP UI writes delivery_state="Closed" to the SP row, SP fires
+    # CHANGED alert. HILDA mirrors the field to local Postgres unconditionally
+    # (no state-machine legality check, no Guard 5 — SP is authoritative per
+    # Pattern A [D-068]). Attribution: trigger_source='sp_ui_delivery_state_write'.
+    # Bypasses the sync_deliverable_fields whitelist which intentionally
+    # excludes delivery_state to avoid HILDA-echo re-processing.
+    APPLY_TPM_SP_CLOSE = "ApplyTpmSpClose"
     # Submit-to-Carrier milestone orchestrator added 2026-06-30 per architect
     # design pass: TPM clicks Submit-to-Carrier in SP UI; SP engineer sets
     # milestone_submission_triggered_at on the Milestone row + sends CHANGED

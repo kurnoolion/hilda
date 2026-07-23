@@ -32,6 +32,7 @@ from . import (  # noqa: F401
     sync_deliverable_fields,  # added 2026-07-02: SYNC_DELIVERABLE_FIELDS null-guarded merge for Deliverables CHANGED alerts
     reconcile,  # added 2026-07-02: meta-reconciler + 5 sync sub-tasks per D-142/D-143 (strand reconcile-sync-cascade)
     tpm_notification,  # added 2026-07-15: scheduled DRR closure final-status email to TPM (Phase C serialization ask)
+    tpm_sp_close,      # added 2026-07-23: mirror SP-authored delivery_state='Closed' from TPM SP UI clicks
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "submit_to_carrier",
     "sync_deliverable_fields",
     "tpm_notification",
+    "tpm_sp_close",
 ]
