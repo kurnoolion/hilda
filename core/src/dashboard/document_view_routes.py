@@ -210,10 +210,22 @@ def _ext(filename: str) -> str:
 
 
 def _wopi_src_to_key(wopi_src: str) -> str:
-    """OnlyOffice `document.key` — stable identifier per document version.
-    Reusing the wopi_src (base64 file_id + host) gives a stable, unique key
-    across users editing the same file at the same version."""
-    return wopi_src.replace("/", "_").replace(":", "_").replace(".", "_")
+    """OnlyOffice `document.key` — unique per edit session.
+
+    Per OnlyOffice caching: the same key across attempts causes OnlyOffice
+    to reuse cached document state — including cached FAILED state from
+    prior broken configs. Corp deploy 2026-07-23 hit this: an early edit
+    attempt with a stale (localhost) URL failed, and every subsequent
+    attempt with the correct URL returned "Other error" because OnlyOffice
+    kept serving the failed cache entry (key was stable = same wopi_src).
+
+    Fix: include a monotonically-increasing time bucket (1-min granularity)
+    so each edit session gets a fresh key while still allowing multiple
+    users concurrently editing to share the key within the same minute.
+    """
+    minute_bucket = int(time.time()) // 60
+    base = wopi_src.replace("/", "_").replace(":", "_").replace(".", "_")
+    return f"{base}_{minute_bucket}"
 
 
 def _mime_for(filename: str) -> str:
