@@ -69,7 +69,16 @@ async def write_attachment_to_view_tree(
         return []
     written: list[str] = []
 
-    is_zip = content[:4] == _ZIP_MAGIC if len(content) >= 4 else False
+    # Bug fix 2026-07-22: `.xlsx`/`.docx`/`.pptx` files are Office Open XML
+    # format = ZIP archives internally. Magic-byte detection alone
+    # incorrectly extracted them, dumping their internal `[Content_Types].xml`,
+    # `_rels/`, `xl/`, `docProps/` structure into the view tree.
+    # Fix: only extract when the file extension is literally `.zip`.
+    is_zip = (
+        filename.lower().endswith(".zip")
+        and len(content) >= 4
+        and content[:4] == _ZIP_MAGIC
+    )
 
     if not is_zip:
         try:

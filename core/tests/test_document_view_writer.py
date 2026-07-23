@@ -170,6 +170,70 @@ class TestZipExtraction:
         assert written == ["view/MMK/SM-S671U1/DRR/hw_reports/broken.zip"]
 
 
+class TestXlsxDocxNotTreatedAsZip:
+    """Bug fix 2026-07-22: .xlsx/.docx/.pptx are Office Open XML = zip archives
+    internally; magic-byte detection alone incorrectly extracted them, dumping
+    [Content_Types].xml + _rels/ + xl/ + docProps/ into the view tree.
+    Fix: only extract when file extension is literally `.zip`."""
+
+    async def test_xlsx_bytes_saved_as_single_file_not_extracted(self):
+        # Build fake xlsx (real zip magic + zip structure) with internal
+        # xlsx-shaped entries. Without the fix, all 3 entries + xlsx would
+        # be written. With the fix, ONLY the xlsx file itself.
+        xlsx_bytes = _zip_bytes({
+            "[Content_Types].xml": b"<?xml ...?>",
+            "_rels/.rels":         b"<?xml ...?>",
+            "xl/workbook.xml":     b"<?xml ...?>",
+        })
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="APPS", item_type="test_tech_waiver_report",
+            filename="report.xlsx", content=xlsx_bytes,
+        )
+        assert written == ["view/MMK/SM-S671U1/DRR/APPS/report.xlsx"]
+        # None of the xlsx internal names should have been written
+        assert not any(
+            "[Content_Types]" in p or "/_rels/" in p or "/xl/" in p
+            for p in written
+        )
+
+    async def test_docx_bytes_saved_as_single_file_not_extracted(self):
+        docx_bytes = _zip_bytes({
+            "[Content_Types].xml": b"<?xml ...?>",
+            "_rels/.rels":         b"<?xml ...?>",
+            "word/document.xml":   b"<?xml ...?>",
+        })
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="APPS", item_type="test_tech_waiver_report",
+            filename="report.docx", content=docx_bytes,
+        )
+        assert written == ["view/MMK/SM-S671U1/DRR/APPS/report.docx"]
+
+    async def test_pptx_bytes_saved_as_single_file_not_extracted(self):
+        pptx_bytes = _zip_bytes({
+            "[Content_Types].xml":         b"<?xml ...?>",
+            "ppt/presentation.xml":        b"<?xml ...?>",
+        })
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="APPS", item_type="test_tech_waiver_report",
+            filename="deck.pptx", content=pptx_bytes,
+        )
+        assert written == ["view/MMK/SM-S671U1/DRR/APPS/deck.pptx"]
+
+    async def test_real_zip_still_extracts(self):
+        # Regression check: legitimate .zip files still extract as before
+        z = _zip_bytes({"inner.txt": b"content"})
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="APPS", item_type="test_tech_waiver_report",
+            filename="pack.zip", content=z,
+        )
+        assert "view/MMK/SM-S671U1/DRR/APPS/pack.zip" in written
+        assert "view/MMK/SM-S671U1/DRR/APPS/inner.txt" in written
+
+
 class TestConstant:
     def test_max_zip_size_is_300MB(self):
         assert MAX_ZIP_SIZE_BYTES == 300 * 1024 * 1024
