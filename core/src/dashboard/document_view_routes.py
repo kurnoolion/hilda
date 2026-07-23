@@ -543,13 +543,33 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
 def _verify_wopi_from_headers(request: Request, secret: str) -> None:
     """Look for WOPI JWT on Authorization: Bearer <token> or ?access_token=..."""
     auth = request.headers.get("Authorization", "")
+    _log.info(
+        "WOPI request received: url=%s method=%s client=%s auth_present=%s "
+        "access_token_present=%s user_agent=%s",
+        request.url.path, request.method, request.client.host if request.client else "?",
+        bool(auth), "access_token" in request.query_params,
+        request.headers.get("user-agent", "?")[:80],
+    )
     if auth.lower().startswith("bearer "):
-        _verify_wopi_jwt(secret=secret, token=auth[7:])
+        try:
+            payload = _verify_wopi_jwt(secret=secret, token=auth[7:])
+            _log.info("WOPI Bearer JWT verified: payload_keys=%s", list(payload.keys()))
+        except HTTPException as exc:
+            _log.warning("WOPI Bearer JWT REJECTED: %s (token[:40]=%s)",
+                         exc.detail, auth[7:47])
+            raise
         return
     tok = request.query_params.get("access_token")
     if tok:
-        _verify_wopi_jwt(secret=secret, token=tok)
+        try:
+            payload = _verify_wopi_jwt(secret=secret, token=tok)
+            _log.info("WOPI access_token verified: payload_keys=%s", list(payload.keys()))
+        except HTTPException as exc:
+            _log.warning("WOPI access_token REJECTED: %s (token[:40]=%s)",
+                         exc.detail, tok[:40])
+            raise
         return
+    _log.warning("WOPI request REJECTED: neither Authorization nor access_token provided")
     raise HTTPException(status_code=401, detail="WOPI JWT required")
 
 
