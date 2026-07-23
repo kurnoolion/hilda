@@ -113,11 +113,28 @@ def _hmac_hex(secret: str, body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _sign_jwt(*, secret: str, payload: dict[str, Any]) -> str:
+    """Generic HS256 JWT signer over an arbitrary payload dict."""
+    header = {"alg": "HS256", "typ": "JWT"}
+    h = base64.urlsafe_b64encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    p = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    sig_b = hmac.new(
+        (secret or "unset-secret").encode("utf-8"),
+        f"{h}.{p}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    sig = base64.urlsafe_b64encode(sig_b).rstrip(b"=").decode("ascii")
+    return f"{h}.{p}.{sig}"
+
+
 def _make_wopi_jwt(*, secret: str, view_relative_path: str, exp_seconds: int = 3600) -> str:
-    """Minimal JWT (HS256) — the shared secret is the same one OnlyOffice
-    container has as JWT_SECRET. OnlyOffice validates on inbound; HILDA
-    validates on inbound. RFC 7519.
-    """
+    """WOPI back-channel token (OnlyOffice server → HILDA WOPI endpoints).
+    HILDA verifies HMAC on inbound WOPI calls. Payload includes exp for
+    freshness."""
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "path": view_relative_path,
@@ -190,6 +207,13 @@ def _ext(filename: str) -> str:
     if "." not in filename:
         return ""
     return "." + filename.rsplit(".", 1)[-1].lower()
+
+
+def _wopi_src_to_key(wopi_src: str) -> str:
+    """OnlyOffice `document.key` — stable identifier per document version.
+    Reusing the wopi_src (base64 file_id + host) gives a stable, unique key
+    across users editing the same file at the same version."""
+    return wopi_src.replace("/", "_").replace(":", "_").replace(".", "_")
 
 
 def _mime_for(filename: str) -> str:
@@ -393,20 +417,55 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         # WOPI src URL — OnlyOffice fetches file bytes from HILDA at this URL.
         # Use the reverse-proxy public origin so OnlyOffice can reach us.
         wopi_src = f"{cfg.reverse_proxy_origin.rstrip('/')}/wopi/files/{_encode_file_id(view_relative_path)}"
-        wopi_jwt = _make_wopi_jwt(secret=cfg.wopi_jwt_secret,
-                                   view_relative_path=view_relative_path)
+        # WOPI back-channel access token (OnlyOffice server → HILDA WOPI GETs/POST)
+        wopi_access_token = _make_wopi_jwt(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
+        )
+
+        # Build the full DocEditor config server-side per OnlyOffice contract:
+        # OnlyOffice validates `token` as a JWT signing the ENTIRE config
+        # object (document + editorConfig + documentType + ...). If token
+        # payload differs from the actual config, OnlyOffice rejects with
+        # "The document security token is not correctly formed".
+        ext = _ext(filename).lstrip(".")
+        if ext in ("docx", "doc", "odt"):
+            document_type = "word"
+        elif ext in ("xlsx", "xls", "xlsm", "ods"):
+            document_type = "cell"
+        elif ext in ("pptx", "ppt", "odp"):
+            document_type = "slide"
+        else:
+            document_type = "word"
+
+        docs_config: dict[str, Any] = {
+            "documentType": document_type,
+            "document": {
+                "fileType": ext or "docx",
+                "key":      _wopi_src_to_key(wopi_src),
+                "title":    filename,
+                "url":      f"{wopi_src}/contents?access_token={wopi_access_token}",
+            },
+            "editorConfig": {
+                "mode": "edit",
+                "user": {"id": user_id, "name": user_id},
+                "callbackUrl": f"{wopi_src}/contents?access_token={wopi_access_token}&user={user_id}",
+            },
+        }
+        # Sign the config as a JWT; the resulting token is what OnlyOffice
+        # verifies against the DocEditor config object at client-side init.
+        docs_config_token = _sign_jwt(secret=cfg.wopi_jwt_secret, payload=docs_config)
 
         return templates.TemplateResponse(
             request,
             "view_tree_editor.html",
             {
                 "onlyoffice_public_url": cfg.onlyoffice_public_url.rstrip("/"),
-                "filename":             filename,
-                "wopi_src":             wopi_src,
-                "wopi_jwt":             wopi_jwt,
-                "user_id":              user_id,
+                "filename":              filename,
+                "docs_config_json":      json.dumps(docs_config),
+                "docs_config_token":     docs_config_token,
             },
         )
+
 
     # ----- Chunk 5: WOPI Host endpoints -----
 
