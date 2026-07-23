@@ -414,9 +414,19 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
 
         _audit(request, "document_edit_opened", view_relative_path, user_id)
 
-        # WOPI src URL — OnlyOffice fetches file bytes from HILDA at this URL.
-        # Use the reverse-proxy public origin so OnlyOffice can reach us.
-        wopi_src = f"{cfg.reverse_proxy_origin.rstrip('/')}/wopi/files/{_encode_file_id(view_relative_path)}"
+        # WOPI src URL — used by OnlyOffice DOCUMENT SERVER (not browser) to
+        # fetch file bytes + POST saves back. OnlyOffice runs inside its own
+        # podman container on the same shared network as hilda-api. Container
+        # DNS lets OnlyOffice reach `hilda-api:8080` directly, bypassing
+        # nginx and avoiding rootless-podman hairpin NAT (container -> host
+        # external IP: 105.52.91.33:8443 typically unreachable from inside).
+        #
+        # 2026-07-23 architect corp deploy: "Download failed" surfaced when
+        # OnlyOffice tried to reach reverse_proxy_origin (105.52.91.33:8443)
+        # from inside its container -> rootless podman doesn't loop back to
+        # the host's external IP. Switch to internal container-network URL.
+        hilda_internal = "http://hilda-api:8080"
+        wopi_src = f"{hilda_internal}/wopi/files/{_encode_file_id(view_relative_path)}"
         # WOPI back-channel access token (OnlyOffice server → HILDA WOPI GETs/POST)
         wopi_access_token = _make_wopi_jwt(
             secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
