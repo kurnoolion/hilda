@@ -525,31 +525,108 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
 
     @app.post("/wopi/files/{file_id}/contents")
     async def wopi_put_file_contents(file_id: str, request: Request):
-        """OnlyOffice saves back here on user Ctrl+S / auto-save. Body is raw
-        file bytes. We save as a new version_num via save_view_document."""
+        """OnlyOffice save callback.
+
+        Contract note (corp deploy 2026-07-23): OnlyOffice's DocEditor
+        `editorConfig.callbackUrl` speaks OnlyOffice's OWN callback protocol,
+        not raw-WOPI PutFile. The body is JSON:
+
+            {"key": "...", "status": <int>, "url": "<download-url>",
+             "users": [...], "actions": [...], "token": "<jwt>"}
+
+        Status codes (OnlyOffice DocumentServer 8.x):
+          1 = editing started        -> respond {"error":0}, no save
+          2 = ready to save          -> download from "url", save bytes, {"error":0}
+          3 = save error             -> log, {"error":0}
+          4 = no changes to save     -> {"error":0}
+          6 = force-save requested   -> same as 2
+          7 = force-save error       -> log, {"error":0}
+
+        Response MUST be exactly `{"error": 0}` on success; anything else
+        (including WOPI-style {LastModifiedTime,Version}) is treated by
+        OnlyOffice as save failure -> user sees "document could not be saved".
+        """
         view_relative_path = _decode_file_id(file_id)
         _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
-        new_bytes = await request.body()
-        # Parse scope from view_relative_path: view/<cust>/<dev>/<mile>/<tg>/<...rel>
+
+        raw_body = await request.body()
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _log.warning(
+                "wopi_put_file_contents: body is not JSON (len=%d) for %s; "
+                "falling back to raw-bytes WOPI PutFile path",
+                len(raw_body), view_relative_path,
+            )
+            payload = None
+
+        status_code = None
+        download_url = None
+        if isinstance(payload, dict):
+            status_code = payload.get("status")
+            download_url = payload.get("url")
+        _log.info(
+            "wopi callback for %s: status=%s has_url=%s",
+            view_relative_path, status_code, bool(download_url),
+        )
+
+        # Parse scope for save_view_document
         parts = view_relative_path.split("/")
         if len(parts) < 6 or parts[0] != "view":
             raise HTTPException(status_code=400, detail="malformed view path")
         _, cust, dev, mile, tg, *rel = parts
-        # Prefer the WOPI JWT's user id when supplied via 'user' query param;
-        # OnlyOffice includes this. Otherwise "wopi-save".
         user_id = request.query_params.get("user") or "wopi-save"
-        from core.src.storage import save_view_document
-        row = await save_view_document(
-            customer_id=cust, device_id=dev, milestone_id=mile, tg_name=tg,
-            relative_parts=tuple(rel),
-            content=new_bytes, saved_by=user_id, source="editor",
-        )
-        _audit(request, "document_saved", view_relative_path, user_id,
-               details={"version_num": row.version_num, "size_bytes": row.size_bytes})
-        return JSONResponse({
-            "LastModifiedTime": row.saved_at.isoformat(),
-            "Version":          str(row.version_num),
-        })
+
+        # OnlyOffice callback protocol: only fetch+save on status 2 or 6.
+        if status_code in (2, 6) and download_url:
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.get(download_url)
+                    resp.raise_for_status()
+                    new_bytes = resp.content
+            except Exception as exc:  # noqa: BLE001
+                _log.error(
+                    "wopi callback: failed to fetch modified doc from %s: %s: %s",
+                    download_url, type(exc).__name__, str(exc)[:200],
+                )
+                # Still return {"error":0}; failing hard here causes OnlyOffice
+                # to endlessly retry the callback. Ops alert path handles this.
+                return JSONResponse({"error": 0})
+
+            from core.src.storage import save_view_document
+            row = await save_view_document(
+                customer_id=cust, device_id=dev, milestone_id=mile, tg_name=tg,
+                relative_parts=tuple(rel),
+                content=new_bytes, saved_by=user_id, source="editor",
+            )
+            _audit(request, "document_saved", view_relative_path, user_id,
+                   details={"version_num": row.version_num,
+                            "size_bytes": row.size_bytes,
+                            "onlyoffice_status": status_code})
+            _log.info(
+                "wopi callback: saved v%d (%d bytes) for %s",
+                row.version_num, row.size_bytes, view_relative_path,
+            )
+            return JSONResponse({"error": 0})
+
+        # Legacy path: raw-bytes WOPI PutFile (no JSON body, no status).
+        # Kept for future WOPI clients that don't use OnlyOffice callback proto.
+        if payload is None and raw_body:
+            from core.src.storage import save_view_document
+            row = await save_view_document(
+                customer_id=cust, device_id=dev, milestone_id=mile, tg_name=tg,
+                relative_parts=tuple(rel),
+                content=raw_body, saved_by=user_id, source="editor",
+            )
+            _audit(request, "document_saved", view_relative_path, user_id,
+                   details={"version_num": row.version_num,
+                            "size_bytes": row.size_bytes,
+                            "protocol": "wopi_putfile_raw"})
+            return JSONResponse({"error": 0})
+
+        # Status 1/3/4/7 or missing url: acknowledge without saving.
+        return JSONResponse({"error": 0})
 
 
 def _verify_wopi_from_headers(request: Request, secret: str) -> None:

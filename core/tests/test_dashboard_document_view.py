@@ -244,8 +244,9 @@ class TestWopiEndpoints:
             content=b"v2 saved via WOPI",
         )
         assert r.status_code == 200
-        j = r.json()
-        assert j["Version"] == "2"
+        # OnlyOffice callback sentinel: {"error": 0} on success, regardless
+        # of raw-bytes vs JSON-callback protocol path.
+        assert r.json() == {"error": 0}
         # Verify subsequent GET returns new bytes
         r2 = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt}")
         assert r2.content == b"v2 saved via WOPI"
@@ -255,6 +256,98 @@ class TestWopiEndpoints:
         file_id = _encode_file_id("view/c/d/m/tg/x.xlsx")
         r = client.get(f"/wopi/files/{file_id}")
         assert r.status_code == 401
+
+    async def test_callback_status_1_editing_no_save(self, cfg, monkeypatch):
+        """Status 1 = editing started; must not create a new version."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1", saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx"
+        file_id = _encode_file_id(view_path)
+        jwt = _make_wopi_jwt(secret=cfg.wopi_jwt_secret, view_relative_path=view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/wopi/files/{file_id}/contents?access_token={jwt}&user=pm.smith",
+            json={"status": 1, "users": ["pm.smith"]},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"error": 0}
+        # v1 still current — no v2 written
+        r2 = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt}")
+        assert r2.content == b"v1"
+
+    async def test_callback_status_2_fetches_and_saves(self, cfg, monkeypatch):
+        """Status 2 = ready to save; fetch from `url`, persist as new version."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1", saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx"
+        file_id = _encode_file_id(view_path)
+        jwt = _make_wopi_jwt(secret=cfg.wopi_jwt_secret, view_relative_path=view_path)
+
+        # Stub httpx.AsyncClient.get so we don't hit the real network.
+        import httpx
+        edited_bytes = b"edited-in-onlyoffice"
+        class _StubResponse:
+            content = edited_bytes
+            def raise_for_status(self): pass
+        class _StubClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url): return _StubResponse()
+        monkeypatch.setattr(httpx, "AsyncClient", _StubClient)
+
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/wopi/files/{file_id}/contents?access_token={jwt}&user=pm.smith",
+            json={
+                "status": 2,
+                "url": "http://onlyoffice-ds/cache/files/abc/output.xlsx",
+                "users": ["pm.smith"],
+                "actions": [{"type": 0, "userid": "pm.smith"}],
+            },
+        )
+        assert r.status_code == 200
+        assert r.json() == {"error": 0}
+        r2 = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt}")
+        assert r2.content == edited_bytes
+
+    async def test_callback_status_2_fetch_failure_still_acks(self, cfg, monkeypatch):
+        """Download failure must still return {"error":0} — else OnlyOffice
+        retries forever. Failure is logged + audited via ops path."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1", saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx"
+        file_id = _encode_file_id(view_path)
+        jwt = _make_wopi_jwt(secret=cfg.wopi_jwt_secret, view_relative_path=view_path)
+
+        import httpx
+        class _BoomClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url):
+                raise httpx.ConnectError("cannot reach onlyoffice-ds")
+        monkeypatch.setattr(httpx, "AsyncClient", _BoomClient)
+
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/wopi/files/{file_id}/contents?access_token={jwt}&user=pm.smith",
+            json={"status": 2, "url": "http://unreachable/x", "users": ["pm.smith"]},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"error": 0}
+        # v1 still current — save didn't happen
+        r2 = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt}")
+        assert r2.content == b"v1"
 
 
 class TestEditorEmbed:
