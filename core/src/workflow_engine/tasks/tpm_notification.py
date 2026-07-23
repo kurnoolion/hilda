@@ -219,13 +219,36 @@ def _list_customer_ids() -> list[str]:
 
 
 def _read_milestones(deps: Any, customer_id: str) -> list[dict[str, Any]]:
-    """Read Milestones_<customer_id> list rows via sp_writer."""
+    """Read the GLOBAL Milestones SP list rows filtered by carrier=customer_id.
+
+    Per [D-083]: Milestones SP list is GLOBAL (single list `Milestones`, not
+    `Milestones_<customer_id>`), with a `carrier` column that identifies which
+    customer each row belongs to. HILDA reads all rows and filters by carrier
+    at task level.
+
+    The customer.yaml `milestones.name` field MUST be set to `Milestones`
+    (no _<customer_id> suffix) for the list-name lookup to hit the right
+    SP list. Passing ListScope(customer_id=...) here is required by the
+    ListScope type but has no effect on the resolved list name when
+    customer.yaml says the list is literally "Milestones" (global).
+    """
     from core.src.sharepoint_integration.config import ListScope
     rows = deps.sp_writer.get_items(
         entity="milestones",
         scope=ListScope(customer_id=customer_id),
     )
-    return list(rows or [])
+    rows = list(rows or [])
+    # Filter rows to this customer only (global list returns all carriers)
+    filtered = [
+        r for r in rows
+        if (_row_get(r, "carrier") or "").strip() == customer_id.strip()
+    ]
+    _log.info(
+        "tpm_notification: read %d milestones (filtered %d out of %d total) "
+        "for customer=%s",
+        len(filtered), len(rows) - len(filtered), len(rows), customer_id,
+    )
+    return filtered
 
 
 def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | None, str | None]:
