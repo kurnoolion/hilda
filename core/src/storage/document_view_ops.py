@@ -27,15 +27,17 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 
 from core.src.diagnostics.error_codes import PipelineError
-from core.src.storage.db import DocumentVersionTable, session_scope
+from core.src.storage.db import CommunicationLogTable, DocumentVersionTable, session_scope
 from core.src.storage.models import DocumentVersionRow
 from core.src.storage.nsd import NSDPath, read_file, write_file
 
 __all__ = [
+    "DocumentEventRow",
     "TgFolderEntry",
     "TgFileEntry",
     "get_current_version",
     "get_version_by_num",
+    "list_document_events",
     "list_files_in_tg",
     "list_tg_names_for_scope",
     "list_versions_for_file",
@@ -54,6 +56,23 @@ _session = session_scope
 # We sniff at save time so downstream UI can gate the Edit button off (OnlyOffice
 # has no NASCA agent inside the container and cannot decrypt).
 _NASCA_MAGIC = b"<## "
+
+
+@dataclass(frozen=True)
+class DocumentEventRow:
+    """One audit event on a file in the view tree — surface to the History UI
+    per D-150 Chunk 7. Sourced from CommunicationLog rows written by the
+    dashboard's `_audit()` helper (external_message_id == view_relative_path).
+
+    `details` holds the full serialized attribution+details dict from the audit
+    row so the History template can render context like version_num on saves
+    or protocol on POSTs.
+    """
+
+    timestamp: datetime
+    action_type: str
+    user_id: str | None
+    details: dict
 
 
 @dataclass(frozen=True)
@@ -379,6 +398,63 @@ async def read_version_bytes(view_relative_path: str, version_num: int) -> bytes
     async for chunk in read_file(sibling):
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+# ---------------------------------------------------------------------------
+# Audit event history — for D-150 Chunk 7 History UI
+# ---------------------------------------------------------------------------
+
+
+# The action_types emitted by `_audit()` in dashboard.document_view_routes.
+# Kept as a module-level constant so tests can grep it and future D-150 audit
+# additions have one canonical list to extend.
+_DOCUMENT_VIEW_ACTION_TYPES = (
+    "document_viewed",
+    "document_edit_opened",
+    "document_saved",
+    "document_downloaded",
+    "document_edit_blocked_drm",  # D-152
+)
+
+
+async def list_document_events(view_relative_path: str) -> list[DocumentEventRow]:
+    """All audit events written by the /browse/* + /wopi/* routes for a given
+    file, newest-first.
+
+    The audit writer (`_audit()` in dashboard.document_view_routes) stashes
+    `view_relative_path` into CommunicationLog.external_message_id via the
+    attribution.correlation_id path — that is our filter key. We further filter
+    to the D-150 action_types so unrelated CommunicationLog rows that happened
+    to share a correlation_id can never leak into the file's history.
+    """
+    import json
+
+    async with _session() as session:
+        result = await session.execute(
+            select(CommunicationLogTable).where(
+                CommunicationLogTable.external_message_id == view_relative_path,
+                CommunicationLogTable.action_type.in_(_DOCUMENT_VIEW_ACTION_TYPES),
+            ).order_by(CommunicationLogTable.timestamp.desc())
+        )
+        rows = list(result.scalars().all())
+
+    events: list[DocumentEventRow] = []
+    for r in rows:
+        # summary is the JSON blob written by AuditWriterImpl:
+        #   {"attribution": {...}, "details": {...}}
+        parsed: dict = {}
+        try:
+            parsed = json.loads(r.summary) if r.summary else {}
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+        details = parsed.get("details") if isinstance(parsed, dict) else {}
+        events.append(DocumentEventRow(
+            timestamp=r.timestamp,
+            action_type=r.action_type or "",
+            user_id=r.sender,
+            details=details if isinstance(details, dict) else {},
+        ))
+    return events
 
 
 # ---------------------------------------------------------------------------

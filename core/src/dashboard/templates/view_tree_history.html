@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — {{ filename }} · history{% endblock %}
+
+{% block content %}
+<p><a href="javascript:history.back()">← Back</a></p>
+
+<h1>{{ filename }}</h1>
+<p><em>Audit timeline — every open, edit, save, and download across all versions.</em></p>
+
+{% if rows|length == 0 %}
+  <p><em>No events recorded for this file yet.</em></p>
+{% else %}
+  <table>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Event</th>
+        <th>User</th>
+        <th>Note</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.timestamp_pretty }}</td>
+        <td>{{ r.event }}</td>
+        <td>{{ r.user_pretty }}</td>
+        <td>{{ r.note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

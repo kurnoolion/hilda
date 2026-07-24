@@ -49,10 +49,12 @@ from core.src.storage.document_view_writer import (
     write_attachment_to_view_tree,
 )
 from core.src.storage.document_view_ops import (
+    DocumentEventRow,
     TgFileEntry,
     TgFolderEntry,
     get_current_version,
     get_version_by_num,
+    list_document_events,
     list_files_in_tg,
     list_tg_names_for_scope,
     list_versions_for_file,

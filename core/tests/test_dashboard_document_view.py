@@ -228,6 +228,206 @@ class TestDrmWrappedFiles:
         assert "/browse/download/" in r.text
 
 
+class TestVersionsAndHistoryViews:
+    """D-150 Chunk 7 refinements 2026-07-24: Filename column rename, clickable
+    Versions cell, /browse/versions/{token} + /browse/history/{token} routes,
+    prior-version download via `v` claim, By-column pretty mapping, and ET
+    timezone rendering."""
+
+    async def test_versions_cell_is_link_when_count_gt_1(self, cfg):
+        # Two saves -> version_count=2 on the current row
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1-bytes", saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v2-bytes", saved_by="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        assert "/browse/versions/" in r.text
+        assert "History" in r.text  # column present
+
+    async def test_versions_cell_is_plaintext_when_count_eq_1(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("only.xlsx",),
+            content=b"only-v1", saved_by="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        # Not linked because count==1
+        assert "/browse/versions/" not in r.text
+
+    async def test_by_mapping_auto_to_owner_and_unknown_to_TPM(self, cfg):
+        # router-driven save (saved_by="auto")
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("router.xlsx",),
+            content=b"auto-payload", saved_by="auto", source="router",
+        )
+        # editor save-back (saved_by="unknown")
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("editor.xlsx",),
+            content=b"editor-payload", saved_by="unknown", source="editor",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        assert ">owner<" in r.text or "owner\n" in r.text or " owner " in r.text
+        assert ">TPM<" in r.text or "TPM\n" in r.text or " TPM " in r.text
+        # And the raw labels should NOT leak
+        assert ">auto<" not in r.text
+        assert ">unknown<" not in r.text
+
+    async def test_versions_view_renders_with_edit_on_current_download_on_prior(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1-bytes", saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v2-bytes", saved_by="pm",
+        )
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="versions", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/versions/{tok}")
+        assert r.status_code == 200
+        # Two rows rendered
+        assert "v1" in r.text and "v2" in r.text
+        assert "current" in r.text
+        # At least one Edit link (on the current row)
+        assert "/browse/edit/" in r.text
+        # Download link on every row (2 downloads total)
+        assert r.text.count("/browse/download/") >= 2
+
+    async def test_versions_view_rejects_wrong_mode_token(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1-bytes", saved_by="pm",
+        )
+        # An "edit" mode token cannot open /browse/versions
+        wrong_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="edit", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/versions/{wrong_tok}")
+        assert r.status_code == 403
+
+    async def test_prior_version_download_streams_vN_sibling_bytes(self, cfg):
+        v1 = b"v1-original-content"
+        v2 = b"v2-newer-content"
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=v1, saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=v2, saved_by="pm",
+        )
+        # Token with v=1 must stream v1 bytes (from .v1 sibling), not current
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="download", user_id="pm",
+            version_num=1,
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/download/{tok}")
+        assert r.status_code == 200
+        assert r.content == v1
+        # And a token WITHOUT v still streams current (v2)
+        cur_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="download", user_id="pm",
+        )
+        r2 = client.get(f"/browse/download/{cur_tok}")
+        assert r2.status_code == 200
+        assert r2.content == v2
+
+    async def test_history_view_lists_events(self, cfg):
+        # The dashboard's _audit() short-circuits when task_deps isn't wired
+        # on the test app, so writing routes through TestClient doesn't
+        # generate audit rows. Insert them directly via the same writer used
+        # in production so the query path is exercised end-to-end.
+        import json as _json
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+        from core.src.storage.db import CommunicationLogTable, session_scope
+        from core.src.storage.models import Channel, Direction
+
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/readme.txt"
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("readme.txt",),
+            content=b"hello", saved_by="pm",
+        )
+
+        async with session_scope() as s:
+            for action_type in ("document_viewed", "document_downloaded"):
+                s.add(CommunicationLogTable(
+                    log_id=str(_uuid.uuid4()),
+                    channel=Channel.SHAREPOINT,
+                    direction=Direction.OUTBOUND,
+                    timestamp=_dt.now(_tz.utc),
+                    delivery_item_id=None,
+                    device_id=None,
+                    sender="pm",
+                    recipients=None,
+                    subject=None,
+                    summary=_json.dumps({
+                        "attribution": {"trigger_source": "dashboard:document_view",
+                                        "correlation_id": view_path,
+                                        "modified_by": "pm"},
+                        "details":     {"view_relative_path": view_path,
+                                        "user_id": "pm"},
+                    }),
+                    external_message_id=view_path,
+                    credential_id=None,
+                    action_type=action_type,
+                    attachments=[],
+                ))
+            await s.commit()
+
+        hist_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="history", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/history/{hist_tok}")
+        assert r.status_code == 200
+        assert "Opened (view)" in r.text
+        assert "Downloaded" in r.text
+
+    async def test_history_view_rejects_wrong_mode_token(self, cfg):
+        wrong_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="download", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/history/{wrong_tok}")
+        assert r.status_code == 403
+
+
 class TestViewDownloadRoutes:
     async def test_view_streams_current_bytes(self, cfg):
         await save_view_document(

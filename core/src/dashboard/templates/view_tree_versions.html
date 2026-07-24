@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — {{ filename }} · versions{% endblock %}
+
+{% block content %}
+<p><a href="javascript:history.back()">← Back</a></p>
+
+<h1>{{ filename }}</h1>
+<p><em>All versions.</em>
+<a href="/browse/history/{{ history_token }}">📜 History</a></p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Version</th>
+      <th>Size</th>
+      <th>Last saved</th>
+      <th>By</th>
+      <th>Source</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>
+        v{{ r.version_num }}
+        {% if r.is_current %}<span style="margin-left:0.4em; padding:0.05em 0.35em; border:1px solid #5a5; color:#5a5; border-radius:3px; font-size:0.8em;">current</span>{% endif %}
+        {% if r.is_drm_wrapped %}<span style="margin-left:0.4em; padding:0.05em 0.35em; border:1px solid #a55; color:#a55; border-radius:3px; font-size:0.8em;" title="Wrapped by corp IRM in transit">🔒 DRM</span>{% endif %}
+      </td>
+      <td>{{ r.size_bytes }}</td>
+      <td>{{ r.saved_at_pretty }}</td>
+      <td>{{ r.saved_by_pretty }}</td>
+      <td>{{ r.source }}</td>
+      <td>
+        {% if r.edit_token %}
+          <a href="/browse/edit/{{ r.edit_token }}">Edit</a>
+        {% endif %}
+        <a href="/browse/download/{{ r.download_token }}">Download</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

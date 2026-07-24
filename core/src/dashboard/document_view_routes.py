@@ -66,15 +66,26 @@ _TOKEN_TTL_SECONDS = 30 * 60   # 30 min
 
 
 def _make_scoped_token(*, secret: str, view_relative_path: str, mode: str,
-                       user_id: str, ttl_seconds: int = _TOKEN_TTL_SECONDS) -> str:
+                       user_id: str, ttl_seconds: int = _TOKEN_TTL_SECONDS,
+                       version_num: int | None = None) -> str:
     """URL-safe token containing view_relative_path + mode + user_id + expires_at.
-    HMAC-SHA256 signed with dashboard.wopi_jwt_secret so tampering is detected."""
-    payload = {
+    HMAC-SHA256 signed with dashboard.wopi_jwt_secret so tampering is detected.
+
+    Modes: "view" | "edit" | "download" | "versions" | "history".
+
+    Optional `version_num`: when set on a "download" token, /browse/download
+    streams the historical `.v<N>` sibling instead of the current bytes. Used
+    by the /browse/versions view to link Download on prior-version rows.
+    Absent version_num = current bytes (backward compatible).
+    """
+    payload: dict[str, Any] = {
         "p":  view_relative_path,
-        "m":  mode,             # "view" | "edit" | "download"
+        "m":  mode,
         "u":  user_id,
         "x":  int(time.time()) + ttl_seconds,
     }
+    if version_num is not None:
+        payload["v"] = int(version_num)
     body = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
     ).rstrip(b"=").decode("ascii")
@@ -207,6 +218,47 @@ def _ext(filename: str) -> str:
     if "." not in filename:
         return ""
     return "." + filename.rsplit(".", 1)[-1].lower()
+
+
+# --- UI presentation helpers (exposed to templates) ------------------------
+
+def _pretty_by(saved_by: str | None) -> str:
+    """Map internal audit identities to TPM-facing role labels for the
+    documents view. Per architect 2026-07-24:
+      * 'auto'    → 'owner'   (router-driven ingest from owner-reply email)
+      * 'unknown' → 'TPM'     (dashboard-mock-auth Edit save-back)
+      * anything else → passthrough (real corp_id when available)
+    """
+    if saved_by is None:
+        return ""
+    s = str(saved_by).strip()
+    if s == "auto":
+        return "owner"
+    if s == "unknown":
+        return "TPM"
+    return s
+
+
+# All view-tree timestamps are stored tz-aware UTC in Postgres. TPMs live in
+# America/New_York → render as ET (auto EDT/EST via zoneinfo tzdata) rather
+# than UTC. Per architect 2026-07-24. If future customers span multiple zones,
+# make this per-user; Ph-1 single-tenant is fine as a module constant.
+try:
+    from zoneinfo import ZoneInfo
+    _DISPLAY_TZ = ZoneInfo("America/New_York")
+except Exception:  # noqa: BLE001 — tzdata missing on some minimal images
+    _DISPLAY_TZ = None
+
+
+def _fmt_dt(dt: datetime | None, fmt: str = "%Y-%m-%d %H:%M %Z") -> str:
+    """Format a UTC-stored tz-aware datetime in America/New_York for TPM UI.
+    Returns '' for None; falls back to the raw UTC string if zoneinfo is absent
+    (dev environments without tzdata)."""
+    if dt is None:
+        return ""
+    if _DISPLAY_TZ is None:
+        return dt.strftime(fmt)
+    return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
 
 
 def _wopi_src_to_key(wopi_src: str) -> str:
@@ -359,16 +411,30 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 secret=secret, view_relative_path=f.view_relative_path,
                 mode="download", user_id=user_id,
             )
+            # Versions link only appears when there's history to show;
+            # emit the token unconditionally so template branch is simple.
+            versions_tok = _make_scoped_token(
+                secret=secret, view_relative_path=f.view_relative_path,
+                mode="versions", user_id=user_id,
+            )
+            history_tok = _make_scoped_token(
+                secret=secret, view_relative_path=f.view_relative_path,
+                mode="history", user_id=user_id,
+            )
             rendered.append({
                 "filename":            f.filename,
                 "view_relative_path":  f.view_relative_path,
                 "size_bytes":          f.size_bytes,
                 "version_count":       f.version_count,
                 "last_saved_at":       f.last_saved_at,
+                "last_saved_at_pretty":_fmt_dt(f.last_saved_at),
                 "last_saved_by":       f.last_saved_by,
+                "last_saved_by_pretty":_pretty_by(f.last_saved_by),
                 "open_mode":           effective_mode,
                 "open_token":          tok,
                 "download_token":      download_tok,
+                "versions_token":      versions_tok,
+                "history_token":       history_tok,
                 "is_drm_wrapped":      f.is_drm_wrapped,
             })
         return templates.TemplateResponse(
@@ -380,6 +446,127 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "milestone_id": milestone_id,
                 "tg_name":      tg_name,
                 "files":        rendered,
+            },
+        )
+
+    # ----- Chunk 7: per-file versions list ---------------------------------
+
+    @app.get("/browse/versions/{token}", response_class=HTMLResponse)
+    async def browse_versions(token: str, request: Request):
+        """Per-file version history — one row per DocumentVersion. Actions:
+        Edit (current + non-DRM only), Download (every version, threaded via
+        the scoped-token `v` claim), History (per-file, all events)."""
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "versions":
+            raise HTTPException(status_code=403, detail="token not a versions token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+
+        from core.src.storage import get_current_version, list_versions_for_file
+        current = await get_current_version(view_relative_path)
+        if current is None:
+            raise HTTPException(status_code=404, detail="no such file")
+        versions = await list_versions_for_file(view_relative_path)   # DESC
+
+        filename = PurePosixPath(view_relative_path).name
+        secret = cfg.wopi_jwt_secret
+
+        # Edit link only for CURRENT + not DRM-wrapped + editor-mode extension.
+        # Prior versions: Download only (per architect 2026-07-24).
+        rows = []
+        for v in versions:
+            is_cur = (v.version_num == current.version_num)
+            can_edit = (
+                is_cur
+                and not v.is_drm_wrapped
+                and _open_mode_for(filename) == "editor"
+            )
+            edit_tok = _make_scoped_token(
+                secret=secret, view_relative_path=view_relative_path,
+                mode="edit", user_id=user_id,
+            ) if can_edit else None
+            # Prior-version download carries `v` claim → browse_download routes
+            # to read_version_bytes(path, N). Current stays without `v` to
+            # exercise the read_current_version_bytes fast path.
+            dl_tok = _make_scoped_token(
+                secret=secret, view_relative_path=view_relative_path,
+                mode="download", user_id=user_id,
+                version_num=None if is_cur else v.version_num,
+            )
+            rows.append({
+                "version_num":         v.version_num,
+                "is_current":          is_cur,
+                "is_drm_wrapped":      v.is_drm_wrapped,
+                "size_bytes":          v.size_bytes,
+                "saved_at_pretty":     _fmt_dt(v.saved_at),
+                "saved_by_pretty":     _pretty_by(v.saved_by),
+                "source":              v.source,
+                "edit_token":          edit_tok,
+                "download_token":      dl_tok,
+            })
+
+        history_tok = _make_scoped_token(
+            secret=secret, view_relative_path=view_relative_path,
+            mode="history", user_id=user_id,
+        )
+        return templates.TemplateResponse(
+            request,
+            "view_tree_versions.html",
+            {
+                "filename":            filename,
+                "view_relative_path":  view_relative_path,
+                "rows":                rows,
+                "history_token":       history_tok,
+            },
+        )
+
+    @app.get("/browse/history/{token}", response_class=HTMLResponse)
+    async def browse_history(token: str, request: Request):
+        """Per-file audit-event timeline — opens/edits/saves/downloads across
+        all versions (per architect 2026-07-24: per-file scope, not per-version).
+        Rows are sourced from CommunicationLog filtered by external_message_id.
+        """
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "history":
+            raise HTTPException(status_code=403, detail="token not a history token")
+        view_relative_path = payload["p"]
+
+        from core.src.storage import list_document_events
+        events = await list_document_events(view_relative_path)
+        filename = PurePosixPath(view_relative_path).name
+
+        # Humanize action_type for the timeline column
+        _humanize = {
+            "document_viewed":            "Opened (view)",
+            "document_edit_opened":       "Opened (edit)",
+            "document_saved":             "Saved",
+            "document_downloaded":        "Downloaded",
+            "document_edit_blocked_drm":  "Edit blocked (DRM)",
+        }
+        rows = []
+        for e in events:
+            # `details` may carry version_num on saves + downloads; surface it
+            # in the row so the template can render a compact note column.
+            note_bits = []
+            v = e.details.get("version_num") if e.details else None
+            if v:
+                note_bits.append(f"v{v}")
+            if e.details and e.details.get("onlyoffice_status"):
+                note_bits.append(f"oo_status={e.details['onlyoffice_status']}")
+            rows.append({
+                "timestamp_pretty": _fmt_dt(e.timestamp),
+                "event":            _humanize.get(e.action_type, e.action_type),
+                "user_pretty":      _pretty_by(e.user_id),
+                "note":             " · ".join(note_bits),
+            })
+
+        return templates.TemplateResponse(
+            request,
+            "view_tree_history.html",
+            {
+                "filename":           filename,
+                "view_relative_path": view_relative_path,
+                "rows":               rows,
             },
         )
 
@@ -409,9 +596,17 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             raise HTTPException(status_code=403, detail="token not a download token")
         view_relative_path = payload["p"]
         user_id = payload["u"]
-        _audit(request, "document_downloaded", view_relative_path, user_id)
-        from core.src.storage import read_current_version_bytes
-        content = await read_current_version_bytes(view_relative_path)
+        # Optional `v` claim (added by /browse/versions links for prior versions)
+        # routes to the archived .v<N> sibling instead of current bytes.
+        version_num = payload.get("v")
+        _audit(request, "document_downloaded", view_relative_path, user_id,
+               details={"version_num": version_num} if version_num else None)
+        if version_num is not None:
+            from core.src.storage import read_version_bytes
+            content = await read_version_bytes(view_relative_path, int(version_num))
+        else:
+            from core.src.storage import read_current_version_bytes
+            content = await read_current_version_bytes(view_relative_path)
         filename = PurePosixPath(view_relative_path).name
         return StreamingResponse(
             iter((content,)),
