@@ -121,6 +121,14 @@ class TestOpenMode:
         assert _open_mode_for("Cache.MSG") == "download"
         assert _open_mode_for("state.db") == "download"
 
+    def test_legacy_binary_office_is_download_only_2026_07_24(self):
+        """Legacy binary .doc/.xls/.ppt formats never open in the editor per
+        architect 2026-07-24: they're always NASCA-wrapped by corp email path
+        and OnlyOffice CE has poor legacy-binary conversion support anyway."""
+        for name in ("report.doc", "spec.DOC", "data.xls", "budget.XLS",
+                     "slides.ppt", "Deck.PPT"):
+            assert _open_mode_for(name) == "download", f"{name} should be download-only"
+
     def test_download_fallback(self):
         assert _open_mode_for("archive.zip") == "download"
         assert _open_mode_for("no_extension") == "download"
@@ -184,10 +192,10 @@ class TestDrmWrappedFiles:
         from core.src.storage import get_current_version
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
-            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            tg_name="hw_reports", relative_parts=("wrapped.docx",),
             content=self._NASCA_BYTES, saved_by="router", source="router",
         )
-        row = await get_current_version("view/MMK/SM-S671U1/DRR/hw_reports/wrapped.doc")
+        row = await get_current_version("view/MMK/SM-S671U1/DRR/hw_reports/wrapped.docx")
         assert row is not None
         assert row.is_drm_wrapped is True
 
@@ -208,7 +216,7 @@ class TestDrmWrappedFiles:
         # One wrapped .doc + one clean .xlsx side-by-side
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
-            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            tg_name="hw_reports", relative_parts=("wrapped.docx",),
             content=self._NASCA_BYTES, saved_by="router", source="router",
         )
         await save_view_document(
@@ -229,12 +237,12 @@ class TestDrmWrappedFiles:
     async def test_browse_edit_returns_415_for_drm_wrapped(self, cfg):
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
-            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            tg_name="hw_reports", relative_parts=("wrapped.docx",),
             content=self._NASCA_BYTES, saved_by="router", source="router",
         )
         edit_tok = _make_scoped_token(
             secret=cfg.wopi_jwt_secret,
-            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/wrapped.doc",
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/wrapped.docx",
             mode="edit", user_id="tpm",
         )
         client = TestClient(build_app(cfg))

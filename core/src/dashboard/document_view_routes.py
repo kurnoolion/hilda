@@ -208,12 +208,20 @@ def _urlsafe_b64_decode(s: str) -> bytes:
 # via documentType="word", which gives us save-back + versions + history +
 # DRM gating consistent with the .docx flow at zero extra plumbing.
 #
-# .msg (Outlook message) and .db (SQLite) are download-only per architect
-# ask; kept explicit in _DOWNLOAD_ONLY_EXTENSIONS as documentation only —
-# the ternary below would fall through to "download" for any unlisted
-# extension anyway.
+# Legacy binary Office formats (.doc, .xls, .ppt) live in _DOWNLOAD_ONLY_EXTENSIONS
+# per architect 2026-07-24. Empirical: corp Exchange DLP always NASCA-wraps
+# legacy binary attachments in transit; the wrapped bytes can't be decrypted
+# server-side, so Edit will always fail. Modern OOXML .docx/.xlsx/.pptx come
+# through clean and stay editable. The D-152 magic-byte sniff still runs on
+# every save — this is a policy layer on top: even if a clean legacy binary
+# ever arrives through a non-email path, we still route it to download-only
+# because OnlyOffice CE 8 doesn't reliably convert .doc/.xls anyway.
+#
+# .msg (Outlook message) and .db (SQLite) are download-only for the same
+# "no browser renderer / binary payload" reason.
 _EDITOR_EXTENSIONS = {
-    ".docx", ".xlsx", ".xlsm", ".doc", ".xls", ".pptx", ".ppt",
+    # Modern OOXML — zip-backed, not wrapped by corp email path
+    ".docx", ".xlsx", ".xlsm", ".pptx",
     ".txt",   # 2026-07-24: plaintext via OnlyOffice Word editor
 }
 _NATIVE_VIEW_EXTENSIONS = {
@@ -222,6 +230,10 @@ _NATIVE_VIEW_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg",
 }
 _DOWNLOAD_ONLY_EXTENSIONS = {
+    # Legacy binary Office — always NASCA-wrapped by corp email; also poor
+    # OnlyOffice CE support even when clean. Users download + open locally
+    # in a NASCA-aware Office client.
+    ".doc", ".xls", ".ppt",
     ".msg",  # Outlook message — no browser renderer
     ".db",   # SQLite database file — binary
 }
@@ -729,13 +741,15 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         # payload differs from the actual config, OnlyOffice rejects with
         # "The document security token is not correctly formed".
         ext = _ext(filename).lstrip(".")
-        if ext in ("docx", "doc", "odt", "txt"):
-            # .txt opens in OnlyOffice's Word editor as plaintext per architect
-            # 2026-07-24; save-back writes back plaintext bytes unchanged.
+        # Only OOXML + .txt reach this branch per 2026-07-24 policy — legacy
+        # binary formats (.doc/.xls/.ppt) are gated download-only upstream in
+        # _open_mode_for. ODF variants (.odt/.ods/.odp) are not deployed in
+        # this env but left in the mapping for future-proofing.
+        if ext in ("docx", "odt", "txt"):
             document_type = "word"
-        elif ext in ("xlsx", "xls", "xlsm", "ods"):
+        elif ext in ("xlsx", "xlsm", "ods"):
             document_type = "cell"
-        elif ext in ("pptx", "ppt", "odp"):
+        elif ext in ("pptx", "odp"):
             document_type = "slide"
         else:
             document_type = "word"
