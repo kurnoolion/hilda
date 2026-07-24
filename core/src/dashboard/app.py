@@ -205,6 +205,24 @@ def build_app(
     if not hasattr(app.state, "mock_storage"):
         app.state.mock_storage = None
 
+    # D-150 Chunk 7 audit wiring (2026-07-24): document_view_routes._audit()
+    # writes CommunicationLog rows for every open/edit/save/download so the
+    # /browse/history/{token} timeline has data to render. It looks for
+    # `request.app.state.task_deps.audit`. Celery workers wire this via a
+    # startup signal; the dashboard is its own uvicorn process and needs
+    # its own wiring. Constructing PostgresAuditWriter is dependency-free
+    # (uses the same engine as `storage` above via storage.audit_ops), so
+    # we wrap it in a minimal shim rather than a full TaskDeps to avoid
+    # having to plumb sp_writer + downstream adapters we don't use here.
+    class _DashboardTaskDeps:  # duck-typed to match TaskDeps.audit surface
+        __slots__ = ("audit",)
+        def __init__(self, audit): self.audit = audit
+    try:
+        from core.src.storage.audit_writer_impl import PostgresAuditWriter
+        app.state.task_deps = _DashboardTaskDeps(audit=PostgresAuditWriter())
+    except Exception:  # noqa: BLE001 — degrade to no-audit rather than crash boot
+        app.state.task_deps = None
+
     # ---- Liveness probe for container orchestration ----
     @app.get("/healthz")
     async def healthz() -> dict:

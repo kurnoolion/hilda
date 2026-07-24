@@ -442,6 +442,49 @@ class TestVersionsAndHistoryViews:
         assert "Opened (view)" in r.text
         assert "Downloaded" in r.text
 
+    async def test_route_audit_wired_end_to_end(self, cfg):
+        """HIST-1 regression: verify build_app() wires task_deps.audit so that
+        real /browse/view + /browse/download hits actually create CommunicationLog
+        rows that the /browse/history view can then render.
+
+        Prior to HIST-1, _audit() short-circuited (app.state.task_deps was None)
+        and History always rendered "No events recorded" no matter how many
+        times the user opened/downloaded a file.
+        """
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("audit-me.txt",),
+            content=b"hello", saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/audit-me.txt"
+        client = TestClient(build_app(cfg))
+
+        # Trigger view + download through the actual routes -- if audit isn't
+        # wired, no CommunicationLog rows are produced and history is empty.
+        view_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="view", user_id="pm",
+        )
+        dl_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="download", user_id="pm",
+        )
+        assert client.get(f"/browse/view/{view_tok}").status_code == 200
+        assert client.get(f"/browse/download/{dl_tok}").status_code == 200
+
+        # Now the history page should reflect both events -- proof that
+        # task_deps.audit landed rows and list_document_events reads them back.
+        hist_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="history", user_id="pm",
+        )
+        r = client.get(f"/browse/history/{hist_tok}")
+        assert r.status_code == 200
+        assert "Opened (view)" in r.text, "view audit row did not land"
+        assert "Downloaded" in r.text, "download audit row did not land"
+        # And "no events" message MUST be absent
+        assert "No events recorded" not in r.text
+
     async def test_history_view_rejects_wrong_mode_token(self, cfg):
         wrong_tok = _make_scoped_token(
             secret=cfg.wopi_jwt_secret,
