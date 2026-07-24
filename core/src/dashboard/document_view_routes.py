@@ -210,22 +210,25 @@ def _ext(filename: str) -> str:
 
 
 def _wopi_src_to_key(wopi_src: str) -> str:
-    """OnlyOffice `document.key` — unique per edit session.
+    """OnlyOffice `document.key` — unique per ~1-min edit window, ≤128 chars.
 
-    Per OnlyOffice caching: the same key across attempts causes OnlyOffice
-    to reuse cached document state — including cached FAILED state from
-    prior broken configs. Corp deploy 2026-07-23 hit this: an early edit
-    attempt with a stale (localhost) URL failed, and every subsequent
-    attempt with the correct URL returned "Other error" because OnlyOffice
-    kept serving the failed cache entry (key was stable = same wopi_src).
+    OnlyOffice DocumentServer spec: `document.key` must be ≤128 characters,
+    charset [0-9a-zA-Z._-]. Corp deploy 2026-07-23 was silently failing
+    (`"Other error"` / "file cannot be accessed") because the naïve key
+    `<wopi_src>_<bucket>` came out at ~170 chars (base64 file_id alone is
+    ~130 chars). OnlyOffice rejected without a clear log line.
 
-    Fix: include a monotonically-increasing time bucket (1-min granularity)
-    so each edit session gets a fresh key while still allowing multiple
-    users concurrently editing to share the key within the same minute.
+    Bucketing rationale: same key across attempts causes OnlyOffice to reuse
+    cached document state — including cached FAILED state from prior broken
+    configs. A 1-min time bucket gives each edit session a fresh cache slot
+    while still letting concurrent editors within the same minute share.
+
+    Format: `d{16-hex-of-sha256(wopi_src)}_{minute_bucket}` — ~30 chars,
+    stable across processes, unique per file per minute.
     """
     minute_bucket = int(time.time()) // 60
-    base = wopi_src.replace("/", "_").replace(":", "_").replace(".", "_")
-    return f"{base}_{minute_bucket}"
+    digest = hashlib.sha256(wopi_src.encode("utf-8")).hexdigest()[:16]
+    return f"d{digest}_{minute_bucket}"
 
 
 def _mime_for(filename: str) -> str:
