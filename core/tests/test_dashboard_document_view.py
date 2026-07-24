@@ -99,14 +99,31 @@ class TestOpenMode:
         assert _open_mode_for("report.xlsx") == "editor"
         assert _open_mode_for("Report.DOCX") == "editor"
 
+    def test_txt_is_editor_2026_07_24(self):
+        """.txt moved to editor: OnlyOffice Word editor supports plaintext."""
+        assert _open_mode_for("notes.txt") == "editor"
+        assert _open_mode_for("README.TXT") == "editor"
+
     def test_native_view_extensions(self):
         assert _open_mode_for("report.pdf") == "native"
         assert _open_mode_for("readme.html") == "native"
-        assert _open_mode_for("notes.txt") == "native"
+        assert _open_mode_for("data.csv") == "native"
+        assert _open_mode_for("notes.md") == "native"
+
+    def test_images_are_native_2026_07_24(self):
+        for name in ("photo.png", "shot.JPG", "pic.jpeg", "anim.gif",
+                     "old.bmp", "modern.webp", "logo.svg"):
+            assert _open_mode_for(name) == "native", f"failed for {name}"
+
+    def test_msg_and_db_are_download_only_2026_07_24(self):
+        """Outlook .msg and SQLite .db files are download-only per architect."""
+        assert _open_mode_for("message.msg") == "download"
+        assert _open_mode_for("Cache.MSG") == "download"
+        assert _open_mode_for("state.db") == "download"
 
     def test_download_fallback(self):
         assert _open_mode_for("archive.zip") == "download"
-        assert _open_mode_for("image.png") == "download"
+        assert _open_mode_for("no_extension") == "download"
 
 
 class TestFileIdEncoding:
@@ -463,6 +480,50 @@ class TestViewDownloadRoutes:
         assert r.content == b"hello"
         assert r.headers["content-disposition"].startswith("attachment;")
 
+    async def test_view_image_streams_inline_with_image_content_type(self, cfg):
+        """.png (added to native-view set 2026-07-24) must stream inline with
+        image/png content-type so the browser can preview it."""
+        # Fake 1-pixel PNG magic bytes; contents don't need to be a real image
+        # for the streaming path — we're only checking headers + bytes echo.
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("shot.png",),
+            content=png_bytes, saved_by="pm",
+        )
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/shot.png",
+            mode="view", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/view/{tok}")
+        assert r.status_code == 200
+        assert r.content == png_bytes
+        assert r.headers["content-type"].startswith("image/png")
+        assert r.headers["content-disposition"].startswith("inline;")
+
+    async def test_txt_edit_page_reaches_editor_render(self, cfg):
+        """.txt moved to editor 2026-07-24: /browse/edit must accept it (not
+        415), pass through DRM sniff, and render the OnlyOffice iframe HTML."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("notes.txt",),
+            content=b"plain text content",  # clean, not DRM-wrapped
+            saved_by="pm",
+        )
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/notes.txt",
+            mode="edit", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/edit/{tok}")
+        assert r.status_code == 200
+        # Editor iframe should be present; documentType is "word" for .txt
+        assert "DocsAPI.DocEditor" in r.text
+        assert '"documentType": "word"' in r.text or "'documentType': 'word'" in r.text
+
     async def test_view_bad_token_rejected(self, cfg):
         client = TestClient(build_app(cfg))
         r = client.get("/browse/view/deadbeef.bad")
@@ -643,14 +704,17 @@ class TestEditorEmbed:
         assert "/wopi/files/" in r.text
 
     async def test_edit_page_rejects_non_editable_extension(self, cfg):
+        # 2026-07-24: .txt moved to editor mode, so this uses .pdf (native) as
+        # the canonical "not editable" example. .msg / .db / .zip would work
+        # equally well — /browse/edit rejects anything not in _EDITOR_EXTENSIONS.
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
-            tg_name="hw_reports", relative_parts=("readme.txt",),
-            content=b"x", saved_by="pm",
+            tg_name="hw_reports", relative_parts=("report.pdf",),
+            content=b"%PDF-1.4 fake", saved_by="pm",
         )
         tok = _make_scoped_token(
             secret=cfg.wopi_jwt_secret,
-            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/readme.txt",
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/report.pdf",
             mode="edit", user_id="pm",
         )
         client = TestClient(build_app(cfg))

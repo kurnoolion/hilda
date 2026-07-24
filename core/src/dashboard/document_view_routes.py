@@ -199,14 +199,45 @@ def _urlsafe_b64_decode(s: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-_EDITOR_EXTENSIONS = {".docx", ".xlsx", ".xlsm", ".doc", ".xls", ".pptx", ".ppt"}
-_NATIVE_VIEW_EXTENSIONS = {".pdf", ".html", ".htm", ".txt", ".csv", ".md"}
-_DOWNLOAD_ONLY_EXTENSIONS: set[str] = set()  # everything else -> download
+# File-type dispatch (per architect 2026-07-24 matrix refresh):
+#   editor  = OnlyOffice DocEditor round-trip (Edit + Download)
+#   native  = browser renders inline via /browse/view (View + Download)
+#   download = file streams as attachment only (no Edit / View link)
+#
+# .txt moved from native -> editor: OnlyOffice supports plain-text editing
+# via documentType="word", which gives us save-back + versions + history +
+# DRM gating consistent with the .docx flow at zero extra plumbing.
+#
+# .msg (Outlook message) and .db (SQLite) are download-only per architect
+# ask; kept explicit in _DOWNLOAD_ONLY_EXTENSIONS as documentation only —
+# the ternary below would fall through to "download" for any unlisted
+# extension anyway.
+_EDITOR_EXTENSIONS = {
+    ".docx", ".xlsx", ".xlsm", ".doc", ".xls", ".pptx", ".ppt",
+    ".txt",   # 2026-07-24: plaintext via OnlyOffice Word editor
+}
+_NATIVE_VIEW_EXTENSIONS = {
+    ".pdf", ".html", ".htm", ".csv", ".md",
+    # Browser-native image previews (2026-07-24 matrix add)
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg",
+}
+_DOWNLOAD_ONLY_EXTENSIONS = {
+    ".msg",  # Outlook message — no browser renderer
+    ".db",   # SQLite database file — binary
+}
 
 
 def _open_mode_for(filename: str) -> str:
-    """Return 'editor' | 'native' | 'download' based on extension."""
+    """Return 'editor' | 'native' | 'download' based on extension.
+
+    Order matters: editor wins over native (a .txt with editor + native
+    membership would open in the editor). _DOWNLOAD_ONLY_EXTENSIONS is
+    checked before the default so it stays authoritative-by-intent even
+    if the sets accidentally overlap in the future.
+    """
     ext = _ext(filename)
+    if ext in _DOWNLOAD_ONLY_EXTENSIONS:
+        return "download"
     if ext in _EDITOR_EXTENSIONS:
         return "editor"
     if ext in _NATIVE_VIEW_EXTENSIONS:
@@ -292,13 +323,21 @@ def _mime_for(filename: str) -> str:
         ".txt":  "text/plain",
         ".csv":  "text/csv",
         ".md":   "text/markdown",
+        # Images (native inline preview per architect 2026-07-24)
         ".png":  "image/png",
         ".jpg":  "image/jpeg",
         ".jpeg": "image/jpeg",
         ".gif":  "image/gif",
+        ".bmp":  "image/bmp",
+        ".webp": "image/webp",
+        ".svg":  "image/svg+xml",
+        # Office (editor via OnlyOffice; also correct on downloads)
         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        # Download-only bins per architect 2026-07-24 matrix
+        ".msg":  "application/vnd.ms-outlook",
+        ".db":   "application/vnd.sqlite3",
     }.get(ext, "application/octet-stream")
 
 
@@ -690,7 +729,9 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         # payload differs from the actual config, OnlyOffice rejects with
         # "The document security token is not correctly formed".
         ext = _ext(filename).lstrip(".")
-        if ext in ("docx", "doc", "odt"):
+        if ext in ("docx", "doc", "odt", "txt"):
+            # .txt opens in OnlyOffice's Word editor as plaintext per architect
+            # 2026-07-24; save-back writes back plaintext bytes unchanged.
             document_type = "word"
         elif ext in ("xlsx", "xls", "xlsm", "ods"):
             document_type = "cell"
