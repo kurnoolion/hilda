@@ -156,6 +156,78 @@ class TestBrowseRoutes:
         assert "Download</a>" in r.text
 
 
+class TestDrmWrappedFiles:
+    """D-152: NASCA-wrapped files must be sniffed at save time, flagged in
+    listings, and rejected by /browse/edit even when the caller has a valid
+    edit token (UI gate is not the only gate)."""
+
+    _NASCA_BYTES = b"<## NASCA-WRAPPED-DOC\x00\x01\x02fake-encrypted-payload"
+
+    async def test_save_sniffs_nasca_magic(self, cfg):
+        from core.src.storage import get_current_version
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            content=self._NASCA_BYTES, saved_by="router", source="router",
+        )
+        row = await get_current_version("view/MMK/SM-S671U1/DRR/hw_reports/wrapped.doc")
+        assert row is not None
+        assert row.is_drm_wrapped is True
+
+    async def test_save_clean_bytes_flag_stays_false(self, cfg):
+        from core.src.storage import get_current_version
+        # OLE compound-doc magic — real legacy .doc
+        clean_doc = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 100
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("clean.doc",),
+            content=clean_doc, saved_by="router", source="router",
+        )
+        row = await get_current_version("view/MMK/SM-S671U1/DRR/hw_reports/clean.doc")
+        assert row is not None
+        assert row.is_drm_wrapped is False
+
+    async def test_browse_listing_shows_drm_badge_and_gates_edit(self, cfg):
+        # One wrapped .doc + one clean .xlsx side-by-side
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            content=self._NASCA_BYTES, saved_by="router", source="router",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("clean.xlsx",),
+            content=b"PK\x03\x04clean-ooxml-payload", saved_by="router", source="router",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        # Wrapped file: DRM badge visible
+        assert "🔒 DRM" in r.text
+        # Clean xlsx still gets an Edit link
+        assert "Edit</a>" in r.text
+        # Both get Download
+        assert r.text.count("Download</a>") >= 2
+
+    async def test_browse_edit_returns_415_for_drm_wrapped(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("wrapped.doc",),
+            content=self._NASCA_BYTES, saved_by="router", source="router",
+        )
+        edit_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/wrapped.doc",
+            mode="edit", user_id="tpm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/edit/{edit_tok}")
+        assert r.status_code == 415
+        assert "DRM-protected" in r.text
+        # 415 page should carry a working Download link
+        assert "/browse/download/" in r.text
+
+
 class TestViewDownloadRoutes:
     async def test_view_streams_current_bytes(self, cfg):
         await save_view_document(

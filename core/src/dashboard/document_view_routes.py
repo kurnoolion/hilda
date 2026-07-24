@@ -342,10 +342,22 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         rendered = []
         for f in files:
             mode = _open_mode_for(f.filename)
-            tok_mode = "edit" if mode == "editor" else ("view" if mode == "native" else "download")
+            # D-152: NASCA-wrapped files cannot be edited in-browser (OnlyOffice
+            # has no NASCA agent). Downgrade Edit → Download for wrapped files
+            # so the token itself grants only what the UI will show. Also emit
+            # a separate download_token so the template can render a Download
+            # link alongside a live Edit / native View when applicable.
+            effective_mode = "download" if f.is_drm_wrapped else mode
+            tok_mode = ("edit" if effective_mode == "editor"
+                        else "view" if effective_mode == "native"
+                        else "download")
             tok = _make_scoped_token(
                 secret=secret, view_relative_path=f.view_relative_path,
                 mode=tok_mode, user_id=user_id,
+            )
+            download_tok = _make_scoped_token(
+                secret=secret, view_relative_path=f.view_relative_path,
+                mode="download", user_id=user_id,
             )
             rendered.append({
                 "filename":            f.filename,
@@ -354,8 +366,10 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "version_count":       f.version_count,
                 "last_saved_at":       f.last_saved_at,
                 "last_saved_by":       f.last_saved_by,
-                "open_mode":           mode,
+                "open_mode":           effective_mode,
                 "open_token":          tok,
+                "download_token":      download_tok,
+                "is_drm_wrapped":      f.is_drm_wrapped,
             })
         return templates.TemplateResponse(
             request,
@@ -419,12 +433,40 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         if _open_mode_for(filename) != "editor":
             raise HTTPException(status_code=415, detail="file type not editable")
 
+        # Config check runs before disk I/O so misconfigured deploys short-circuit
+        # cleanly without needing the file to exist (matches historical behavior).
         if not cfg.onlyoffice_public_url or not cfg.wopi_jwt_secret:
             return HTMLResponse(
                 "<html><body><h1>OnlyOffice not configured</h1>"
                 "<p>Set dashboard.onlyoffice_public_url + wopi_jwt_secret in "
                 "config/dashboard.json to enable in-browser editing.</p></body></html>",
                 status_code=503,
+            )
+
+        # D-152 belt-and-suspenders: even if the UI hid the Edit link, a caller
+        # can still hit this URL directly (bookmarked token, curl, etc). Sniff
+        # the first 4 bytes of the current version — NASCA-wrapped files start
+        # with `<## ` (0x3c 0x23 0x23 0x20) and OnlyOffice cannot decrypt them.
+        # Fail fast with 415 + a Download link rather than letting OnlyOffice
+        # spin on a corrupt-looking payload and surface "Unknown error".
+        from core.src.storage import read_current_version_bytes
+        head = (await read_current_version_bytes(view_relative_path))[:4]
+        if head == b"<## ":
+            _audit(request, "document_edit_blocked_drm", view_relative_path, user_id)
+            dl_tok = _make_scoped_token(
+                secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
+                mode="download", user_id=user_id,
+            )
+            return HTMLResponse(
+                "<html><body>"
+                "<h1>🔒 DRM-protected document</h1>"
+                "<p>This file was wrapped by corp Information Rights Management "
+                "(NASCA) in transit. In-browser editing is not available for "
+                "wrapped files.</p>"
+                f"<p><a href=\"/browse/download/{dl_tok}\">Download</a> and open "
+                "in a NASCA-aware Office client on your workstation to edit.</p>"
+                "</body></html>",
+                status_code=415,
             )
 
         _audit(request, "document_edit_opened", view_relative_path, user_id)

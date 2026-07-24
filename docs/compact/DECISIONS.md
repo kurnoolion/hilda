@@ -3921,3 +3921,47 @@ State (1) is already legal per [D-146]'s `OPEN → CLOSED` edge (added for Defau
 - (g) **Interaction with future fuzzy / LLM stages (Ph-2)**: when `ph1_first_pass_substring_only=False` in Ph-2, `_tg_scoped_route` still runs first. If empty, fuzzy / folder / LLM run as before. TG-default becomes an intermediate fallback layer between substring and fuzzy.
 
 **Anchors**: **FR-52** (5-step routing pipeline), **FR-78** (milestone Default WI legacy fallback), **FR-82** (item_description nested tag-set model).
+
+
+## D-152: Email-path IRM wrapping blocks in-browser Edit — magic-byte sniff at ingest, UI + route gate on wrapped files
+
+**Date**: 2026-07-24
+**Status**: Ratified
+
+**Context**: Empirical finding during D-150 corp deployment. Same office file, two ingress paths — divergent results:
+
+| Path | Result |
+|---|---|
+| Windows workstation → SCP → Linux view-tree | Clean (OLE magic `d0cf11e0a1b11ae1` for .doc, PK zip magic for .docx/.xlsx) |
+| Windows Outlook → SMTP → OMADM_BOT mailbox → HILDA email poll → view-tree | Wrapped (`<## NASC...` marker prepended, real payload encrypted) |
+
+Corp Exchange / DLP applies **NASCA IRM (Information Rights Management)** to attachments in transit — even internal-to-internal. Empirical scope: legacy `.doc` and `.xls` binary formats get wrapped; modern OOXML `.docx` / `.xlsx` / `.pptx` come through clean. Wrapped payload can only be decrypted by the corp NASCA agent installed on end-user Windows machines; the OnlyOffice container has no such agent. OnlyOffice on a wrapped file silently returns "Other error" after ~10s spin, no useful log.
+
+Ph-1 owner-reply attachments (FR-52 / FR-85 / FR-86) arrive exclusively via email → any `.doc` / `.xls` in that flow will be wrapped and un-editable in-browser.
+
+**Decision**: Magic-byte sniff at save time (`content.startswith(b"<## ")`); persist `is_drm_wrapped: bool` on `document_version`; dashboard UI and `/browse/edit/{token}` both gate on the flag.
+
+1. **Storage** — `DocumentVersionRow` + `DocumentVersionTable` get `is_drm_wrapped: bool = False`. `save_view_document` computes the flag from the incoming bytes (`_NASCA_MAGIC = b"<## "`) and persists on every version row. `TgFileEntry` propagates the flag to the browse listing.
+2. **Dashboard listing** — per-file rendering computes `effective_mode = "download" if is_drm_wrapped else _open_mode_for(filename)`. Emits an extra `download_token` alongside `open_token` so the template can always render a Download link.
+3. **Template** — wrapped rows show a 🔒 DRM badge (with tooltip explaining the corp IRM behavior) and Download-only. Non-wrapped rows behave as before (Edit for editor-mode, View for native, Download universally).
+4. **`/browse/edit/{token}` belt-and-suspenders** — reads first 4 bytes of the current version; if `<## ` returns 415 HTML page with a Download link and audits `document_edit_blocked_drm`. Sits AFTER the config-503 short-circuit so misconfigured deploys still return 503 quickly without a disk read.
+
+**Why**:
+- (a) **Magic-byte sniff over extension-based blocklist (rejected)**: extensions lie (see D-150 Chunk 3 zip magic detection). NASCA can wrap any format; magic-byte sniff is authoritative and cheap.
+- (b) **Sniff at save time over sniff at open time (chosen)**: browse listings would otherwise need to open every file to render; O(N) disk reads per page load. Persisting the flag on `document_version` keeps listings a single DB query.
+- (c) **Also sniff on editor save-back (chosen)**: `save_view_document` is called by both router (attachment ingest) and WOPI PUT (editor save). Editor saves should never produce wrapped bytes — but sniffing unconditionally guards against future flows we haven't thought of.
+- (d) **Belt-and-suspenders route check (chosen)**: bookmarked edit tokens or direct-URL callers can bypass the UI gate. 415 at the route is the definitive contract; UI gate is a latency optimization.
+- (e) **Download-only over "reject entirely" (chosen)**: TPMs still need access to the wrapped file — they can decrypt it locally in corp-provisioned Office. Blocking download would be strictly worse than status quo.
+- (f) **Ph-2 defer for server-side NASCA decrypt integration**: requires corp security engagement (API/CLI availability, key material provisioning, deployment hardening). Non-trivial cross-team work. Ph-1 ships the constraint; Ph-2 revisits if TPM friction warrants.
+
+**Consequences**:
+- (a) **Schema change**: `document_version.is_drm_wrapped BOOLEAN DEFAULT FALSE` — additive; existing rows default `false`, which is safe for non-wrapped files and mildly optimistic for wrapped ones (they'll show Edit until the next save re-sniffs). Backfill script deferred; empirically the corpus is small enough that a one-time re-ingest fixes it.
+- (b) **Model surface change**: `DocumentVersionRow.is_drm_wrapped`, `TgFileEntry.is_drm_wrapped` — additive, defaults preserve callers.
+- (c) **Dashboard route emits `download_token` alongside `open_token`** for every row (always, not just wrapped). Template renders Download universally; simpler than conditional token generation.
+- (d) **New audit action_type**: `document_edit_blocked_drm` fires when `/browse/edit` short-circuits on wrapped bytes. Ops grep patterns updated.
+- (e) **In-browser Edit remains available** for OOXML (which corp NASCA doesn't wrap) and for any legacy files that arrived through non-email paths (SCP, manual ingest, future direct-SP-fetch). Not a total lockout.
+- (f) **UX signal**: 🔒 DRM badge is visible in the tg-files listing; users understand at a glance which files require local-Office edit vs in-browser.
+- (g) **Ph-2 open question tracked in STATUS.md**: "NASCA server-side decrypt integration (corp API TBD)".
+- (h) **Test suite**: 4 new tests in `TestDrmWrappedFiles` covering (i) NASCA sniff on save, (ii) clean-bytes flag stays false, (iii) listing renders badge + gates Edit, (iv) `/browse/edit` returns 415 with Download link.
+
+**Anchors**: [D-150] (HILDA-side documents view + WOPI Host), **FR-52** (attachment router), **FR-85** / **FR-86** (owner-reply attachment persistence). Discovery credit: empirical test comparing SCP path vs email path 2026-07-24 (architect direct observation).

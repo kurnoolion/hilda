@@ -46,6 +46,16 @@ __all__ = [
 _session = session_scope
 
 
+# D-152 (2026-07-24): corp Exchange DLP/IRM wraps some in-transit attachments
+# with NASCA. Wrapped bytes start with the ASCII marker `<## ` (0x3c 0x23 0x23
+# 0x20). Empirically confirmed 2026-07-24: same file arriving via SCP is clean,
+# same file arriving via corp email → OMADM_BOT mailbox is wrapped. Legacy
+# .doc/.xls formats are wrapped by policy; modern OOXML .docx/.xlsx come clean.
+# We sniff at save time so downstream UI can gate the Edit button off (OnlyOffice
+# has no NASCA agent inside the container and cannot decrypt).
+_NASCA_MAGIC = b"<## "
+
+
 @dataclass(frozen=True)
 class TgFolderEntry:
     """Directory-shaped entry returned by list_tg_names_for_scope for the landing
@@ -70,6 +80,9 @@ class TgFileEntry:
     version_count: int
     last_saved_at: datetime
     last_saved_by: str
+    # D-152: True when the current file is NASCA/IRM-wrapped (bytes start with
+    # `<## `). Dashboard hides the Edit button and shows Download-only.
+    is_drm_wrapped: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +154,12 @@ async def save_view_document(
         # Insert the new current row
         now = datetime.now(timezone.utc)
         sha = hashlib.sha256(content).hexdigest()
+        # D-152 DRM sniff: OnlyOffice can't decrypt NASCA-wrapped bytes; the
+        # dashboard checks this flag to gate the Edit button off. Editor
+        # save-backs (source="editor") should never be wrapped in practice —
+        # OnlyOffice writes cleartext — but we sniff unconditionally so a
+        # corrupt/spoofed round-trip still lands with the flag set.
+        is_drm = content.startswith(_NASCA_MAGIC)
         new_row = DocumentVersionRow(
             version_id=uuid.uuid4().hex,
             view_relative_path=view_relative,
@@ -156,6 +175,7 @@ async def save_view_document(
             saved_at=now,
             saved_by=saved_by,
             source=source,
+            is_drm_wrapped=is_drm,
         )
         session.add(_row_to_table(new_row))
         await session.commit()
@@ -303,6 +323,7 @@ async def list_files_in_tg(
             version_count=version_count_by_path.get(r.view_relative_path, 1),
             last_saved_at=r.saved_at,
             last_saved_by=r.saved_by,
+            is_drm_wrapped=bool(r.is_drm_wrapped),
         )
         for r in current_rows
     ]
@@ -392,6 +413,7 @@ def _row_to_table(row: DocumentVersionRow) -> DocumentVersionTable:
         saved_at=row.saved_at,
         saved_by=row.saved_by,
         source=row.source,
+        is_drm_wrapped=row.is_drm_wrapped,
     )
 
 
@@ -411,4 +433,5 @@ def _table_to_row(t: DocumentVersionTable) -> DocumentVersionRow:
         saved_at=t.saved_at,
         saved_by=t.saved_by,
         source=t.source,
+        is_drm_wrapped=t.is_drm_wrapped,
     )

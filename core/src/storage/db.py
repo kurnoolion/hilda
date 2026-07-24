@@ -332,6 +332,8 @@ class DocumentVersionTable(Base):
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     saved_by: Mapped[str] = mapped_column(String(128))  # user id from X-Authenticated-User; "auto" for router-driven saves
     source: Mapped[str] = mapped_column(String(32), default="editor")  # "editor" | "router" | "zip_extract"
+    # D-152 (2026-07-24): NASCA IRM detection at save time. See DocumentVersionRow.
+    is_drm_wrapped: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AutomationRuleOverrideTable(Base):

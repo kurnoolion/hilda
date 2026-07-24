@@ -273,6 +273,12 @@ class DocumentVersionRow(BaseModel):
     saved_at: datetime
     saved_by: str                            # user id (X-Authenticated-User), or "auto" for router-driven saves
     source: str = "editor"                   # "editor" | "router" | "zip_extract"
+    # D-152 (2026-07-24): corp Exchange DLP wraps some in-transit attachments with
+    # NASCA IRM (magic `<## `). Wrapped bytes can't be decrypted server-side (no
+    # NASCA agent in the container). Sniffed at save; UI gates Edit off, offers
+    # Download-only. Empirically observed on legacy .doc/.xls arriving via email
+    # polling; OOXML .docx/.xlsx come through clean.
+    is_drm_wrapped: bool = False
 
 
 # UNC path sanity helper used by NSD layer — kept here so models stay IO-free.
