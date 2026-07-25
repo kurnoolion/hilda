@@ -193,11 +193,13 @@ class TestTgScopedRoute:
         assert len(matches) == 1
         assert matches[0].item_id == "A"
 
-    def test_two_tg1_tgs_no_substring_hits_both_via_fallback_ph2(self):
-        """Ph-2 shape (owner-scoped candidates): when filename matches NEITHER
-        TG's tags, both TG=1 shortcuts fire → doc fans out to both. Under Ph-1
-        flag this test asserts the empty-fallthrough behavior instead — see
-        the paired _ph1 test below."""
+    def test_two_tg1_tgs_no_substring_both_hit_default_wi_ph2(self):
+        """D-153 architect 2026-07-25: cross-TG constraint — a doc can never
+        route to items in multiple TGs. Two 1-item TGs both firing
+        TG_SINGLE_ITEM used to fan out to both (pre-D-153); now returns empty
+        so the caller uses milestone Default WI. Test flag=False to exercise
+        the Ph-2 path where TG_SINGLE_ITEM is enabled; the aggregation
+        constraint applies at both Ph-1 and Ph-2."""
         r = _mk_router(ph1=False)
         matches, res = r._tg_scoped_route(
             "random_zzz.pdf",
@@ -206,8 +208,24 @@ class TestTgScopedRoute:
                 _item("B", tg_name="TG-B", item_description=[["wifi"]]),
             ],
         )
-        assert res == RoutingResolution.TG_SINGLE_ITEM
-        assert {m.item_id for m in matches} == {"A", "B"}
+        assert matches == []  # cross-TG TG_SINGLE_ITEM ambiguity → Default WI
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_two_tg1_tgs_only_one_matches_substring_ph2(self):
+        """Ph-2: one TG has substring evidence, the other doesn't → route to
+        the TG with evidence (SUBSTRING_MATCH wins over the sibling's
+        TG_SINGLE_ITEM fallback which is suppressed by the evidence-first
+        rule)."""
+        r = _mk_router(ph1=False)
+        matches, res = r._tg_scoped_route(
+            "5g_report.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["5g"]]),
+                _item("B", tg_name="TG-B", item_description=[["wifi"]]),
+            ],
+        )
+        assert res == RoutingResolution.SUBSTRING_MATCH
+        assert len(matches) == 1 and matches[0].item_id == "A"
 
     def test_two_tg1_tgs_no_substring_falls_through_under_ph1(self):
         """Ph-1 gate 2026-07-25: same scenario as _ph2 above but under Ph-1
@@ -244,6 +262,91 @@ class TestTgScopedRoute:
             [_item("A", tg_name="TG-A", item_description=[["compliance"]])],
         )
         assert matches == []
+
+    # -----------------------------------------------------------------------
+    # D-153 cross-TG constraint suite (architect 2026-07-25)
+    # -----------------------------------------------------------------------
+
+    def test_cross_tg_two_single_matches_go_to_default_wi(self):
+        """D-153 rule 2 (refined): TG-A single-match + TG-B single-match →
+        cannot route to both (view-tree TG scoping); Default WI instead."""
+        r = _mk_router()  # ph1 default; behavior identical under both flags
+        matches, res = r._tg_scoped_route(
+            "sustainability_waiver_report.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["sustainability"]]),
+                _item("B", tg_name="TG-B", item_description=[["waiver"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_cross_tg_default_multimatch_plus_other_tg_evidence_defaults(self):
+        """D-153: TG-A has multi-match resolved by ["default"] tiebreaker AND
+        TG-B has single-match. Both TGs contributed evidence → cross-TG →
+        Default WI, not TG_DEFAULT_MULTIMATCH-wins-over-SUBSTRING-cross-TG
+        (which was the pre-D-153 D-151 precedence)."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "waiver_compliance.pdf",
+            [
+                # TG-A: 2 items both match "waiver", one has ["default"] tiebreak
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A",
+                      item_description=[["waiver"], ["default"]]),
+                # TG-B: 1 item that also matches
+                _item("B1", tg_name="TG-B", item_description=[["compliance"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_cross_tg_intra_tg_multi_no_default_plus_other_tg_defaults(self):
+        """D-153 rule 1 + cross-TG: TG-A multi-match no ["default"] AND TG-B
+        single-match. Even though TG-A returns None (intra-TG ambiguity per
+        rule 1) AND TG-B has a legit single match, both TGs contributed
+        substring evidence → cross-TG → Default WI."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "waiver_compliance.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("B1", tg_name="TG-B", item_description=[["compliance"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_intra_tg_multi_no_default_alone_defaults_ph1_and_ph2(self):
+        """D-153 rule 1: intra-TG multi-match with no ["default"] tiebreaker
+        → Default WI. When it's the only signal (no evidence in other TGs),
+        this is naturally covered by the len(tgs_with_evidence)==1 branch
+        returning None-match → empty."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "waiver.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["waiver"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_single_tg_evidence_still_routes_normally(self):
+        """D-153 doesn't change the happy path: evidence in exactly ONE TG
+        (single-match here) still routes to that item."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "sustainability.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["sustainability"]]),
+                _item("B", tg_name="TG-B", item_description=[["waiver"]]),
+            ],
+        )
+        assert res == RoutingResolution.SUBSTRING_MATCH
+        assert len(matches) == 1 and matches[0].item_id == "A"
 
     def test_multi_tg_matched_tg_default_wins(self):
         r = _mk_router()

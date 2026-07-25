@@ -3965,3 +3965,49 @@ Ph-1 owner-reply attachments (FR-52 / FR-85 / FR-86) arrive exclusively via emai
 - (h) **Test suite**: 4 new tests in `TestDrmWrappedFiles` covering (i) NASCA sniff on save, (ii) clean-bytes flag stays false, (iii) listing renders badge + gates Edit, (iv) `/browse/edit` returns 415 with Download link.
 
 **Anchors**: [D-150] (HILDA-side documents view + WOPI Host), **FR-52** (attachment router), **FR-85** / **FR-86** (owner-reply attachment persistence). Discovery credit: empirical test comparing SCP path vs email path 2026-07-24 (architect direct observation).
+
+
+## D-153: Attachment routing — cross-TG constraint (one doc lives under one TG folder)
+
+**Date**: 2026-07-25
+**Status**: Ratified
+
+**Context**: The D-150 view tree stores every document under a single TG folder: `view/<customer>/<device>/<milestone>/<tg_name>/<...>`. There is no physical path where a document lives in two TGs at once. The `/browse/<c>/<d>/<m>/tg/<tg>/` UI + WOPI + versions + history all key off that single-TG path.
+
+The D-151 attachment router's aggregation was designed for fan-out — a document that legitimately matches items in multiple TGs (via `SUBSTRING_MATCH` in each TG, or `TG_SINGLE_ITEM` shortcut in multiple 1-item TGs) would return matches for BOTH items, and the persistence layer would create `DocumentItemAssociation` rows for each. But the underlying NSD write is single-path — the doc bytes land in ONE TG folder — so the second association pointed to bytes physically outside its own TG scope.
+
+Empirical trigger (architect Doc 2/3 review 2026-07-25): the earlier Ph-1 gate on `TG_SINGLE_ITEM` (commit `9d4db3a`) fixed the "solo-item TG catches unmatched docs" failure mode, but architect noted that even cross-TG substring fan-out is incorrect for the same reason — a doc can only physically live under one TG folder, so routing to multiple TGs at once creates broken references from the second TG onwards.
+
+**Decision**: In `_tg_scoped_route`, enforce the constraint that a document routes to items in **at most one TG**. Any cross-TG involvement collapses to the milestone Default WI (`STAGED_DEFAULT`) for TPM triage.
+
+Aggregation algorithm:
+
+1. Per TG, run `_route_within_tg` AND compute `has_substring_evidence = _any_substring_hit(filename, items_in_tg)`.
+2. Count TGs with substring evidence:
+   - **>1 TG has evidence** → return empty; caller falls to Default WI. (This is the cross-TG rule; rules 2 and 5 in the architect's numbering.)
+   - **Exactly 1 TG has evidence** → use that TG's resolution. If the TG's resolution is `None` (intra-TG multi-match with no `["default"]` tiebreaker, per rule 1) → return empty; caller falls to Default WI. Otherwise return the single match.
+   - **0 TGs have evidence** → try `TG_SINGLE_ITEM` (Ph-2 only; Ph-1 gate already disables it). If exactly 1 TG contributed a `TG_SINGLE_ITEM` result, route there. If 0 or >1 → return empty.
+
+Rules covered (architect enumeration 2026-07-25):
+
+1. **Intra-TG multi-match, no `["default"]`** → Default WI (`return []`).
+2. **Cross-TG: multiple single-matches across different TGs** → Default WI (new — was fan-out under D-151).
+3. **No match anywhere** → Default WI.
+4. **Ph-1 vs Ph-2 `TG_SINGLE_ITEM`** — Ph-1 disables; Ph-2 enables but only when exactly 1 TG contributes.
+5. **Cross-TG: multi-match across TGs** → Default WI (new; was `TG_DEFAULT_MULTIMATCH`-wins-cross-TG under D-151).
+
+**Why**:
+- (a) **View-tree physical constraint** is the actual driver. A doc lands at exactly one NSD path; routing metadata that suggests otherwise creates dangling references and confuses the dashboard listing (a file appearing in TG-A's list actually stored under TG-B has no discoverable path).
+- (b) **Consistency principle**: if we can't route a doc unambiguously to a single destination, we don't guess — Default WI is the correct place for TPM disambiguation. Silent fan-out was noise, not signal.
+- (c) **Rule 1 rewritten to converge with cross-TG rule**: intra-TG multi-match with no `["default"]` tiebreaker now returns empty (Default WI) unconditionally instead of the pre-D-151 "return None + hope another TG contributes" fall-through. Same principle — no confident single destination → Default WI.
+- (d) **`TG_DEFAULT_MULTIMATCH` cross-TG behavior changed**: pre-D-153, a TG-A `TG_DEFAULT_MULTIMATCH` beat a TG-B `SUBSTRING_MATCH`. Post-D-153, both TGs having evidence collapses to Default WI. Simpler mental model — "any ambiguity across TGs → Default WI".
+- (e) **Owner-scoped candidate filtering (Ph-2)** would make cross-TG scenarios impossible by construction (candidates = only the reply-sender's items, and one owner owns items in one TG). Until that lands, D-153 enforces the constraint at the router layer as a safety net.
+
+**Consequences**:
+- (a) **Behavior change from D-151**: some previously fan-out scenarios now go to Default WI. Ph-2 test `test_two_tg1_tgs_no_substring_hits_both_via_fallback` was inverted (2 items → empty); new tests added for the D-153 constraint.
+- (b) **New method `_any_substring_hit`**: mirrors Stage 1 iteration; slightly redundant compute (called per-TG on the aggregation pass in addition to `_route_within_tg`'s own substring loop). Acceptable — router candidate lists are small (< 50 items typically).
+- (c) **Routing telemetry**: `RoutingResolution.SUBSTRING_MATCH` is used as the "no-match sentinel" return value when the router falls through to Default WI (unchanged from pre-D-153). Consider a distinct `RoutingResolution.CROSS_TG_AMBIGUITY` value in a future cleanup for cleaner audit signal.
+- (d) **Test suite**: 5 new tests in `TestTgScopedRoute` covering the D-153 cases (cross-TG single-matches, cross-TG default-multimatch, intra-TG multi-with-cross-TG-single, intra-TG multi alone, and single-TG-evidence happy path). 29/29 passing + 1 skipped (TG_DEFAULT_NOMATCH still Ph-2).
+- (e) **Ph-2 restore note**: when owner-scoped candidate filtering lands, this constraint becomes structurally impossible to violate (one owner = one TG). The D-153 aggregation code stays as belt-and-suspenders — cheap correctness guarantee even if the owner-scoping filter regresses.
+
+**Anchors**: [D-150] (view-tree TG folder scoping is the physical constraint), [D-151] (attachment routing pipeline this refines), **FR-52** (5-step routing), **FR-79** (previously called for multi-item fan-out; D-153 constrains that to intra-TG only). Discovery credit: architect Doc 2/3 review 2026-07-25 (empirical Ph-1 early-access trace).

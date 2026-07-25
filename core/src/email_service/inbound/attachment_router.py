@@ -523,29 +523,58 @@ class Fr52AttachmentRouter:
                 continue
             by_tg.setdefault(tg, []).append(c)
 
-        results_by_precedence: dict[RoutingResolution, list[AttachmentItemMatch]] = {}
+        # D-153 architect 2026-07-25: a doc lives under exactly ONE TG folder
+        # in the view tree (view/<cust>/<dev>/<mile>/<tg>/<...>) — the router
+        # therefore MUST NEVER route a single doc to items in multiple TGs.
+        # Any cross-TG evidence collapses to the milestone Default WI so the
+        # TPM can triage. Inside a single TG, the existing D-151 4-stage
+        # pipeline resolves (single-match, ["default"] tiebreaker, or None
+        # for ambiguous multi-match → also falls to Default WI per rule 1).
+        #
+        # "Evidence" per TG = at least one item's item_description tag-set
+        # substring-matches the filename. TG_SINGLE_ITEM (Ph-2 shortcut) is
+        # a SEPARATE signal handled after the evidence pass — it fires only
+        # when NO TG has substring evidence and exactly ONE TG qualifies.
 
+        per_tg: dict[str, tuple[AttachmentItemMatch | None, RoutingResolution, bool]] = {}
         for tg_name, items in by_tg.items():
             match, resolution = self._route_within_tg(filename, tg_name, items)
+            has_evidence = self._any_substring_hit(filename, items)
+            per_tg[tg_name] = (match, resolution, has_evidence)
+
+        tgs_with_evidence = [tg for tg, (_, _, ev) in per_tg.items() if ev]
+
+        # Case A: >1 TG has substring evidence → cross-TG ambiguity → Default WI.
+        # Case B: exactly 1 TG has evidence → use that TG's resolution (may
+        #         itself be None for intra-TG multi-match no ["default"] →
+        #         still falls to Default WI per rule 1).
+        # Case C: no TG has evidence → try TG_SINGLE_ITEM shortcut, but only
+        #         if EXACTLY ONE TG has a valid single-item result. Multiple
+        #         solo-item TGs → cross-TG → Default WI.
+        if len(tgs_with_evidence) > 1:
+            return [], RoutingResolution.SUBSTRING_MATCH  # Default WI
+
+        if len(tgs_with_evidence) == 1:
+            tg = tgs_with_evidence[0]
+            match, resolution, _ = per_tg[tg]
             if match is None:
-                continue
-            # Accumulate per resolution so we can pick the strongest tie-break.
-            results_by_precedence.setdefault(resolution, []).append(match)
+                # intra-TG multi-match no ["default"] → Default WI (rule 1)
+                return [], RoutingResolution.SUBSTRING_MATCH
+            return [match], resolution
 
-        # Precedence per D-151 + architect Q3 2026-07-22 refinement:
-        # strong evidence beats fallback signals; TG_DEFAULT_NOMATCH excluded
-        # (Ph-2 deferred — see _route_within_tg docstring). Falls through to
-        # milestone Default WI (STAGED_DEFAULT) in the caller when this
-        # method returns empty.
-        for res in (
-            RoutingResolution.TG_DEFAULT_MULTIMATCH,
-            RoutingResolution.SUBSTRING_MATCH,
-            RoutingResolution.TG_SINGLE_ITEM,
-            # RoutingResolution.TG_DEFAULT_NOMATCH,   # Ph-2 deferred
-        ):
-            if res in results_by_precedence and results_by_precedence[res]:
-                return list(results_by_precedence[res]), res
+        # Case C — no substring evidence anywhere. Ph-2 TG_SINGLE_ITEM
+        # shortcut may still fire; Ph-1 gate disables it entirely (see
+        # _route_within_tg Stage 0). Enforce cross-TG constraint here too:
+        # multiple 1-item TGs → Default WI, not fan-out.
+        tg_single_hits = [
+            (tg, m, r) for tg, (m, r, _) in per_tg.items()
+            if m is not None and r == RoutingResolution.TG_SINGLE_ITEM
+        ]
+        if len(tg_single_hits) == 1:
+            _, m, r = tg_single_hits[0]
+            return [m], r
 
+        # 0 or >1 TG_SINGLE_ITEM hits → fall to Default WI.
         return [], RoutingResolution.SUBSTRING_MATCH
 
     def _route_within_tg(
@@ -675,6 +704,26 @@ class Fr52AttachmentRouter:
 
         # No match, TG=1 shortcut didn't apply → this TG rejects.
         return (None, RoutingResolution.SUBSTRING_MATCH)
+
+    def _any_substring_hit(self, filename: str, items: list[dict]) -> bool:
+        """D-153 helper: True if any item in `items` has an item_description
+        tag-set that substring-matches `filename` (per FR-82 AND-of-OR shape).
+
+        Used by _tg_scoped_route to detect per-TG evidence — the cross-TG
+        constraint (a doc can never route to items in multiple TGs) requires
+        us to know which TGs the doc had ANY substring evidence in, not just
+        the TGs that produced a confident single-item resolution.
+        """
+        for cand in items:
+            groups = self._extract_tag_groups(cand.get("item_description"))
+            if not groups:
+                continue
+            if any(
+                all(tag.lower() in filename for tag in group)
+                for group in groups
+            ):
+                return True
+        return False
 
     @staticmethod
     def _has_default_tag_set(cand: dict) -> bool:
