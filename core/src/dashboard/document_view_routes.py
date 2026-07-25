@@ -142,16 +142,24 @@ def _sign_jwt(*, secret: str, payload: dict[str, Any]) -> str:
     return f"{h}.{p}.{sig}"
 
 
-def _make_wopi_jwt(*, secret: str, view_relative_path: str, exp_seconds: int = 3600) -> str:
+def _make_wopi_jwt(*, secret: str, view_relative_path: str, exp_seconds: int = 3600,
+                   version_num: int | None = None) -> str:
     """WOPI back-channel token (OnlyOffice server → HILDA WOPI endpoints).
     HILDA verifies HMAC on inbound WOPI calls. Payload includes exp for
-    freshness."""
+    freshness.
+
+    Optional `version_num`: when set, wopi_get_file_contents streams the
+    archived `.v<N>` sibling instead of the current bytes. Used by the
+    read-only preview flow on prior versions in /browse/versions.
+    """
     header = {"alg": "HS256", "typ": "JWT"}
-    payload = {
+    payload: dict[str, Any] = {
         "path": view_relative_path,
         "iat": int(time.time()),
         "exp": int(time.time()) + exp_seconds,
     }
+    if version_num is not None:
+        payload["v"] = int(version_num)
     h = base64.urlsafe_b64encode(
         json.dumps(header, separators=(",", ":")).encode("utf-8")
     ).rstrip(b"=").decode("ascii")
@@ -304,7 +312,7 @@ def _fmt_dt(dt: datetime | None, fmt: str = "%Y-%m-%d %H:%M %Z") -> str:
     return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
 
 
-def _wopi_src_to_key(wopi_src: str) -> str:
+def _wopi_src_to_key(wopi_src: str, version_num: int | None = None) -> str:
     """OnlyOffice `document.key` — unique per ~1-min edit window, ≤128 chars.
 
     OnlyOffice DocumentServer spec: `document.key` must be ≤128 characters,
@@ -318,11 +326,17 @@ def _wopi_src_to_key(wopi_src: str) -> str:
     configs. A 1-min time bucket gives each edit session a fresh cache slot
     while still letting concurrent editors within the same minute share.
 
-    Format: `d{16-hex-of-sha256(wopi_src)}_{minute_bucket}` — ~30 chars,
-    stable across processes, unique per file per minute.
+    Version isolation (PREV cascade 2026-07-24): when `version_num` is set,
+    include it in the hash input so the read-only preview of a prior version
+    gets a distinct key from the current-version editor session. Without this,
+    OnlyOffice's cache would serve the current bytes when a TPM opens v1 in
+    preview immediately after someone had the current version open.
+
+    Format: `d{16-hex-of-sha256(wopi_src|v?)}_{minute_bucket}` — ~30 chars.
     """
     minute_bucket = int(time.time()) // 60
-    digest = hashlib.sha256(wopi_src.encode("utf-8")).hexdigest()[:16]
+    hash_input = wopi_src if version_num is None else f"{wopi_src}|v{version_num}"
+    digest = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:16]
     return f"d{digest}_{minute_bucket}"
 
 
@@ -523,19 +537,30 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         secret = cfg.wopi_jwt_secret
 
         # Edit link only for CURRENT + not DRM-wrapped + editor-mode extension.
-        # Prior versions: Download only (per architect 2026-07-24).
+        # Current: Edit + Download. Prior: read-only Preview + Download
+        # (PREV cascade 2026-07-24 — architect: TPMs need to peek at what
+        # an older version contained without risking a save).
         rows = []
+        is_editor_file = (_open_mode_for(filename) == "editor")
         for v in versions:
             is_cur = (v.version_num == current.version_num)
-            can_edit = (
-                is_cur
+            can_edit = is_cur and not v.is_drm_wrapped and is_editor_file
+            # Prior versions: Preview link only when the extension is editor-
+            # eligible AND the version isn't DRM-wrapped. DRM-wrapped prior
+            # versions get Download-only (same as current-DRM policy).
+            can_preview = (
+                (not is_cur)
                 and not v.is_drm_wrapped
-                and _open_mode_for(filename) == "editor"
+                and is_editor_file
             )
             edit_tok = _make_scoped_token(
                 secret=secret, view_relative_path=view_relative_path,
                 mode="edit", user_id=user_id,
             ) if can_edit else None
+            preview_tok = _make_scoped_token(
+                secret=secret, view_relative_path=view_relative_path,
+                mode="preview", user_id=user_id, version_num=v.version_num,
+            ) if can_preview else None
             # Prior-version download carries `v` claim → browse_download routes
             # to read_version_bytes(path, N). Current stays without `v` to
             # exercise the read_current_version_bytes fast path.
@@ -553,6 +578,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "saved_by_pretty":     _pretty_by(v.saved_by),
                 "source":              v.source,
                 "edit_token":          edit_tok,
+                "preview_token":       preview_tok,
                 "download_token":      dl_tok,
             })
 
@@ -783,6 +809,116 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             },
         )
 
+    # ----- PREV cascade 2026-07-24: read-only preview of a prior version ---
+
+    @app.get("/browse/preview/{token}", response_class=HTMLResponse)
+    async def browse_preview(token: str, request: Request):
+        """Read-only OnlyOffice preview of a SPECIFIC prior version.
+
+        Per architect 2026-07-24: on /browse/versions/{token}, prior versions
+        get a "View" link that opens the archived .v<N> bytes in OnlyOffice
+        with `editorConfig.mode="view"` + permissions.edit=false. No callback
+        URL is set so OnlyOffice cannot even attempt a save-back — read-only
+        end-to-end. Only the current version keeps the full Edit flow.
+        """
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "preview":
+            raise HTTPException(status_code=403, detail="token not a preview token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+        version_num = payload.get("v")
+        if version_num is None:
+            raise HTTPException(status_code=400, detail="preview token missing v claim")
+        version_num = int(version_num)
+
+        filename = PurePosixPath(view_relative_path).name
+        if _open_mode_for(filename) != "editor":
+            raise HTTPException(status_code=415, detail="file type not previewable")
+
+        if not cfg.onlyoffice_public_url or not cfg.wopi_jwt_secret:
+            return HTMLResponse(
+                "<html><body><h1>OnlyOffice not configured</h1></body></html>",
+                status_code=503,
+            )
+
+        # DRM sniff: even for read-only preview, wrapped bytes can't be
+        # decrypted by OnlyOffice — fail fast rather than let it spin.
+        from core.src.storage import read_version_bytes
+        head = (await read_version_bytes(view_relative_path, version_num))[:4]
+        if head == b"<## ":
+            _audit(request, "document_edit_blocked_drm", view_relative_path, user_id,
+                   details={"version_num": version_num, "mode": "preview"})
+            dl_tok = _make_scoped_token(
+                secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
+                mode="download", user_id=user_id, version_num=version_num,
+            )
+            return HTMLResponse(
+                "<html><body><h1>🔒 DRM-protected version</h1>"
+                f"<p>v{version_num} is IRM-wrapped and cannot preview in-browser. "
+                f"<a href=\"/browse/download/{dl_tok}\">Download</a> to open locally.</p>"
+                "</body></html>",
+                status_code=415,
+            )
+
+        _audit(request, "document_viewed", view_relative_path, user_id,
+               details={"version_num": version_num, "mode": "preview"})
+
+        # WOPI back-channel URL carries `v` so wopi_get_file_contents streams
+        # the archived .v<N> sibling instead of current bytes.
+        hilda_internal = "http://hilda-api:8080"
+        wopi_src = f"{hilda_internal}/wopi/files/{_encode_file_id(view_relative_path)}"
+        wopi_access_token = _make_wopi_jwt(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
+            version_num=version_num,
+        )
+
+        ext = _ext(filename).lstrip(".")
+        if ext in ("docx", "odt", "txt"):
+            document_type = "word"
+        elif ext in ("xlsx", "xlsm", "ods"):
+            document_type = "cell"
+        elif ext in ("pptx", "odp"):
+            document_type = "slide"
+        else:
+            document_type = "word"
+
+        docs_config: dict[str, Any] = {
+            "documentType": document_type,
+            "document": {
+                "fileType":    ext or "docx",
+                # Key includes version_num so this preview session is a
+                # distinct cache entry from any concurrent edit of current.
+                "key":         _wopi_src_to_key(wopi_src, version_num=version_num),
+                "title":       f"{filename} (v{version_num} — read only)",
+                "url":         f"{wopi_src}/contents?access_token={wopi_access_token}",
+                "permissions": {
+                    "edit":    False,
+                    "download": True,
+                    "review":  False,
+                    "comment": False,
+                    "print":   True,
+                },
+            },
+            "editorConfig": {
+                "mode": "view",   # OnlyOffice read-only mode
+                "user": {"id": user_id, "name": user_id},
+                # NO callbackUrl — read-only end-to-end; OnlyOffice must not
+                # even attempt a save POST.
+            },
+        }
+        docs_config_token = _sign_jwt(secret=cfg.wopi_jwt_secret, payload=docs_config)
+
+        return templates.TemplateResponse(
+            request,
+            "view_tree_editor.html",
+            {
+                "onlyoffice_public_url": cfg.onlyoffice_public_url.rstrip("/"),
+                "filename":              f"{filename} (v{version_num})",
+                "docs_config_json":      json.dumps(docs_config),
+                "docs_config_token":     docs_config_token,
+            },
+        )
+
 
     # ----- Chunk 5: WOPI Host endpoints -----
 
@@ -812,9 +948,17 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
     @app.get("/wopi/files/{file_id}/contents")
     async def wopi_get_file_contents(file_id: str, request: Request):
         view_relative_path = _decode_file_id(file_id)
-        _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
-        from core.src.storage import read_current_version_bytes
-        content = await read_current_version_bytes(view_relative_path)
+        wopi_payload = _verify_wopi_from_headers(request, cfg.wopi_jwt_secret)
+        # Optional `v` claim (PREV cascade 2026-07-24): when set by the read-only
+        # preview flow on prior versions, stream the archived .v<N> sibling
+        # instead of the current bytes. Absent = current (backward compatible).
+        version_num = wopi_payload.get("v")
+        if version_num is not None:
+            from core.src.storage import read_version_bytes
+            content = await read_version_bytes(view_relative_path, int(version_num))
+        else:
+            from core.src.storage import read_current_version_bytes
+            content = await read_current_version_bytes(view_relative_path)
         return StreamingResponse(iter((content,)),
                                  media_type="application/octet-stream")
 
@@ -924,8 +1068,11 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         return JSONResponse({"error": 0})
 
 
-def _verify_wopi_from_headers(request: Request, secret: str) -> None:
-    """Look for WOPI JWT on Authorization: Bearer <token> or ?access_token=..."""
+def _verify_wopi_from_headers(request: Request, secret: str) -> dict[str, Any]:
+    """Look for WOPI JWT on Authorization: Bearer <token> or ?access_token=...
+    Returns the verified JWT payload (used by callers to read claims like `v`
+    for version-scoped read-only preview). Raises HTTPException(401) on failure.
+    """
     auth = request.headers.get("Authorization", "")
     _log.info(
         "WOPI request received: url=%s method=%s client=%s auth_present=%s "
@@ -942,7 +1089,7 @@ def _verify_wopi_from_headers(request: Request, secret: str) -> None:
             _log.warning("WOPI Bearer JWT REJECTED: %s (token[:40]=%s)",
                          exc.detail, auth[7:47])
             raise
-        return
+        return payload
     tok = request.query_params.get("access_token")
     if tok:
         try:
@@ -952,7 +1099,7 @@ def _verify_wopi_from_headers(request: Request, secret: str) -> None:
             _log.warning("WOPI access_token REJECTED: %s (token[:40]=%s)",
                          exc.detail, tok[:40])
             raise
-        return
+        return payload
     _log.warning("WOPI request REJECTED: neither Authorization nor access_token provided")
     raise HTTPException(status_code=401, detail="WOPI JWT required")
 

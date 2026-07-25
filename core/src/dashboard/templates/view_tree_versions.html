@@ -35,6 +35,8 @@
       <td>
         {% if r.edit_token %}
           <a href="/browse/edit/{{ r.edit_token }}">Edit</a>
+        {% elif r.preview_token %}
+          <a href="/browse/preview/{{ r.preview_token }}" title="Open v{{ r.version_num }} in read-only view">View</a>
         {% endif %}
         <a href="/browse/download/{{ r.download_token }}">Download</a>
       </td>

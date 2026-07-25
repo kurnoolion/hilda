@@ -496,6 +496,120 @@ class TestVersionsAndHistoryViews:
         assert r.status_code == 403
 
 
+class TestPreviewPriorVersion:
+    """PREV cascade 2026-07-24: prior versions in /browse/versions get a
+    read-only 'View' link → /browse/preview/{token} opens the archived .vN
+    bytes in OnlyOffice with mode='view' + permissions.edit=false. WOPI GET
+    honors the `v` JWT claim to stream the correct historical bytes."""
+
+    async def test_wopi_get_with_v_streams_prior_version(self, cfg):
+        v1 = b"v1-original-bytes"
+        v2 = b"v2-newer-bytes"
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=v1, saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=v2, saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx"
+        file_id = _encode_file_id(view_path)
+        # JWT with v=1 must route WOPI GET to the .v1 sibling
+        jwt_v1 = _make_wopi_jwt(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            version_num=1,
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt_v1}")
+        assert r.status_code == 200
+        assert r.content == v1
+        # And a JWT WITHOUT v still streams current (v2)
+        jwt_cur = _make_wopi_jwt(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+        )
+        r2 = client.get(f"/wopi/files/{file_id}/contents?access_token={jwt_cur}")
+        assert r2.content == v2
+
+    async def test_preview_route_renders_read_only_config(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1-clean-ooxml", saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v2-clean-ooxml", saved_by="pm",
+        )
+        view_path = "view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx"
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="preview", user_id="pm", version_num=1,
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/preview/{tok}")
+        assert r.status_code == 200
+        # OnlyOffice config MUST declare read-only:
+        assert '"mode": "view"' in r.text
+        assert '"edit": false' in r.text
+        # And should NOT have a callbackUrl (preview must never attempt saves)
+        assert "callbackUrl" not in r.text
+        # Title reflects the version being previewed
+        assert "v1" in r.text
+
+    async def test_preview_rejects_missing_v_claim(self, cfg):
+        # A "preview" token without a `v` claim should 400 -- we don't want
+        # someone crafting one that silently opens the current version.
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="preview", user_id="pm",  # NO version_num
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/preview/{tok}")
+        assert r.status_code == 400
+        assert "missing v claim" in r.text.lower()
+
+    async def test_preview_rejects_wrong_mode_token(self, cfg):
+        wrong_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="edit", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/preview/{wrong_tok}")
+        assert r.status_code == 403
+
+    async def test_versions_view_shows_view_link_on_prior_edit_on_current(self, cfg):
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v1", saved_by="pm",
+        )
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"v2", saved_by="pm",
+        )
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret,
+            view_relative_path="view/MMK/SM-S671U1/DRR/hw_reports/r.xlsx",
+            mode="versions", user_id="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/versions/{tok}")
+        assert r.status_code == 200
+        # Current version -> Edit link
+        assert "/browse/edit/" in r.text
+        # Prior version -> View (preview) link
+        assert "/browse/preview/" in r.text
+        # Both rows have Download (2 downloads minimum)
+        assert r.text.count("/browse/download/") >= 2
+
+
 class TestViewDownloadRoutes:
     async def test_view_streams_current_bytes(self, cfg):
         await save_view_document(
