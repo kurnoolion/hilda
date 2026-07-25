@@ -633,7 +633,17 @@ class Fr52AttachmentRouter:
         # TG=1 implicit routing per architect Q2 2026-07-22 refinement.
         # Only fires when Stage 1 substring produced 0 matches AND the TG has
         # exactly 1 non-Default work item.
-        if len(items) == 1:
+        #
+        # Ph-1 gate 2026-07-25: skipped entirely when ph1_first_pass_substring_only
+        # is True (per architect early-access review of Doc 3 failure). In Ph-1
+        # early-access shape (1 TPM = many TGs), TG_SINGLE_ITEM would fire on
+        # ANY 1-item TG whenever the filename had no substring evidence
+        # anywhere, sending files intended for a different TG into a solo-item
+        # TG. In Ph-2 production shape (1 owner = 1 TG), this fallback becomes
+        # trivially correct — but Ph-2 depends on owner-scoped candidate
+        # filtering (not yet implemented). Restored via the same flag flip
+        # that turns on B2/B3/B4. Tracked in STATUS.md Flag.
+        if len(items) == 1 and not self._ph1_first_pass_substring_only:
             return (
                 AttachmentItemMatch(
                     item_id=items[0]["item_id"],

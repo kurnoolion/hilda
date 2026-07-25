@@ -23,16 +23,26 @@ class _Storage:
         return None
 
 
-def _mk_router() -> Fr52AttachmentRouter:
+def _mk_router(ph1: bool = True) -> Fr52AttachmentRouter:
     """Bare Fr52AttachmentRouter — we call _tg_scoped_route directly, so
-    rules_path + tg_resolver never fire."""
+    rules_path + tg_resolver never fire.
+
+    `ph1=True` (default) matches current production flag:
+    ph1_first_pass_substring_only=True. Under this flag, TG_SINGLE_ITEM
+    Stage 0 fallback is DISABLED (per architect 2026-07-25 Doc 3 review) —
+    unmatched-in-any-TG docs fall through to milestone Default WI instead
+    of accidentally landing on whichever TG happens to have a solo item.
+
+    Pass `ph1=False` to exercise the Ph-2 shape where fuzzy/folder/LLM +
+    TG_SINGLE_ITEM Stage 0 fallback all activate.
+    """
     from pathlib import Path
     return Fr52AttachmentRouter(
         storage=_Storage(),
         llm=None,
         tg_resolver=None,
         doc_type_filename_rules_path=Path("/nonexistent"),
-        ph1_first_pass_substring_only=True,
+        ph1_first_pass_substring_only=ph1,
     )
 
 
@@ -57,8 +67,11 @@ def _default_wi() -> dict:
 
 
 class TestTgScopedRoute:
-    def test_stage0_tg_single_item(self):
-        r = _mk_router()
+    def test_stage0_tg_single_item_ph2(self):
+        """TG=1 shortcut is a Ph-2 feature (requires owner-scoped candidate
+        filtering to be safe). Under Ph-1 flag it's disabled; under Ph-2
+        flag it fires as originally spec'd."""
+        r = _mk_router(ph1=False)
         matches, res = r._tg_scoped_route(
             "anything.pdf",
             [_item("ITEM-1", tg_name="TG-A", item_description=None), _default_wi()],
@@ -66,9 +79,23 @@ class TestTgScopedRoute:
         assert res == RoutingResolution.TG_SINGLE_ITEM
         assert matches[0].item_id == "ITEM-1"
 
-    def test_stage0_ignores_default_wi_in_count(self):
-        r = _mk_router()
+    def test_stage0_tg_single_item_suppressed_under_ph1_2026_07_25(self):
+        """Ph-1 gate: TG_SINGLE_ITEM must NOT fire under the current
+        substring-only mode. Verified by Doc 3 corp regression 2026-07-25 —
+        was routing unmatched-anywhere docs to a solo-item Voice/DRR TG
+        (item_no=84). Falling through to empty lets caller default-WI to
+        the milestone Default WI (or absorb via ops if none configured)."""
+        r = _mk_router(ph1=True)
+        matches, res = r._tg_scoped_route(
+            "anything.pdf",
+            [_item("ITEM-1", tg_name="TG-A", item_description=None), _default_wi()],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH  # fall-through sentinel
+
+    def test_stage0_ignores_default_wi_in_count_ph2(self):
         # 1 real item in TG-A + Default WI (item_type='default') = still TG=1
+        r = _mk_router(ph1=False)
         matches, res = r._tg_scoped_route(
             "nomatch.pdf",
             [_item("ITEM-1", tg_name="TG-A",
@@ -166,13 +193,12 @@ class TestTgScopedRoute:
         assert len(matches) == 1
         assert matches[0].item_id == "A"
 
-    def test_two_tg1_tgs_no_substring_hits_both_via_fallback(self):
-        """When filename matches NEITHER TG's tags, both TG=1 shortcuts fire
-        at TG_SINGLE_ITEM tier → doc fans out to both. This is expected Ph-1
-        behavior (matches FR-79 multi-item pattern). Tester's filename choice
-        eliminates the fan-out when needed.
-        """
-        r = _mk_router()
+    def test_two_tg1_tgs_no_substring_hits_both_via_fallback_ph2(self):
+        """Ph-2 shape (owner-scoped candidates): when filename matches NEITHER
+        TG's tags, both TG=1 shortcuts fire → doc fans out to both. Under Ph-1
+        flag this test asserts the empty-fallthrough behavior instead — see
+        the paired _ph1 test below."""
+        r = _mk_router(ph1=False)
         matches, res = r._tg_scoped_route(
             "random_zzz.pdf",
             [
@@ -183,19 +209,41 @@ class TestTgScopedRoute:
         assert res == RoutingResolution.TG_SINGLE_ITEM
         assert {m.item_id for m in matches} == {"A", "B"}
 
-    def test_tg1_with_tags_but_no_hit_still_captures(self):
-        """TG has 1 item with tags. Doc filename doesn't match the tags.
-        Substring produces 0 matches → TG=1 fallback fires → item captured
-        via implicit routing (TG_SINGLE_ITEM). Preserves original TG=1
-        semantic for production shape (1 owner = 1 TG).
-        """
-        r = _mk_router()
+    def test_two_tg1_tgs_no_substring_falls_through_under_ph1(self):
+        """Ph-1 gate 2026-07-25: same scenario as _ph2 above but under Ph-1
+        flag → TG_SINGLE_ITEM suppressed → no matches → caller falls to
+        milestone Default WI. This is the fix for Doc 3."""
+        r = _mk_router(ph1=True)
+        matches, res = r._tg_scoped_route(
+            "random_zzz.pdf",
+            [
+                _item("A", tg_name="TG-A", item_description=[["5g"]]),
+                _item("B", tg_name="TG-B", item_description=[["wifi"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH  # sentinel for no-match
+
+    def test_tg1_with_tags_but_no_hit_still_captures_ph2(self):
+        """Ph-2: TG=1 item with tags but no substring hit → TG_SINGLE_ITEM
+        fallback catches. Ph-1 counterpart asserts fall-through instead."""
+        r = _mk_router(ph1=False)
         matches, res = r._tg_scoped_route(
             "no_matching_tags.pdf",
             [_item("A", tg_name="TG-A", item_description=[["compliance"]])],
         )
         assert res == RoutingResolution.TG_SINGLE_ITEM
         assert matches[0].item_id == "A"
+
+    def test_tg1_with_tags_but_no_hit_falls_through_under_ph1(self):
+        """Ph-1 counterpart: TG=1 item, no substring hit, flag=True →
+        empty matches → caller uses milestone Default WI."""
+        r = _mk_router(ph1=True)
+        matches, res = r._tg_scoped_route(
+            "no_matching_tags.pdf",
+            [_item("A", tg_name="TG-A", item_description=[["compliance"]])],
+        )
+        assert matches == []
 
     def test_multi_tg_matched_tg_default_wins(self):
         r = _mk_router()
