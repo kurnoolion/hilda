@@ -4064,3 +4064,26 @@ Ph-1 uses a static substring routing pass (D-151 + D-153); introducing a full re
 - (g) **Extensibility path**: if we accumulate 3+ reserved literals, refactor to a `_RESERVED_LITERAL_MATCHERS` dict `{tag_string: matcher_fn}` and register per-literal. For 2 literals a bespoke branch reads cleaner.
 
 **Anchors**: [D-151] (reserved literal pattern, isolation rule), [D-153] (cross-TG constraint still applies to IMEI matches), **FR-82** (item_description tag semantics). Discovery credit: architect Ph-1 early-access observation of HW PL IMEI Excel filenames 2026-07-26.
+
+### D-154 Addendum (same-day widening, 2026-07-26)
+
+**Trigger**: within hours of the initial D-154 landing, architect observed a second IMEI filename shape in real Ph-1 traffic: filenames like `Report_357123456789012_Samsung.xlsx` where the 15-digit IMEI is EMBEDDED in the basename (delimited by underscores / dashes) rather than being the entire basename. Both shapes route to the same item (item_no=39 in MMK/DRR).
+
+**Update**: widen the reserved-literal match rule from "basename IS exactly 15 digits + Excel ext" to "basename CONTAINS a word-bounded 15-digit IMEI token AND ends in Excel ext". Case 1 (exact) is now a natural subset of case 2 (contains), since the exact form is trivially delimited by start-of-string and `.` (both non-digit).
+
+**Implementation**: split the single regex into two smaller ones — cleaner to reason about, cleaner to test:
+
+```python
+_IMEI_TOKEN_REGEX = re.compile(r"(?:^|\D)\d{15}(?:\D|$)")
+_EXCEL_EXT_REGEX  = re.compile(r"\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
+```
+
+`_filename_matches_imei_excel(name)` returns True iff BOTH regex hit on the basename. The `(?:^|\D)` / `(?:\D|$)` guards ensure the 15-digit run is a word-bounded token — surrounded by non-digits or edges. This prevents a 15-digit substring inside a longer numeric run from tripping the match (e.g., `1234567890123456789.xlsx` has 5 possible 15-digit substrings but none are word-bounded → no match, correctly).
+
+**Why word-boundary guard matters**: without it, any 20+ digit hash/ID/timestamp in a filename would false-positive as an IMEI. Sample false-positive risks: nanosecond timestamps (~19 digits), large order numbers, hash prefixes. The `\D`/`$` boundary rejects them all — an IMEI must be a distinct token in the filename.
+
+**Migration**: none needed. Existing templates using `[["all-15-digits-imei"]]` continue to work; the widened semantics is strictly a superset (every filename that matched under the exact rule also matches under the contains rule). No template author intervention required.
+
+**Test coverage** (7 additional in `TestImeiExcelReservedLiteral`): embedded IMEI matches, dashes-vs-underscores delimiter both work, embedded IMEI with non-Excel extension still rejected, 19-digit long-run rejected (word-boundary), 16-digit delimited run rejected (needs exactly 15).
+
+**Renaming rejected**: the literal `all-15-digits-imei` is slightly misleading under the widened semantics ("all" suggests the whole basename). Considered renaming to `imei-excel` or `contains-15-digit-imei`. Rejected because (a) user's template already adopted the name; (b) renaming would break template files without a compat shim; (c) the literal's semantics are documented here + in the router's docstring. If a third IMEI-related literal ever appears, we'll revisit naming as part of an extensibility refactor (per D-154 consequence g).

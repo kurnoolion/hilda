@@ -423,11 +423,60 @@ class TestImeiExcelReservedLiteral:
         )
         assert matches == []
 
-    def test_imei_with_alpha_prefix_does_not_match(self):
-        """Digits must be the WHOLE basename, not a prefix or embedded."""
+    def test_imei_with_alpha_prefix_MATCHES_widened_2026_07_26(self):
+        """D-154 addendum: widened from 'basename IS 15 digits' to
+        'basename CONTAINS a word-bounded 15-digit token'. Observed
+        real-traffic filenames embed IMEIs like Report_357123456789012_Samsung."""
         r = _mk_router()
         matches, _ = r._tg_scoped_route(
             "imei_123456789012345.xlsx",
+            [self._IMEI_ITEM],
+        )
+        assert matches and matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_embedded_between_underscores_matches(self):
+        """D-154 addendum: real production shape."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "report_357123456789012_samsung.xlsx",
+            [self._IMEI_ITEM],
+        )
+        assert matches and matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_embedded_between_dashes_matches(self):
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "test-123456789012345-report.xlsm",
+            [self._IMEI_ITEM],
+        )
+        assert matches and matches[0].item_id == "IMEI-ITEM"
+
+    def test_15_digits_inside_longer_digit_run_does_not_match(self):
+        """Word-boundary guard: 19-digit run has 5 possible 15-digit
+        substrings but NONE are word-bounded (all surrounded by other
+        digits) → must not match. Prevents false positives on long
+        numeric IDs / hash prefixes / timestamps."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "1234567890123456789.xlsx",  # 19 digits, no word-bounded 15-run
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_16_digit_run_delimited_still_does_not_match(self):
+        """16 digits delimited by non-digits: no 15-digit token, so no match."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "report_1234567890123456_x.xlsx",
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_imei_embedded_pdf_still_does_not_match(self):
+        """Excel-extension gate is preserved under the widening."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "report_357123456789012_samsung.pdf",
             [self._IMEI_ITEM],
         )
         assert matches == []

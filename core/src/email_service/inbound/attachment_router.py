@@ -724,23 +724,55 @@ class Fr52AttachmentRouter:
     # per handset; every doc has a different IMEI so substring tags cannot
     # cover the case. When the reserved literal appears as a standalone
     # tag-group entry (like `["default"]` per D-151), the router matches the
-    # item iff the filename basename is exactly 15 digits + Excel extension.
+    # item iff the filename basename contains a word-bounded 15-digit IMEI
+    # token AND ends in an Excel extension.
+    #
+    # D-154 addendum (same-day widening 2026-07-26): initially the literal
+    # required the basename to be EXACTLY 15 digits + ext. Observed real
+    # Ph-1 traffic includes IMEIs embedded as substrings like
+    # `Report_357123456789012_Samsung.xlsx`. Widened to match "contains a
+    # 15-digit IMEI token" — case 1 (exact) is a subset of case 2 (contains)
+    # since the exact form has start-of-string and `.` as its delimiters.
+    #
+    # Word-boundary guard prevents a 15-digit run INSIDE a longer number
+    # from matching: `1234567890123456789.xlsx` (19 digits) has 5 different
+    # 15-digit substrings but NONE are word-bounded (all surrounded by
+    # digits). The IMEI token must be delimited by non-digit or edges.
     #
     # Reserved literal isolation is enforced by DeliveryItemBase validator
     # (mixed groups like ["imei", "all-15-digits-imei"] are rejected at
     # template load), so runtime can trust the shape.
     _IMEI_XLS_TAG = "all-15-digits-imei"
-    _IMEI_XLS_REGEX = re.compile(r"^\d{15}\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
+    # 15-digit IMEI as a word-bounded token — delimited by non-digit or edges.
+    # (?:^|\D) = start-of-string OR non-digit before. Consumes 1 char except
+    # at start; that's fine — re.search anywhere in basename catches the token.
+    _IMEI_TOKEN_REGEX = re.compile(r"(?:^|\D)\d{15}(?:\D|$)")
+    # Excel extension anchored at end of basename.
+    _EXCEL_EXT_REGEX = re.compile(r"\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
 
     @classmethod
-    def _filename_is_imei_excel(cls, filename: str) -> bool:
-        """True if filename basename is exactly 15 digits + Excel extension.
-        `filename` is already lowercased by caller; regex is case-insensitive
-        anyway to defend against a change in that contract."""
+    def _filename_matches_imei_excel(cls, filename: str) -> bool:
+        """True if filename basename CONTAINS a word-bounded 15-digit IMEI
+        token AND ends in an Excel extension (.xls/.xlsx/.xlsm/.xlsb).
+
+        Covers both observed shapes:
+          - Exact: `357123456789012.xlsx`
+          - Embedded: `Report_357123456789012_Samsung.xlsx`
+
+        Rejects false positives:
+          - `1234567890123456789.xlsx` (19-digit run — no 15-digit word-bounded token)
+          - `imei_357123456789012.pdf` (non-Excel extension)
+          - `14-digit-only.xlsx` (only 14 digits somewhere)
+
+        `filename` is already lowercased by caller; regexes are
+        case-insensitive on ext for defense against a contract change.
+        """
         # PurePosixPath.name — filename may arrive with a path prefix in some
         # paths; be defensive.
         base = filename.rsplit("/", 1)[-1]
-        return cls._IMEI_XLS_REGEX.match(base) is not None
+        if not cls._EXCEL_EXT_REGEX.search(base):
+            return False
+        return cls._IMEI_TOKEN_REGEX.search(base) is not None
 
     def _any_group_matches(self, filename: str, groups: list[list[str]]) -> bool:
         """Return True if ANY tag-group in `groups` matches `filename`.
@@ -754,13 +786,14 @@ class Fr52AttachmentRouter:
         Case-insensitive on both sides (filename is lowercased upstream).
         """
         for group in groups:
-            # D-154 reserved literal — matches iff filename is 15-digit Excel.
+            # D-154 reserved literal — matches iff filename contains a
+            # word-bounded 15-digit IMEI token AND is an Excel file.
             if (
                 len(group) == 1
                 and isinstance(group[0], str)
                 and group[0].strip().lower() == self._IMEI_XLS_TAG
             ):
-                if self._filename_is_imei_excel(filename):
+                if self._filename_matches_imei_excel(filename):
                     return True
                 continue  # explicit skip — don't fall into substring path
             # Normal FR-82 substring AND-of-OR.
