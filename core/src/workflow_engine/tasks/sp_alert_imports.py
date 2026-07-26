@@ -148,6 +148,24 @@ def _build_delivery_item(
         item_no=item_no,
     )
 
+    # DEBUG-1 (2026-07-26 architect ask): item_description provenance trace.
+    # Runs on every import so the next occurrence of an empty item_description
+    # surfaces its source at INFO level. When investigation is done + template
+    # bootstrap is healthy, this can drop to DEBUG.
+    _tmpl_desc_raw = tmpl.get("item_description") if tmpl else None
+    _body_desc_raw = body_kvs.get("item_description")
+    _final_desc = (
+        _parse_item_description(_tmpl_desc_raw) if tmpl
+        else _parse_item_description(_body_desc_raw)
+    )
+    logger.info(
+        "item_description PROVENANCE: item_no=%s tmpl_hit=%s "
+        "tmpl_value=%r body_value=%r final=%r%s",
+        item_no, tmpl is not None,
+        _tmpl_desc_raw, _body_desc_raw, _final_desc,
+        " [WARN empty!]" if not _final_desc else "",
+    )
+
     return DeliveryItemBase(
         # Identity:
         item_id=item_id,
@@ -698,6 +716,15 @@ def kickoff_collection_task(
             updates["item_path_id"] = info["item_path_id"]
         if not updates:
             continue
+        # DEBUG-1 (2026-07-26): back-fill provenance — log item_description
+        # if it's about to be written from the SP kickoff read.
+        if "item_description" in updates:
+            logger.info(
+                "item_description BACKFILL: item_id=%s sp_value=%r "
+                "(source=kickoff_collection SP read)%s",
+                item_id, updates["item_description"],
+                " [WARN empty!]" if not updates["item_description"] else "",
+            )
         try:
             deps.storage.update_delivery_item(item_id, updates)
             backfilled += 1

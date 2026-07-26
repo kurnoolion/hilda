@@ -241,9 +241,23 @@ def _merge_item_description(updates: dict[str, Any], body_kvs: dict[str, str]) -
     """FR-82 item_description = list of list of str; skip on None / empty."""
     if "item_description" not in body_kvs:
         return
-    val = _parse_item_description(body_kvs["item_description"])
+    raw = body_kvs["item_description"]
+    val = _parse_item_description(raw)
+    # DEBUG-1 (2026-07-26 architect ask): item_description sync provenance.
+    # sync_deliverable_fields fires on every Deliverables-CHANGED alert. Empty
+    # parse → skip (defends against SP dropping the field mid-cascade). We log
+    # both the raw + parsed values so a future empty-write investigation has
+    # the full picture of what SP sent us.
     if not val:
+        _log.info(
+            "item_description SYNC-SKIP: body_raw=%r parsed=%r (empty; not merging into updates)",
+            raw, val,
+        )
         return
+    _log.info(
+        "item_description SYNC-MERGE: body_raw=%r parsed=%r (will be written to Postgres)",
+        raw, val,
+    )
     updates["item_description"] = val
 
 

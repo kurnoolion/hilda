@@ -19,6 +19,7 @@ Surface (StorageWriter Protocol-aligned, 6 methods):
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -28,6 +29,8 @@ from core.src.diagnostics.error_codes import PipelineError
 from core.src.storage._sync_bridge import run_async_sync
 from core.src.storage.db import DeliveryItemTable, session_scope
 from core.src.template_schema import DeliveryItemBase
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "get_delivery_item",
@@ -95,6 +98,15 @@ async def create_delivery_item(item: DeliveryItemBase | Any) -> str:
             "STR-E003",
             context={"entity": "delivery_item", "reason": "item_id is required"},
         )
+    # DEBUG-1 (2026-07-26 architect ask): catch-all item_description write log.
+    # Fires regardless of the upstream caller, so we see item_description on
+    # every INSERT path (import, backfill, manual). Empty writes are flagged.
+    _desc = kwargs.get("item_description")
+    _log.info(
+        "delivery_item INSERT: item_id=%s item_no=%s item_description=%r%s",
+        item_id, kwargs.get("item_no"), _desc,
+        " [WARN empty!]" if not _desc else "",
+    )
     async with session_scope() as session:
         try:
             row = DeliveryItemTable(**kwargs)
@@ -113,6 +125,17 @@ async def update_delivery_item(item_id: str, fields: dict[str, Any]) -> None:
     can verify via get_delivery_item)."""
     if not fields:
         return
+    # DEBUG-1 (2026-07-26 architect ask): catch-all item_description write log.
+    # Only fires when the UPDATE touches item_description -- typical field
+    # updates (delivery_state, doc_count, owner_status_note) skip this log
+    # to keep it targeted.
+    if "item_description" in fields:
+        _desc = fields["item_description"]
+        _log.info(
+            "delivery_item UPDATE item_description: item_id=%s value=%r%s",
+            item_id, _desc,
+            " [WARN empty!]" if not _desc else "",
+        )
     async with session_scope() as session:
         row = await session.get(DeliveryItemTable, item_id)
         if row is None:
