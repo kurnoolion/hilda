@@ -372,6 +372,19 @@ class _FakeAsyncEmailSender:
         return "msg-id-test-001"
 
 
+class _RaisingAsyncEmailSender:
+    """REL-1 test double: simulates a persistent SMTP failure so we can verify
+    send_initial_outreach_task raises (rather than silently returning
+    audit_only). Records attempt count for debugging."""
+    def __init__(self, error_type: type = RuntimeError, message: str = "SMTP down"):
+        self.attempts = 0
+        self._error_type = error_type
+        self._message = message
+    async def send(self, to, cc, subject, body, in_reply_to=None):
+        self.attempts += 1
+        raise self._error_type(self._message)
+
+
 class _FakeAsyncMessenger:
     def __init__(self, return_value=True):
         self._rv = return_value
@@ -427,6 +440,72 @@ class TestOutreachTasks:
         assert result["message_id"] == "msg-id-test-001"
         assert len(email.sent) == 1
         assert email.sent[0]["to"] == ["alice@corp.example"]
+
+    def test_send_initial_outreach_raises_on_send_failure_writes_failure_audit_first(self):
+        """REL-1 (2026-07-25): when the email send raises (SMTP down, EWS
+        auth expired, etc.), the task must (a) write a
+        send_initial_outreach_failed audit row FIRST so history captures
+        the attempt, then (b) re-raise so Celery retries + the chain
+        UpdateState task never advances state to OutreachSent. Prior code
+        swallowed the exception -> silent 'audit_only' success -> item lied
+        about being OutreachSent while owner never got email."""
+        # Use ConnectionError (not RuntimeError) to sidestep a pre-existing
+        # _send_email bug where the outer try/except RuntimeError (intended
+        # to catch loop-setup failures) also catches coroutine-raised
+        # RuntimeErrors and then tries to re-await the already-consumed
+        # coroutine → "cannot reuse already awaited coroutine". Real SMTP
+        # failures surface as ConnectionError / TimeoutError / smtplib errors
+        # anyway, so this test matches production shape. Bug tracked as a
+        # STATUS.md Flag (2026-07-25) for follow-up.
+        raising_sender = _RaisingAsyncEmailSender(
+            error_type=ConnectionError, message="SMTP timeout mid-send"
+        )
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=raising_sender,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            # apply_async().get() re-raises exceptions surfaced by the task
+            with pytest.raises(ConnectionError, match="SMTP timeout mid-send"):
+                send_initial_outreach_task.apply_async(
+                    args=({"template": "std_outreach"},
+                          ctx(owner_corp_usa_email="alice@corp.example"))
+                ).get()
+        # Send was attempted
+        assert raising_sender.attempts == 1
+        # Failure audit landed BEFORE the raise (visible to HILDA OPS)
+        failure_logs = [a for a in d.audit.logs if a[0] == "send_initial_outreach_failed"]
+        assert len(failure_logs) == 1
+        failure_details = failure_logs[0][3]
+        assert failure_details["error_type"] == "ConnectionError"
+        assert "SMTP timeout mid-send" in failure_details["error"]
+        assert failure_details["recipient"] == "alice@corp.example"
+        assert failure_details["retry_attempt"] == 1
+        # The success audit (send_initial_outreach) must NOT be written on
+        # the failure path -- previously both fired which polluted history.
+        success_logs = [a for a in d.audit.logs if a[0] == "send_initial_outreach"]
+        assert len(success_logs) == 0, (
+            "success audit must not fire when send failed; "
+            "prior bug wrote both send_initial_outreach + send_initial_outreach_failed"
+        )
+
+    def test_send_initial_outreach_success_still_writes_success_audit_only(self):
+        """REL-1 regression guard: happy path unchanged -- only
+        send_initial_outreach (success) audit lands, no failure row."""
+        email = _FakeAsyncEmailSender()
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=email,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            result = send_initial_outreach_task.apply_async(
+                args=({}, ctx(owner_corp_usa_email="alice@corp.example"))
+            ).get()
+        assert result["outcome"] == "sent"
+        assert len([a for a in d.audit.logs if a[0] == "send_initial_outreach"]) == 1
+        assert len([a for a in d.audit.logs if a[0] == "send_initial_outreach_failed"]) == 0
 
     def test_send_reminder_includes_count(self):
         email = _FakeAsyncEmailSender()

@@ -181,9 +181,14 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
     return row.get("owner_corp_usa_email") or row.get("owner_corp_email")
 
 
-@hilda_celery_app.task(name="core.src.workflow_engine.tasks.outreach.send_initial_outreach")
+@hilda_celery_app.task(
+    name="core.src.workflow_engine.tasks.outreach.send_initial_outreach",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+)
 def send_initial_outreach_task(
-    params: dict[str, Any], event_context: dict[str, Any]
+    self, params: dict[str, Any], event_context: dict[str, Any]
 ) -> dict[str, Any]:
     """SEND_INITIAL_OUTREACH per FR-9 -- send first outreach email to owner(s).
 
@@ -252,11 +257,58 @@ def send_initial_outreach_task(
                 subject=f"{_subject_prefix} -- Status request -- {batch_id}",
                 body_marker=body_html,
             )
-        except Exception as e:  # noqa: BLE001 -- audit-best-effort
+        except Exception as e:  # noqa: BLE001
+            # REL-1 (2026-07-25) — audit-before-raise fix for GAP 1: prior code
+            # swallowed the send exception and returned outcome="audit_only",
+            # which made the downstream chain UpdateState task advance the item
+            # to OutreachSent even though NO email was actually sent. Owner never
+            # got contacted; TPM discovered days later during reminder cadence.
+            #
+            # New behavior: write a failure audit row so HILDA OPS + TPM history
+            # show the attempted send + retry story, THEN re-raise so Celery
+            # retries (max_retries=3, delay=30s) AND the chain breaks — the
+            # UpdateState task never runs while the send is still failing.
+            # After max_retries exhausts, the task fails permanently, item stays
+            # at Open, and HILDA OPS can query CommunicationLog for
+            # action_type='send_initial_outreach_failed' to find stuck items.
             _log.warning(
-                "send_initial_outreach email send failed: %s: %s",
+                "send_initial_outreach email send failed: %s: %s "
+                "(attempt %s of %s)",
                 type(e).__name__, str(e)[:120],
+                self.request.retries + 1,
+                (self.max_retries or 0) + 1,
             )
+            try:
+                deps.audit.write_communication_log(
+                    action_type="send_initial_outreach_failed",
+                    delivery_item_id=delivery_item_id,
+                    attribution={
+                        "trigger_source": event_context.get("trigger_source", "automated"),
+                        "correlation_id": correlation_id,
+                        "modified_by":    event_context.get("pm_id", "system"),
+                    },
+                    details={
+                        "template":      template,
+                        "channel":       channel,
+                        "recipient":     recipient,
+                        "batch_id":      batch_id,
+                        "milestone_id":  event_context.get("milestone_id"),
+                        "error_type":    type(e).__name__,
+                        "error":         str(e)[:200],
+                        "retry_attempt": self.request.retries + 1,
+                        "max_retries":   (self.max_retries or 0) + 1,
+                    },
+                )
+            except Exception as audit_exc:  # noqa: BLE001
+                # Audit itself failed — log but don't mask the original send error.
+                _log.warning(
+                    "send_initial_outreach_failed audit write ALSO failed: %s: %s",
+                    type(audit_exc).__name__, str(audit_exc)[:120],
+                )
+            # Re-raise so Celery retries and the chain UpdateState task does NOT
+            # run. Item stays at Open; on final give-up state stays at Open with
+            # the failure audit trail visible in CommunicationLog.
+            raise
 
     deps.audit.write_communication_log(
         action_type="send_initial_outreach",
