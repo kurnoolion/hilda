@@ -4011,3 +4011,56 @@ Rules covered (architect enumeration 2026-07-25):
 - (e) **Ph-2 restore note**: when owner-scoped candidate filtering lands, this constraint becomes structurally impossible to violate (one owner = one TG). The D-153 aggregation code stays as belt-and-suspenders — cheap correctness guarantee even if the owner-scoping filter regresses.
 
 **Anchors**: [D-150] (view-tree TG folder scoping is the physical constraint), [D-151] (attachment routing pipeline this refines), **FR-52** (5-step routing), **FR-79** (previously called for multi-item fan-out; D-153 constrains that to intra-TG only). Discovery credit: architect Doc 2/3 review 2026-07-25 (empirical Ph-1 early-access trace).
+
+
+## D-154: Reserved literal `all-15-digits-imei` for IMEI-shaped Excel filenames
+
+**Date**: 2026-07-26
+**Status**: Ratified
+
+**Context**: Certain HW PL work items receive documents whose filenames are exactly a 15-digit IMEI (International Mobile Equipment Identity) plus an Excel extension — e.g., `357123456789012.xlsx`. Each doc has a DIFFERENT IMEI (one per handset), so no static substring in `item_description` can cover the case. Template authors have no way to enumerate "all possible IMEIs" — they need a shape-based match, not a substring-based one.
+
+Ph-1 uses a static substring routing pass (D-151 + D-153); introducing a full regex-per-item extension mechanism is broader than needed for the observed scenario. The concrete requirement is narrow: **IMEI-shaped filename + Excel extension → route to a specific item**.
+
+**Decision**: Recognize a new reserved literal `"all-15-digits-imei"` in `item_description`, mirroring the D-151 `"default"` pattern:
+
+1. **Template shape** — the literal appears as a standalone tag-group entry:
+   ```yaml
+   item_description:
+     - ["all-15-digits-imei"]
+   ```
+   Cannot be mixed with other tags in the same group (validator rejects `["imei", "all-15-digits-imei"]` at template load — same isolation rule as `["default"]`).
+
+2. **Router match** — when scanning item_description tag-groups during Stage 1 substring pass, the reserved literal group matches iff the filename basename satisfies:
+   - Exactly 15 ASCII digits followed by an Excel extension, one of `.xls` / `.xlsx` / `.xlsm` / `.xlsb`
+   - Regex: `^\d{15}\.(xls|xlsx|xlsm|xlsb)$` (case-insensitive; filename is lowercased upstream)
+   - Anything else (14 digits, 16 digits, alpha prefix, PDF extension, etc.) does NOT match this group
+
+3. **Interaction with existing pipeline**:
+   - IMEI-match counts as a normal SUBSTRING_MATCH for the item — D-151 tiebreakers and D-153 cross-TG constraint apply unchanged
+   - An item can have BOTH the IMEI reserved literal AND regular substring tags:
+     ```yaml
+     item_description:
+       - ["imei"]                  # normal substring: filename contains "imei"
+       - ["all-15-digits-imei"]    # reserved literal: filename is 15-digit Excel
+     ```
+     Item matches on EITHER path (OR semantics between groups).
+   - Cross-TG rule (D-153) still applies: if an IMEI-shaped filename also has substring evidence in another TG, the file collapses to Default WI. Prevents accidental fan-out.
+
+**Why**:
+- (a) **Narrow surface** — a reserved literal handles the concrete case without introducing a new schema column, Pydantic field, DB migration, or template-shape extension. Reuses the existing tag-group iteration.
+- (b) **Semantic clarity for template authors** — `["all-15-digits-imei"]` reads as "this item receives all-15-digit-IMEI Excel files", closer to natural language than a regex would be. Regex `^\d{15}\.(xls|xlsx|xlsm|xlsb)$` is opaque and error-prone (missed anchor, wrong escape, catastrophic backtracking).
+- (c) **Precedent from D-151** — the `"default"` reserved literal established the same shape. Consistent mental model: "some strings in item_description are ordinary substring tags; some are reserved literals with special-case matching semantics; validator enforces isolation."
+- (d) **Excel-extension gate is intentional** — filenames that happen to be 15 digits with a non-Excel extension (e.g., `123456789012345.pdf`) don't automatically match. Prevents false positives from unrelated numeric IDs (order numbers, ticket IDs) that happen to be 15 digits. Extensible in a future ADR if other formats need coverage.
+- (e) **Ph-2 escape hatch retained** — if IMEI proves to be one of many dynamic-identifier patterns (serial numbers, timestamps, part numbers), we upgrade to a proper `filename_pattern: str` regex field on the template (Option A from the 2026-07-26 architect discussion) and migrate all reserved literals to the generic mechanism. For now, one reserved literal is cheaper than the schema change.
+
+**Consequences**:
+- (a) **New reserved literal** — the constant `Fr52AttachmentRouter._IMEI_XLS_TAG = "all-15-digits-imei"` lives in `attachment_router.py` alongside the compiled regex `_IMEI_XLS_REGEX`.
+- (b) **Router refactor** — the ad-hoc "any group matches" loop in Stage 1 + `_any_substring_hit` (D-153) now delegates to `_any_group_matches(filename, groups)`. Single source of truth for what "a group matches this filename" means, including reserved literals. Zero behavior change for existing substring tags.
+- (c) **Validator extension** — `DeliveryItemBase._v_default_tag_isolation` (D-151) generalized to check a `_RESERVED_LITERALS` set including both `"default"` and `"all-15-digits-imei"`. Same error shape either way.
+- (d) **Template authors** — for the IMEI Excel item (Ph-1 MMK/DRR item_no=39), template.yaml gets `item_description: [["all-15-digits-imei"]]`. That single entry replaces trying to enumerate 15-digit patterns.
+- (e) **Extension list is intentional not exhaustive** — .xlsx, .xls, .xlsm, .xlsb covered. If IMEI files ever arrive as .csv or .docx, add to `_IMEI_XLS_REGEX` alternation with a follow-up commit. Small enough that ad-hoc extension is fine.
+- (f) **Test suite** — 7 new tests in `TestImeiExcelReservedLiteral` (all extensions, uppercase ext, 14/16-digit rejection, alpha-prefix rejection, cross-TG-collapse per D-153) + 2 in `TestImeiTagValidation` (isolation validator). Total router test count 39 → verifies existing D-151/D-153 behavior unbroken.
+- (g) **Extensibility path**: if we accumulate 3+ reserved literals, refactor to a `_RESERVED_LITERAL_MATCHERS` dict `{tag_string: matcher_fn}` and register per-literal. For 2 literals a bespoke branch reads cleaner.
+
+**Anchors**: [D-151] (reserved literal pattern, isolation rule), [D-153] (cross-TG constraint still applies to IMEI matches), **FR-82** (item_description tag semantics). Discovery credit: architect Ph-1 early-access observation of HW PL IMEI Excel filenames 2026-07-26.

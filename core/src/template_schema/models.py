@@ -412,21 +412,29 @@ class DeliveryItemBase(_Base):
         Runtime routing treats an item with `["default"]` as its own tag-set
         entry as the TG-scoped default catch-all (TG_DEFAULT_MULTIMATCH /
         TG_DEFAULT_NOMATCH resolutions).
+
+        D-154 architect 2026-07-26 — same isolation rule applies to the
+        reserved literal `all-15-digits-imei`. Matches iff the doc's filename
+        is exactly 15 digits + Excel extension. Standalone-only so template
+        authors can't accidentally combine it with substring tags (which
+        would produce ambiguous match semantics).
         """
+        _RESERVED_LITERALS = {"default", "all-15-digits-imei"}
         if not self.item_description:
             return self
         for i, tag_set in enumerate(self.item_description):
             if not isinstance(tag_set, list):
                 continue
-            has_default = any(
-                isinstance(t, str) and t.strip().lower() == "default"
-                for t in tag_set
-            )
-            if has_default and len(tag_set) > 1:
+            reserved_hits = {
+                t.strip().lower() for t in tag_set
+                if isinstance(t, str) and t.strip().lower() in _RESERVED_LITERALS
+            }
+            if reserved_hits and len(tag_set) > 1:
+                literal = next(iter(reserved_hits))
                 raise ValueError(
                     f"item {self.item_id}: item_description[{i}]={tag_set!r} — "
-                    f"reserved literal 'default' tag must appear as a standalone "
-                    f"tag-set entry (e.g. `[\"default\"]`), never mixed with other tags"
+                    f"reserved literal '{literal}' tag must appear as a standalone "
+                    f"tag-set entry (e.g. `[\"{literal}\"]`), never mixed with other tags"
                 )
         return self
 

@@ -363,6 +363,124 @@ class TestTgScopedRoute:
         assert matches[0].item_id == "A2"
 
 
+class TestImeiExcelReservedLiteral:
+    """D-154 architect 2026-07-26 — reserved literal `all-15-digits-imei`
+    handles Excel filenames that are exactly a 15-digit IMEI (no static
+    substring can catch them). Same isolation semantics as ["default"]."""
+
+    _IMEI_ITEM = _item(
+        "IMEI-ITEM", tg_name="IMEI-TG",
+        item_description=[["all-15-digits-imei"]],
+    )
+
+    def test_imei_xlsx_filename_matches(self):
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "123456789012345.xlsx",
+            [self._IMEI_ITEM],
+        )
+        assert res == RoutingResolution.SUBSTRING_MATCH
+        assert matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_xls_and_xlsm_and_xlsb_all_match(self):
+        r = _mk_router()
+        for ext in ("xls", "xlsx", "xlsm", "xlsb"):
+            matches, res = r._tg_scoped_route(
+                f"357123456789012.{ext}",
+                [self._IMEI_ITEM],
+            )
+            assert matches and matches[0].item_id == "IMEI-ITEM", f"failed ext={ext}"
+
+    def test_imei_uppercase_extension_still_matches(self):
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route("123456789012345.XLSX", [self._IMEI_ITEM])
+        # filename gets lowercased upstream so this is same as .xlsx
+        assert matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_pdf_filename_does_not_match(self):
+        """15-digit filename with non-Excel extension → no match."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "123456789012345.pdf",
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_imei_14_digit_does_not_match(self):
+        """Only exactly 15 digits — 14 must not match."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "12345678901234.xlsx",  # 14 digits
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_imei_16_digit_does_not_match(self):
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "1234567890123456.xlsx",  # 16 digits
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_imei_with_alpha_prefix_does_not_match(self):
+        """Digits must be the WHOLE basename, not a prefix or embedded."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "imei_123456789012345.xlsx",
+            [self._IMEI_ITEM],
+        )
+        assert matches == []
+
+    def test_imei_cross_tg_with_other_evidence_defaults(self):
+        """D-153 cross-TG constraint still applies: if the IMEI item matches
+        AND another item in a different TG substring-matches → Default WI."""
+        r = _mk_router()
+        other = _item("OTHER", tg_name="OTHER-TG",
+                      item_description=[["357123456789012"]])  # tag exactly matches too
+        matches, res = r._tg_scoped_route(
+            "357123456789012.xlsx",
+            [self._IMEI_ITEM, other],
+        )
+        # Both TGs match → Default WI per D-153
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+
+class TestImeiTagValidation:
+    """D-154 validator: `all-15-digits-imei` must be standalone in its
+    tag-set, mirroring the `default` isolation rule from D-151."""
+
+    @staticmethod
+    def _mk_item(**overrides):
+        from datetime import datetime, timezone
+        from core.src.template_schema.models import DeliveryItemBase
+        from core.src.template_schema.enums import DeliveryState, ItemType
+        defaults = dict(
+            item_id="X", item_no=1, milestone_id="M",
+            item_name="IMEI Records",
+            delivery_state=DeliveryState.OPEN.value,
+            item_type=ItemType.TEST_TECH_WAIVER_REPORT.value,
+            tracking_modality=["Email"],
+            last_updated=datetime.now(timezone.utc),
+            sort_order=1,
+            path_id="imei-item",
+        )
+        defaults.update(overrides)
+        return DeliveryItemBase(**defaults)
+
+    def test_imei_alone_accepts(self):
+        self._mk_item(item_description=[["all-15-digits-imei"]], doc_count=1)
+
+    def test_imei_mixed_rejects(self):
+        import pytest as _pytest
+        with _pytest.raises(Exception, match="all-15-digits-imei.*standalone"):
+            self._mk_item(
+                item_description=[["imei", "all-15-digits-imei"]],
+                doc_count=1,
+            )
+
+
 class TestHasDefaultTagSet:
     def test_default_alone_positive(self):
         assert Fr52AttachmentRouter._has_default_tag_set(

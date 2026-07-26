@@ -620,10 +620,7 @@ class Fr52AttachmentRouter:
             groups = self._extract_tag_groups(cand.get("item_description"))
             if not groups:
                 continue
-            if any(
-                all(tag.lower() in filename for tag in group)
-                for group in groups
-            ):
+            if self._any_group_matches(filename, groups):
                 matches.append(cand)
 
         if len(matches) == 1:
@@ -718,10 +715,56 @@ class Fr52AttachmentRouter:
             groups = self._extract_tag_groups(cand.get("item_description"))
             if not groups:
                 continue
-            if any(
-                all(tag.lower() in filename for tag in group)
-                for group in groups
+            if self._any_group_matches(filename, groups):
+                return True
+        return False
+
+    # D-154 architect 2026-07-26 — reserved literal `all-15-digits-imei` for
+    # IMEI-shaped Excel filenames. The IMEI is a 15-digit unique identifier
+    # per handset; every doc has a different IMEI so substring tags cannot
+    # cover the case. When the reserved literal appears as a standalone
+    # tag-group entry (like `["default"]` per D-151), the router matches the
+    # item iff the filename basename is exactly 15 digits + Excel extension.
+    #
+    # Reserved literal isolation is enforced by DeliveryItemBase validator
+    # (mixed groups like ["imei", "all-15-digits-imei"] are rejected at
+    # template load), so runtime can trust the shape.
+    _IMEI_XLS_TAG = "all-15-digits-imei"
+    _IMEI_XLS_REGEX = re.compile(r"^\d{15}\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
+
+    @classmethod
+    def _filename_is_imei_excel(cls, filename: str) -> bool:
+        """True if filename basename is exactly 15 digits + Excel extension.
+        `filename` is already lowercased by caller; regex is case-insensitive
+        anyway to defend against a change in that contract."""
+        # PurePosixPath.name — filename may arrive with a path prefix in some
+        # paths; be defensive.
+        base = filename.rsplit("/", 1)[-1]
+        return cls._IMEI_XLS_REGEX.match(base) is not None
+
+    def _any_group_matches(self, filename: str, groups: list[list[str]]) -> bool:
+        """Return True if ANY tag-group in `groups` matches `filename`.
+
+        A group matches when either:
+          (a) every inner tag is a substring of `filename` (normal FR-82
+              AND-of-OR substring semantics), OR
+          (b) D-154 reserved literal: the group is exactly
+              `[cls._IMEI_XLS_TAG]` AND filename passes _filename_is_imei_excel.
+
+        Case-insensitive on both sides (filename is lowercased upstream).
+        """
+        for group in groups:
+            # D-154 reserved literal — matches iff filename is 15-digit Excel.
+            if (
+                len(group) == 1
+                and isinstance(group[0], str)
+                and group[0].strip().lower() == self._IMEI_XLS_TAG
             ):
+                if self._filename_is_imei_excel(filename):
+                    return True
+                continue  # explicit skip — don't fall into substring path
+            # Normal FR-82 substring AND-of-OR.
+            if all(tag.lower() in filename for tag in group):
                 return True
         return False
 
