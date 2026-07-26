@@ -29,7 +29,11 @@ auto-extracted preserving folder structure; every save creates a new version.</p
       {% for f in files %}
       <tr>
         <td>
-          <code>{{ f.filename }}</code>
+          {# Show subdir-prefixed path for zip-extracted files (path preserves
+             the zip's folder structure under the TG root); root-of-TG files
+             show basename only. Restored 2026-07-26 after UI-1 collapse.
+             Example: `docs/report.pdf` for extracted, `report.pdf` for direct. #}
+          <code>{{ f.view_relative_path.split('/' + tg_name + '/', 1)[1] if ('/' + tg_name + '/') in f.view_relative_path else f.filename }}</code>
           {% if f.is_drm_wrapped %}
             <span title="Wrapped by corp IRM (NASCA) in transit. In-browser edit unavailable — download and open locally in a NASCA-aware Office client." style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #a55; color:#a55; border-radius:3px; font-size:0.85em;">🔒 DRM</span>
           {% endif %}
