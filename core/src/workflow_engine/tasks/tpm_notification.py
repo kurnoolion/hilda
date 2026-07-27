@@ -267,17 +267,20 @@ def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | 
     """
     from core.src.sharepoint_integration.config import ListScope
     try:
-        # expand + extra_select per TPM-3 (2026-07-27): SP 2017 rejects
-        # $expand=TPM with HTTP 400 -1 unless paired with $select of the
-        # sub-fields. Matches the get_item_by_id pattern in list_crud.py.
-        # Include Device (the filter column) so the row still resolves,
-        # plus all common User-field sub-fields the TPM-1 extractor knows:
-        #   EMail       — standard SP PersonOrGroup email
-        #   Title       — display name (typically "First Last")
-        #   Name        — AD DN shape ("First Last/Dept/Company") — DN head extracted
-        #   Work_x0020_email — corp UserProfile custom column (screenshot 2026-07-27)
-        # If any sub-field doesn't exist on the corp TPM column, SP silently
-        # returns null for that key — TPM-1 extractor tolerates None entries.
+        # expand + extra_select per TPM-3/TPM-4 (2026-07-27): SP 2017 rejects
+        # $expand=TPM with HTTP 400 -1 unless paired with $select of TPM
+        # sub-fields. Live corp-box probe (2026-07-27):
+        #   probe($expand=TPM alone)               -> HTTP 400
+        #   probe($expand=TPM + $select=TPM/EMail) -> HTTP OK, returns
+        #     TPM={"__metadata":{"type":"SP.Data.UserInfoItem"},"EMail":"..."}
+        #
+        # SP.Data.UserInfoItem exposes ONLY: Id, Title, EMail, LoginName,
+        # ContentType. NAME + "Work email" (UserProfile properties) are NOT
+        # available under this expand — the screenshot label "Work email"
+        # is the SP UI display for the standard EMail property. Adding
+        # TPM/Name or TPM/Work_x0020_email to $select 400s the whole request.
+        #
+        # Include Device (filter column) explicitly so the row resolves.
         rows = deps.sp_writer.get_items(
             entity="projects",
             scope=ListScope(customer_id=customer_id),
@@ -288,8 +291,6 @@ def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | 
                 "Device",
                 "TPM/EMail",
                 "TPM/Title",
-                "TPM/Name",
-                "TPM/Work_x0020_email",
             ],
         )
     except Exception as exc:  # noqa: BLE001
