@@ -134,69 +134,43 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
     for a in attachments_raw:
         try:
             attachment = InboundAttachment(**a) if isinstance(a, dict) else a
-            routed = await router.route(attachment, batch_id, candidate_items)
-            processed += 1
-            # Cross-device shared-file fix 2026-07-07: is_duplicate=True means
-            # the file bytes are already stored. If matches is empty as well,
-            # it's a true no-op (all target items already carry an association
-            # -- accidental resend). If matches is non-empty, the file is a
-            # legitimate cross-device / cross-item re-use and the persist step
-            # will skip the bytes write + index row but still create new
-            # associations + increment doc_count_received for each match.
-            if routed.is_duplicate and not routed.matches:
-                duplicates += 1
-                await _audit(deps, "attachment_duplicate", None, {
-                    "batch_id": batch_id, "file_hash": routed.file_hash,
-                    "filename": getattr(attachment, "filename", "")[:120],
-                    "correlation_id": correlation_id,
-                })
+
+            # D-155 2026-07-26 — archives (.zip / .7z) are containers.
+            # Outer archive gets NO router match / doc_type classification;
+            # inner entries are extracted and each processed as an independent
+            # attachment (own file_hash → own dedup + own routing).
+            if _is_archive_attachment(attachment):
+                arch_stats = await _process_archive_attachment(
+                    deps=deps,
+                    router=router,
+                    attachment=attachment,
+                    candidate_items=candidate_items,
+                    batch_id=batch_id,
+                    correlation_id=correlation_id,
+                )
+                processed += arch_stats["processed"]
+                routed_with_match += arch_stats["routed_with_match"]
+                routed_unrouted += arch_stats["routed_unrouted"]
+                duplicates += arch_stats["duplicates"]
+                failed += arch_stats["failed"]
+                items_incremented.update(arch_stats["items_incremented"])
+                events_fired += arch_stats["events_fired"]
                 continue
 
-            if routed.is_duplicate:
-                # Non-empty matches on a duplicate = legitimate re-use. Count
-                # separately for telemetry visibility -- these advance state
-                # for new items without re-storing bytes.
-                duplicates += 1
-                await _audit(deps, "attachment_duplicate_reroute", None, {
-                    "batch_id": batch_id, "file_hash": routed.file_hash,
-                    "filename": getattr(attachment, "filename", "")[:120],
-                    "new_item_matches": [m.item_id for m in routed.matches],
-                    "correlation_id": correlation_id,
-                })
-
-            # Steps E + F + G + H (per design pass)
-            counts = await _persist_routed_attachment(
+            reg_stats = await _process_regular_attachment(
                 deps=deps,
+                router=router,
                 attachment=attachment,
-                routed=routed,
                 candidate_items=candidate_items,
                 batch_id=batch_id,
                 correlation_id=correlation_id,
             )
-            if counts["match_count"] > 0:
-                routed_with_match += 1
-            else:
-                routed_unrouted += 1
-            items_incremented.update(counts["item_ids"])
-            events_fired += counts["events_fired"]
-
-            # D-150 Chunk 3 hook: also persist to the HILDA-side documents
-            # view tree (tg-scoped, distinct from FR-86 internal/ tree).
-            # Deduped by (customer, device, milestone, tg_name) so multi-item
-            # associations with same tg don't re-write. Default WI items and
-            # empty-tg items are excluded by write_attachment_to_view_tree.
-            # Best-effort: any failure logs; does not fail the outer task.
-            try:
-                await _write_matches_to_view_tree(
-                    attachment=attachment,
-                    matched_item_ids=counts.get("item_ids", set()),
-                    candidate_items=candidate_items,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "process_inbound_attachments: view-tree write failed: %s: %s",
-                    type(exc).__name__, str(exc)[:120],
-                )
+            processed += reg_stats["processed"]
+            routed_with_match += reg_stats["routed_with_match"]
+            routed_unrouted += reg_stats["routed_unrouted"]
+            duplicates += reg_stats["duplicates"]
+            items_incremented.update(reg_stats["items_incremented"])
+            events_fired += reg_stats["events_fired"]
         except Exception as exc:  # noqa: BLE001
             failed += 1
             _log.warning(
@@ -228,6 +202,335 @@ async def _async_process_attachments(msg_payload: dict[str, Any]) -> dict[str, A
         "items_incremented":    sorted(items_incremented),
         "events_fired":         events_fired,
     }
+
+
+def _is_archive_attachment(attachment) -> bool:
+    """D-155 — archive containers are dispatched to _process_archive_attachment.
+    Extension-only check (matches storage.archive_extractor.is_archive_filename)."""
+    from core.src.storage.archive_extractor import is_archive_filename
+    return is_archive_filename(getattr(attachment, "filename", "") or "")
+
+
+async def _process_regular_attachment(
+    *,
+    deps,
+    router,
+    attachment,
+    candidate_items: list[dict],
+    batch_id: str,
+    correlation_id: str,
+) -> dict[str, Any]:
+    """Route + persist + view-tree one non-archive attachment.
+
+    Returns telemetry deltas: processed, routed_with_match, routed_unrouted,
+    duplicates, items_incremented (set), events_fired.
+
+    Extracted 2026-07-26 for D-155 (was inline in the main loop). Behavior
+    unchanged from prior code path for regular files.
+    """
+    routed = await router.route(attachment, batch_id, candidate_items)
+    stats = {
+        "processed": 1,
+        "routed_with_match": 0,
+        "routed_unrouted": 0,
+        "duplicates": 0,
+        "items_incremented": set(),
+        "events_fired": 0,
+    }
+    # Cross-device shared-file fix 2026-07-07: is_duplicate=True means
+    # the file bytes are already stored. If matches is empty as well,
+    # it's a true no-op (all target items already carry an association
+    # -- accidental resend). If matches is non-empty, the file is a
+    # legitimate cross-device / cross-item re-use and the persist step
+    # will skip the bytes write + index row but still create new
+    # associations + increment doc_count_received for each match.
+    if routed.is_duplicate and not routed.matches:
+        stats["duplicates"] = 1
+        await _audit(deps, "attachment_duplicate", None, {
+            "batch_id": batch_id, "file_hash": routed.file_hash,
+            "filename": getattr(attachment, "filename", "")[:120],
+            "correlation_id": correlation_id,
+        })
+        return stats
+
+    if routed.is_duplicate:
+        stats["duplicates"] = 1
+        await _audit(deps, "attachment_duplicate_reroute", None, {
+            "batch_id": batch_id, "file_hash": routed.file_hash,
+            "filename": getattr(attachment, "filename", "")[:120],
+            "new_item_matches": [m.item_id for m in routed.matches],
+            "correlation_id": correlation_id,
+        })
+
+    counts = await _persist_routed_attachment(
+        deps=deps,
+        attachment=attachment,
+        routed=routed,
+        candidate_items=candidate_items,
+        batch_id=batch_id,
+        correlation_id=correlation_id,
+    )
+    if counts["match_count"] > 0:
+        stats["routed_with_match"] = 1
+    else:
+        stats["routed_unrouted"] = 1
+    stats["items_incremented"] = counts["item_ids"]
+    stats["events_fired"] = counts["events_fired"]
+
+    try:
+        await _write_matches_to_view_tree(
+            attachment=attachment,
+            matched_item_ids=counts.get("item_ids", set()),
+            candidate_items=candidate_items,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "process_inbound_attachments: view-tree write failed: %s: %s",
+            type(exc).__name__, str(exc)[:120],
+        )
+    return stats
+
+
+async def _process_archive_attachment(
+    *,
+    deps,
+    router,
+    attachment,
+    candidate_items: list[dict],
+    batch_id: str,
+    correlation_id: str,
+) -> dict[str, Any]:
+    """D-155 — process an archive attachment (.zip / .7z).
+
+    Steps:
+      1. Persist an ARCHIVE_CONTAINER document_index audit row for the outer
+         archive (no doc_type classification, no associations, no doc_count
+         increment). Idempotent — re-sending same archive skips silently.
+      2. Extract inner entries via storage.archive_extractor.
+      3. On extract success: iterate inner entries. Each becomes a synthesized
+         InboundAttachment (filename=inner path preserving subdirs, own hash)
+         and runs through _process_regular_attachment — same routing + dedup
+         + per-item association + view-tree writes.
+      4. On extract failure (bad archive / password / oversized / library
+         missing): audit event; outer archive is left in document_index for
+         audit; no inner processing. TPM can see the outer arrived + why
+         extraction failed.
+      5. Save outer archive to view-tree in the TG(s) that received inner
+         matches (so TPM sees "here's the archive these files came from").
+         Skipped when no inner file matched — outer bytes reachable via NSD.
+
+    Returns telemetry deltas aggregated across all inner entries. Outer archive
+    itself does NOT contribute to routed_with_match / routed_unrouted counts —
+    it's a container, not a routed document.
+    """
+    from core.src.email_service.protocol import InboundAttachment
+    from core.src.storage.archive_extractor import extract_archive
+    from core.src.storage.models import DocumentIndexRow, RoutingResolution
+    from core.src.template_schema.enums import IngestSource
+
+    stats = {
+        "processed": 0,
+        "routed_with_match": 0,
+        "routed_unrouted": 0,
+        "duplicates": 0,
+        "failed": 0,
+        "items_incremented": set(),
+        "events_fired": 0,
+    }
+
+    filename = getattr(attachment, "filename", "") or ""
+    content = getattr(attachment, "content", b"") or b""
+    file_hash = getattr(attachment, "file_hash", "") or ""
+
+    milestone_id = ""
+    if candidate_items:
+        milestone_id = candidate_items[0].get("milestone_id") or ""
+
+    # Step 1: outer archive audit row — idempotent.
+    try:
+        deps.storage.add_document_index_row(DocumentIndexRow(
+            file_hash=file_hash,
+            milestone_id=milestone_id,
+            doc_type="",                               # archive: no doc_type
+            doc_id_slug=None,
+            rev_number=None,
+            ingest_source=IngestSource.EMAIL.value,
+            original_filename=filename,
+            first_page_excerpt="",
+            is_final=False,                            # container, not deliverable
+            inferred_tg_name=None,
+            routing_resolution=RoutingResolution.ARCHIVE_CONTAINER.value,
+            ingested_at=datetime.now(timezone.utc),
+        ))
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "process_inbound_attachments: archive outer index row failed "
+            "for file_hash=%s: %s: %s",
+            file_hash, type(exc).__name__, str(exc)[:120],
+        )
+
+    # Step 2: extract.
+    result = extract_archive(filename, bytes(content))
+
+    await _audit(deps, "archive_container_received", None, {
+        "batch_id": batch_id,
+        "file_hash": file_hash,
+        "filename": filename[:120],
+        "extract_status": result.status,
+        "extract_reason": result.reason[:200] if result.reason else "",
+        "entry_count": len(result.entries),
+        "correlation_id": correlation_id,
+    })
+
+    if result.status != "extracted":
+        # Extraction failed — no inner processing. Outer already in
+        # document_index. Save outer bytes to view-tree via a default-WI
+        # TG so TPM can still download the archive.
+        stats["failed"] = 1
+        await _save_outer_archive_to_default_tg(
+            attachment=attachment, candidate_items=candidate_items,
+        )
+        return stats
+
+    # Step 3: iterate inner entries. Aggregate matched TGs so we can
+    # replicate the outer archive to each of them (step 5).
+    matched_tgs: set[tuple[str, str, str, str, str]] = set()
+    for entry in result.entries:
+        inner_rel = "/".join(entry.relative_parts)
+        inner_bytes = entry.content
+        inner_hash = _sha256_hex(inner_bytes)
+        inner_attachment = InboundAttachment(
+            filename=inner_rel,
+            content=inner_bytes,
+            content_type="application/octet-stream",
+            file_hash=inner_hash,
+        )
+        try:
+            inner_stats = await _process_regular_attachment(
+                deps=deps,
+                router=router,
+                attachment=inner_attachment,
+                candidate_items=candidate_items,
+                batch_id=batch_id,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats["failed"] += 1
+            _log.warning(
+                "process_inbound_attachments: archive inner failure entry=%r "
+                "file=%s: %s: %s",
+                inner_rel, filename, type(exc).__name__, str(exc)[:120],
+            )
+            await _audit(deps, "archive_inner_processing_failed", None, {
+                "batch_id": batch_id,
+                "outer_filename": filename[:120],
+                "inner_filename": inner_rel[:120],
+                "error": f"{type(exc).__name__}: {str(exc)[:120]}",
+                "correlation_id": correlation_id,
+            })
+            continue
+
+        stats["processed"] += inner_stats["processed"]
+        stats["routed_with_match"] += inner_stats["routed_with_match"]
+        stats["routed_unrouted"] += inner_stats["routed_unrouted"]
+        stats["duplicates"] += inner_stats["duplicates"]
+        stats["items_incremented"].update(inner_stats["items_incremented"])
+        stats["events_fired"] += inner_stats["events_fired"]
+
+        # Collect TG destinations of matched items (for outer replication).
+        for item_id in inner_stats["items_incremented"]:
+            for cand in candidate_items:
+                if cand.get("item_id") == item_id and (
+                    (cand.get("item_type") or "").lower() != "default"
+                ):
+                    key = (
+                        cand.get("customer_id") or "",
+                        cand.get("device_id") or "",
+                        cand.get("milestone_id") or "",
+                        cand.get("tg_name") or "",
+                        cand.get("item_type") or "",
+                    )
+                    if key[3]:
+                        matched_tgs.add(key)
+                    break
+
+    # Step 5: replicate outer archive to each matched TG's view-tree root
+    # so TPM can see "here's the archive these files came from".
+    if matched_tgs:
+        await _replicate_outer_archive_to_tgs(
+            filename=filename, content=bytes(content), targets=matched_tgs,
+        )
+
+    return stats
+
+
+def _sha256_hex(data: bytes) -> str:
+    """Local helper — sha256 of bytes as hex string."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+async def _save_outer_archive_opaque(
+    *, customer_id: str, device_id: str, milestone_id: str,
+    tg_name: str, filename: str, content: bytes,
+) -> None:
+    """Save the outer archive bytes to view-tree AS AN OPAQUE FILE (no
+    extraction). Bypasses write_attachment_to_view_tree because that helper
+    would re-extract the same archive. Best-effort — logs on failure.
+
+    Placed at TG root as `<filename>`. Overwrite = new version via
+    save_view_document. tg_name empty → skip (matches view-tree contract).
+    """
+    if not tg_name:
+        return
+    from core.src.storage.document_view_ops import save_view_document
+    try:
+        await save_view_document(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id, tg_name=tg_name,
+            relative_parts=(filename,),
+            content=content, saved_by="auto", source="archive_container",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "process_inbound_attachments: outer-archive opaque save to "
+            "tg=%s file=%s failed: %s: %s",
+            tg_name, filename, type(exc).__name__, str(exc)[:120],
+        )
+
+
+async def _save_outer_archive_to_default_tg(
+    *, attachment, candidate_items: list[dict],
+) -> None:
+    """When extraction fails, save the outer archive to view-tree at the
+    first candidate item's TG (or an unrouted-archives fallback name) so
+    TPM can still access the file. Best-effort."""
+    if not candidate_items:
+        return
+    ctx = candidate_items[0]
+    await _save_outer_archive_opaque(
+        customer_id=ctx.get("customer_id") or "",
+        device_id=ctx.get("device_id") or "",
+        milestone_id=ctx.get("milestone_id") or "",
+        tg_name=ctx.get("tg_name") or "_unrouted_archives",
+        filename=getattr(attachment, "filename", "") or "archive.bin",
+        content=bytes(getattr(attachment, "content", b"") or b""),
+    )
+
+
+async def _replicate_outer_archive_to_tgs(
+    *, filename: str, content: bytes, targets: set,
+) -> None:
+    """Save the outer archive bytes AS-IS (no extraction) to view-tree at
+    the root of each matched TG. Called after inner-entry processing so the
+    archive appears alongside its extracted contents in the browse UI.
+    Best-effort per-TG.
+    """
+    for cust, dev, mil, tg, _item_type in targets:
+        await _save_outer_archive_opaque(
+            customer_id=cust, device_id=dev, milestone_id=mil,
+            tg_name=tg, filename=filename, content=content,
+        )
 
 
 def _widen_candidates_for_router(deps, batch_items: list[dict]) -> list[dict]:

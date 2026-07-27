@@ -49,6 +49,12 @@ redis>=5.0,<6
 aiofiles>=23.2,<25
 smbprotocol>=1.12,<2
 
+# storage/archive_extractor — .7z extraction per D-155 (2026-07-26). Archives
+# (.zip via stdlib, .7z via py7zr) are treated as containers only; inner files
+# route independently. Lazy-imported inside extractor so non-7z deploys pay
+# no import cost.
+py7zr>=0.21,<1
+
 # Test deps
 pytest>=8.0,<9
 pytest-asyncio>=0.23,<1

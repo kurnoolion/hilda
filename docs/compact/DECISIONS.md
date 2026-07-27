@@ -4087,3 +4087,57 @@ _EXCEL_EXT_REGEX  = re.compile(r"\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
 **Test coverage** (7 additional in `TestImeiExcelReservedLiteral`): embedded IMEI matches, dashes-vs-underscores delimiter both work, embedded IMEI with non-Excel extension still rejected, 19-digit long-run rejected (word-boundary), 16-digit delimited run rejected (needs exactly 15).
 
 **Renaming rejected**: the literal `all-15-digits-imei` is slightly misleading under the widened semantics ("all" suggests the whole basename). Considered renaming to `imei-excel` or `contains-15-digit-imei`. Rejected because (a) user's template already adopted the name; (b) renaming would break template files without a compat shim; (c) the literal's semantics are documented here + in the router's docstring. If a third IMEI-related literal ever appears, we'll revisit naming as part of an extensibility refactor (per D-154 consequence g).
+
+## D-155: Archives (.zip, .7z) are containers — outer gets no routing, inner files routed independently
+
+**Status**: Active · **Date**: 2026-07-26
+
+**Context**: prior behavior (since the D-150 view-tree landed) had the FR-52 attachment router match on the OUTER `.zip` filename against `item_description` tags. If the outer filename didn't substring-match any item's tags, the whole archive was unrouted — even when inner filenames would have matched their intended items cleanly. Meanwhile `.7z` was silently unsupported: no magic-byte detection, no extraction, fell through as an opaque binary and typically failed routing outright.
+
+Live evidence 2026-07-26: an owner sent a `.7z` containing files that individually would have routed to distinct items. Observed state: `document_index` row present for the outer `.7z`, but zero `document_item_association` rows and zero `document_version` rows. Root cause: no inner extraction + outer-filename routing that couldn't fire against the archive's opaque name.
+
+**Decision**: archives (`.zip`, `.7z`) are treated as **containers only**. Concretely:
+
+1. **Outer archive gets NO substring-match routing and NO doc_type classification.** A `document_index` row is still written for audit (`routing_resolution=ArchiveContainer`, `doc_type=""`, `is_final=False`) — leave-for-audit per architect Q4.
+2. **Inner entries are extracted and each processed as an independent attachment** — synthesized `InboundAttachment(filename=<inner path>, content=<inner bytes>, file_hash=sha256(inner bytes))` runs through the same `_process_regular_attachment` code path as a non-archive email attachment. Independent routing, independent doc_type, independent dedup, independent `document_item_association`, independent `document_version`.
+3. **Inner-file dedup uses inner file_hash** (per Q3): owner re-sending the same archive → all inner hashes match → all inner treated as duplicates. Owner sending different archive with same-hash inner file → duplicate detected. Owner sending different inner content → new revision.
+4. **Outer archive replicated to view-tree** at the TG-root of each TG that received an inner-file match, so TPM sees "here's the archive these files came from" alongside the extracted contents. If no inner matched, outer lands under the first candidate item's TG (fallback for visibility).
+5. **`.zip` and `.7z` treated identically** — architect Q1 lock: no format-specific behavior.
+
+**Implementation** — three files:
+
+- `core/src/storage/archive_extractor.py` (new) — `extract_archive(filename, content) -> ExtractResult`. `.zip` via stdlib `zipfile`; `.7z` via `py7zr` (lazy import). Status enum: `extracted`, `not_archive`, `oversized`, `decompressed_oversized`, `password_protected`, `bad_archive`, `library_missing`. Two caps: `MAX_COMPRESSED_BYTES=300MB` (existing cap, preserved) and new `MAX_DECOMPRESSED_BYTES=500MB` (guards decompression bombs / 7z solid-compression high ratios). Zip-slip helper `safe_relative_parts` shared by both branches. Never raises — all failure modes map to a status value.
+- `core/src/storage/document_view_writer.py` (refactored) — now consumes `extract_archive`; behavior for non-archive files unchanged; filename-with-embedded-`/` (per-inner pseudo-attachment case) split into folder tuple so `save_view_document` receives proper `relative_parts`.
+- `core/src/workflow_engine/tasks/inbound_attachment.py` (reshape) — main per-attachment loop dispatches on `_is_archive_attachment`. Archive branch calls new `_process_archive_attachment`: writes `ARCHIVE_CONTAINER` audit row for the outer, extracts, iterates inner entries running each through `_process_regular_attachment` (existing per-attachment routing pipeline extracted verbatim from the old inline body). New `RoutingResolution.ARCHIVE_CONTAINER` enum value added. New `py7zr>=0.21,<1` dependency in `requirements.txt`.
+
+**Why**:
+
+- **Symmetric handling** — `.zip` and `.7z` had inconsistent behavior; unifying under one abstraction removes special-casing and future-proofs `.rar`/`.tar.gz` if ever needed (drop-in extractor branch).
+- **Correct routing** — inner filenames are what template authors write substring tags against. Routing on outer archive names required template authors to duplicate every inner-file tag AT the archive filename layer — cumbersome and fragile.
+- **Independent versioning** — file_hash dedup at the inner level lets owners re-send an archive after fixing one file inside it; only the changed inner file bumps to v2, unchanged inner files stay at v1. Prior behavior would have rejected the entire archive as a duplicate on outer-hash match.
+- **py7zr vs libarchive-c** (rejected): `py7zr` is a pure Python + native-dep pip package; `libarchive-c` handles more formats but requires a `libarchive` system package in the podman image. Chose `py7zr` for smaller image footprint and preserving the proven `zipfile` path for `.zip`. Trade-off accepted: if `.rar`/`.tar.gz` becomes a real ask, we swap in `libarchive-c` behind the same abstraction.
+
+**Alternatives considered**:
+
+- **Route the outer archive AND every inner file** (fan-out): rejected — duplicates counting, confuses `doc_count_received` semantics ("did this archive count once or N times?"), and forces template authors to reason about "does my tag match archive names too?".
+- **Extract only when outer routing fails** (fallback extraction): rejected — asymmetric with `.7z` (which never had outer routing that worked), and creates a debug-hostile mode where a template misfix silently changes whether extraction happens.
+- **Extract only inside the view-tree writer, not the router** (current behavior for `.zip`): rejected per architect Q1 — user wants full inner-file routing + independent versioning, not just view-tree convenience.
+
+**Consequences**:
+
+- (a) `doc_count_received` now increments per **inner file** that matched an item, not per outer archive. This matches the FR-52 file-centric model per D-138 (per-file file_hash = the atomic tracked unit).
+- (b) Existing `document_index` rows for pre-D-155 `.zip` outer archives that were successfully routed remain in place with their old (substring-matched) `routing_resolution` values — no backfill migration. Consequence: historical rows show `.zip` files with regular routing resolutions; post-cutover `.zip` outer rows show `ArchiveContainer`. Ops query filtering by `routing_resolution` needs to be date-aware if it distinguishes pre/post-D-155.
+- (c) `document_item_association` for pre-D-155 `.zip` outer archives similarly not backfilled. If TPM needs to reprocess a pre-D-155 `.zip` under the new semantics, forward-only fix: re-ingest the archive (owner resend).
+- (d) New Ph-1 unroutable state: an inner file with no matching tag lands at the outer archive's fallback TG (first candidate item's TG) via NSD unrouted path, same as any other unrouted attachment. Not surfaced in view-tree — current writer excludes `item_type='default'` by design. TPM sees unmatched inner files only via `document_index` + `document_item_association` queries. If the browse UI needs to show unmatched inner files, that is a Ph-2 UX enhancement.
+- (e) `MAX_DECOMPRESSED_BYTES=500MB` cap applies to `.zip` too — a pre-existing zip-bomb risk that was latent. Safer default; no known Ph-1 archive exceeds it (typical: a few MB uncompressed).
+- (f) `py7zr` transitive deps (`pycryptodomex`, `pyzstd`, `pyppmd`, `pybcj`, `psutil`, `texttable`, `brotli`, `inflate64`, `multivolumefile`) add ~10MB to the container image. Acceptable.
+- (g) Password-protected archives (`.7z` or `.zip` with encrypted entries) surface as `password_protected` extract status; outer archive still lands in `document_index` and view-tree audit copy, but no inner processing. TPM sees the outer + audit event `archive_container_received extract_status=password_protected`. Manual triage.
+- (h) `RoutingResolution.ARCHIVE_CONTAINER = "ArchiveContainer"` is a new enum value — ops dashboards/queries filtering on `routing_resolution` should ignore this value (it is a container audit marker, not a routing outcome).
+
+**Test coverage** — 3 test files:
+
+- `test_archive_extractor.py` (new, 22 tests): flat + nested `.zip`, flat + nested `.7z`, password-protected `.7z`, bad magic, oversized compressed, oversized decompressed (bomb guard), zip-slip skipped, `is_archive_filename` gating (`.xlsx`/`.docx`/`.pptx` correctly rejected).
+- `test_document_view_writer.py` (extended +6 tests): existing `.zip` behavior regression + new `.7z` extraction round-trips + password-protected `.7z` keeps outer + bad-magic `.7z` keeps outer + slash-in-filename creates subfolder (the per-inner pseudo-attachment case).
+- `test_inbound_attachment_archive.py` (new, 11 tests): dispatch helpers (`_is_archive_attachment`, `_sha256_hex`), enum-value stability (`ARCHIVE_CONTAINER == "ArchiveContainer"`), round-trip extraction through the abstraction confirming pipeline-shape contract.
+
+Full pipeline (router + storage + view-tree) coverage relies on composition of tested primitives — no integration test spins up the full router+MockStorage+task path, since the archive branch delegates to `_process_regular_attachment` which is already exercised via existing `test_workflow_engine_tasks.py::TestInboundAttachmentTaskEarlyExits` and the extractor+writer tests validate the specific archive-processing surface.

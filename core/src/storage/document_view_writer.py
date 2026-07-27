@@ -8,8 +8,13 @@ Ph-1 rules (per architect 2026-07-22):
   * Zip original also saved to the view tree (per architect: keep both).
   * Overwrite of an existing file = new version (save_view_document handles).
   * Default WI (item_type='default') attachments are EXCLUDED from view.
-  * Max zip size: 300MB.
+  * Max compressed archive size: MAX_COMPRESSED_BYTES (300 MB).
+  * Max decompressed total: MAX_DECOMPRESSED_BYTES (500 MB) per D-155.
   * Zip-slip guard: any entry name with `..` segment or absolute path skipped.
+
+D-155 2026-07-26 — extraction supports both .zip and .7z through
+storage.archive_extractor. Outer archive routing/dedup moved to the caller
+in workflow_engine.tasks.inbound_attachment.
 
 The writer is best-effort from the router's perspective: any failure logs
 a warning and does not fail the outer routing task. Attachment routing is
@@ -17,20 +22,28 @@ authoritative for tracking; view tree is a UX layer.
 """
 from __future__ import annotations
 
-import io
 import logging
-import zipfile
-from pathlib import PurePosixPath
 
+from core.src.storage.archive_extractor import (
+    MAX_COMPRESSED_BYTES,
+    MAX_DECOMPRESSED_BYTES,
+    extract_archive,
+    is_archive_filename,
+    safe_relative_parts,
+)
 from core.src.storage.document_view_ops import save_view_document
 
-__all__ = ["write_attachment_to_view_tree", "MAX_ZIP_SIZE_BYTES"]
+__all__ = [
+    "write_attachment_to_view_tree",
+    "MAX_ZIP_SIZE_BYTES",
+    "MAX_COMPRESSED_BYTES",
+    "MAX_DECOMPRESSED_BYTES",
+]
 
 _log = logging.getLogger(__name__)
 
-
-MAX_ZIP_SIZE_BYTES = 300 * 1024 * 1024  # 300 MB — architect cap 2026-07-22
-_ZIP_MAGIC = b"PK\x03\x04"
+# Kept as legacy alias so callers/tests importing the old name still resolve.
+MAX_ZIP_SIZE_BYTES = MAX_COMPRESSED_BYTES
 
 
 async def write_attachment_to_view_tree(
@@ -49,12 +62,11 @@ async def write_attachment_to_view_tree(
     Behavior:
       * item_type == 'default' -> skip entirely (view excludes Default WI docs).
       * tg_name empty / None -> skip (no destination tg directory).
-      * content is a zip (magic-byte detect):
-         - Store the original zip as `<filename>` (audit / re-download).
-         - Extract each entry preserving folders; skip zip-slip attempts.
-         - Save each extracted entry via save_view_document (versioning if
-           the same relative path already exists).
-      * content is not a zip: save once at `<filename>`.
+      * filename is an archive (.zip / .7z): save the original at TG root
+        (audit / re-download), then extract each entry preserving folders
+        and save independently. Zip-slip skipped, password/oversize/bad
+        archive keep the original only.
+      * filename is not an archive: save once at `<filename>`.
 
     Returns list of view_relative_paths written (empty if skipped). Best-effort
     on all failure modes -- a warning is logged for skips.
@@ -69,23 +81,19 @@ async def write_attachment_to_view_tree(
         return []
     written: list[str] = []
 
-    # Bug fix 2026-07-22: `.xlsx`/`.docx`/`.pptx` files are Office Open XML
-    # format = ZIP archives internally. Magic-byte detection alone
-    # incorrectly extracted them, dumping their internal `[Content_Types].xml`,
-    # `_rels/`, `xl/`, `docProps/` structure into the view tree.
-    # Fix: only extract when the file extension is literally `.zip`.
-    is_zip = (
-        filename.lower().endswith(".zip")
-        and len(content) >= 4
-        and content[:4] == _ZIP_MAGIC
-    )
-
-    if not is_zip:
+    # Non-archive branch: single save. Filenames MAY carry subdir path
+    # (e.g. "subfolder/report.pdf") when the caller synthesized the
+    # attachment from an archive inner entry (D-155 2026-07-26). Split on
+    # `/` so save_view_document receives proper folder-tree parts; single-
+    # segment filenames pass through as before. safe_relative_parts also
+    # zip-slip-sanitizes any accidental `..` in the path.
+    if not is_archive_filename(filename):
+        parts = safe_relative_parts(filename) or (filename,)
         try:
             row = await save_view_document(
                 customer_id=customer_id, device_id=device_id,
                 milestone_id=milestone_id, tg_name=tg_name,
-                relative_parts=(filename,),
+                relative_parts=parts,
                 content=content, saved_by=saved_by, source="router",
             )
             written.append(row.view_relative_path)
@@ -96,29 +104,7 @@ async def write_attachment_to_view_tree(
             )
         return written
 
-    # Zip path -- size cap first (before decompression)
-    if len(content) > MAX_ZIP_SIZE_BYTES:
-        _log.warning(
-            "view_tree_writer: zip exceeds cap %d>%d bytes (file=%s) -- skipping extraction; "
-            "saving original zip only",
-            len(content), MAX_ZIP_SIZE_BYTES, filename,
-        )
-        try:
-            row = await save_view_document(
-                customer_id=customer_id, device_id=device_id,
-                milestone_id=milestone_id, tg_name=tg_name,
-                relative_parts=(filename,),
-                content=content, saved_by=saved_by, source="router",
-            )
-            written.append(row.view_relative_path)
-        except Exception as exc:  # noqa: BLE001
-            _log.warning(
-                "view_tree_writer: save oversized zip failed for %s: %s: %s",
-                filename, type(exc).__name__, str(exc)[:120],
-            )
-        return written
-
-    # Save the original zip first (preserved for audit + re-download)
+    # Archive branch: always save the outer archive first (audit + re-download).
     try:
         orig = await save_view_document(
             customer_id=customer_id, device_id=device_id,
@@ -129,77 +115,40 @@ async def write_attachment_to_view_tree(
         written.append(orig.view_relative_path)
     except Exception as exc:  # noqa: BLE001
         _log.warning(
-            "view_tree_writer: save original zip failed for %s: %s: %s",
+            "view_tree_writer: save original archive failed for %s: %s: %s",
             filename, type(exc).__name__, str(exc)[:120],
         )
-        # continue with extraction anyway
+        # continue with extraction anyway — outer save is best-effort.
 
-    # Extract + save each entry
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(content))
-    except zipfile.BadZipFile:
+    # Extract inner entries via shared extractor abstraction.
+    result = extract_archive(filename, content)
+    if result.status != "extracted":
         _log.warning(
-            "view_tree_writer: zip magic present but archive is malformed (file=%s) -- "
-            "kept original only, no extraction",
-            filename,
+            "view_tree_writer: archive extraction skipped (file=%s status=%s reason=%s) "
+            "-- kept original only",
+            filename, result.status, result.reason,
         )
         return written
 
-    with zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            entry_parts = _safe_relative_parts(info.filename)
-            if entry_parts is None:
-                _log.warning(
-                    "view_tree_writer: zip-slip attempt skipped: entry=%r file=%s",
-                    info.filename, filename,
-                )
-                continue
-            try:
-                entry_bytes = zf.read(info)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "view_tree_writer: zip entry read failed entry=%r file=%s: %s: %s",
-                    info.filename, filename, type(exc).__name__, str(exc)[:120],
-                )
-                continue
-            try:
-                row = await save_view_document(
-                    customer_id=customer_id, device_id=device_id,
-                    milestone_id=milestone_id, tg_name=tg_name,
-                    relative_parts=entry_parts,
-                    content=entry_bytes, saved_by=saved_by, source="zip_extract",
-                )
-                written.append(row.view_relative_path)
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "view_tree_writer: save zip entry failed entry=%r file=%s: %s: %s",
-                    info.filename, filename, type(exc).__name__, str(exc)[:120],
-                )
+    for entry in result.entries:
+        try:
+            row = await save_view_document(
+                customer_id=customer_id, device_id=device_id,
+                milestone_id=milestone_id, tg_name=tg_name,
+                relative_parts=entry.relative_parts,
+                content=entry.content, saved_by=saved_by, source="archive_extract",
+            )
+            written.append(row.view_relative_path)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "view_tree_writer: save archive entry failed entry=%r file=%s: %s: %s",
+                "/".join(entry.relative_parts), filename,
+                type(exc).__name__, str(exc)[:120],
+            )
 
     return written
 
 
+# Legacy shim — some callers/tests may import this. Delegates to shared helper.
 def _safe_relative_parts(entry_name: str) -> tuple[str, ...] | None:
-    """Zip-slip protection. Reject:
-      * Absolute paths (leading / or Windows drive letter)
-      * Any `..` segment (path escape)
-      * Empty component after normalization
-
-    Returns None if unsafe. Otherwise returns the folder-tree tuple ready
-    for save_view_document's relative_parts arg.
-    """
-    if not entry_name:
-        return None
-    # Normalize windows separators
-    normalized = entry_name.replace("\\", "/")
-    p = PurePosixPath(normalized)
-    if p.is_absolute():
-        return None
-    parts = [seg for seg in p.parts if seg not in ("", ".")]
-    if not parts:
-        return None
-    if any(seg == ".." for seg in parts):
-        return None
-    return tuple(parts)
+    return safe_relative_parts(entry_name)

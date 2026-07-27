@@ -106,6 +106,11 @@ class RoutingResolution(str, Enum):
     # commented block in Fr52AttachmentRouter._route_within_tg + the
     # precedence loop entry in _tg_scoped_route. STATUS.md Flag tracks.
     TG_DEFAULT_NOMATCH = "TgDefaultNomatch"     # PH-2: Step 1 substring produced 0 matches within a TG; the TG's ["default"]-tagged item catches
+    # D-155 2026-07-26 — outer archive audit row. The outer .zip/.7z gets a
+    # document_index row for audit visibility but is NEVER routed (no
+    # substring match, no doc_type classification, no associations). Inner
+    # files are extracted and each routed independently.
+    ARCHIVE_CONTAINER = "ArchiveContainer"
 
 
 class DocumentIndexRow(BaseModel):

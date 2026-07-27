@@ -145,9 +145,12 @@ class TestZipExtraction:
         assert not any("passwd" in p or "hosts" in p for p in written)
 
     async def test_oversized_zip_keeps_original_skips_extraction(self, monkeypatch):
-        # Fake a "large" zip by patching the constant to a tiny value
-        import core.src.storage.document_view_writer as mod
-        monkeypatch.setattr(mod, "MAX_ZIP_SIZE_BYTES", 100)
+        # Fake a "large" zip by patching the archive_extractor constants
+        # (moved from document_view_writer as part of the D-155 refactor).
+        # Patch both compressed and decompressed caps so either can trigger.
+        import core.src.storage.archive_extractor as ax
+        monkeypatch.setattr(ax, "MAX_COMPRESSED_BYTES", 100)
+        monkeypatch.setattr(ax, "MAX_DECOMPRESSED_BYTES", 100)
         zip_bytes = _zip_bytes({"a.txt": b"x" * 500})
         assert len(zip_bytes) > 100
 
@@ -237,3 +240,92 @@ class TestXlsxDocxNotTreatedAsZip:
 class TestConstant:
     def test_max_zip_size_is_300MB(self):
         assert MAX_ZIP_SIZE_BYTES == 300 * 1024 * 1024
+
+
+class TestSevenZExtraction:
+    """D-155 (2026-07-26) — .7z archives extract via py7zr and land in the
+    view tree the same way .zip archives do."""
+
+    async def test_extracts_flat_7z_preserves_original(self):
+        py7zr = pytest.importorskip("py7zr")
+        buf = io.BytesIO()
+        with py7zr.SevenZipFile(buf, "w") as z:
+            z.writestr(b"spec bytes", "spec.pdf")
+            z.writestr(b"notes bytes", "notes.txt")
+        seven_z_bytes = buf.getvalue()
+
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="pack.7z", content=seven_z_bytes,
+        )
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/pack.7z" in written
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/spec.pdf" in written
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/notes.txt" in written
+
+    async def test_extracts_nested_7z_preserving_tree(self):
+        py7zr = pytest.importorskip("py7zr")
+        buf = io.BytesIO()
+        with py7zr.SevenZipFile(buf, "w") as z:
+            z.writestr(b"pdf", "vendor/sig/report.pdf")
+            z.writestr(b"build", "vendor/sw/build.log")
+        seven_z_bytes = buf.getvalue()
+
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="vendor_pack.7z", content=seven_z_bytes,
+        )
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/vendor_pack.7z" in written
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/vendor/sig/report.pdf" in written
+        assert "view/MMK/SM-S671U1/DRR/hw_reports/vendor/sw/build.log" in written
+
+    async def test_password_protected_7z_keeps_original(self):
+        py7zr = pytest.importorskip("py7zr")
+        buf = io.BytesIO()
+        with py7zr.SevenZipFile(buf, "w", password="secret") as z:
+            z.writestr(b"locked payload", "locked.txt")
+        locked_bytes = buf.getvalue()
+
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="locked.7z", content=locked_bytes,
+        )
+        # Outer archive saved for audit; no inner entry extracted.
+        assert written == ["view/MMK/SM-S671U1/DRR/hw_reports/locked.7z"]
+
+    async def test_bad_magic_7z_keeps_original(self):
+        malformed = b"7z\xbc\xaf\x27\x1c" + b"garbage" * 40  # magic + junk
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="broken.7z", content=malformed,
+        )
+        assert written == ["view/MMK/SM-S671U1/DRR/hw_reports/broken.7z"]
+
+
+class TestFilenameWithSubdirPath:
+    """D-155 (2026-07-26) — when inbound_attachment synthesizes a per-inner
+    pseudo-attachment, its filename carries the archive subdir path (e.g.
+    "subfolder/nested.txt"). write_attachment_to_view_tree must split on `/`
+    so the file lands in the proper folder tree, not as a single-segment
+    name with an embedded slash."""
+
+    async def test_slash_in_filename_creates_subfolder(self):
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="docs/report.pdf", content=b"content",
+        )
+        assert written == ["view/MMK/SM-S671U1/DRR/hw_reports/docs/report.pdf"]
+
+    async def test_deep_subdir_preserved(self):
+        written = await write_attachment_to_view_tree(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", item_type="test_tech_waiver_report",
+            filename="vendor/sub/deep/report.pdf", content=b"content",
+        )
+        assert written == [
+            "view/MMK/SM-S671U1/DRR/hw_reports/vendor/sub/deep/report.pdf"
+        ]
