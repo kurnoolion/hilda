@@ -252,8 +252,19 @@ def _read_milestones(deps: Any, customer_id: str) -> list[dict[str, Any]]:
 
 
 def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | None, str | None]:
-    """Look up TPM email + name from Projects_<customer_id> keyed on project_model=device_id.
-    Returns (email, display_name); either may be None on lookup miss."""
+    """Look up TPM email + name from Projects_<customer_id> keyed on
+    project_model=device_id. Returns (email, display_name); either may be
+    None on lookup miss.
+
+    Field-shape handling (added 2026-07-27 per architect observation): the
+    TPM column in Projects_<customer_id> is a SP User / PersonOrGroup
+    field, not a plain string. SP REST returns it as a nested dict when
+    $expand is applied (typical keys: EMail, Title, LoginName, Name) OR
+    as a list of such dicts for multi-user fields. The canonical HILDA
+    column-map may point `tpm_email` and `tpm_name` at the SAME SP column
+    (the TPM person field) and rely on this extractor to pull the right
+    sub-value from the shared underlying object.
+    """
     from core.src.sharepoint_integration.config import ListScope
     try:
         rows = deps.sp_writer.get_items(
@@ -268,10 +279,87 @@ def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | 
         )
         return None, None
     for row in rows or []:
-        email = _row_get(row, "tpm_email")
-        if email:
-            name = _row_get(row, "tpm_name") or ""
-            return str(email), str(name) if name else None
+        tpm_email_field = _row_get(row, "tpm_email")
+        email, embedded_name = _extract_user_field_email_name(tpm_email_field)
+        if not email:
+            continue
+        # Name preference: (1) name embedded in the same tpm_email User
+        # field (SP User fields ship EMail + Title together), (2) separate
+        # tpm_name field if column_map defines one distinctly.
+        name = embedded_name
+        if not name:
+            tpm_name_field = _row_get(row, "tpm_name")
+            _, name_only = _extract_user_field_email_name(tpm_name_field)
+            name = name_only
+        return str(email), (str(name) if name else None)
+    return None, None
+
+
+def _extract_user_field_email_name(
+    field: Any,
+) -> tuple[str | None, str | None]:
+    """Extract (email, display_name) from a SP field value.
+
+    Handled shapes:
+      * None or empty string   → (None, None)
+      * str                    → (str, None) — assume already an email
+      * dict                   → look up common User/PersonOrGroup keys:
+                                   email:  EMail | Email | email | mail
+                                   name:   Title | DisplayName | Name
+      * list of dicts          → recurse on first non-empty entry
+                                 (SP multi-user field takes the first)
+      * anything else          → (None, None)
+
+    All key lookups are case-preserving; SP's canonical shape uses
+    PascalCase (EMail / Title / etc.) — the lowercase fallbacks cover
+    hand-authored dicts / test fixtures / non-SP sources.
+    """
+    if field is None or field == "":
+        return None, None
+    if isinstance(field, str):
+        # Strip whitespace; treat leftover as email if non-empty
+        s = field.strip()
+        return (s if s else None), None
+    if isinstance(field, list):
+        for item in field:
+            email, name = _extract_user_field_email_name(item)
+            if email:
+                return email, name
+        return None, None
+    if isinstance(field, dict):
+        # Email keys in preference order. Corp SP profile expansion returns
+        # 'Work email' (with space, from the SP UI schema) or 'WorkEmail'
+        # (JSON camelCase from UserProfile properties); standard SP
+        # PersonOrGroup $expand returns 'EMail'. Try all common shapes.
+        email = (
+            field.get("Work email")
+            or field.get("WorkEmail")
+            or field.get("EMail")
+            or field.get("Email")
+            or field.get("email")
+            or field.get("mail")
+        )
+        # Name keys in preference order:
+        #   Title / DisplayName — clean display shape when present
+        #   Name — corp AD often returns Distinguished-Name shape with `/`
+        #          delimiters ("Thendral Arasu.../Device Management/..."),
+        #          so split on first `/` and take the head.
+        #   First name + Last name — compose when neither above is set.
+        name = field.get("Title") or field.get("DisplayName")
+        if not name:
+            name_dn = field.get("Name")
+            if isinstance(name_dn, str) and name_dn.strip():
+                name = name_dn.split("/", 1)[0].strip()
+        if not name:
+            first = (field.get("First name") or field.get("FirstName") or "").strip()
+            last = (field.get("Last name") or field.get("LastName") or "").strip()
+            composed = (first + " " + last).strip()
+            if composed:
+                name = composed
+        return (
+            str(email).strip() if email else None,
+            str(name).strip() if name else None,
+        )
     return None, None
 
 
