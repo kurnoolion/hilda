@@ -382,14 +382,39 @@ class TestImeiExcelReservedLiteral:
         assert res == RoutingResolution.SUBSTRING_MATCH
         assert matches[0].item_id == "IMEI-ITEM"
 
-    def test_imei_xls_and_xlsm_and_xlsb_all_match(self):
+    def test_imei_xls_and_xlsm_and_xlsb_and_csv_all_match(self):
+        """D-154 second addendum 2026-07-27: .csv added to reserved-literal
+        extension list per architect ask (real Ph-1 IMEI exports arrive as
+        .csv, not Excel binary formats)."""
         r = _mk_router()
-        for ext in ("xls", "xlsx", "xlsm", "xlsb"):
+        for ext in ("xls", "xlsx", "xlsm", "xlsb", "csv"):
             matches, res = r._tg_scoped_route(
                 f"357123456789012.{ext}",
                 [self._IMEI_ITEM],
             )
             assert matches and matches[0].item_id == "IMEI-ITEM", f"failed ext={ext}"
+
+    def test_imei_csv_embedded_matches(self):
+        """.csv path also honors the widened embedded-IMEI rule."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route(
+            "imei_log_357123456789012_samsung.csv",
+            [self._IMEI_ITEM],
+        )
+        assert matches and matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_csv_uppercase_extension_matches(self):
+        r = _mk_router()
+        # filename is lowercased upstream; regex is IGNORECASE for defense.
+        matches, _ = r._tg_scoped_route("357123456789012.csv", [self._IMEI_ITEM])
+        assert matches and matches[0].item_id == "IMEI-ITEM"
+
+    def test_imei_csv_without_15_digit_token_does_not_match(self):
+        """CSV extension alone is not sufficient — the 15-digit IMEI token
+        rule still applies (guard against widening past intent)."""
+        r = _mk_router()
+        matches, _ = r._tg_scoped_route("report_no_imei_here.csv", [self._IMEI_ITEM])
+        assert matches == []
 
     def test_imei_uppercase_extension_still_matches(self):
         r = _mk_router()

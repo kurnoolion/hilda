@@ -747,21 +747,31 @@ class Fr52AttachmentRouter:
     # (?:^|\D) = start-of-string OR non-digit before. Consumes 1 char except
     # at start; that's fine — re.search anywhere in basename catches the token.
     _IMEI_TOKEN_REGEX = re.compile(r"(?:^|\D)\d{15}(?:\D|$)")
-    # Excel extension anchored at end of basename.
-    _EXCEL_EXT_REGEX = re.compile(r"\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
+    # Tabular extension anchored at end of basename. Added `csv` 2026-07-27
+    # per architect observation: real Ph-1 IMEI-shaped filenames arrive as
+    # .csv exports, not just Excel binary formats. Same reserved-literal
+    # semantics apply — the IMEI file is IMEI-shaped tabular data regardless
+    # of container format. Tag name `all-15-digits-imei` kept as-is per
+    # D-154 addendum renaming-rejected rationale.
+    _IMEI_EXT_REGEX = re.compile(r"\.(xls|xlsx|xlsm|xlsb|csv)$", re.IGNORECASE)
 
     @classmethod
     def _filename_matches_imei_excel(cls, filename: str) -> bool:
         """True if filename basename CONTAINS a word-bounded 15-digit IMEI
-        token AND ends in an Excel extension (.xls/.xlsx/.xlsm/.xlsb).
+        token AND ends in a tabular extension (.xls/.xlsx/.xlsm/.xlsb/.csv).
 
-        Covers both observed shapes:
-          - Exact: `357123456789012.xlsx`
+        Function name kept as `_imei_excel` for callsite stability; the
+        extension list is the source of truth for what counts as "tabular"
+        here (see _IMEI_EXT_REGEX).
+
+        Covers all observed shapes:
+          - Exact: `357123456789012.xlsx` / `357123456789012.csv`
           - Embedded: `Report_357123456789012_Samsung.xlsx`
+          - CSV export: `imei_357123456789012_log.csv`
 
         Rejects false positives:
           - `1234567890123456789.xlsx` (19-digit run — no 15-digit word-bounded token)
-          - `imei_357123456789012.pdf` (non-Excel extension)
+          - `imei_357123456789012.pdf` (non-tabular extension)
           - `14-digit-only.xlsx` (only 14 digits somewhere)
 
         `filename` is already lowercased by caller; regexes are
@@ -770,7 +780,7 @@ class Fr52AttachmentRouter:
         # PurePosixPath.name — filename may arrive with a path prefix in some
         # paths; be defensive.
         base = filename.rsplit("/", 1)[-1]
-        if not cls._EXCEL_EXT_REGEX.search(base):
+        if not cls._IMEI_EXT_REGEX.search(base):
             return False
         return cls._IMEI_TOKEN_REGEX.search(base) is not None
 

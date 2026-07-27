@@ -4088,6 +4088,20 @@ _EXCEL_EXT_REGEX  = re.compile(r"\.(xls|xlsx|xlsm|xlsb)$", re.IGNORECASE)
 
 **Renaming rejected**: the literal `all-15-digits-imei` is slightly misleading under the widened semantics ("all" suggests the whole basename). Considered renaming to `imei-excel` or `contains-15-digit-imei`. Rejected because (a) user's template already adopted the name; (b) renaming would break template files without a compat shim; (c) the literal's semantics are documented here + in the router's docstring. If a third IMEI-related literal ever appears, we'll revisit naming as part of an extensibility refactor (per D-154 consequence g).
 
+### D-154 second addendum 2026-07-27 — extension widening: .csv added alongside Excel formats
+
+**Trigger**: architect observation 2026-07-27 that real Ph-1 IMEI-shaped filenames in the corp MMK/DRR HW PL flow arrive as `.csv` exports (from device logging tools that write CSV, not Excel binary). Prior extension gate `\.(xls|xlsx|xlsm|xlsb)$` rejected these files even though they contained a valid 15-digit IMEI token — routing fell through to Default WI for TPM triage.
+
+**Update**: widen `_IMEI_EXT_REGEX` (renamed from `_EXCEL_EXT_REGEX` internally) from `\.(xls|xlsx|xlsm|xlsb)$` to `\.(xls|xlsx|xlsm|xlsb|csv)$`. Same regex-search-on-basename semantics; same case-insensitive flag; same IMEI-token word-boundary rule. Function name `_filename_matches_imei_excel` kept as-is — internal, no callsite churn.
+
+**Zero-shape template migration**: existing item templates using `[["all-15-digits-imei"]]` need no changes; the widening is a strict superset (every filename that matched under the Excel-only rule still matches under the widened rule). The tag literal `all-15-digits-imei` is unchanged.
+
+**Test coverage** (3 additional in `TestImeiExcelReservedLiteral`): (a) `.csv` extension with exact 15-digit IMEI matches; (b) `.csv` with embedded IMEI (`imei_log_357123456789012_samsung.csv`) matches; (c) `.csv` without a 15-digit token (`report_no_imei_here.csv`) still does NOT match — the extension-only gate is preserved as necessary-but-not-sufficient. The pre-existing `test_imei_xls_and_xlsm_and_xlsb_all_match` was renamed to `test_imei_xls_and_xlsm_and_xlsb_and_csv_all_match` and now loops over 5 extensions.
+
+**Same-name-reserved-literal rejected again**: for the same reasons as the first addendum. The "excel" in `_filename_matches_imei_excel` is now doubly-misleading (Excel + CSV), but function-name refactor produces zero user-visible benefit and adds churn risk to a corp-critical routing path. Documenting the extension list in the docstring is the accepted mitigation.
+
+**Migration note**: if future data surfaces .txt / .log / .tsv IMEI exports, add the extension to `_IMEI_EXT_REGEX` — same 3-test coverage pattern (positive-exact, positive-embedded, negative-no-token) applies.
+
 ## D-155: Archives (.zip, .7z) are containers — outer gets no routing, inner files routed independently
 
 **Status**: Active · **Date**: 2026-07-26
