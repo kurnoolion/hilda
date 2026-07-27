@@ -267,16 +267,30 @@ def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | 
     """
     from core.src.sharepoint_integration.config import ListScope
     try:
-        # expand=["TPM"] per TPM-2 (2026-07-27): SP User field returns
-        # LookupId only without $expand; expansion returns nested
-        # {Id, Title, EMail, LoginName, Name}. If MMK.yaml column_map maps
-        # `tpm_email -> TPM`, the from_sp_fields transform preserves the
-        # nested object and _extract_user_field_email_name pulls the email.
+        # expand + extra_select per TPM-3 (2026-07-27): SP 2017 rejects
+        # $expand=TPM with HTTP 400 -1 unless paired with $select of the
+        # sub-fields. Matches the get_item_by_id pattern in list_crud.py.
+        # Include Device (the filter column) so the row still resolves,
+        # plus all common User-field sub-fields the TPM-1 extractor knows:
+        #   EMail       — standard SP PersonOrGroup email
+        #   Title       — display name (typically "First Last")
+        #   Name        — AD DN shape ("First Last/Dept/Company") — DN head extracted
+        #   Work_x0020_email — corp UserProfile custom column (screenshot 2026-07-27)
+        # If any sub-field doesn't exist on the corp TPM column, SP silently
+        # returns null for that key — TPM-1 extractor tolerates None entries.
         rows = deps.sp_writer.get_items(
             entity="projects",
             scope=ListScope(customer_id=customer_id),
             canonical_filters={"project_model": device_id},
             expand=["TPM"],
+            extra_select=[
+                "Id",
+                "Device",
+                "TPM/EMail",
+                "TPM/Title",
+                "TPM/Name",
+                "TPM/Work_x0020_email",
+            ],
         )
     except Exception as exc:  # noqa: BLE001
         _log.warning(
