@@ -67,12 +67,23 @@ class SpCrudWriter:
         entity: str,
         scope: Any,                      # ListScope from sharepoint_integration
         canonical_filters: dict[str, Any] | None = None,
+        *,
+        expand: list[str] | None = None,
+        extra_select: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Sync wrapper around SpCrud.get_items -- canonical-field-out rows.
 
         Each returned dict carries `_sp_id` (SP's auto-counter Id) alongside
         the customer's canonical fields. Empty list when no match.
+
+        expand + extra_select (added 2026-07-27 per TPM-2): forward User /
+        Person field expansion to SP. Without expand, `Projects.TPM` returns
+        as `TPMId` (int) and downstream email extraction sees None. Pass
+        `expand=["TPM"]` to get the nested User object.
         """
         return run_async_sync(
-            lambda: self._crud.get_items(entity, scope, canonical_filters)
+            lambda: self._crud.get_items(
+                entity, scope, canonical_filters,
+                expand=expand, extra_select=extra_select,
+            )
         )

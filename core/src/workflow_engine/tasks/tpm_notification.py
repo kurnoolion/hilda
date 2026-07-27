@@ -267,10 +267,16 @@ def _read_tpm_email(deps: Any, customer_id: str, device_id: str) -> tuple[str | 
     """
     from core.src.sharepoint_integration.config import ListScope
     try:
+        # expand=["TPM"] per TPM-2 (2026-07-27): SP User field returns
+        # LookupId only without $expand; expansion returns nested
+        # {Id, Title, EMail, LoginName, Name}. If MMK.yaml column_map maps
+        # `tpm_email -> TPM`, the from_sp_fields transform preserves the
+        # nested object and _extract_user_field_email_name pulls the email.
         rows = deps.sp_writer.get_items(
             entity="projects",
             scope=ListScope(customer_id=customer_id),
             canonical_filters={"project_model": device_id},
+            expand=["TPM"],
         )
     except Exception as exc:  # noqa: BLE001
         _log.warning(

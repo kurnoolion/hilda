@@ -75,6 +75,8 @@ class SpCrud:
         canonical_filters: dict[str, Any] | None = None,
         *,
         with_select: bool = False,
+        expand: list[str] | None = None,
+        extra_select: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Read SP rows, returning canonical-field dicts.
 
@@ -87,12 +89,23 @@ class SpCrud:
         request). Callers who need the bandwidth optimization can opt in via
         with_select=True after verifying every YAML column matches the SP
         InternalName.
+
+        expand + extra_select (added 2026-07-27 per TPM-2): parity with
+        get_item_by_id's User/Person field expansion. Without $expand, a
+        User field like `Projects.TPM` returns as `TPMId` (int LookupId
+        only); with `expand=["TPM"]`, SP returns the nested object
+        `{"TPM": {"Id": N, "Title": "...", "EMail": "..."}}`. Pass
+        `extra_select=["TPM/EMail", "TPM/Title"]` to narrow the sub-field
+        selection when needed (Ph-1 default: expand alone, let SP return
+        default sub-fields — matches get_item_by_id ergonomics).
         """
         list_name = self._provider.get_list_name(entity, scope)
         select: list[str] | None = None
         if with_select:
             col_map = self._provider.get_column_map(entity, scope)
             select = list(col_map.values()) or None
+        if extra_select:
+            select = (select or []) + list(extra_select)
         filter_expr: str | None = None
         if canonical_filters:
             sp_fields = self._provider.to_sp_fields(entity, scope, canonical_filters)
@@ -100,7 +113,7 @@ class SpCrud:
                 f"{k} eq {_odata_literal(v)}" for k, v in sp_fields.items()
             )
         items_sp = await self._client.get_list_items(
-            list_name, select=select, filter_expr=filter_expr
+            list_name, select=select, filter_expr=filter_expr, expand=expand,
         )
         return [
             {
