@@ -212,6 +212,18 @@ def apply_pm_approval_task(
     is_confirmation = _fresh_item_type() == _IT.CONFIRMATION.value
     transitions_completed: list[str] = []
 
+    # Bind pm_id_email BEFORE _run_transition is defined -- the closure
+    # references it inside the event_context dict, and Python resolves free
+    # variables lazily at call time. Prior code (pre 2026-07-27) assigned
+    # this variable AFTER the transitions ran (~line 366 in the audit block),
+    # causing NameError: cannot access free variable 'pm_id_email' where it
+    # is not associated with a value in enclosing scope. That NameError was
+    # swallowed by _run_transition's except-block and surfaced as "apply_pm_
+    # approval: rfs transition failed" in worker logs while the mirror-and-
+    # audit path continued -- silent failure of the RFS state advance for
+    # every PM-approved item in DRR-52 / DRR-67 / DRR-69 / DRR-64 real traffic.
+    pm_id_email = mirror_fields.get("pm_approval_pm_id") or "system:pm_approval_unattributed"
+
     def _run_transition(target_state, marker: str) -> bool:
         try:
             _uds(
@@ -363,7 +375,8 @@ def apply_pm_approval_task(
     # Audit per architect lock: action_type=pm_approval; attribution.modified_by
     # = pm_approval_pm_id (PM corp email, e.g. abc@corp.com); details capture
     # the 3 mirrored values + source marker for SQL discoverability.
-    pm_id_email = mirror_fields.get("pm_approval_pm_id") or "system:pm_approval_unattributed"
+    # (pm_id_email is bound earlier — above _run_transition — so its value is
+    # available for both the transition closure and this audit block.)
     try:
         deps.audit.write_communication_log(
             action_type="pm_approval",

@@ -1463,6 +1463,38 @@ class TestPMApproval:
             ).get()
         assert result["outcome"] == "skipped_no_pm_fields"
 
+    def test_rfs_transition_hop_fires_regression_2026_07_27(self, deps):
+        """Regression: pm_id_email was assigned inside apply_pm_approval_task
+        AFTER _run_transition was defined + called. Python resolves closure
+        free-variables lazily -> NameError on every RFS transition attempt.
+        The NameError was swallowed by _run_transition's except-block and
+        surfaced only as a WARNING log line in production, with the outer
+        task returning outcome='applied' + transitions=[] (empty).
+
+        Live evidence 2026-07-27 corp box: DRR-52/64/67/69 all logged
+        'apply_pm_approval: rfs transition failed for item=... NameError:
+        cannot access free variable pm_id_email' and stayed at UnderPMReview
+        even though the mirror path succeeded.
+
+        This test asserts the transition list is NON-empty after a normal PM
+        approval cascade -- a NameError inside _run_transition would leave
+        it empty. Fix: hoist pm_id_email above _run_transition.
+        """
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        # Seed the item at UnderPMReview so Hop 1 (UnderPMReview -> RFS) is
+        # the meaningful transition path (not idempotent no-op).
+        deps.storage.items["MMK-SM-S671U1-P1-1"] = mk_item(DeliveryState.UNDER_PM_REVIEW)
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, _pm_approval_event_context())
+            ).get()
+        assert result["outcome"] == "applied"
+        # The failing case had transitions=[]. Fix makes 'rfs' appear.
+        assert "rfs" in result["transitions"], (
+            f"expected 'rfs' hop in transitions; got {result['transitions']!r} — "
+            "regression: pm_id_email likely referenced before assignment"
+        )
+
     def test_handles_list_delta_shape(self, deps):
         """Celery JSON serialization converts tuples -> lists. Task must
         handle both shapes for field_deltas[name]."""
