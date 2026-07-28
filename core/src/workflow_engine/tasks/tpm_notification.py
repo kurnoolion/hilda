@@ -569,6 +569,27 @@ def _send_notification(
     # Semantics: HILDA-generated Excel sent to TPM == carrier deliverable
     # submitted from HILDA's perspective (TPM forwards to carrier).
     # Best-effort: any failure logs a warning but does not fail the send.
+    #
+    # CFG-1 fix (2026-07-28): reload TpmNotificationConfig here — cfg was
+    # previously referenced as a free var from the enclosing tick body,
+    # but _send_notification runs in its own scope and cfg was never
+    # threaded in. Live 2026-07-28 corp box: the send succeeded end-to-end
+    # (Excel landed in TPM's mailbox) but this side-effect crashed with
+    # NameError, preventing item_no=<final_deliverable_item_name> from
+    # advancing to SubmittedToCustomer. Reload is cheap (JSON file read
+    # + Pydantic parse) and lets ops flip flags without a code deploy.
+    try:
+        cfg = TpmNotificationConfig.from_sources()
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "tpm_notification: cfg reload failed in send side-effect "
+            "customer=%s device=%s milestone=%s: %s: %s -- skipping final "
+            "deliverable transition",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return True
+
     if phase == _PHASE_DAY_OF and milestone_id in cfg.final_deliverable_milestone_names:
         _transition_final_deliverable_and_close_default_wi(
             deps=deps,
