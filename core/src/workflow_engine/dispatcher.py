@@ -190,6 +190,15 @@ class TriggerDispatcher:
     # ONLY when the SP-authored new value is literally 'Closed'.
     _TPM_SP_CLOSE_TARGET_VALUE = "closed"
 
+    # CIP-1 (2026-07-28): per-item TPM close serialization. Value-based
+    # refinement, ordered BEFORE the plain 'closed' check because the
+    # 'closeinprogress' string is a longer more-specific match against
+    # the same delivery_state field. Missing this ordering would still be
+    # safe (task self-validates the literal value) but the audit trail
+    # would show the wrong sub_trigger and the corp-side rule would fire
+    # the wrong action.
+    _TPM_SP_CLOSE_IN_PROGRESS_TARGET_VALUE = "closeinprogress"
+
     @staticmethod
     def _delta_new_value(deltas: dict, key: str) -> Any:
         """Extract the 'new' half of a field_deltas entry. Tolerant to both
@@ -249,10 +258,15 @@ class TriggerDispatcher:
         # misfire here would no-op safely at the task layer.
         if "delivery_state" in delta_keys:
             new_value = cls._delta_new_value(deltas, "delivery_state")
-            if (
-                isinstance(new_value, str)
-                and new_value.strip().lower() == cls._TPM_SP_CLOSE_TARGET_VALUE
-            ):
+            new_value_norm = (
+                new_value.strip().lower() if isinstance(new_value, str) else None
+            )
+            # CIP-1 (2026-07-28): check CloseInProgress FIRST (more specific
+            # than plain 'closed'). Both values live in the delivery_state
+            # delta; longer/more-specific match wins.
+            if new_value_norm == cls._TPM_SP_CLOSE_IN_PROGRESS_TARGET_VALUE:
+                refined = "TpmSpCloseInProgress"
+            elif new_value_norm == cls._TPM_SP_CLOSE_TARGET_VALUE:
                 refined = "TpmSpClose"
 
         if refined is None and delta_keys & cls._PM_APPROVAL_DELTA_FIELDS:

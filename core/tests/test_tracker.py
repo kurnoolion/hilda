@@ -197,8 +197,9 @@ def writers():
 
 
 class TestStateMachine:
-    def test_11_states(self):
-        assert len(DeliveryState) == 11
+    def test_state_count(self):
+        # 11 baseline + 1 CIP-1 2026-07-28 (CLOSE_IN_PROGRESS transient) = 12
+        assert len(DeliveryState) == 12
 
     def test_legal_transitions_keys_match_states(self):
         assert set(LEGAL_TRANSITIONS.keys()) == set(DeliveryState)
@@ -218,16 +219,44 @@ class TestStateMachine:
     def test_owner_closed_transient_target_is_under_pm_review(self):
         # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting
         # the transient auto-advance to UnderPMReview.
+        # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
         assert LEGAL_TRANSITIONS[DeliveryState.OWNER_CLOSED] == frozenset({
             DeliveryState.UNDER_PM_REVIEW,
             DeliveryState.CLOSED,
+            DeliveryState.CLOSE_IN_PROGRESS,
         })
 
+    def test_close_in_progress_only_reaches_closed(self):
+        # CIP-1 (2026-07-28): CloseInProgress is a 1-hop transient. Only legal
+        # target is CLOSED -- no back-out to prior state, no sideways moves.
+        assert LEGAL_TRANSITIONS[DeliveryState.CLOSE_IN_PROGRESS] == frozenset({
+            DeliveryState.CLOSED,
+        })
+
+    def test_all_active_states_can_reach_close_in_progress(self):
+        # CIP-1 (2026-07-28): every active state must be able to transition
+        # to CLOSE_IN_PROGRESS so TPM can click Close from any point in the
+        # lifecycle. Excluded: CLOSED (terminal) and CLOSE_IN_PROGRESS itself
+        # (idempotent no-op via transition_legal short-circuit).
+        active = [
+            DeliveryState.NOT_STARTED, DeliveryState.OPEN,
+            DeliveryState.OUTREACH_SENT, DeliveryState.DOCUMENT_RECEIVED,
+            DeliveryState.OWNER_CLOSED, DeliveryState.UNDER_PM_REVIEW,
+            DeliveryState.READY_FOR_SUBMISSION, DeliveryState.SUBMITTED_TO_CUSTOMER,
+            DeliveryState.DELAYED, DeliveryState.BLOCKED,
+        ]
+        for s in active:
+            assert DeliveryState.CLOSE_IN_PROGRESS in LEGAL_TRANSITIONS[s], (
+                f"missing CLOSE_IN_PROGRESS in LEGAL_TRANSITIONS[{s.value}]"
+            )
+
     def test_submitted_rewind_targets(self):
+        # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
         assert LEGAL_TRANSITIONS[DeliveryState.SUBMITTED_TO_CUSTOMER] == frozenset({
             DeliveryState.CLOSED,
             DeliveryState.DOCUMENT_RECEIVED,
             DeliveryState.OUTREACH_SENT,
+            DeliveryState.CLOSE_IN_PROGRESS,
         })
 
     def test_transition_legal_idempotent_noop(self):
@@ -250,8 +279,13 @@ class TestStateMachine:
         #     OWNER_CLOSED, UNDER_PM_REVIEW, DELAYED, BLOCKED for TPM Close All
         #     Items force-close authority. Guard 5 still gates policy on
         #     trigger_source in ('manual_tpm_override', 'tpm_button').)
+        # 48 (CIP-1 2026-07-28: +CLOSE_IN_PROGRESS edge from all 10 active
+        #     from-states + new CLOSE_IN_PROGRESS -> CLOSED terminal edge.
+        #     Per-item TPM close serialization -- SP UI writes CloseInProgress
+        #     immediately for Start-Collection visibility, HILDA 2-hop
+        #     advances to Closed.)
         total = sum(len(targets) for targets in LEGAL_TRANSITIONS.values())
-        assert total == 37
+        assert total == 48
 
 
 # ---------------------------------------------------------------------------

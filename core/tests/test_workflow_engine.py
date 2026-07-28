@@ -182,14 +182,17 @@ class TestCeleryApp:
 
 
 class TestRegistry:
-    def test_expected_22_action_kinds(self):
-        # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
+    def test_expected_26_action_kinds(self):
+        # 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
         # (IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION).
-        # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
-        # (APPLY_PM_APPROVAL added).
-        # Bumped 21 -> 22 on 2026-06-30 per architect submit-to-carrier design pass
-        # (SUBMIT_TO_CARRIER added; milestone-scoped upload orchestrator).
-        assert len(expected_action_kinds_ph1()) == 22
+        # 20 -> 21 on 2026-06-28 per architect PM-approval (APPLY_PM_APPROVAL).
+        # 21 -> 22 on 2026-06-30 per architect submit-to-carrier (SUBMIT_TO_CARRIER).
+        # 22 -> 23 on 2026-07-02 per close-all-items (CLOSE_ALL_ITEMS).
+        # 23 -> 24 on 2026-07-02 per template-merge (SYNC_DELIVERABLE_FIELDS).
+        # 24 -> 25 on 2026-07-23 per TPM early-close mirror (APPLY_TPM_SP_CLOSE).
+        # 25 -> 26 on 2026-07-28 per CIP-1 per-item TPM close serialization
+        # (APPLY_TPM_SP_CLOSE_IN_PROGRESS).
+        assert len(expected_action_kinds_ph1()) == 26
 
     def test_registry_initially_empty_or_partial(self, _registry_snapshot):
         # In a fresh test run with the registry snapshotted, we can clear and verify

@@ -52,7 +52,7 @@ class TriggerKind(str, Enum):
 # ItemModified sub-triggers (Ph-1) — discriminated by TriggerEvent.sub_trigger / Rule.sub_trigger.
 # Membership is validated at load time (loader.py), not at model construction — Ph-2 may extend
 # sub-triggers via registry per the D-DRAFT-3 ownership decision.
-ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved", "TpmSpClose"}
+ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved", "TpmSpClose", "TpmSpCloseInProgress"}
 
 
 class ActionKind(str, Enum):
@@ -104,6 +104,15 @@ class ActionKind(str, Enum):
     # Bypasses the sync_deliverable_fields whitelist which intentionally
     # excludes delivery_state to avoid HILDA-echo re-processing.
     APPLY_TPM_SP_CLOSE = "ApplyTpmSpClose"
+    # CIP-1 (2026-07-28): per-item TPM close serialization. SP UI writes
+    # delivery_state='CloseInProgress' the moment TPM clicks Close on ONE
+    # item (button visibility disabled immediately, no ~90s race window).
+    # HILDA's 2-hop task mirrors CloseInProgress to Postgres then advances
+    # to Closed (+ SP writeback via update_delivery_state). Dispatcher's
+    # TpmSpCloseInProgress refinement ordered FIRST (before TpmSpClose)
+    # because "CloseInProgress" and "Closed" both live in delivery_state
+    # deltas; more-specific string match wins.
+    APPLY_TPM_SP_CLOSE_IN_PROGRESS = "ApplyTpmSpCloseInProgress"
     # Submit-to-Carrier milestone orchestrator added 2026-06-30 per architect
     # design pass: TPM clicks Submit-to-Carrier in SP UI; SP engineer sets
     # milestone_submission_triggered_at on the Milestone row + sends CHANGED

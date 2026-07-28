@@ -644,15 +644,17 @@ class TestEnums:
             "not-started",
         }
 
-    def test_delivery_state_11_values_per_fr7(self) -> None:
-        """Per FR-7 — 11-value canonical enum (Not Started + 8 happy-path + Delayed + Blocked).
+    def test_delivery_state_12_values_per_fr7_and_cip1(self) -> None:
+        """Per FR-7 — 11-value canonical baseline + CIP-1 (2026-07-28) adds
+        CloseInProgress transient (per-item TPM close serialization). Total 12.
         Per architect lock 2026-06-26 direction (α): value strings match SP display
         (PascalCase with spaces)."""
-        assert len(DeliveryState) == 11
+        assert len(DeliveryState) == 12
         assert {s.value for s in DeliveryState} == {
             "Not Started", "Open", "OutreachSent", "DocumentReceived",
             "OwnerClosed", "UnderPMReview", "ReadyForSubmission",
-            "SubmittedToCustomer", "Closed", "Delayed", "Blocked",
+            "SubmittedToCustomer", "CloseInProgress", "Closed",
+            "Delayed", "Blocked",
         }
 
     def test_item_type_4_values_per_d053(self) -> None:

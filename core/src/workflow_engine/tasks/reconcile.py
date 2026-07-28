@@ -58,6 +58,7 @@ _STATE_READY_FOR_SUBMISSION = "ReadyForSubmission"
 _STATE_UNDER_PM_REVIEW      = "UnderPMReview"
 _STATE_SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"
 _STATE_CLOSED               = "Closed"
+_STATE_CLOSE_IN_PROGRESS    = "CloseInProgress"
 
 
 @hilda_celery_app.task(
@@ -95,6 +96,8 @@ def reconcile_all_task(
         "sync_4_skipped":             0,
         "sync_5_dispatched":          0,
         "sync_5_skipped":             0,
+        "sync_6_advanced":            0,   # CIP-4 stuck-CloseInProgress sweeper
+        "sync_6_skipped":             0,
     }
 
     correlation_id = f"reconcile-{uuid.uuid4().hex[:12]}"
@@ -144,6 +147,14 @@ def reconcile_all_task(
         except Exception as exc:  # noqa: BLE001
             _log.warning("sync_5_error: milestone=%s: %s", milestone_id, type(exc).__name__)
             stats["sync_5_skipped"] += 1
+        try:
+            _sync_6_close_in_progress(
+                deps, cfg, stats, correlation_id,
+                customer_id, device_id, milestone_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync_6_error: milestone=%s: %s", milestone_id, type(exc).__name__)
+            stats["sync_6_skipped"] += 1
 
     _log.info("reconcile_all: %s", stats)
     return {"outcome": "fired", "correlation_id": correlation_id, **stats}
@@ -684,3 +695,117 @@ def _audit(
         )
     except Exception as exc:  # noqa: BLE001
         _log.warning("reconcile_audit_failed: %s", type(exc).__name__)
+
+
+# ---------------------------------------------------------------------------
+# sync-6: stuck-CloseInProgress sweeper (CIP-4 2026-07-28)
+# ---------------------------------------------------------------------------
+
+
+def _sync_6_close_in_progress(
+    deps: Any, cfg: ReconcileConfig, stats: dict[str, int], correlation_id: str,
+    customer_id: str, device_id: str, milestone_id: str,
+) -> None:
+    """Force-advance items stranded at CloseInProgress past the elapsed
+    threshold. Normally apply_tpm_sp_close_in_progress_task's 2-hop
+    completes in ~1s; anything at CloseInProgress older than the threshold
+    is genuinely stuck (worker crash between hop 1 and hop 2, or SP write
+    in hop 2 that raised, etc.).
+
+    Force-advance uses update_delivery_state with bypass_guards=True +
+    trigger_source='manual_tpm_override' (reuse of the CLOSE-1 escape
+    hatch; same pattern the primary task uses for hop 2). SP writeback is
+    handled inside update_delivery_state.
+
+    No-op when:
+      * sync_6 disabled in config
+      * no CloseInProgress items in this scope
+      * item's last_updated within the threshold (still could be racing
+        the primary task's hop 2)
+    """
+    sync_cfg = cfg.sync_6_close_in_progress
+    if not sync_cfg.enabled:
+        stats["sync_6_skipped"] += 1
+        return
+
+    list_items = getattr(deps.storage, "list_items_for_milestone", None)
+    if list_items is None:
+        stats["sync_6_skipped"] += 1
+        return
+
+    try:
+        items = list_items(milestone_id, states=[_STATE_CLOSE_IN_PROGRESS])
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_6_list_failed: milestone=%s: %s",
+            milestone_id, type(exc).__name__,
+        )
+        stats["sync_6_skipped"] += 1
+        return
+
+    if not items:
+        return  # normal case -- no stragglers
+
+    from core.src.template_schema.enums import DeliveryState
+    from core.src.tracker.transitions import update_delivery_state
+
+    threshold_sec = sync_cfg.elapsed_threshold_sec
+    now_utc = datetime.now(timezone.utc)
+
+    for item in items:
+        # Scope filter: reconciler iterates all customers x devices x
+        # milestones; only touch items belonging to this specific tuple.
+        if device_id and (getattr(item, "device_id", None) or "") != device_id:
+            continue
+        item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
+        if item_id is None:
+            continue
+        last_updated = getattr(item, "last_updated", None) or getattr(item, "state_changed_at", None)
+        elapsed = None
+        if isinstance(last_updated, datetime):
+            lu = last_updated if last_updated.tzinfo else last_updated.replace(tzinfo=timezone.utc)
+            elapsed = (now_utc - lu).total_seconds()
+        # If elapsed is None (missing timestamp) treat as stuck to be safe
+        # -- worker crashes usually don't update last_updated either.
+        if elapsed is not None and elapsed < threshold_sec:
+            continue   # still within the racing window
+
+        try:
+            result = update_delivery_state(
+                delivery_item_id=item_id,
+                target_state=DeliveryState.CLOSED,
+                params={"closed_via": "reconcile_sync_6_stuck_close_in_progress"},
+                event_context={
+                    "correlation_id":   correlation_id,
+                    "customer_id":      customer_id,
+                    "milestone_id":     milestone_id,
+                    "delivery_item_id": item_id,
+                    "trigger_source":   "manual_tpm_override",
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+                bypass_guards=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "sync_6_advance_failed: item=%s: %s: %s",
+                item_id, type(exc).__name__, str(exc)[:120],
+            )
+            continue
+
+        if result.outcome in ("transitioned", "no_op_idempotent"):
+            stats["sync_6_advanced"] += 1
+            _write_audit(
+                deps,
+                action_type="reconcile_sync_6_close_in_progress_advanced",
+                delivery_item_id=item_id,
+                details={
+                    "milestone_id":    milestone_id,
+                    "customer_id":     customer_id,
+                    "device_id":       device_id,
+                    "correlation_id":  correlation_id,
+                    "elapsed_sec":     elapsed,
+                    "trigger_source":  "sync_backfill_close_in_progress",
+                },
+            )

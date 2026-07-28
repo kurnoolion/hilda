@@ -32,6 +32,14 @@ class DeliveryState(str, Enum):
     UNDER_PM_REVIEW       = "UnderPMReview"
     READY_FOR_SUBMISSION  = "ReadyForSubmission"
     SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"
+    # CIP-1 (2026-07-28): transient TPM close intent. SP UI writes
+    # `CloseInProgress` when TPM clicks Close on a single item; SP UI's
+    # Start-Collection button visibility check treats this state the same
+    # as CLOSED (button hidden), serializing TPM's intent immediately
+    # rather than waiting the ~60-90s for SP alert -> HILDA processing.
+    # HILDA advances CLOSE_IN_PROGRESS -> CLOSED via apply_tpm_sp_close_
+    # in_progress_task on the SP CHANGED alert. Terminal after 1 hop.
+    CLOSE_IN_PROGRESS     = "CloseInProgress"
     CLOSED                = "Closed"
     DELAYED               = "Delayed"
     BLOCKED               = "Blocked"

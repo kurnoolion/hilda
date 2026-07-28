@@ -40,7 +40,11 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # guard change is needed. Symmetric belt-and-suspenders with the
     # OPEN -> CLOSED path used for the same early-close intent when auto-
     # transition has already landed.
-    DeliveryState.NOT_STARTED: frozenset({DeliveryState.OPEN, DeliveryState.CLOSED}),
+    DeliveryState.NOT_STARTED: frozenset({
+        DeliveryState.OPEN,
+        DeliveryState.CLOSED,
+        DeliveryState.CLOSE_IN_PROGRESS,   # CIP-1 2026-07-28
+    }),
 
     # Open: HILDA has armed tracking; outreach not yet sent. Owner cannot report
     # Delayed/Blocked because they haven't been contacted yet.
@@ -74,6 +78,7 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
         DeliveryState.OUTREACH_SENT,
         DeliveryState.CLOSED,
         DeliveryState.SUBMITTED_TO_CUSTOMER,   # STATE-1 2026-07-28: D-148 final-deliverable path
+        DeliveryState.CLOSE_IN_PROGRESS,        # CIP-1 2026-07-28
     }),
 
     # OutreachSent: owner can now report status (Delayed/Blocked) or send docs
@@ -90,17 +95,20 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
         DeliveryState.OWNER_CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # DocumentReceived: docs have arrived; close gates (doc_count + reviews)
     # checked by OwnerClosed 2-condition guard. Owner can still report status.
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.DOCUMENT_RECEIVED: frozenset({
         DeliveryState.OWNER_CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # OwnerClosed: transient — auto-advances to UnderPMReview within same task
@@ -108,59 +116,82 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # zero observable duration.
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting the
     # transient auto-advance (accepted per architect 2026-07-28: TPM final word).
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.OWNER_CLOSED: frozenset({
         DeliveryState.UNDER_PM_REVIEW,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # UnderPMReview: PM evaluates; PMApproval gate fires READY_FOR_SUBMISSION.
     # Owner can still report Delayed/Blocked at this stage.
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.UNDER_PM_REVIEW: frozenset({
         DeliveryState.READY_FOR_SUBMISSION,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # ReadyForSubmission: PM-approved; awaits FR-18 carrier dispatch. Direct →
     # CLOSED allowed only for no_customer_upload=True items (skip carrier
     # upload entirely) per FR-7 + DEF-20 carve-out; guard enforces.
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.READY_FOR_SUBMISSION: frozenset({
         DeliveryState.SUBMITTED_TO_CUSTOMER,
         DeliveryState.CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # SubmittedToCustomer: dispatched. CLOSED via TPM Mark Closed (FR-7 +
     # DEF-20 manual). Rewind to DocumentReceived/OutreachSent for customer RFI
     # / re-submission — guard requires TPM attribution (TRK-E006 if automated).
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.SUBMITTED_TO_CUSTOMER: frozenset({
         DeliveryState.CLOSED,
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.OUTREACH_SENT,
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 
     # CLOSED: terminal.
     DeliveryState.CLOSED: frozenset(),
 
+    # CIP-1 (2026-07-28): CloseInProgress is a 1-hop transient. SP UI writes
+    # this the moment TPM clicks Close on a single item; SP UI treats it same
+    # as CLOSED for button visibility (Start Collection disabled), serializing
+    # TPM intent immediately without waiting for HILDA's ~90s alert-processing
+    # cycle. HILDA's apply_tpm_sp_close_in_progress_task advances to CLOSED
+    # on the SP CHANGED alert. Only legal exit is CLOSED -- no back-out, no
+    # sideways moves. Guard 5 (DEF-20) accepts trigger_source
+    # ('manual_tpm_override' | 'tpm_button') for the advance, same as any
+    # other CLOSED transition; task uses bypass_guards=True defensively so a
+    # policy tweak elsewhere can't strand items at CloseInProgress.
+    DeliveryState.CLOSE_IN_PROGRESS: frozenset({DeliveryState.CLOSED}),
+
     # Delayed / Blocked: off-path holding. Resume to previous active state
     # (OPEN excluded — see Open row above).
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
+    # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
     DeliveryState.DELAYED: frozenset({
         DeliveryState.OUTREACH_SENT,
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.UNDER_PM_REVIEW,
         DeliveryState.READY_FOR_SUBMISSION,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
     DeliveryState.BLOCKED: frozenset({
         DeliveryState.OUTREACH_SENT,
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.UNDER_PM_REVIEW,
         DeliveryState.READY_FOR_SUBMISSION,
-        DeliveryState.CLOSED,   # CLOSE-1
+        DeliveryState.CLOSED,               # CLOSE-1
+        DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
     }),
 }
 

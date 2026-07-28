@@ -89,12 +89,14 @@ class TestEnums:
         # delivery_state new value = 'Closed'; wires the D-149 NotStarted
         # -> Closed early-close path + D-146 Open -> Closed mid-lifecycle
         # path to apply_tpm_sp_close_task mirror to Postgres).
+        # TpmSpCloseInProgress added 2026-07-28 per CIP-1 (per-item TPM close
+        # serialization; SP UI writes CloseInProgress -> HILDA 2-hop -> CLOSED).
         assert ITEM_MODIFIED_SUB_TRIGGERS_PH1 == {
             "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
-            "TpmSpClose",
+            "TpmSpClose", "TpmSpCloseInProgress",
         }
 
-    def test_action_kind_has_24_members(self):
+    def test_action_kind_has_26_members(self):
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
         # (added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION). Bumped
         # 20 -> 21 on 2026-06-28 per architect PM-approval design pass:
@@ -110,7 +112,10 @@ class TestEnums:
         # Bumped 24 -> 25 on 2026-07-23 per architect TPM early-close mirror:
         # added APPLY_TPM_SP_CLOSE (mirror SP-authored delivery_state='Closed'
         # to Postgres for NotStarted->Closed / Open->Closed paths).
-        assert len(ActionKind) == 25
+        # Bumped 25 -> 26 on 2026-07-28 per CIP-1 per-item TPM close serialization:
+        # added APPLY_TPM_SP_CLOSE_IN_PROGRESS (2-hop task mirroring
+        # delivery_state='CloseInProgress' then advancing to Closed).
+        assert len(ActionKind) == 26
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",
@@ -864,7 +869,9 @@ class TestCLI:
         # Bumped 15 -> 16 on 2026-06-28 per architect PM-approval design pass:
         # ITEM_MODIFIED_SUB_TRIGGERS_PH1 grew {OwnerReassigned, DeadlineMoved,
         # TagsModified} -> +PmApproved = 4. _PH1_TRIGGER_COUNT = (13-1)+4 = 16.
-        assert "trigger_kinds=16" in out
+        # Bumped 16 -> 17 on 2026-07-28 per TPM-CLOSE-1 (+TpmSpClose = 5).
+        # Bumped 17 -> 18 on 2026-07-28 per CIP-1 (+TpmSpCloseInProgress = 6).
+        assert "trigger_kinds=18" in out
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] cascade.
         # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
         # (APPLY_PM_APPROVAL added).
@@ -872,7 +879,9 @@ class TestCLI:
         # (SUBMIT_TO_CARRIER added).
         # Bumped 22 -> 23 on 2026-07-02 (CLOSE_ALL_ITEMS added).
         # Bumped 23 -> 24 on 2026-07-02 (SYNC_DELIVERABLE_FIELDS added).
-        assert "action_kinds=24" in out
+        # Bumped 24 -> 25 on 2026-07-23 (APPLY_TPM_SP_CLOSE added).
+        # Bumped 25 -> 26 on 2026-07-28 per CIP-1 (APPLY_TPM_SP_CLOSE_IN_PROGRESS).
+        assert "action_kinds=26" in out
         assert "postgres_overrides=0" in out
 
     def test_explain_emits_met_and_trace(self, rules_tree, capsys):

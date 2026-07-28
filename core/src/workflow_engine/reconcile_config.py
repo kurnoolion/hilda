@@ -64,6 +64,19 @@ class ReconcileConfig(BaseModel):
     sync_5_close_all_items: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=300
     )
+    # CIP-4 (2026-07-28): stuck-CloseInProgress sweeper. The 2-hop task
+    # apply_tpm_sp_close_in_progress_task commits Postgres=CloseInProgress
+    # in hop 1 THEN advances to Closed in hop 2. Worker crash between the
+    # two hops leaves the item at CloseInProgress. sync-6 scans for such
+    # stragglers and force-advances via update_delivery_state(bypass_guards=
+    # True, trigger_source='manual_tpm_override'). Dormant when the
+    # top-level enabled=false (corp Ph-1 default is OFF -- accepted risk
+    # since crash window is <1s). 300s default threshold: real 2-hop
+    # completes in ~1s, so anything older than 5 minutes is genuinely
+    # stuck (not just racing the reconciler).
+    sync_6_close_in_progress: SyncTypeConfig = SyncTypeConfig(
+        enabled=True, elapsed_threshold_sec=300
+    )
 
     @classmethod
     def from_sources(

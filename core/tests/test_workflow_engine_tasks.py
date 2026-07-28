@@ -1732,6 +1732,56 @@ class TestDispatcherTpmSpCloseRefinement:
         assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "changed"
 
 
+class TestDispatcherTpmSpCloseInProgressRefinement:
+    """CIP-1 (2026-07-28): dispatcher refines 'changed' -> 'TpmSpCloseInProgress'
+    when field_deltas has delivery_state new value = 'CloseInProgress'. Wired
+    ahead of TpmSpClose because 'CloseInProgress' is a more-specific match on
+    the same field.
+    """
+
+    @staticmethod
+    def _event(field_deltas):
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        return TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas=field_deltas,
+            timestamp=None, correlation_id="c-cip", derived_fields=None,
+        )
+
+    def test_close_in_progress_tuple(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Open", "CloseInProgress")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpCloseInProgress"
+
+    def test_close_in_progress_list_shape(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ["OutreachSent", "CloseInProgress"]})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpCloseInProgress"
+
+    def test_close_in_progress_case_insensitive(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Open", "closeinprogress")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpCloseInProgress"
+
+    def test_close_in_progress_wins_over_pm_approval(self):
+        # If somehow both come in the same delta -- CloseInProgress is more
+        # specific than PmApproved key-based match.
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({
+            "delivery_state":     ("Open", "CloseInProgress"),
+            "pm_approval_at":     (None, "2026-07-28T00:00:00+00:00"),
+        })
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpCloseInProgress"
+
+    def test_close_in_progress_distinct_from_close(self):
+        # Explicit sanity: 'Closed' still refines to TpmSpClose, not TpmSpCloseInProgress
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Open", "Closed")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+
 # ===========================================================================
 # TestOwnerIntentPersistence -- race-resolution per architect 2026-06-29
 # ===========================================================================
