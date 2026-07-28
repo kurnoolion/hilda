@@ -851,11 +851,59 @@ def _fetch_scope_items(
     try:
         all_items = fn(milestone_id) or []
     except Exception as exc:  # noqa: BLE001
+        # DBG-TICK-1 (2026-07-27): the prior str(exc)[:120] truncation hid
+        # the actual asyncpg root cause. Unwrap the PipelineError to reach
+        # the underlying DBAPI exception + log the full traceback + walk the
+        # __cause__/__context__ chain. The same code path runs green from
+        # a fresh Python invocation but fails inside Celery ForkPoolWorker
+        # tick context -- symptom points at event-loop / connection-pool
+        # lifecycle bug (asyncpg connection tied to a closed loop).
+        import traceback as _tb
         _log.warning(
             "tpm_notification: list_items_for_milestone failed customer=%s "
             "milestone=%s: %s: %s",
             customer_id, milestone_id, type(exc).__name__, str(exc)[:120],
         )
+        # Log FULL exception details on separate lines so nothing gets
+        # truncated by logfmt / log-shipper trimming.
+        _log.warning(
+            "DBG_TICK exception_class=%s.%s full_str=%r",
+            type(exc).__module__, type(exc).__name__, str(exc),
+        )
+        current = exc.__cause__ or exc.__context__
+        depth = 1
+        while current is not None and depth < 8:
+            _log.warning(
+                "DBG_TICK   cause[%d]=%s.%s: %r",
+                depth, type(current).__module__, type(current).__name__,
+                str(current),
+            )
+            current = current.__cause__ or current.__context__
+            depth += 1
+        _log.warning("DBG_TICK traceback:\n%s", _tb.format_exc())
+        # Also log event-loop + engine state to help diagnose async-context
+        # lifecycle issues (loop closed / connection stale).
+        try:
+            import asyncio as _asy
+            _log.warning(
+                "DBG_TICK asyncio_state: current_loop=%r running=%s",
+                _asy.get_event_loop_policy().get_event_loop(),
+                False,  # sync context; if we could reach here loop isn't running
+            )
+        except Exception:  # noqa: BLE001
+            _log.warning("DBG_TICK asyncio_state: <could not introspect>")
+        try:
+            from core.src.storage.db import get_engine as _get_engine
+            _eng = _get_engine()
+            _pool = _eng.pool if _eng is not None else None
+            _log.warning(
+                "DBG_TICK engine=%r pool=%r pool_status=%s",
+                _eng, _pool,
+                _pool.status() if _pool is not None else "<no pool>",
+            )
+        except Exception as _ex:  # noqa: BLE001
+            _log.warning("DBG_TICK engine_state introspection failed: %s: %s",
+                         type(_ex).__name__, str(_ex)[:120])
         return []
     return [
         it for it in all_items
