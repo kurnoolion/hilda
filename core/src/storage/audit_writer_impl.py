@@ -78,3 +78,76 @@ class PostgresAuditWriter:
             attachments=[],
         )
         run_async_sync(lambda: log_communication(row))
+
+    def query_communications(
+        self,
+        action_type: str,
+        details_contains: dict[str, Any] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return communication_log rows matching action_type + a JSON-substring
+        containment check on the `summary` column (which stores the serialized
+        attribution + details dict from write_communication_log).
+
+        Added 2026-07-28 per SETUP-2 (fixes idempotency spam). Prior state:
+        setup_complete_notification's tick + tpm_notification's day-of send
+        both call `_already_notified` / `_already_sent` via getattr on this
+        surface; when the method didn't exist, both fell into the "audit
+        query surface unavailable" branch and defensively re-sent every tick.
+
+        details_contains: dict of key->value pairs. Every entry must appear
+        as `"key":"value"` (JSON substring) in the row's summary field.
+        Simple substring match -- adequate for the idempotency use case
+        (scope keys like customer_id / device_id / milestone_id) without
+        needing JSON_EXTRACT or jsonb operators (schema is TEXT, not jsonb).
+
+        Returns list of {log_id, timestamp, action_type, summary} dicts.
+        Empty list when no match. Never raises -- audit query failures
+        must not crash tick tasks.
+        """
+        import json
+        from sqlalchemy import select
+        from core.src.storage.db import CommunicationLogTable, get_engine
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        async def _query() -> list[dict[str, Any]]:
+            try:
+                engine = get_engine()
+                async with AsyncSession(engine) as session:
+                    stmt = (
+                        select(CommunicationLogTable)
+                        .where(CommunicationLogTable.action_type == action_type)
+                        .order_by(CommunicationLogTable.timestamp.desc())
+                        .limit(limit)
+                    )
+                    rows = (await session.execute(stmt)).scalars().all()
+            except Exception:  # noqa: BLE001
+                return []
+
+            # Post-filter in Python -- summary is a JSON-serialized string,
+            # not a jsonb column, so no native SQL JSON operators.
+            filtered: list[dict[str, Any]] = []
+            for r in rows:
+                s = r.summary or ""
+                if details_contains:
+                    match = True
+                    for k, v in details_contains.items():
+                        # Match `"<key>":"<value>"` or `"<key>": "<value>"`
+                        # (JSON separators are `,:` per write path -- no
+                        # spaces -- but tolerate spaces defensively).
+                        needle_compact = f'"{k}":{json.dumps(v)}'
+                        needle_spaced  = f'"{k}": {json.dumps(v)}'
+                        if needle_compact not in s and needle_spaced not in s:
+                            match = False
+                            break
+                    if not match:
+                        continue
+                filtered.append({
+                    "log_id":       r.log_id,
+                    "timestamp":    r.timestamp,
+                    "action_type":  r.action_type,
+                    "summary":      r.summary,
+                })
+            return filtered
+
+        return run_async_sync(_query)
