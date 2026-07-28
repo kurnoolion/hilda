@@ -181,8 +181,24 @@ def _build_delivery_item(
         # then early-exited because item.customer_id was None.
         customer_id=customer_id,
         device_id=device_id,
-        # -- SP-only: item_name is SP-editable at runtime; body wins --
-        item_name=item_title or body_kvs.get("Title") or (tmpl.get("item_name") if tmpl else None) or f"Item {item_no}",
+        # -- item_name: template wins over SP-alert-derived values --
+        # NAME-1 fix (2026-07-28 Ph-1 blocker): SP itself truncates long
+        # item names in outbound alert emails (subject line + body kvs
+        # both get clipped with a "..." suffix at ~34 chars). Prior
+        # priority order (item_title -> body_kvs.Title -> tmpl) let the
+        # truncated SP-alert value win and persist to Postgres, breaking
+        # exact-string lookups downstream. Concrete case: item_no=85
+        # "Final DRR status excel deliverable for carrier" (46 chars)
+        # imported as "Final DRR status excel deliverable..." (37 chars),
+        # so _transition_final_deliverable_and_close_default_wi's
+        # strict-equality match against cfg.final_deliverable_item_name
+        # missed on the day-of DRR send and item_no=85 stayed at
+        # Open/UnderPMReview instead of advancing to SubmittedToCustomer.
+        # Fix: template wins when defined -- the yaml's item_name is
+        # authoritative and always the full string. SP-alert values are
+        # fallback only (rows without a template match). Mirrors the
+        # item_description template-authoritative pattern per DEBUG-1.
+        item_name=(tmpl.get("item_name") if tmpl else None) or item_title or body_kvs.get("Title") or f"Item {item_no}",
         # -- Template-authoritative: item_type, item_description, tracking_modality,
         #    milestone_gating, tg_path_id, item_path_id, form-factor flags. --
         item_type=(tmpl.get("item_type") if tmpl else None) or body_kvs.get("item_type") or "Default",
