@@ -501,6 +501,10 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "versions_token":      versions_tok,
                 "history_token":       history_tok,
                 "is_drm_wrapped":      f.is_drm_wrapped,
+                # MERGE-1 (2026-07-28): flag surfaced as red asterisk in
+                # view_tree_tg.html when an owner-authored version landed on
+                # top of a prior TPM edit -- manual merge required.
+                "needs_merge":         f.needs_merge,
             })
         return templates.TemplateResponse(
             request,

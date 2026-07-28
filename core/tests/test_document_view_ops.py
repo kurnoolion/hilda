@@ -256,6 +256,96 @@ class TestBrowseHelpers:
         assert b.version_count == 1
 
 
+class TestNeedsMergeFlag:
+    """MERGE-1 (2026-07-28) — red-asterisk signal for owner-on-top-of-TPM-edit.
+
+    Rule: needs_merge = (version_count > 1) AND (current.saved_by == "auto")
+                       AND (any prior.saved_by != "auto").
+    Owner sentinel: saved_by == "auto" (router-driven ingest from owner email).
+    TPM/human:      saved_by != "auto" (dashboard Edit save-back, real corp_id).
+    """
+    _scope = dict(customer_id="MMK", device_id="SM-S671U1",
+                   milestone_id="DRR", tg_name="hw_reports")
+
+    async def _save(self, name: str, content: bytes, saved_by: str, source: str = "editor"):
+        await save_view_document(
+            **self._scope, relative_parts=(name,),
+            content=content, saved_by=saved_by, source=source,
+        )
+
+    async def _get(self, name: str):
+        files = await list_files_in_tg(**self._scope)
+        by_name = {f.filename: f for f in files}
+        return by_name.get(name)
+
+    async def test_single_version_owner_no_asterisk(self):
+        await self._save("a.xlsx", b"a1", saved_by="auto", source="zip_extract")
+        f = await self._get("a.xlsx")
+        assert f is not None
+        assert f.version_count == 1
+        assert f.needs_merge is False
+
+    async def test_single_version_tpm_no_asterisk(self):
+        await self._save("a.xlsx", b"a1", saved_by="unknown")
+        f = await self._get("a.xlsx")
+        assert f.needs_merge is False
+
+    async def test_all_versions_owner_no_asterisk(self):
+        # Owner-only cascade: nothing was ever edited by TPM, nothing to merge.
+        await self._save("a.xlsx", b"a1", saved_by="auto")
+        await self._save("a.xlsx", b"a2", saved_by="auto")
+        await self._save("a.xlsx", b"a3", saved_by="auto")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 3
+        assert f.needs_merge is False
+
+    async def test_all_versions_tpm_no_asterisk(self):
+        # TPM edited across all versions, no owner overwrite -- no merge signal.
+        await self._save("a.xlsx", b"a1", saved_by="unknown")
+        await self._save("a.xlsx", b"a2", saved_by="pm.smith")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 2
+        assert f.needs_merge is False
+
+    async def test_tpm_last_after_owner_no_asterisk(self):
+        # Owner v1, TPM v2 (latest). TPM has already merged / re-edited.
+        await self._save("a.xlsx", b"a1", saved_by="auto")
+        await self._save("a.xlsx", b"a2", saved_by="unknown")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 2
+        assert f.last_saved_by == "unknown"
+        assert f.needs_merge is False
+
+    async def test_owner_after_tpm_asterisk(self):
+        # TPM v1 edit, then owner v2 landed on top -- MERGE REQUIRED.
+        await self._save("a.xlsx", b"a1", saved_by="unknown")
+        await self._save("a.xlsx", b"a2", saved_by="auto")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 2
+        assert f.last_saved_by == "auto"
+        assert f.needs_merge is True
+
+    async def test_owner_tpm_owner_asterisk(self):
+        # Owner v1 -> TPM v2 (edit) -> Owner v3 (overwrite). Merge required.
+        await self._save("a.xlsx", b"a1", saved_by="auto")
+        await self._save("a.xlsx", b"a2", saved_by="pm.smith")
+        await self._save("a.xlsx", b"a3", saved_by="auto")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 3
+        assert f.needs_merge is True
+
+    async def test_owner_tpm_owner_tpm_no_asterisk(self):
+        # Owner -> TPM -> Owner -> TPM. TPM re-merged; latest is TPM. No asterisk.
+        await self._save("a.xlsx", b"a1", saved_by="auto")
+        await self._save("a.xlsx", b"a2", saved_by="pm.smith")
+        await self._save("a.xlsx", b"a3", saved_by="auto")
+        await self._save("a.xlsx", b"a4", saved_by="pm.smith")
+        f = await self._get("a.xlsx")
+        assert f.version_count == 4
+        assert f.last_saved_by == "pm.smith"
+        assert f.needs_merge is False
+
+
 # ---------------------------------------------------------------------------
 # get_current_version
 # ---------------------------------------------------------------------------

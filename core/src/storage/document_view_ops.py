@@ -102,6 +102,14 @@ class TgFileEntry:
     # D-152: True when the current file is NASCA/IRM-wrapped (bytes start with
     # `<## `). Dashboard hides the Edit button and shows Download-only.
     is_drm_wrapped: bool = False
+    # MERGE-1 (2026-07-28): True when the current version is authored by the
+    # owner (`saved_by == "auto"`) AND at least one prior version was authored
+    # by a TPM/human (`saved_by != "auto"`). Signals to TPM that a fresh owner
+    # copy landed on top of edits they had made -- manual merge required.
+    # False when: single version; all versions owner-authored (nothing edited);
+    # or the latest version is TPM/human-authored (TPM has already merged /
+    # re-edited on top of the owner copy, no outstanding merge).
+    needs_merge: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -324,15 +332,30 @@ async def list_files_in_tg(
         )
         current_rows = list(result.scalars().all())
 
-        # Count total versions per path for the version_count field
+        # Count total versions per path for the version_count field.
+        # Also collect the set of saved_by values across ALL versions per path
+        # so MERGE-1 can compute needs_merge (owner-on-top-of-TPM-edit signal).
         version_count_by_path: dict[str, int] = {}
+        saved_by_set_by_path: dict[str, set[str]] = {}
         for r in current_rows:
-            count_result = await session.execute(
+            all_versions_result = await session.execute(
                 select(DocumentVersionTable).where(
                     DocumentVersionTable.view_relative_path == r.view_relative_path,
                 )
             )
-            version_count_by_path[r.view_relative_path] = len(list(count_result.scalars().all()))
+            all_versions = list(all_versions_result.scalars().all())
+            version_count_by_path[r.view_relative_path] = len(all_versions)
+            saved_by_set_by_path[r.view_relative_path] = {
+                (v.saved_by or "") for v in all_versions
+            }
+
+    def _needs_merge(current_saved_by: str, all_saved_by: set[str]) -> bool:
+        # Current must be owner AND at least one prior version must be
+        # non-owner (TPM/human). Owner sentinel = "auto"; TPM = "unknown" or
+        # any real corp_id (see _pretty_by in document_view_routes.py).
+        if current_saved_by != "auto":
+            return False
+        return any(sb != "auto" for sb in all_saved_by)
 
     entries = [
         TgFileEntry(
@@ -343,6 +366,10 @@ async def list_files_in_tg(
             last_saved_at=r.saved_at,
             last_saved_by=r.saved_by,
             is_drm_wrapped=bool(r.is_drm_wrapped),
+            needs_merge=_needs_merge(
+                r.saved_by or "",
+                saved_by_set_by_path.get(r.view_relative_path, set()),
+            ),
         )
         for r in current_rows
     ]
