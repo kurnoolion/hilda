@@ -105,6 +105,19 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "schedule": 300.0,
             "options":  {"queue": "default", "expires": 290},
         },
+        # SETUP-1 (2026-07-28) — TPM setup-complete notification per architect.
+        # Fires every 60s (tunable via TpmNotificationConfig.setup_complete_
+        # beat_interval_seconds); task no-ops when config.setup_complete_enabled
+        # is False. Task body scans all (customer, device, milestone) scopes
+        # with delivery_items in Postgres; sends one email per scope when
+        # every item is past 'Not Started' state (all D-144 auto-transitions
+        # settled) + no prior 'setup_complete_notified' audit exists.
+        # Idempotent per scope (option A per architect 2026-07-28).
+        "setup_complete_notification_tick_60s": {
+            "task":     "core.src.workflow_engine.tasks.setup_complete_notification.tick",
+            "schedule": 60.0,
+            "options":  {"queue": "default", "expires": 55},
+        },
     }
     return app
 

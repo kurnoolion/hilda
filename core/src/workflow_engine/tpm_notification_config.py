@@ -34,6 +34,8 @@ _ENV_MAP = {
     "ops_alert_on_missing_target_date": "HILDA_TPM_NOTIFICATION_OPS_ALERT_ON_MISSING_TARGET_DATE",
     "final_deliverable_item_name":      "HILDA_TPM_NOTIFICATION_FINAL_DELIVERABLE_ITEM_NAME",
     "final_deliverable_milestone_names": "HILDA_TPM_NOTIFICATION_FINAL_DELIVERABLE_MILESTONE_NAMES",
+    "setup_complete_enabled":              "HILDA_TPM_NOTIFICATION_SETUP_COMPLETE_ENABLED",
+    "setup_complete_beat_interval_seconds": "HILDA_TPM_NOTIFICATION_SETUP_COMPLETE_BEAT_INTERVAL_SECONDS",
 }
 
 
@@ -59,6 +61,17 @@ class TpmNotificationConfig(BaseModel):
     # (and the matching Default WI is closed, Ph-2 gate respected).
     final_deliverable_item_name:      str       = "Final DRR status excel deliverable for carrier"
     final_deliverable_milestone_names: list[str] = ["DRR"]
+
+    # SETUP-1 (2026-07-28): setup-complete notification per architect ask.
+    # Beat task fires every N seconds; for each (customer, device, milestone)
+    # with delivery_items in Postgres, if every item.delivery_state is past
+    # 'Not Started' (i.e., HILDA's D-144 auto-transition to Open finished for
+    # all items in scope), send a completion email to the TPM. Idempotent
+    # per scope via audit row 'setup_complete_notified' -- fires exactly once
+    # per scope. If TPM adds items in a later wave, they're not re-notified
+    # (option A per architect 2026-07-28; option B "delta emails" deferred).
+    setup_complete_enabled:                bool = True
+    setup_complete_beat_interval_seconds:  int  = 60
 
     @field_validator("final_deliverable_milestone_names", mode="before")
     @classmethod

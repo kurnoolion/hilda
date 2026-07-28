@@ -33,6 +33,7 @@ from . import (  # noqa: F401
     reconcile,  # added 2026-07-02: meta-reconciler + 5 sync sub-tasks per D-142/D-143 (strand reconcile-sync-cascade)
     tpm_notification,  # added 2026-07-15: scheduled DRR closure final-status email to TPM (Phase C serialization ask)
     tpm_sp_close,      # added 2026-07-23: mirror SP-authored delivery_state='Closed' from TPM SP UI clicks
+    setup_complete_notification,  # SETUP-1 added 2026-07-28: TPM email when all items in a scope are past Not Started
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "sync_deliverable_fields",
     "tpm_notification",
     "tpm_sp_close",
+    "setup_complete_notification",
 ]
