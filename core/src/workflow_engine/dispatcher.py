@@ -176,6 +176,29 @@ class TriggerDispatcher:
         "pm_approval_at", "pm_approval_pm_id",
     })
 
+    # TPM-CLOSE-1 (2026-07-28): TPM early-close via SP UI writes
+    # delivery_state='Closed' to the SP row (NotStarted->Closed per D-149
+    # or Open->Closed per D-146). SP fires CHANGED alert with delivery_state
+    # in field_deltas. Refine sub_trigger to 'TpmSpClose' so the
+    # corp-side rule mirror_tpm_sp_close_on_delivery_state_closed matches
+    # and apply_tpm_sp_close_task fires (mirror to Postgres).
+    #
+    # Uses a value-based check (delivery_state new value must equal 'Closed'
+    # case-insensitive) rather than a key-based check, because
+    # delivery_state ALSO appears in field_deltas for other TPM/PM edits
+    # (e.g., pm_approval writes RFS). The TpmSpClose refinement must fire
+    # ONLY when the SP-authored new value is literally 'Closed'.
+    _TPM_SP_CLOSE_TARGET_VALUE = "closed"
+
+    @staticmethod
+    def _delta_new_value(deltas: dict, key: str) -> Any:
+        """Extract the 'new' half of a field_deltas entry. Tolerant to both
+        (prior, new) tuple/list serialization and bare-scalar dispatch shapes."""
+        entry = deltas.get(key)
+        if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+            return entry[1]
+        return entry
+
     @classmethod
     def _refine_sub_trigger(cls, event: TriggerEvent) -> TriggerEvent:
         """Map raw 'changed' SP alerts to semantic sub_triggers based on
@@ -214,18 +237,36 @@ class TriggerDispatcher:
         delta_keys = set(deltas.keys())
 
         refined: str | None = None
-        if delta_keys & cls._PM_APPROVAL_DELTA_FIELDS:
+
+        # TPM-CLOSE-1 (2026-07-28): TpmSpClose ORDERED FIRST because it
+        # inspects the VALUE of delivery_state, and delivery_state also
+        # appears in field_deltas for pm_approval writes (RFS). In
+        # practice PM approval writes RFS not Closed so this check
+        # matches only when the SP-authored delivery_state new value is
+        # literally 'Closed' -- covers both the D-149 NotStarted->Closed
+        # early-close path and D-146 Open->Closed mid-lifecycle path.
+        # Task apply_tpm_sp_close self-validates the value, so even a
+        # misfire here would no-op safely at the task layer.
+        if "delivery_state" in delta_keys:
+            new_value = cls._delta_new_value(deltas, "delivery_state")
+            if (
+                isinstance(new_value, str)
+                and new_value.strip().lower() == cls._TPM_SP_CLOSE_TARGET_VALUE
+            ):
+                refined = "TpmSpClose"
+
+        if refined is None and delta_keys & cls._PM_APPROVAL_DELTA_FIELDS:
             # Pattern A (SP-authoritative) per architect 2026-06-28: SP UI
             # engineer's button atomically writes 3 fields; HILDA mirrors.
-            # PM-approval check ordered FIRST because it's the most explicit
-            # SP-user-initiated signal -- can't be confused with an automated
-            # owner re-assignment cascade.
+            # PM-approval check ordered SECOND (after TpmSpClose) because
+            # it's less specific than the value-based close check but more
+            # specific than owner/deadline/tag key-based checks.
             refined = "PmApproved"
-        elif delta_keys & cls._OWNER_DELTA_FIELDS:
+        elif refined is None and delta_keys & cls._OWNER_DELTA_FIELDS:
             refined = "OwnerReassigned"
-        elif delta_keys & cls._DEADLINE_DELTA_FIELDS:
+        elif refined is None and delta_keys & cls._DEADLINE_DELTA_FIELDS:
             refined = "DeadlineMoved"
-        elif any(k.startswith(cls._TAGS_DELTA_FIELD_PREFIXES) for k in delta_keys):
+        elif refined is None and any(k.startswith(cls._TAGS_DELTA_FIELD_PREFIXES) for k in delta_keys):
             refined = "TagsModified"
 
         if refined is None:

@@ -52,7 +52,7 @@ class TriggerKind(str, Enum):
 # ItemModified sub-triggers (Ph-1) — discriminated by TriggerEvent.sub_trigger / Rule.sub_trigger.
 # Membership is validated at load time (loader.py), not at model construction — Ph-2 may extend
 # sub-triggers via registry per the D-DRAFT-3 ownership decision.
-ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved"}
+ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved", "TpmSpClose"}
 
 
 class ActionKind(str, Enum):

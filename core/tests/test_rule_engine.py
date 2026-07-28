@@ -84,8 +84,14 @@ class TestEnums:
         assert len(TriggerKind) == 13
 
     def test_item_modified_sub_triggers_ph1(self):
+        # TpmSpClose added 2026-07-28 per TPM-CLOSE-1 (dispatcher refines
+        # sub_trigger to TpmSpClose when SP CHANGED alert carries
+        # delivery_state new value = 'Closed'; wires the D-149 NotStarted
+        # -> Closed early-close path + D-146 Open -> Closed mid-lifecycle
+        # path to apply_tpm_sp_close_task mirror to Postgres).
         assert ITEM_MODIFIED_SUB_TRIGGERS_PH1 == {
             "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
+            "TpmSpClose",
         }
 
     def test_action_kind_has_24_members(self):
@@ -101,7 +107,10 @@ class TestEnums:
         # Bumped 23 -> 24 on 2026-07-02 per architect template-merge design pass:
         # added SYNC_DELIVERABLE_FIELDS (Deliverables CHANGED alert null-guarded
         # merge from body_kvs to Postgres).
-        assert len(ActionKind) == 24
+        # Bumped 24 -> 25 on 2026-07-23 per architect TPM early-close mirror:
+        # added APPLY_TPM_SP_CLOSE (mirror SP-authored delivery_state='Closed'
+        # to Postgres for NotStarted->Closed / Open->Closed paths).
+        assert len(ActionKind) == 25
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",

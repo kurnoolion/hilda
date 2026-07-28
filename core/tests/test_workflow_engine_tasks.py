@@ -1586,6 +1586,75 @@ class TestPMApprovalActionRegistered:
         assert ActionKind.APPLY_PM_APPROVAL in ACTION_KIND_TO_TASK
 
 
+class TestDispatcherTpmSpCloseRefinement:
+    """TPM-CLOSE-1 (2026-07-28): dispatcher refines 'changed' -> 'TpmSpClose'
+    when field_deltas has delivery_state new value = 'Closed'. Wires the
+    D-149 NotStarted->Closed early-close path + D-146 Open->Closed
+    mid-lifecycle path to apply_tpm_sp_close_task via the corp-side rule
+    mirror_tpm_sp_close_on_delivery_state_closed.
+    """
+
+    @staticmethod
+    def _event(field_deltas):
+        from core.src.rule_engine import TriggerEvent, TriggerKind, EntityRef
+        return TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="changed",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas=field_deltas,
+            timestamp=None, correlation_id="c-tpm-close", derived_fields=None,
+        )
+
+    def test_delivery_state_closed_tuple_triggers_refinement(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Not Started", "Closed")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+    def test_delivery_state_closed_list_shape_triggers_refinement(self):
+        # Celery JSON serialization converts tuples -> lists
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ["Open", "Closed"]})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+    def test_delivery_state_bare_scalar_triggers_refinement(self):
+        # Some dispatch shapes carry just the new value (no prior)
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": "Closed"})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+    def test_delivery_state_closed_case_insensitive(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Open", "closed")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+    def test_delivery_state_rfs_does_not_trigger_tpm_close(self):
+        # PM approval writes RFS -> should refine to PmApproved not TpmSpClose
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({
+            "delivery_state":     ("UnderPMReview", "ReadyForSubmission"),
+            "pm_approval_at":     (None, "2026-07-28T00:00:00+00:00"),
+            "pm_approval_pm_id":  (None, "abc@corp.com"),
+        })
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "PmApproved"
+
+    def test_tpm_close_wins_over_pm_approval_when_state_is_closed(self):
+        # Extremely unlikely SP shape (delivery_state=Closed + pm_approval
+        # fields in same delta), but if it happens TpmSpClose is more
+        # specific per architect intent.
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({
+            "delivery_state":     ("Open", "Closed"),
+            "pm_approval_at":     (None, "2026-07-28T00:00:00+00:00"),
+        })
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+    def test_delivery_state_non_closed_falls_through(self):
+        # No PM/OWNER/DEADLINE/TAGS deltas either -> no refinement (stays 'changed')
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._event({"delivery_state": ("Not Started", "Open")})
+        assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "changed"
+
+
 # ===========================================================================
 # TestOwnerIntentPersistence -- race-resolution per architect 2026-06-29
 # ===========================================================================
