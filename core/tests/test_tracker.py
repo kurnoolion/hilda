@@ -235,9 +235,14 @@ class TestStateMachine:
                 assert not transition_legal(DeliveryState.CLOSED, s)
 
     def test_total_transitions(self):
-        # Sanity: 28 transitions excluding idempotent no-ops.
+        # Sanity check — bumped on each state-machine expansion:
+        # 28 (baseline pre-Ph-1)
+        # → drifted to 30 (pre-STATE-1: D-146 OPEN→CLOSED + D-149 NOT_STARTED→CLOSED)
+        # 31 (STATE-1 2026-07-28: OPEN→SUBMITTED_TO_CUSTOMER for D-148 final-
+        #     deliverable path — HILDA-generated DRR Excel triggers direct
+        #     Open→SubmittedToCustomer via trigger_source='tpm_drr_final_deliverable')
         total = sum(len(targets) for targets in LEGAL_TRANSITIONS.values())
-        assert total == 28
+        assert total == 31
 
 
 # ---------------------------------------------------------------------------

@@ -56,7 +56,25 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # trigger_source='tpm_button' | 'manual_tpm_override' | 'automated' with
     # rule_id='default_wi_auto_close_on_all_ready' -- the sweep uses the
     # last form (attribution captured in the audit row).
-    DeliveryState.OPEN: frozenset({DeliveryState.OUTREACH_SENT, DeliveryState.CLOSED}),
+    #
+    # OPEN -> SUBMITTED_TO_CUSTOMER added 2026-07-28 per STATE-1 (Ph-1 blocker):
+    # HILDA-generated deliverables like the "Final DRR status excel deliverable
+    # for carrier" item (D-148) never go through the owner reply / PM approval
+    # cycle — they sit at Open until HILDA's day-of tpm_notification tick
+    # generates the Excel + sends it to the TPM. At that moment HILDA IS the
+    # authoritative "submitted to carrier" event source (per architect 2026-07-18
+    # semantics: TPM forwards the HILDA-generated Excel to the carrier). Prior
+    # LEGAL_TRANSITIONS[OPEN] omitted this edge, so Guard 1 (legality) rejected
+    # the transition BEFORE Guard 4's existing trigger_source='tpm_drr_final_
+    # deliverable' carve-out could allow it. Guard 4 (line ~232 in guards.py)
+    # already gates SubmittedToCustomer on trigger_source in
+    # ('submit_to_carrier_task', 'tpm_drr_final_deliverable') so no other
+    # trigger source can accidentally exploit this new legal edge.
+    DeliveryState.OPEN: frozenset({
+        DeliveryState.OUTREACH_SENT,
+        DeliveryState.CLOSED,
+        DeliveryState.SUBMITTED_TO_CUSTOMER,   # STATE-1 2026-07-28: D-148 final-deliverable path
+    }),
 
     # OutreachSent: owner can now report status (Delayed/Blocked) or send docs
     # (DocumentReceived) or close intent (OwnerClosed — Confirmation items).

@@ -721,7 +721,7 @@ def _transition_final_deliverable_and_close_default_wi(
             transition_ok = True
             continue
         try:
-            _uds(
+            _result = _uds(
                 delivery_item_id=fi_id,
                 target_state=_DS.SUBMITTED_TO_CUSTOMER,
                 params={},
@@ -735,18 +735,44 @@ def _transition_final_deliverable_and_close_default_wi(
                 sp_writer=deps.sp_writer,
                 audit=deps.audit,
             )
-            transition_ok = True
-            _log.info(
-                "tpm_drr_final_deliverable_transitioned: item=%s "
-                "(customer=%s device=%s milestone=%s) %s -> SubmittedToCustomer",
-                fi_id, customer_id, device_id, milestone_id, current_state,
-            )
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "tpm_drr_final_deliverable_transition_failed: item=%s "
                 "(customer=%s device=%s milestone=%s) from=%s: %s: %s",
                 fi_id, customer_id, device_id, milestone_id, current_state,
                 type(exc).__name__, str(exc)[:120],
+            )
+            continue
+
+        # STATE-1 fix (2026-07-28): _uds() does NOT raise on guard denial --
+        # it returns a TransitionResult with outcome='guard_denied' /
+        # 'illegal_transition' / 'no_op_idempotent' / 'transitioned' and
+        # writes the appropriate audit row. Prior caller treated no-exception
+        # as success; that logged "Open -> SubmittedToCustomer" success even
+        # when Guard 1 rejected because OPEN->SUBMITTED_TO_CUSTOMER wasn't
+        # in LEGAL_TRANSITIONS. Item_no=85 stayed at Open in Postgres/SP
+        # while the log claimed a successful transition. Now inspect the
+        # outcome and only treat 'transitioned' or 'no_op_idempotent' as
+        # success; any other outcome logs the real reason.
+        _outcome = getattr(_result, "outcome", "unknown") if _result is not None else "unknown"
+        if _outcome in ("transitioned", "no_op_idempotent"):
+            transition_ok = True
+            _log.info(
+                "tpm_drr_final_deliverable_transitioned: item=%s "
+                "(customer=%s device=%s milestone=%s) %s -> SubmittedToCustomer "
+                "outcome=%s",
+                fi_id, customer_id, device_id, milestone_id, current_state, _outcome,
+            )
+        else:
+            _reason = ""
+            _gr = getattr(_result, "guard_result", None)
+            if _gr is not None:
+                _reason = getattr(_gr, "reason", "") or ""
+            _log.warning(
+                "tpm_drr_final_deliverable_not_transitioned: item=%s "
+                "(customer=%s device=%s milestone=%s) from=%s outcome=%s reason=%r",
+                fi_id, customer_id, device_id, milestone_id, current_state,
+                _outcome, _reason,
             )
 
     if not transition_ok:
@@ -788,7 +814,7 @@ def _transition_final_deliverable_and_close_default_wi(
             )
             continue
         try:
-            _uds(
+            _dwi_result = _uds(
                 delivery_item_id=dwi_id,
                 target_state=_DS.CLOSED,
                 params={},
@@ -802,17 +828,39 @@ def _transition_final_deliverable_and_close_default_wi(
                 sp_writer=deps.sp_writer,
                 audit=deps.audit,
             )
-            _log.info(
-                "default_wi_auto_closed_on_drr_send: default_wi=%s "
-                "(customer=%s device=%s milestone=%s)",
-                dwi_id, customer_id, device_id, milestone_id,
-            )
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "default_wi_auto_close_on_drr_send_failed: default_wi=%s "
                 "(customer=%s device=%s milestone=%s): %s: %s",
                 dwi_id, customer_id, device_id, milestone_id,
                 type(exc).__name__, str(exc)[:120],
+            )
+            continue
+
+        # STATE-1 fix (2026-07-28): inspect TransitionResult.outcome; _uds
+        # doesn't raise on guard denial. Prior caller logged success even
+        # when the transition was actually rejected.
+        _dwi_outcome = (
+            getattr(_dwi_result, "outcome", "unknown")
+            if _dwi_result is not None else "unknown"
+        )
+        if _dwi_outcome in ("transitioned", "no_op_idempotent"):
+            _log.info(
+                "default_wi_auto_closed_on_drr_send: default_wi=%s "
+                "(customer=%s device=%s milestone=%s) outcome=%s",
+                dwi_id, customer_id, device_id, milestone_id, _dwi_outcome,
+            )
+        else:
+            _dwi_reason = ""
+            _dwi_gr = getattr(_dwi_result, "guard_result", None)
+            if _dwi_gr is not None:
+                _dwi_reason = getattr(_dwi_gr, "reason", "") or ""
+            _log.warning(
+                "default_wi_auto_close_on_drr_send_not_transitioned: "
+                "default_wi=%s (customer=%s device=%s milestone=%s) "
+                "outcome=%s reason=%r",
+                dwi_id, customer_id, device_id, milestone_id,
+                _dwi_outcome, _dwi_reason,
             )
 
 
