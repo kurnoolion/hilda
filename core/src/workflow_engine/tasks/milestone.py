@@ -27,6 +27,7 @@ __all__ = [
     "halt_milestone_polling_task",
     "final_sweep_task",
     "close_all_items_task",
+    "apply_milestone_delete_task",
 ]
 
 
@@ -212,5 +213,180 @@ register_task_binding(TaskBinding(
 register_task_binding(TaskBinding(
     action_kind=ActionKind.CLOSE_ALL_ITEMS,
     celery_task=close_all_items_task,
+    queue="default",
+))
+
+
+# ---------------------------------------------------------------------------
+# MDEL-3 (2026-07-28): apply_milestone_delete_task
+# ---------------------------------------------------------------------------
+#
+# Ph-1 requirement 2026-07-28: TPM wants to run end-to-end test cycles N
+# times, so deleting a Milestone row in SP must fully clean HILDA state for
+# that (customer, device, milestone) scope. Without cleanup, orphaned Postgres
+# rows + filesystem trees pollute the next test cycle.
+#
+# Scope inference: parser emits sub_trigger="deleted" for Milestones-list
+# DELETE alerts, with entity_ref.{customer_id, device_id, milestone_id} all
+# populated from the alert body (carrier + project_model + Title). Dispatcher's
+# MDEL-4 refinement (dispatcher.py) maps sub_trigger="deleted" + list_name==
+# "Milestones" -> "MilestoneDeleted" so the corp-side rule can bind to it
+# unambiguously (other delete alerts -- Deliverables single-row delete,
+# Projects delete -- stay as sub_trigger="deleted" and do nothing).
+#
+# Ordering:
+#   1. Pre-audit "cascade_starting" (forensic footprint BEFORE destructive ops)
+#   2. Postgres: delete_milestone_cascade -> summary dict of row counts
+#   3. Filesystem: delete_milestone_scope_dirs -> rm -rf internal + view trees
+#   4. Post-audit "cascade_completed" with combined counts
+#
+# Irreversible. If TPM's delete is accidental, permanent loss (accepted per
+# architect 2026-07-28 -- Ph-1 test scenario, TPM aware).
+
+
+@hilda_celery_app.task(
+    name="core.src.workflow_engine.tasks.milestone.apply_milestone_delete",
+)
+def apply_milestone_delete_task(
+    params: dict[str, Any], event_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Cascade delete for a (customer, device, milestone) scope. Fired by
+    the corp-side rule mirror_milestone_deleted_cascade_cleanup on
+    sub_trigger='MilestoneDeleted' (dispatcher refinement MDEL-4).
+
+    Idempotent: repeated invocations on an already-cleaned scope return
+    zeros. Best-effort filesystem cleanup: OSError on rmtree is logged
+    and continues (Postgres deletion has already succeeded).
+    """
+    import logging
+    from core.src.storage import delete_milestone_scope_dirs
+
+    _log = logging.getLogger(__name__)
+    deps = get_task_deps()
+
+    customer_id  = event_context.get("customer_id")
+    device_id    = event_context.get("device_id")
+    milestone_id = event_context.get("milestone_id")
+
+    if not (customer_id and device_id and milestone_id):
+        _log.warning(
+            "apply_milestone_delete: skipping -- missing scope "
+            "(customer=%r device=%r milestone=%r)",
+            customer_id, device_id, milestone_id,
+        )
+        return {
+            "outcome": "skipped_missing_scope",
+            "customer_id": customer_id,
+            "device_id": device_id,
+            "milestone_id": milestone_id,
+        }
+
+    correlation_id = event_context.get("correlation_id", "")
+
+    # Pre-audit: forensic marker BEFORE destructive ops.
+    try:
+        deps.audit.write_communication_log(
+            action_type="milestone_delete_cascade_starting",
+            delivery_item_id=None,
+            attribution={
+                "trigger_source": "sp_ui_milestone_deleted",
+                "correlation_id": correlation_id,
+                "modified_by":    "sp_ui:tpm_delete",
+            },
+            details={
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "apply_milestone_delete: pre-audit failed: %s (continuing)",
+            str(exc)[:120],
+        )
+
+    # Step 2: Postgres cascade.
+    storage_summary: dict[str, Any]
+    try:
+        storage_summary = deps.storage.delete_milestone_cascade(
+            customer_id, device_id, milestone_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.error(
+            "apply_milestone_delete: storage cascade failed customer=%s "
+            "device=%s milestone=%s: %s: %s",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return {
+            "outcome":     "storage_cascade_failed",
+            "customer_id": customer_id, "device_id": device_id,
+            "milestone_id": milestone_id,
+            "error":       f"{type(exc).__name__}: {str(exc)[:120]}",
+        }
+
+    # Step 3: Filesystem cleanup (best-effort).
+    try:
+        fs_summary = delete_milestone_scope_dirs(customer_id, device_id, milestone_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "apply_milestone_delete: fs cleanup raised (continuing): %s: %s",
+            type(exc).__name__, str(exc)[:120],
+        )
+        fs_summary = {"internal_dir_removed": False, "view_dir_removed": False}
+
+    combined = {
+        **storage_summary,
+        **fs_summary,
+    }
+
+    # Step 4: Post-audit with counts. Cannot include delivery_item_id since
+    # ALL of them just got deleted; use None + scope in details.
+    try:
+        deps.audit.write_communication_log(
+            action_type="milestone_delete_cascade_completed",
+            delivery_item_id=None,
+            attribution={
+                "trigger_source": "sp_ui_milestone_deleted",
+                "correlation_id": correlation_id,
+                "modified_by":    "sp_ui:tpm_delete",
+            },
+            details={
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+                **combined,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "apply_milestone_delete: post-audit failed: %s (state cascade already done)",
+            str(exc)[:120],
+        )
+
+    _log.info(
+        "apply_milestone_delete: cascade complete customer=%s device=%s "
+        "milestone=%s items=%d assocs=%d audit=%d versions=%d index=%d "
+        "internal_dir=%s view_dir=%s",
+        customer_id, device_id, milestone_id,
+        combined.get("items_deleted", 0),
+        combined.get("assocs_deleted", 0),
+        combined.get("audit_deleted", 0),
+        combined.get("versions_deleted", 0),
+        combined.get("index_deleted", 0),
+        combined.get("internal_dir_removed", False),
+        combined.get("view_dir_removed", False),
+    )
+    return {
+        "outcome":     "cascade_completed",
+        "customer_id": customer_id, "device_id": device_id,
+        "milestone_id": milestone_id,
+        **combined,
+    }
+
+
+register_task_binding(TaskBinding(
+    action_kind=ActionKind.APPLY_MILESTONE_DELETE,
+    celery_task=apply_milestone_delete_task,
     queue="default",
 ))

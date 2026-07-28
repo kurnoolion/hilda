@@ -81,6 +81,7 @@ from core.src.storage.models import (
 from core.src.storage.nsd import (
     NSDPath,
     compute_file_hash,
+    delete_milestone_scope_dirs,
     extract_first_page,
     list_inbound_drops,
     read_file,
@@ -128,6 +129,8 @@ __all__ = [
     "configure_engine",
     "deactivate_tag",
     "delete_document_item_association",
+    "delete_milestone_cascade",
+    "delete_milestone_scope_dirs",
     "extract_first_page",
     "fan_out_plm_associations",
     "find_doc_id_slugs_for_item",

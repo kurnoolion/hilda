@@ -22,12 +22,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from core.src.diagnostics.error_codes import PipelineError
 from core.src.storage._sync_bridge import run_async_sync
-from core.src.storage.db import DeliveryItemTable, session_scope
+from core.src.storage.db import (
+    CommunicationLogTable,
+    DeliveryItemTable,
+    DocumentIndexTable,
+    DocumentItemAssociationTable,
+    DocumentVersionTable,
+    session_scope,
+)
 from core.src.template_schema import DeliveryItemBase
 
 _log = logging.getLogger(__name__)
@@ -39,6 +46,7 @@ __all__ = [
     "list_items_for_milestone",
     "list_default_workitem_for_milestone",
     "find_items_by_natural_key",
+    "delete_milestone_cascade",
     "PostgresStorage",
 ]
 
@@ -223,6 +231,136 @@ async def find_items_by_natural_key(
 
 
 # ----------------------------------------------------------------------------
+# MDEL-1 (2026-07-28): Milestone-scoped Postgres cascade delete
+# ----------------------------------------------------------------------------
+
+
+async def delete_milestone_cascade(
+    customer_id: str, device_id: str, milestone_id: str,
+) -> dict[str, Any]:
+    """Aggressive cleanup of all Postgres rows for the (customer, device,
+    milestone) scope. Called by apply_milestone_delete_task on a Milestones-
+    list DELETE alert.
+
+    Ordering:
+      1. Enumerate delivery_item.item_id in scope.
+      2. Enumerate file_hash values referenced by those items' associations.
+      3. DELETE document_item_association WHERE delivery_item_id IN (item_ids).
+      4. Re-query surviving associations for the same file_hashes -- any hash
+         still referenced by some OTHER milestone's item is kept in
+         document_index (dedup preservation).
+      5. DELETE document_version WHERE (customer, device, milestone) matches.
+      6. DELETE communication_log WHERE delivery_item_id IN (item_ids).
+      7. DELETE document_index for hashes that became orphaned in step 4.
+      8. DELETE delivery_item rows.
+
+    Returns a summary dict of counts + the orphaned file_hash list (caller
+    uses that for optional file-hash-scoped internal-storage cleanup).
+
+    Idempotent: repeated invocation on an already-cleaned scope returns
+    zeros. No FK cascades exist in the schema -- explicit deletes only.
+
+    NOT WRAPPED IN A TRANSACTION at this layer; session_scope commits
+    incrementally. A crash mid-cleanup leaves partial state (some rows
+    deleted, others not). Acceptable per architect 2026-07-28: Ph-1 test
+    scenario, worst case is a re-run of the delete alert (idempotent).
+    """
+    async with session_scope() as session:
+        item_ids_result = await session.execute(
+            select(DeliveryItemTable.item_id).where(
+                DeliveryItemTable.customer_id == customer_id,
+                DeliveryItemTable.device_id == device_id,
+                DeliveryItemTable.milestone_id == milestone_id,
+            )
+        )
+        item_ids: list[str] = list(item_ids_result.scalars().all())
+
+        if not item_ids:
+            return {
+                "items_deleted":    0,
+                "assocs_deleted":   0,
+                "audit_deleted":    0,
+                "versions_deleted": 0,
+                "index_deleted":    0,
+                "orphan_hashes":    [],
+            }
+
+        # Step 2: hashes referenced by items in this scope (may be shared
+        # with other milestones -- checked post-delete in step 4).
+        hashes_result = await session.execute(
+            select(DocumentItemAssociationTable.file_hash).where(
+                DocumentItemAssociationTable.delivery_item_id.in_(item_ids)
+            ).distinct()
+        )
+        hashes_this_scope: set[str] = set(hashes_result.scalars().all())
+
+        # Step 3: delete the associations for our items.
+        assocs_del = await session.execute(
+            delete(DocumentItemAssociationTable).where(
+                DocumentItemAssociationTable.delivery_item_id.in_(item_ids)
+            )
+        )
+        assocs_deleted = assocs_del.rowcount or 0
+
+        # Step 4: refcount check for document_index orphans.
+        orphan_hashes: list[str] = []
+        if hashes_this_scope:
+            still_ref_result = await session.execute(
+                select(DocumentItemAssociationTable.file_hash).where(
+                    DocumentItemAssociationTable.file_hash.in_(hashes_this_scope)
+                ).distinct()
+            )
+            still_referenced = set(still_ref_result.scalars().all())
+            orphan_hashes = sorted(hashes_this_scope - still_referenced)
+
+        # Step 5: document_version rows for this scope (view tree).
+        versions_del = await session.execute(
+            delete(DocumentVersionTable).where(
+                DocumentVersionTable.customer_id == customer_id,
+                DocumentVersionTable.device_id == device_id,
+                DocumentVersionTable.milestone_id == milestone_id,
+            )
+        )
+        versions_deleted = versions_del.rowcount or 0
+
+        # Step 6: communication_log rows for our items (audit for THIS scope
+        # goes away; global/non-item audits are preserved).
+        audit_del = await session.execute(
+            delete(CommunicationLogTable).where(
+                CommunicationLogTable.delivery_item_id.in_(item_ids)
+            )
+        )
+        audit_deleted = audit_del.rowcount or 0
+
+        # Step 7: document_index for orphaned hashes.
+        index_deleted = 0
+        if orphan_hashes:
+            index_del = await session.execute(
+                delete(DocumentIndexTable).where(
+                    DocumentIndexTable.file_hash.in_(orphan_hashes)
+                )
+            )
+            index_deleted = index_del.rowcount or 0
+
+        # Step 8: delivery_item rows themselves.
+        items_del = await session.execute(
+            delete(DeliveryItemTable).where(
+                DeliveryItemTable.item_id.in_(item_ids)
+            )
+        )
+        items_deleted = items_del.rowcount or 0
+
+        return {
+            "items_deleted":    items_deleted,
+            "assocs_deleted":   assocs_deleted,
+            "audit_deleted":    audit_deleted,
+            "versions_deleted": versions_deleted,
+            "index_deleted":    index_deleted,
+            "orphan_hashes":    orphan_hashes,
+        }
+
+
+# ----------------------------------------------------------------------------
 # Sync wrapper conforming to StorageWriter Protocol -- for Celery task bodies
 # ----------------------------------------------------------------------------
 
@@ -303,6 +441,14 @@ class PostgresStorage:
         """Sync wrapper for the dashboard's /docs/<customer_id>/<sp_id> lookup."""
         return run_async_sync(
             lambda: get_by_customer_and_sp_id(customer_id, sp_id)
+        )
+
+    def delete_milestone_cascade(
+        self, customer_id: str, device_id: str, milestone_id: str,
+    ) -> dict[str, Any]:
+        """MDEL-1 (2026-07-28): sync wrapper for apply_milestone_delete_task."""
+        return run_async_sync(
+            lambda: delete_milestone_cascade(customer_id, device_id, milestone_id)
         )
 
     # ----------------------------------------------------------------------

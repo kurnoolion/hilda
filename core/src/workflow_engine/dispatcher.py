@@ -230,6 +230,31 @@ class TriggerDispatcher:
             event.sub_trigger,
             sorted((event.field_deltas or {}).keys())[:12],
         )
+        # MDEL-4 (2026-07-28): delete alerts have sub_trigger='deleted' (not
+        # 'changed'), so they short-circuit past the value-based refinements
+        # below. Refine here to 'MilestoneDeleted' when the alert came from
+        # the Milestones list -- that's the (customer, device, milestone)-
+        # scoped cascade-delete trigger. Other 'deleted' alerts (Deliverables
+        # single-row delete, Projects delete) stay as 'deleted' for now.
+        if event.sub_trigger == "deleted":
+            list_name = (
+                (event.derived_fields or {}).get("list_name")
+                if getattr(event, "derived_fields", None) else None
+            )
+            if list_name == "Milestones":
+                from dataclasses import replace
+                logger.info(
+                    "DBG dispatcher._refine_sub_trigger REFINED corr_id=%s 'deleted' -> 'MilestoneDeleted'",
+                    getattr(event, 'correlation_id', '?'),
+                )
+                event = replace(event, sub_trigger="MilestoneDeleted")
+            else:
+                logger.info(
+                    "DBG dispatcher._refine_sub_trigger SKIP non-Milestones delete corr_id=%s list=%s",
+                    getattr(event, 'correlation_id', '?'), list_name,
+                )
+            return event
+
         if event.sub_trigger != "changed":
             logger.info(
                 "DBG dispatcher._refine_sub_trigger SKIP non-changed corr_id=%s sub_trigger=%s",

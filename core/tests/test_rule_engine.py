@@ -91,12 +91,14 @@ class TestEnums:
         # path to apply_tpm_sp_close_task mirror to Postgres).
         # TpmSpCloseInProgress added 2026-07-28 per CIP-1 (per-item TPM close
         # serialization; SP UI writes CloseInProgress -> HILDA 2-hop -> CLOSED).
+        # MilestoneDeleted added 2026-07-28 per MDEL-1 (Milestones-list delete
+        # alert -> cascade wipe of Postgres + filesystem for the scope).
         assert ITEM_MODIFIED_SUB_TRIGGERS_PH1 == {
             "OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved",
-            "TpmSpClose", "TpmSpCloseInProgress",
+            "TpmSpClose", "TpmSpCloseInProgress", "MilestoneDeleted",
         }
 
-    def test_action_kind_has_26_members(self):
+    def test_action_kind_has_27_members(self):
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] strict-boundary cascade
         # (added IMPORT_DELIVERABLE_TRACKER + KICKOFF_COLLECTION). Bumped
         # 20 -> 21 on 2026-06-28 per architect PM-approval design pass:
@@ -115,7 +117,9 @@ class TestEnums:
         # Bumped 25 -> 26 on 2026-07-28 per CIP-1 per-item TPM close serialization:
         # added APPLY_TPM_SP_CLOSE_IN_PROGRESS (2-hop task mirroring
         # delivery_state='CloseInProgress' then advancing to Closed).
-        assert len(ActionKind) == 26
+        # Bumped 26 -> 27 on 2026-07-28 per MDEL-1 milestone-delete cascade
+        # cleanup: added APPLY_MILESTONE_DELETE.
+        assert len(ActionKind) == 27
 
     def test_action_kind_excludes_ph2_actions(self):
         ph2 = {"CancelOutstanding", "NotifyOwnerDocCountPending", "TriggerVersionSelection",
@@ -871,7 +875,8 @@ class TestCLI:
         # TagsModified} -> +PmApproved = 4. _PH1_TRIGGER_COUNT = (13-1)+4 = 16.
         # Bumped 16 -> 17 on 2026-07-28 per TPM-CLOSE-1 (+TpmSpClose = 5).
         # Bumped 17 -> 18 on 2026-07-28 per CIP-1 (+TpmSpCloseInProgress = 6).
-        assert "trigger_kinds=18" in out
+        # Bumped 18 -> 19 on 2026-07-28 per MDEL-1 (+MilestoneDeleted = 7).
+        assert "trigger_kinds=19" in out
         # Bumped 18 -> 20 on 2026-06-26 per [D-118] cascade.
         # Bumped 20 -> 21 on 2026-06-28 per architect PM-approval design pass
         # (APPLY_PM_APPROVAL added).
@@ -881,7 +886,8 @@ class TestCLI:
         # Bumped 23 -> 24 on 2026-07-02 (SYNC_DELIVERABLE_FIELDS added).
         # Bumped 24 -> 25 on 2026-07-23 (APPLY_TPM_SP_CLOSE added).
         # Bumped 25 -> 26 on 2026-07-28 per CIP-1 (APPLY_TPM_SP_CLOSE_IN_PROGRESS).
-        assert "action_kinds=26" in out
+        # Bumped 26 -> 27 on 2026-07-28 per MDEL-1 (APPLY_MILESTONE_DELETE).
+        assert "action_kinds=27" in out
         assert "postgres_overrides=0" in out
 
     def test_explain_emits_met_and_trace(self, rules_tree, capsys):

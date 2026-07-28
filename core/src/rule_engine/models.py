@@ -52,7 +52,7 @@ class TriggerKind(str, Enum):
 # ItemModified sub-triggers (Ph-1) — discriminated by TriggerEvent.sub_trigger / Rule.sub_trigger.
 # Membership is validated at load time (loader.py), not at model construction — Ph-2 may extend
 # sub-triggers via registry per the D-DRAFT-3 ownership decision.
-ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved", "TpmSpClose", "TpmSpCloseInProgress"}
+ITEM_MODIFIED_SUB_TRIGGERS_PH1 = {"OwnerReassigned", "DeadlineMoved", "TagsModified", "PmApproved", "TpmSpClose", "TpmSpCloseInProgress", "MilestoneDeleted"}
 
 
 class ActionKind(str, Enum):
@@ -113,6 +113,13 @@ class ActionKind(str, Enum):
     # because "CloseInProgress" and "Closed" both live in delivery_state
     # deltas; more-specific string match wins.
     APPLY_TPM_SP_CLOSE_IN_PROGRESS = "ApplyTpmSpCloseInProgress"
+    # MDEL-3 (2026-07-28): milestone-delete cascade cleanup. When TPM deletes
+    # a Milestone row in SP, HILDA wipes all corresponding delivery_items +
+    # associations + audit rows + document_versions + orphaned document_index
+    # rows, plus rm -rf's ~/hilda/internal/<c>/<d>/<m>/ + ~/hilda/view/<c>/<d>/<m>/.
+    # Ph-1 requirement so TPM can run end-to-end test cycles N times without
+    # residual state polluting subsequent runs. Irreversible.
+    APPLY_MILESTONE_DELETE = "ApplyMilestoneDelete"
     # Submit-to-Carrier milestone orchestrator added 2026-06-30 per architect
     # design pass: TPM clicks Submit-to-Carrier in SP UI; SP engineer sets
     # milestone_submission_triggered_at on the Milestone row + sends CHANGED

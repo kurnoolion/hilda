@@ -25,6 +25,7 @@ from core.src.storage.config import get_storage_config
 __all__ = [
     "NSDPath",
     "compute_file_hash",
+    "delete_milestone_scope_dirs",
     "extract_first_page",
     "list_inbound_drops",
     "read_file",
@@ -364,3 +365,46 @@ async def extract_first_page(path: NSDPath) -> str:
         )
 
     return await asyncio.to_thread(_extract)
+
+
+# ----------------------------------------------------------------------------
+# MDEL-2 (2026-07-28): milestone-scoped filesystem cleanup
+# ----------------------------------------------------------------------------
+
+
+def delete_milestone_scope_dirs(
+    customer_id: str, device_id: str, milestone_id: str,
+) -> dict[str, bool]:
+    """rm -rf both `internal/<c>/<d>/<m>/` and `view/<c>/<d>/<m>/` under the
+    NSD mount root. Both trees share the same (customer, device, milestone)
+    top-level path structure (see NSDPath.internal_* + NSDPath.view_tree).
+
+    Best-effort: OSError on either tree is logged and continues. Missing
+    directories (nothing was ever written for that scope) are silent no-ops.
+    Returns a summary dict of which trees were actually removed.
+
+    Complements delete_milestone_cascade (storage/delivery_item_ops.py) --
+    together they wipe a (customer, device, milestone) scope from both
+    Postgres and the NSD filesystem so a fresh test cycle starts from zero.
+    """
+    import shutil
+    root = _mount_root()
+    result: dict[str, bool] = {}
+    for tree in ("internal", "view"):
+        dir_path = root.joinpath(tree, customer_id, device_id, milestone_id)
+        removed = False
+        if dir_path.is_dir():
+            try:
+                shutil.rmtree(dir_path)
+                removed = True
+            except OSError as exc:
+                # Non-fatal -- caller has already deleted Postgres rows; a
+                # leftover disk directory is recoverable manually and doesn't
+                # block a fresh test cycle (new writes will happily overwrite).
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "delete_milestone_scope_dirs: rmtree failed for %s: %s: %s",
+                    dir_path, type(exc).__name__, str(exc)[:120],
+                )
+        result[f"{tree}_dir_removed"] = removed
+    return result

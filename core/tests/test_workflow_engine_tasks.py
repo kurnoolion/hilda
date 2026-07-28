@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,6 +25,7 @@ from core.src.workflow_engine.tasks.escalation import (
     notify_pm_task,
 )
 from core.src.workflow_engine.tasks.milestone import (
+    apply_milestone_delete_task,
     close_all_items_task,
     final_sweep_task,
     halt_milestone_polling_task,
@@ -382,6 +384,135 @@ class TestMilestoneTasks:
         assert result["closed_count"] == 1
         assert deps.storage.items["I-THIS"].delivery_state == DeliveryState.CLOSED
         assert deps.storage.items["I-OTHER"].delivery_state == DeliveryState.OPEN  # untouched
+
+
+class TestApplyMilestoneDelete:
+    """MDEL-3 (2026-07-28): milestone-delete cascade cleanup task.
+
+    Fired on SP CHANGED alert with sub_trigger='MilestoneDeleted' (dispatcher
+    refinement MDEL-4). Orchestrates:
+      1. Pre-audit "cascade_starting".
+      2. Postgres cascade via storage.delete_milestone_cascade.
+      3. Filesystem cleanup via delete_milestone_scope_dirs (rm -rf both
+         internal + view tree scoped to (customer, device, milestone)).
+      4. Post-audit "cascade_completed" with counts.
+
+    Irreversible; TPM accepts this per architect 2026-07-28.
+    """
+
+    def _delete_ctx(self, **overrides):
+        base = ctx(customer_id="MMK", device_id="MODEL-A", milestone_id="M-1")
+        base.update(overrides)
+        return base
+
+    def test_missing_scope_skipped(self, deps):
+        with override_task_deps(deps):
+            r = apply_milestone_delete_task.apply_async(
+                args=({}, ctx(customer_id=None)),
+            ).get()
+        assert r["outcome"] == "skipped_missing_scope"
+        # Neither storage nor audit called
+        assert not deps.audit.logs
+
+    def test_happy_path_cascade_completed(self, deps, monkeypatch):
+        # Mock the storage cascade + fs helper
+        summary = {
+            "items_deleted":    5,
+            "assocs_deleted":   12,
+            "audit_deleted":    40,
+            "versions_deleted": 8,
+            "index_deleted":    3,
+            "orphan_hashes":    ["h1", "h2", "h3"],
+        }
+        deps.storage.delete_milestone_cascade = MagicMock(return_value=summary)
+        fs_summary = {"internal_dir_removed": True, "view_dir_removed": True}
+        monkeypatch.setattr(
+            "core.src.storage.delete_milestone_scope_dirs",
+            MagicMock(return_value=fs_summary),
+        )
+
+        with override_task_deps(deps):
+            r = apply_milestone_delete_task.apply_async(
+                args=({}, self._delete_ctx()),
+            ).get()
+
+        assert r["outcome"] == "cascade_completed"
+        assert r["items_deleted"] == 5
+        assert r["assocs_deleted"] == 12
+        assert r["audit_deleted"] == 40
+        assert r["versions_deleted"] == 8
+        assert r["index_deleted"] == 3
+        assert r["internal_dir_removed"] is True
+        assert r["view_dir_removed"] is True
+
+        # Both pre-audit + post-audit rows written
+        action_types = [call[0] for call in deps.audit.logs]
+        assert "milestone_delete_cascade_starting" in action_types
+        assert "milestone_delete_cascade_completed" in action_types
+        # Post-audit carries the counts
+        post_row = [c for c in deps.audit.logs if c[0] == "milestone_delete_cascade_completed"][0]
+        assert post_row[3]["items_deleted"] == 5
+
+    def test_idempotent_when_nothing_to_delete(self, deps, monkeypatch):
+        # storage.delete_milestone_cascade returns zeros -- normal on re-run
+        deps.storage.delete_milestone_cascade = MagicMock(return_value={
+            "items_deleted": 0, "assocs_deleted": 0, "audit_deleted": 0,
+            "versions_deleted": 0, "index_deleted": 0, "orphan_hashes": [],
+        })
+        monkeypatch.setattr(
+            "core.src.storage.delete_milestone_scope_dirs",
+            MagicMock(return_value={"internal_dir_removed": False, "view_dir_removed": False}),
+        )
+        with override_task_deps(deps):
+            r = apply_milestone_delete_task.apply_async(
+                args=({}, self._delete_ctx()),
+            ).get()
+        assert r["outcome"] == "cascade_completed"
+        assert r["items_deleted"] == 0
+        # Both audit rows still written (forensic footprint even on empty pass)
+        action_types = [call[0] for call in deps.audit.logs]
+        assert "milestone_delete_cascade_starting" in action_types
+        assert "milestone_delete_cascade_completed" in action_types
+
+    def test_storage_cascade_failure_reported(self, deps, monkeypatch):
+        deps.storage.delete_milestone_cascade = MagicMock(
+            side_effect=RuntimeError("db exploded"),
+        )
+        # fs helper should NOT be called if storage failed
+        fs_stub = MagicMock()
+        monkeypatch.setattr(
+            "core.src.storage.delete_milestone_scope_dirs", fs_stub,
+        )
+
+        with override_task_deps(deps):
+            r = apply_milestone_delete_task.apply_async(
+                args=({}, self._delete_ctx()),
+            ).get()
+        assert r["outcome"] == "storage_cascade_failed"
+        assert "RuntimeError" in r["error"]
+        fs_stub.assert_not_called()
+        # Pre-audit still written (forensic marker before the failure)
+        assert any(c[0] == "milestone_delete_cascade_starting" for c in deps.audit.logs)
+
+    def test_fs_failure_does_not_block_post_audit(self, deps, monkeypatch):
+        # Storage succeeded; fs raised. Task should still write post-audit.
+        deps.storage.delete_milestone_cascade = MagicMock(return_value={
+            "items_deleted": 2, "assocs_deleted": 3, "audit_deleted": 10,
+            "versions_deleted": 4, "index_deleted": 1, "orphan_hashes": ["h"],
+        })
+        monkeypatch.setattr(
+            "core.src.storage.delete_milestone_scope_dirs",
+            MagicMock(side_effect=OSError("permission denied")),
+        )
+        with override_task_deps(deps):
+            r = apply_milestone_delete_task.apply_async(
+                args=({}, self._delete_ctx()),
+            ).get()
+        assert r["outcome"] == "cascade_completed"
+        assert r["items_deleted"] == 2
+        assert r["internal_dir_removed"] is False
+        assert r["view_dir_removed"] is False
+        assert any(c[0] == "milestone_delete_cascade_completed" for c in deps.audit.logs)
 
 
 # ---------------------------------------------------------------------------
@@ -1780,6 +1911,59 @@ class TestDispatcherTpmSpCloseInProgressRefinement:
         from core.src.workflow_engine.dispatcher import TriggerDispatcher
         e = self._event({"delivery_state": ("Open", "Closed")})
         assert TriggerDispatcher._refine_sub_trigger(e).sub_trigger == "TpmSpClose"
+
+
+class TestDispatcherMilestoneDeletedRefinement:
+    """MDEL-4 (2026-07-28): sub_trigger='deleted' + list_name=='Milestones'
+    -> 'MilestoneDeleted'. Other delete alerts (Deliverables, Projects)
+    stay as 'deleted' and are ignored (no rule matches -- Ph-1 scope).
+    """
+
+    @staticmethod
+    def _delete_event(list_name):
+        from core.src.rule_engine import EntityRef, TriggerEvent, TriggerKind
+        return TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED,
+            sub_trigger="deleted",
+            entity_ref=EntityRef(customer_id="MMK", device_id="MODEL-A",
+                                  milestone_id="DRR"),
+            field_deltas=None,
+            timestamp=None, correlation_id="c-mdel",
+            derived_fields={"list_name": list_name},
+        )
+
+    def test_milestones_delete_refines_to_milestone_deleted(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._delete_event("Milestones")
+        r = TriggerDispatcher._refine_sub_trigger(e)
+        assert r.sub_trigger == "MilestoneDeleted"
+
+    def test_deliverables_delete_stays_deleted(self):
+        # Ph-1: single-item Deliverables delete not handled -- stays as
+        # 'deleted' sub_trigger which no rule matches (no-op).
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._delete_event("Deliverables")
+        r = TriggerDispatcher._refine_sub_trigger(e)
+        assert r.sub_trigger == "deleted"
+
+    def test_projects_delete_stays_deleted(self):
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = self._delete_event("Projects")
+        r = TriggerDispatcher._refine_sub_trigger(e)
+        assert r.sub_trigger == "deleted"
+
+    def test_delete_without_derived_fields_stays_deleted(self):
+        # Defensive: an event with derived_fields=None should NOT crash.
+        from core.src.rule_engine import EntityRef, TriggerEvent, TriggerKind
+        from core.src.workflow_engine.dispatcher import TriggerDispatcher
+        e = TriggerEvent(
+            trigger=TriggerKind.ITEM_MODIFIED, sub_trigger="deleted",
+            entity_ref=EntityRef(customer_id="MMK"),
+            field_deltas=None, timestamp=None,
+            correlation_id="c-mdel", derived_fields=None,
+        )
+        r = TriggerDispatcher._refine_sub_trigger(e)
+        assert r.sub_trigger == "deleted"
 
 
 # ===========================================================================

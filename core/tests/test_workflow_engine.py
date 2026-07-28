@@ -192,7 +192,9 @@ class TestRegistry:
         # 24 -> 25 on 2026-07-23 per TPM early-close mirror (APPLY_TPM_SP_CLOSE).
         # 25 -> 26 on 2026-07-28 per CIP-1 per-item TPM close serialization
         # (APPLY_TPM_SP_CLOSE_IN_PROGRESS).
-        assert len(expected_action_kinds_ph1()) == 26
+        # 26 -> 27 on 2026-07-28 per MDEL-1 milestone-delete cascade cleanup
+        # (APPLY_MILESTONE_DELETE).
+        assert len(expected_action_kinds_ph1()) == 27
 
     def test_registry_initially_empty_or_partial(self, _registry_snapshot):
         # In a fresh test run with the registry snapshotted, we can clear and verify
