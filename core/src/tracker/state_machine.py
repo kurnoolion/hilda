@@ -78,32 +78,49 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
 
     # OutreachSent: owner can now report status (Delayed/Blocked) or send docs
     # (DocumentReceived) or close intent (OwnerClosed — Confirmation items).
+    #
+    # CLOSE-1 (2026-07-28): + CLOSED. TPM's "Close All Items" milestone action
+    # is authoritative and must be able to force-close from any active state.
+    # Guard 5 (DEF-20) still gates: only trigger_source in
+    # ('manual_tpm_override', 'tpm_button') allowed; automated close from this
+    # state remains rejected as policy violation. Legality broadens, policy
+    # unchanged.
     DeliveryState.OUTREACH_SENT: frozenset({
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.OWNER_CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
+        DeliveryState.CLOSED,   # CLOSE-1
     }),
 
     # DocumentReceived: docs have arrived; close gates (doc_count + reviews)
     # checked by OwnerClosed 2-condition guard. Owner can still report status.
+    # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
     DeliveryState.DOCUMENT_RECEIVED: frozenset({
         DeliveryState.OWNER_CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
+        DeliveryState.CLOSED,   # CLOSE-1
     }),
 
     # OwnerClosed: transient — auto-advances to UnderPMReview within same task
     # body. Ph-2 multi-revision FR-66 forks here; Ph-1 single-revision flow has
     # zero observable duration.
-    DeliveryState.OWNER_CLOSED: frozenset({DeliveryState.UNDER_PM_REVIEW}),
+    # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting the
+    # transient auto-advance (accepted per architect 2026-07-28: TPM final word).
+    DeliveryState.OWNER_CLOSED: frozenset({
+        DeliveryState.UNDER_PM_REVIEW,
+        DeliveryState.CLOSED,   # CLOSE-1
+    }),
 
     # UnderPMReview: PM evaluates; PMApproval gate fires READY_FOR_SUBMISSION.
     # Owner can still report Delayed/Blocked at this stage.
+    # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
     DeliveryState.UNDER_PM_REVIEW: frozenset({
         DeliveryState.READY_FOR_SUBMISSION,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
+        DeliveryState.CLOSED,   # CLOSE-1
     }),
 
     # ReadyForSubmission: PM-approved; awaits FR-18 carrier dispatch. Direct →
@@ -130,17 +147,20 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
 
     # Delayed / Blocked: off-path holding. Resume to previous active state
     # (OPEN excluded — see Open row above).
+    # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
     DeliveryState.DELAYED: frozenset({
         DeliveryState.OUTREACH_SENT,
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.UNDER_PM_REVIEW,
         DeliveryState.READY_FOR_SUBMISSION,
+        DeliveryState.CLOSED,   # CLOSE-1
     }),
     DeliveryState.BLOCKED: frozenset({
         DeliveryState.OUTREACH_SENT,
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.UNDER_PM_REVIEW,
         DeliveryState.READY_FOR_SUBMISSION,
+        DeliveryState.CLOSED,   # CLOSE-1
     }),
 }
 

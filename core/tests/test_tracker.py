@@ -216,7 +216,12 @@ class TestStateMachine:
         assert DeliveryState.DELAYED not in LEGAL_TRANSITIONS[DeliveryState.BLOCKED]
 
     def test_owner_closed_transient_target_is_under_pm_review(self):
-        assert LEGAL_TRANSITIONS[DeliveryState.OWNER_CLOSED] == frozenset({DeliveryState.UNDER_PM_REVIEW})
+        # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting
+        # the transient auto-advance to UnderPMReview.
+        assert LEGAL_TRANSITIONS[DeliveryState.OWNER_CLOSED] == frozenset({
+            DeliveryState.UNDER_PM_REVIEW,
+            DeliveryState.CLOSED,
+        })
 
     def test_submitted_rewind_targets(self):
         assert LEGAL_TRANSITIONS[DeliveryState.SUBMITTED_TO_CUSTOMER] == frozenset({
@@ -241,8 +246,12 @@ class TestStateMachine:
         # 31 (STATE-1 2026-07-28: OPEN→SUBMITTED_TO_CUSTOMER for D-148 final-
         #     deliverable path — HILDA-generated DRR Excel triggers direct
         #     Open→SubmittedToCustomer via trigger_source='tpm_drr_final_deliverable')
+        # 37 (CLOSE-1 2026-07-28: +CLOSED from OUTREACH_SENT, DOCUMENT_RECEIVED,
+        #     OWNER_CLOSED, UNDER_PM_REVIEW, DELAYED, BLOCKED for TPM Close All
+        #     Items force-close authority. Guard 5 still gates policy on
+        #     trigger_source in ('manual_tpm_override', 'tpm_button').)
         total = sum(len(targets) for targets in LEGAL_TRANSITIONS.values())
-        assert total == 31
+        assert total == 37
 
 
 # ---------------------------------------------------------------------------

@@ -134,26 +134,36 @@ def close_all_items_task(
             "outcome":         "no_storage_helper_stub",
         }
 
-    candidates = list_items(milestone_id, states={
-        DeliveryState.SUBMITTED_TO_CUSTOMER,
-        DeliveryState.READY_FOR_SUBMISSION,
-    })
+    # CLOSE-1 (2026-07-28): TPM's Close All Items is authoritative -- force
+    # close from ANY current state, not just SubmittedToCustomer / RFS+no_upload.
+    # Prior (FR-64 Option (b)) restricted the sweep to two "clean" from-states;
+    # in Ph-1 early access with 1 TPM / 85 items, TPM discovered that OUTREACH_
+    # SENT / DOCUMENT_RECEIVED / UNDER_PM_REVIEW / DELAYED / BLOCKED items were
+    # silently left behind after Close All Items. Guards deny these edges by
+    # design; the fix is to bypass guards specifically for this action.
+    #
+    # Attribution: trigger_source="manual_tpm_override" is the ONLY value
+    # update_delivery_state accepts when bypass_guards=True (defensive check
+    # at transitions.py:377 raises TRK-E004 otherwise). This is the intended
+    # escape hatch for TPM-authoritative overrides.
+    #
+    # Skip already-CLOSED (idempotent no-op) up-front so audit doesn't record
+    # trivial no-op events for every re-run.
+    candidates = list_items(milestone_id)   # no state filter -- all items
 
     eligible = []
     for item in candidates:
         # Device-scope filter per fix 2026-07-06 (see identity block above).
         if device_id and (getattr(item, "device_id", None) or "") != device_id:
             continue
-        state = getattr(item, "delivery_state", None)
-        if state == DeliveryState.SUBMITTED_TO_CUSTOMER:
-            eligible.append(item)
-        elif state == DeliveryState.READY_FOR_SUBMISSION and getattr(item, "no_customer_upload", False):
-            eligible.append(item)
+        if getattr(item, "delivery_state", None) == DeliveryState.CLOSED:
+            continue
+        eligible.append(item)
 
     closed = 0
     skipped = 0
     per_item_ctx = dict(event_context)
-    per_item_ctx["trigger_source"] = "tpm_button"
+    per_item_ctx["trigger_source"] = "manual_tpm_override"
     per_item_ctx["pm_id"] = pm_id
     for item in eligible:
         item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
@@ -163,11 +173,12 @@ def close_all_items_task(
         result = update_delivery_state(
             delivery_item_id=item_id,
             target_state=DeliveryState.CLOSED,
-            params={"closed_via": "fr64_batch"},
+            params={"closed_via": "fr64_batch_force"},
             event_context=per_item_ctx,
             storage=deps.storage,
             sp_writer=deps.sp_writer,
             audit=deps.audit,
+            bypass_guards=True,
         )
         if result.outcome in ("transitioned", "no_op_idempotent"):
             closed += 1

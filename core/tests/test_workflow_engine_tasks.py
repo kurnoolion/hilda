@@ -110,7 +110,10 @@ class MockStorage:
     def list_default_workitem_for_milestone(self, milestone_id):
         return self.default_wi_by_milestone.get(milestone_id)
 
-    def list_items_for_milestone(self, milestone_id, states):
+    def list_items_for_milestone(self, milestone_id, states=None):
+        # CLOSE-1 (2026-07-28): callers may now invoke without a state filter
+        # (force-close from any state). Mock returns the seeded list either
+        # way -- tests set list_items_response to whatever they want visible.
         return self.list_items_response
 
     # Optional helpers for reassignment -- must filter by target_item_id + doc_type
@@ -305,6 +308,80 @@ class TestMilestoneTasks:
         assert result["eligible_count"] == 2
         assert result["closed_count"] == 2
         assert result["outcome"] == "completed"
+
+    def test_close_all_items_force_closes_from_every_active_state(self, deps):
+        # CLOSE-1 (2026-07-28) — TPM Close All Items is authoritative; force
+        # every currently-active state to CLOSED. LEGAL_TRANSITIONS widened +
+        # bypass_guards=True + trigger_source="manual_tpm_override" together
+        # let this cross every previously-blocked edge.
+        active_states = [
+            DeliveryState.NOT_STARTED,
+            DeliveryState.OPEN,
+            DeliveryState.OUTREACH_SENT,       # previously illegal edge
+            DeliveryState.DOCUMENT_RECEIVED,   # previously illegal edge
+            DeliveryState.OWNER_CLOSED,        # previously illegal edge
+            DeliveryState.UNDER_PM_REVIEW,     # previously illegal edge
+            DeliveryState.READY_FOR_SUBMISSION,
+            DeliveryState.SUBMITTED_TO_CUSTOMER,
+            DeliveryState.DELAYED,             # previously illegal edge
+            DeliveryState.BLOCKED,             # previously illegal edge
+        ]
+        items = []
+        for i, st in enumerate(active_states):
+            item = mk_item(st, delivery_item_id=f"I-{i}")
+            deps.storage.items[f"I-{i}"] = item
+            items.append(item)
+        deps.storage.list_items_response = items
+
+        with override_task_deps(deps):
+            result = close_all_items_task.apply_async(args=({}, ctx())).get()
+
+        assert result["eligible_count"] == len(active_states)
+        assert result["closed_count"] == len(active_states), (
+            f"expected all {len(active_states)} items closed, got {result['closed_count']} "
+            f"(skipped={result['skipped_count']})"
+        )
+        assert result["outcome"] == "completed"
+        # Every item now Closed in the mock storage
+        for i in range(len(active_states)):
+            assert deps.storage.items[f"I-{i}"].delivery_state == DeliveryState.CLOSED
+
+    def test_close_all_items_skips_already_closed(self, deps):
+        # Already-CLOSED items should not be re-attempted (avoids no-op audit noise).
+        i1 = mk_item(DeliveryState.OPEN, delivery_item_id="I-A")
+        i2 = mk_item(DeliveryState.CLOSED, delivery_item_id="I-B")   # already closed
+        i3 = mk_item(DeliveryState.OUTREACH_SENT, delivery_item_id="I-C")
+        deps.storage.items["I-A"] = i1
+        deps.storage.items["I-B"] = i2
+        deps.storage.items["I-C"] = i3
+        deps.storage.list_items_response = [i1, i2, i3]
+
+        with override_task_deps(deps):
+            result = close_all_items_task.apply_async(args=({}, ctx())).get()
+
+        # Only I-A and I-C were eligible; I-B pre-filtered out.
+        assert result["eligible_count"] == 2
+        assert result["closed_count"] == 2
+        # I-B still CLOSED (untouched); no transition attempted on it.
+        assert deps.storage.items["I-B"].delivery_state == DeliveryState.CLOSED
+
+    def test_close_all_items_device_id_scope_still_honored(self, deps):
+        # Fix 2026-07-06 device_id scoping must be preserved: only current
+        # device's items closed even under force semantics.
+        i_this = mk_item(DeliveryState.OPEN, delivery_item_id="I-THIS", device_id="MODEL-A")
+        i_other = mk_item(DeliveryState.OPEN, delivery_item_id="I-OTHER", device_id="MODEL-B")
+        deps.storage.items["I-THIS"] = i_this
+        deps.storage.items["I-OTHER"] = i_other
+        deps.storage.list_items_response = [i_this, i_other]
+
+        with override_task_deps(deps):
+            # ctx() defaults device_id="MODEL-A" -- only I-THIS is in scope.
+            result = close_all_items_task.apply_async(args=({}, ctx())).get()
+
+        assert result["eligible_count"] == 1
+        assert result["closed_count"] == 1
+        assert deps.storage.items["I-THIS"].delivery_state == DeliveryState.CLOSED
+        assert deps.storage.items["I-OTHER"].delivery_state == DeliveryState.OPEN  # untouched
 
 
 # ---------------------------------------------------------------------------
