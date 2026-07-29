@@ -194,6 +194,21 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
         }
         _log.info("owner_reply_unparseable diag: %r", diag)
         await _audit(deps, "owner_reply_unparseable", None, diag)
+        # UNP-1 (2026-07-29): auto-reply to the owner explaining the format
+        # expectation. Ph-1 test surfaced this: owner copy-pasted a table
+        # from another email into their reply; Outlook flattened the table
+        # to <div>+inline-style so <table> parser saw table_count=0 and
+        # returned unparseable. Owner had no idea their reply was dropped.
+        # Auto-reply tells them to reply directly (no editing) to the
+        # original HILDA email.
+        #
+        # Idempotency: don't spam the owner if HILDA processes the same
+        # message twice (Celery retry, ews replay). Check for prior
+        # 'owner_reply_unparseable_notified' audit row keyed on message_id.
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=msg, batch_id=batch_id,
+            correlation_id=correlation_id,
+        )
         return {"batch_id": batch_id, "rows_parsed": 0,
                 "error": "unparseable"}
 
@@ -517,6 +532,132 @@ async def _audit(
             "owner_reply audit write failed: action=%s err=%s",
             action_type, str(exc)[:120],
         )
+
+
+# ---------------------------------------------------------------------------
+# UNP-1 (2026-07-29): auto-reply to owner on unparseable reply
+# ---------------------------------------------------------------------------
+
+_UNPARSEABLE_AUTO_REPLY_AUDIT = "owner_reply_unparseable_notified"
+
+_UNPARSEABLE_AUTO_REPLY_BODY = """\
+<p>Hi,</p>
+
+<p>Thanks for replying to the HILDA request
+<code>{batch_id}</code>. HILDA couldn't parse the update from your
+message -- most often this happens when the response table is copied
+from another email or edited in a way that changes its underlying
+formatting.</p>
+
+<p><b>How to reply so HILDA can process it automatically:</b></p>
+<ol>
+  <li>Open the original HILDA email (subject: "{subject}").</li>
+  <li>Click <b>Reply</b>.</li>
+  <li>Fill in the <b>Status</b> / <b>Notes</b> cells directly in the
+      table Outlook keeps at the top of the reply -- please don't paste
+      or move cells around.</li>
+  <li>Send.</li>
+</ol>
+
+<p>Your original response is safe -- your PM has been copied and can
+process it manually if needed. This is an automated message; no reply
+is required to this email.</p>
+
+<p>-- HILDA</p>
+"""
+
+
+async def _maybe_send_unparseable_auto_reply(
+    *, deps: Any, msg: Any, batch_id: str, correlation_id: str,
+) -> None:
+    """Send a one-time auto-reply to the owner explaining the format
+    requirement, then write an idempotency audit row keyed on message_id.
+
+    Failures (no email_sender, no sender address, SMTP fail, audit fail)
+    are logged and swallowed -- the outer unparseable path already returned
+    a diag audit row for ops forensics; this helper is best-effort UX.
+
+    Idempotency: if a prior 'owner_reply_unparseable_notified' audit row
+    exists for the same message_id, skip. Prevents Celery retries or
+    duplicate-ingest replays from spamming the owner.
+    """
+    sender = (getattr(msg, "sender", "") or "").strip()
+    message_id = getattr(msg, "message_id", "") or ""
+    subject = (getattr(msg, "subject", "") or "")[:120]
+
+    if not sender:
+        _log.info(
+            "unparseable_auto_reply: skip -- msg has no sender (batch_id=%s)",
+            batch_id,
+        )
+        return
+    if getattr(deps, "email_sender", None) is None:
+        _log.info(
+            "unparseable_auto_reply: skip -- email_sender not wired (batch_id=%s)",
+            batch_id,
+        )
+        return
+
+    # Idempotency probe.
+    query_fn = getattr(deps.audit, "query_communications", None)
+    if query_fn is not None and message_id:
+        try:
+            prior = query_fn(
+                action_type=_UNPARSEABLE_AUTO_REPLY_AUDIT,
+                details_contains={"message_id": message_id},
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.info(
+                "unparseable_auto_reply: idempotency probe failed (%s) -- "
+                "proceeding to send (better to re-send than never send)",
+                type(exc).__name__,
+            )
+            prior = []
+        if prior:
+            _log.info(
+                "unparseable_auto_reply: skip -- already notified for "
+                "message_id=%s batch_id=%s",
+                message_id, batch_id,
+            )
+            return
+
+    body_html = _UNPARSEABLE_AUTO_REPLY_BODY.format(
+        batch_id=batch_id,
+        subject=(subject or "your HILDA request").replace("<", "&lt;").replace(">", "&gt;"),
+    )
+    reply_subject = f"[HILDA] Reply not processed -- please re-reply from original ({batch_id})"
+
+    try:
+        await deps.email_sender.send(
+            to=[sender],
+            cc=[],
+            subject=reply_subject,
+            body=body_html,
+            attachments=[],
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "unparseable_auto_reply: send failed to=%s batch_id=%s: %s: %s",
+            sender, batch_id, type(exc).__name__, str(exc)[:120],
+        )
+        return
+
+    await _audit(
+        deps,
+        _UNPARSEABLE_AUTO_REPLY_AUDIT,
+        None,
+        {
+            "batch_id":       batch_id,
+            "message_id":     message_id,
+            "sender":         sender,
+            "subject":        subject,
+            "correlation_id": correlation_id,
+        },
+    )
+    _log.info(
+        "unparseable_auto_reply: sent to=%s batch_id=%s (idempotent per message_id)",
+        sender, batch_id,
+    )
 
 
 async def _lookup_batch_items(batch_id: str) -> list[dict[str, Any]]:
