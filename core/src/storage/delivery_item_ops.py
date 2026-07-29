@@ -350,6 +350,14 @@ async def delete_milestone_cascade(
         )
         items_deleted = items_del.rowcount or 0
 
+        # Commit -- session_scope() only rolls back on error; without an
+        # explicit commit every delete() above stays staged and rolls back
+        # when the session context exits, leaving Postgres unchanged while
+        # the return values (SQLAlchemy's as-if rowcounts) report success.
+        # Bug caught in first production test 2026-07-28: task returned
+        # cascade_completed with counts but 87 delivery_item rows survived.
+        await session.commit()
+
         return {
             "items_deleted":    items_deleted,
             "assocs_deleted":   assocs_deleted,

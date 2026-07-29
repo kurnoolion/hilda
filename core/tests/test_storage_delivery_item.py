@@ -21,6 +21,7 @@ from core.src.storage.db import configure_engine, init_db
 from core.src.storage.delivery_item_ops import (
     PostgresStorage,
     create_delivery_item,
+    delete_milestone_cascade,
     find_items_by_natural_key,
     get_delivery_item,
     list_default_workitem_for_milestone,
@@ -203,3 +204,76 @@ def test_postgres_storage_protocol_methods_exist():
     assert hasattr(s, "list_items_for_milestone")
     assert hasattr(s, "list_default_workitem_for_milestone")
     assert hasattr(s, "find_items_by_natural_key")
+    assert hasattr(s, "delete_milestone_cascade")
+
+
+# ============================================================================
+# MDEL-1 (2026-07-28): delete_milestone_cascade — validates actual commit
+# ============================================================================
+
+
+async def test_delete_milestone_cascade_actually_persists():
+    """First production run of apply_milestone_delete_task reported
+    items_deleted=87 but Postgres still had all 87 rows. Root cause:
+    session_scope() never commits -- delete() calls staged in the session
+    were rolled back when the context exited. Fix: explicit
+    await session.commit() at end of cascade.
+
+    This test would have caught the bug: seed rows, run cascade, then
+    RE-QUERY the DB and assert zero rows survive.
+    """
+    for i in range(3):
+        await create_delivery_item(_mk_item(
+            item_id=f"MMK-SM-S671U1-DRR-{i}",
+            item_no=i, milestone_id="DRR",
+        ))
+    # Also seed a row in a DIFFERENT milestone -- must survive.
+    await create_delivery_item(_mk_item(
+        item_id="MMK-SM-S671U1-OTHER-1", milestone_id="OTHER-MS", item_no=99,
+    ))
+
+    # Sanity: all 4 exist before cascade
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-0") is not None
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-1") is not None
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-2") is not None
+    assert await get_delivery_item("MMK-SM-S671U1-OTHER-1") is not None
+
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert summary["items_deleted"] == 3
+
+    # THE ACTUAL TEST — re-query after cascade
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-0") is None
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-1") is None
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-2") is None
+    # Other milestone survives (scope isolation)
+    assert await get_delivery_item("MMK-SM-S671U1-OTHER-1") is not None
+
+
+async def test_delete_milestone_cascade_idempotent_on_empty_scope():
+    # Nothing seeded -- cascade should return zeros without crashing.
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert summary["items_deleted"] == 0
+    assert summary["orphan_hashes"] == []
+
+
+async def test_delete_milestone_cascade_device_scope_isolation():
+    # Same customer + milestone_id, DIFFERENT devices -- cascade should
+    # only touch the requested device.
+    await create_delivery_item(_mk_item(
+        item_id="MMK-SM-S671U1-DRR-1", milestone_id="DRR", device_id="SM-S671U1",
+    ))
+    await create_delivery_item(_mk_item(
+        item_id="MMK-SM-M777U-DRR-1", milestone_id="DRR", device_id="SM-M777U",
+        item_no=1,
+    ))
+
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert summary["items_deleted"] == 1
+    assert await get_delivery_item("MMK-SM-S671U1-DRR-1") is None
+    assert await get_delivery_item("MMK-SM-M777U-DRR-1") is not None  # different device survives
