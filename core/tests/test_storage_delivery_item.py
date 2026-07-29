@@ -277,3 +277,89 @@ async def test_delete_milestone_cascade_device_scope_isolation():
     assert summary["items_deleted"] == 1
     assert await get_delivery_item("MMK-SM-S671U1-DRR-1") is None
     assert await get_delivery_item("MMK-SM-M777U-DRR-1") is not None  # different device survives
+
+
+# ============================================================================
+# SETUP-5 (2026-07-29): scope-level audit rows cleaned up too
+# ============================================================================
+
+
+async def test_delete_milestone_cascade_purges_scope_level_audits():
+    """delivery_item_id=None audit rows (setup_complete_notified,
+    tpm_notification summaries, etc.) survived MDEL because Step 6a filter
+    WHERE delivery_item_id IN (item_ids) doesn't match NULL. Result: after
+    milestone delete + re-setup, the tick's idempotency check found the
+    OLD audit row (same customer+device+milestone in summary substring)
+    and skipped the send -- TPM got no email for the fresh cycle.
+
+    Fix (Step 6b): also delete communication_log rows where
+    delivery_item_id IS NULL AND summary contains all three scope
+    substrings. Other scopes' audits (different device or different
+    milestone) survive.
+    """
+    from datetime import datetime, timezone
+    import uuid, json
+    from core.src.storage.db import CommunicationLogTable, session_scope
+    from sqlalchemy import select
+
+    # Seed one delivery_item so cascade has something to walk.
+    await create_delivery_item(_mk_item(
+        item_id="MMK-SM-S671U1-DRR-1", milestone_id="DRR",
+    ))
+
+    # Seed 3 scope-level audit rows (delivery_item_id=None):
+    #   A. matches our target scope -- should get purged
+    #   B. matches customer+milestone but DIFFERENT device -- survives
+    #   C. matches customer+device but DIFFERENT milestone -- survives
+    seed_rows = [
+        ("A", "MMK", "SM-S671U1", "DRR"),        # target scope
+        ("B", "MMK", "SM-M777U",  "DRR"),        # different device
+        ("C", "MMK", "SM-S671U1", "OTHER-MS"),   # different milestone
+    ]
+    async with session_scope() as session:
+        for tag, c, d, m in seed_rows:
+            details = {"customer_id": c, "device_id": d, "milestone_id": m}
+            summary = json.dumps(
+                {"attribution": {}, "details": details},
+                default=str, separators=(",", ":"),
+            )
+            session.add(CommunicationLogTable(
+                log_id=f"tag-{tag}-{uuid.uuid4().hex[:8]}",
+                channel="SharePoint", direction="Outbound",
+                timestamp=datetime.now(timezone.utc),
+                delivery_item_id=None,           # scope-level, not item-scoped
+                summary=summary,
+                action_type="setup_complete_notified",
+                attachments=[],
+            ))
+        await session.commit()
+
+    # Sanity: 3 audit rows exist.
+    async with session_scope() as session:
+        rows = (await session.execute(
+            select(CommunicationLogTable).where(
+                CommunicationLogTable.action_type == "setup_complete_notified"
+            )
+        )).scalars().all()
+        assert len(rows) == 3
+
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    # Row A purged (scope match); B + C survive (different scope).
+    assert summary["audit_deleted"] >= 1   # at least the one target-scope row
+
+    async with session_scope() as session:
+        rows = (await session.execute(
+            select(CommunicationLogTable).where(
+                CommunicationLogTable.action_type == "setup_complete_notified"
+            )
+        )).scalars().all()
+        surviving = {(json.loads(r.summary)["details"]["customer_id"],
+                      json.loads(r.summary)["details"]["device_id"],
+                      json.loads(r.summary)["details"]["milestone_id"])
+                     for r in rows}
+    # A gone, B + C survive.
+    assert ("MMK", "SM-S671U1", "DRR")       not in surviving
+    assert ("MMK", "SM-M777U",  "DRR")       in surviving
+    assert ("MMK", "SM-S671U1", "OTHER-MS")  in surviving

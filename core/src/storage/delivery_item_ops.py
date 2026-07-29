@@ -323,14 +323,59 @@ async def delete_milestone_cascade(
         )
         versions_deleted = versions_del.rowcount or 0
 
-        # Step 6: communication_log rows for our items (audit for THIS scope
-        # goes away; global/non-item audits are preserved).
+        # Step 6a: communication_log rows keyed by delivery_item_id (audit
+        # rows written PER item -- state transitions, PM approvals, owner
+        # replies, etc.).
         audit_del = await session.execute(
             delete(CommunicationLogTable).where(
                 CommunicationLogTable.delivery_item_id.in_(item_ids)
             )
         )
         audit_deleted = audit_del.rowcount or 0
+
+        # Step 6b (SETUP-5 2026-07-29): scope-level audit rows use
+        # delivery_item_id=None (setup_complete_notified,
+        # milestone_delete_cascade_starting/completed, tpm-notification-tick
+        # summaries -- anything not keyed to a specific item). Step 6a
+        # doesn't touch them. Without this step, setup_complete_notified
+        # rows from prior test cycles survive MDEL and block the next
+        # cycle's send via the idempotency check that substring-matches
+        # customer/device/milestone in the summary JSON.
+        #
+        # Substring match on summary field (same pattern as
+        # audit_writer_impl.query_communications). Summary is TEXT of
+        # {"attribution": {...}, "details": {"customer_id":"MMK","device_id":
+        # "SM-S671U1","milestone_id":"DRR",...}} -- match the compact JSON
+        # form we write (no spaces per audit_writer_impl separators=(",",
+        # ":")). Spaced form tolerated defensively.
+        scope_needles_compact = [
+            f'"customer_id":"{customer_id}"',
+            f'"device_id":"{device_id}"',
+            f'"milestone_id":"{milestone_id}"',
+        ]
+        scope_needles_spaced = [
+            f'"customer_id": "{customer_id}"',
+            f'"device_id": "{device_id}"',
+            f'"milestone_id": "{milestone_id}"',
+        ]
+        from sqlalchemy import and_, or_
+        # Row must contain ALL three (customer AND device AND milestone);
+        # each needle can be compact-form OR spaced-form.
+        conditions = [
+            or_(
+                CommunicationLogTable.summary.contains(cnp),
+                CommunicationLogTable.summary.contains(spd),
+            )
+            for cnp, spd in zip(scope_needles_compact, scope_needles_spaced)
+        ]
+        scope_audit_del = await session.execute(
+            delete(CommunicationLogTable).where(
+                CommunicationLogTable.delivery_item_id.is_(None),
+                and_(*conditions),
+            )
+        )
+        scope_audit_deleted = scope_audit_del.rowcount or 0
+        audit_deleted += scope_audit_deleted
 
         # Step 7: document_index for orphaned hashes.
         index_deleted = 0
