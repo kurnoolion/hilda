@@ -36,7 +36,8 @@ def _mk_item(customer_id, device_id, milestone_id, item_no, state, tg="hw_pl"):
 
 def _make_deps(*, items_by_milestone=None, already_notified=None,
                storage_none=False, sp_writer_none=False,
-               email_sender_none=False):
+               email_sender_none=False, sp_expected_by_scope=None,
+               sp_read_raises=False):
     deps = MagicMock()
     if storage_none:
         deps.storage = None
@@ -47,6 +48,37 @@ def _make_deps(*, items_by_milestone=None, already_notified=None,
         )
     if sp_writer_none:
         deps.sp_writer = None
+    else:
+        # SETUP-3 (2026-07-29): SP-authoritative expected-count gate now reads
+        # Deliverables_<customer> via sp_writer.get_items. Mock it to return
+        # a list of the right length per (customer, device, milestone) scope.
+        # Default: mirror the Postgres count (test predates the gate; keep
+        # test scenarios firing as before) so only tests explicitly exercising
+        # the gate need to set sp_expected_by_scope.
+        _sp_map = sp_expected_by_scope or {}
+        def _sp_get_items(entity=None, scope=None, canonical_filters=None, **kw):
+            if sp_read_raises:
+                raise RuntimeError("SP unreachable")
+            if entity != "delivery_items":
+                return []
+            cf = canonical_filters or {}
+            customer_id  = getattr(scope, "customer_id", None) if scope else None
+            device_id    = cf.get("project_model")
+            milestone_id = cf.get("milestone_id")
+            key = (customer_id, device_id, milestone_id)
+            if key in _sp_map:
+                return [{"_sp_id": i} for i in range(_sp_map[key])]
+            # Fallback: mirror Postgres count for the scope so pre-SETUP-3
+            # tests still fire. Look up scope items via the storage mock.
+            items_by_mid = items_by_milestone or {}
+            all_items = items_by_mid.get(milestone_id, [])
+            scoped = [
+                it for it in all_items
+                if (getattr(it, "customer_id", None) or "") == customer_id
+                and (getattr(it, "device_id", None) or "") == device_id
+            ]
+            return [{"_sp_id": i} for i in range(len(scoped))]
+        deps.sp_writer.get_items = MagicMock(side_effect=_sp_get_items)
     if email_sender_none:
         deps.email_sender = None
 
@@ -217,6 +249,82 @@ class TestCompletionCheck:
         r = setup_complete_notification_tick_task(None, None)
         assert r["sends_attempted"] == 1  # attempt started
         assert r["sends_succeeded"] == 0  # but skipped at TPM lookup
+
+
+class TestSpExpectedCountGate:
+    """SETUP-3 (2026-07-29): compare Postgres item count to SP-authoritative
+    Deliverables_<customer> filtered row count. Skip send until they match --
+    prevents "N items ready" emails firing mid-import when only some ADDED
+    alerts have been processed."""
+
+    _SCOPE = ("MMK", "SM-S671U1", "DRR")
+
+    def _scenario(self, deps_and_patches, monkeypatch, *, postgres_count, sp_expected):
+        items = [
+            _mk_item("MMK", "SM-S671U1", "DRR", i, "Open")
+            for i in range(1, postgres_count + 1)
+        ]
+        deps = deps_and_patches(
+            items_by_milestone={"DRR": items},
+            sp_expected_by_scope={self._SCOPE: sp_expected},
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.setup_complete_notification._list_scopes",
+            lambda deps_: [self._SCOPE],
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.tpm_notification._read_tpm_email",
+            lambda deps_, c, d: ("t.arasu@samsung.com", "Thendral"),
+        )
+        return deps
+
+    def test_send_when_postgres_matches_sp(self, deps_and_patches, monkeypatch):
+        # Fully imported: 87 in Postgres, 87 in SP -> fire.
+        deps = self._scenario(deps_and_patches, monkeypatch, postgres_count=87, sp_expected=87)
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 1
+        assert r["sends_succeeded"] == 1
+        assert len(deps._sends) == 1
+        assert "87 items" in deps._sends[0]["subject"]
+
+    def test_skip_when_postgres_less_than_sp(self, deps_and_patches, monkeypatch):
+        # Partial import (4 items landed in Postgres so far; SP has 87 expected)
+        # -- MUST NOT fire. This is the primary bug the gate fixes.
+        deps = self._scenario(deps_and_patches, monkeypatch, postgres_count=4, sp_expected=87)
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 0
+        assert r["sends_succeeded"] == 0
+        assert deps._sends == []
+        # No audit written -- scope stays unnotified so the next tick after
+        # import catches up can fire cleanly.
+        assert not deps.audit.write_communication_log.called
+
+    def test_skip_when_postgres_greater_than_sp(self, deps_and_patches, monkeypatch):
+        # Postgres has stale items from a prior test cycle that MDEL missed.
+        # Divergence in either direction blocks send.
+        deps = self._scenario(deps_and_patches, monkeypatch, postgres_count=90, sp_expected=87)
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 0
+        assert deps._sends == []
+
+    def test_skip_when_sp_read_fails(self, deps_and_patches, monkeypatch):
+        # SP unreachable / HTTP error -> skip send. Safer than false-positive.
+        items = [_mk_item("MMK", "SM-S671U1", "DRR", i, "Open") for i in range(1, 6)]
+        deps = deps_and_patches(
+            items_by_milestone={"DRR": items},
+            sp_read_raises=True,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.setup_complete_notification._list_scopes",
+            lambda deps_: [self._SCOPE],
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.tpm_notification._read_tpm_email",
+            lambda deps_, c, d: ("t.arasu@samsung.com", "T"),
+        )
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 0
+        assert deps._sends == []
 
 
 class TestSubjectAndBody:

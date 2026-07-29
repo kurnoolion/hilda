@@ -100,6 +100,39 @@ def setup_complete_notification_tick_task(
         if any_not_started:
             continue
 
+        # SETUP-3 (2026-07-29): SP-authoritative expected-count gate. Prior
+        # behavior fired as soon as every currently-imported item was past
+        # 'Not Started' -- but the import cascade is progressive (per-item
+        # ADDED alerts). A tick landing mid-import saw only the fast-first
+        # Confirmation items (say 4), fired "4 items ready", wrote audit,
+        # then subsequent ticks for the same scope hit idempotency skip --
+        # TPM never got the "all 87 ready" email they were waiting for.
+        # Fix: read SP Deliverables_<customer> for the (device, milestone)
+        # scope and require Postgres count == SP count. Skip send until
+        # import fully caught up.
+        #
+        # Defensive: on SP READ failure, SKIP send (better silence than a
+        # false-positive early trigger). The next tick 60s later retries.
+        sp_expected = _read_sp_expected_count(
+            deps, customer_id, device_id, milestone_id,
+        )
+        if sp_expected is None:
+            _log.info(
+                "setup_complete_notification: SP expected-count read failed "
+                "customer=%s device=%s milestone=%s -- skipping this tick",
+                customer_id, device_id, milestone_id,
+            )
+            continue
+        if len(scope_items) != sp_expected:
+            _log.info(
+                "setup_complete_notification: partial import, waiting "
+                "customer=%s device=%s milestone=%s "
+                "(postgres=%d, sp_expected=%d)",
+                customer_id, device_id, milestone_id,
+                len(scope_items), sp_expected,
+            )
+            continue
+
         # Idempotency check: has an audit row already been written for this scope?
         if _already_notified(deps, customer_id, device_id, milestone_id):
             continue
@@ -187,6 +220,47 @@ def _list_scopes(deps: Any) -> list[tuple[str, str, str]]:
             type(exc).__name__, str(exc)[:120],
         )
         return []
+
+
+# ---------------------------------------------------------------------------
+# SETUP-3 (2026-07-29): SP-authoritative expected-count read
+# ---------------------------------------------------------------------------
+
+
+def _read_sp_expected_count(
+    deps: Any, customer_id: str, device_id: str, milestone_id: str,
+) -> int | None:
+    """Return the number of rows in SP Deliverables_<customer> filtered by
+    (project_model=device_id, milestone_id=milestone_id). This is the
+    SP-authoritative count of "items TPM expected to import" for the scope
+    -- the truth against which HILDA's Postgres count is compared.
+
+    Returns None on ANY read failure (SP unreachable, HTTP 4xx/5xx, empty
+    response indistinguishable from filter-mismatch). Caller treats None
+    as "skip this tick" -- safer than firing an early false-positive.
+
+    Uses the same get_items(entity='delivery_items', canonical_filters=...)
+    call the reconciler sync-2 already uses -- no new SP surface.
+    """
+    from core.src.sharepoint_integration.config import ListScope
+    try:
+        rows = deps.sp_writer.get_items(
+            entity="delivery_items",
+            scope=ListScope(customer_id=customer_id),
+            canonical_filters={
+                "project_model": device_id,
+                "milestone_id":  milestone_id,
+            },
+        ) or []
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "setup_complete_notification: SP delivery_items read failed "
+            "customer=%s device=%s milestone=%s: %s: %s",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return None
+    return len(rows)
 
 
 # ---------------------------------------------------------------------------
