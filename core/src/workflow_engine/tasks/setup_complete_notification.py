@@ -100,36 +100,47 @@ def setup_complete_notification_tick_task(
         if any_not_started:
             continue
 
-        # SETUP-3 (2026-07-29): SP-authoritative expected-count gate. Prior
-        # behavior fired as soon as every currently-imported item was past
-        # 'Not Started' -- but the import cascade is progressive (per-item
-        # ADDED alerts). A tick landing mid-import saw only the fast-first
-        # Confirmation items (say 4), fired "4 items ready", wrote audit,
-        # then subsequent ticks for the same scope hit idempotency skip --
-        # TPM never got the "all 87 ready" email they were waiting for.
-        # Fix: read SP Deliverables_<customer> for the (device, milestone)
-        # scope and require Postgres count == SP count. Skip send until
-        # import fully caught up.
+        # SETUP-3 (2026-07-29): expected-count gate. Prior behavior fired
+        # as soon as every currently-imported item was past 'Not Started'
+        # -- but the import cascade is progressive (per-item ADDED alerts).
+        # A tick landing mid-import saw only the fast-first Confirmation
+        # items (say 4), fired "4 items ready", wrote audit, then subsequent
+        # ticks for the same scope hit idempotency skip -- TPM never got
+        # the "all 87 ready" email they were waiting for.
         #
-        # Defensive: on SP READ failure, SKIP send (better silence than a
-        # false-positive early trigger). The next tick 60s later retries.
-        sp_expected = _read_sp_expected_count(
+        # Fix: compare Postgres scope count to an authoritative "expected"
+        # count. TWO sources, in priority order:
+        #   1. template.yaml (in-memory, no network, no transient window)
+        #      -- authoritative per architect 2026-07-29. Setup Deliverables
+        #      writes to SP from this same template, so template count ==
+        #      SP row count == Postgres row count once import catches up.
+        #   2. SP Deliverables_<customer> row count -- fallback when the
+        #      template isn't cached (edge case: first tick after worker
+        #      startup before template_lookup loaded, or non-templated
+        #      customer). Adds ~200-500ms SP round-trip and has a ~10s
+        #      transient during initial SP populate; unavoidable for the
+        #      fallback path.
+        #
+        # Either path returning None -> skip this tick (defensive; next
+        # tick retries). Postgres count != expected -> skip + log
+        # partial-import diagnostic.
+        expected = _get_expected_count(
             deps, customer_id, device_id, milestone_id,
         )
-        if sp_expected is None:
+        if expected is None:
             _log.info(
-                "setup_complete_notification: SP expected-count read failed "
+                "setup_complete_notification: expected-count unavailable "
                 "customer=%s device=%s milestone=%s -- skipping this tick",
                 customer_id, device_id, milestone_id,
             )
             continue
-        if len(scope_items) != sp_expected:
+        if len(scope_items) != expected:
             _log.info(
                 "setup_complete_notification: partial import, waiting "
                 "customer=%s device=%s milestone=%s "
-                "(postgres=%d, sp_expected=%d)",
+                "(postgres=%d, expected=%d)",
                 customer_id, device_id, milestone_id,
-                len(scope_items), sp_expected,
+                len(scope_items), expected,
             )
             continue
 
@@ -223,25 +234,43 @@ def _list_scopes(deps: Any) -> list[tuple[str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# SETUP-3 (2026-07-29): SP-authoritative expected-count read
+# SETUP-3 (2026-07-29): expected-count -- template-first, SP fallback
 # ---------------------------------------------------------------------------
 
 
-def _read_sp_expected_count(
+def _get_expected_count(
     deps: Any, customer_id: str, device_id: str, milestone_id: str,
 ) -> int | None:
-    """Return the number of rows in SP Deliverables_<customer> filtered by
-    (project_model=device_id, milestone_id=milestone_id). This is the
-    SP-authoritative count of "items TPM expected to import" for the scope
-    -- the truth against which HILDA's Postgres count is compared.
+    """Return the count of items TPM expects to have imported for
+    (customer, device, milestone). Priority:
 
-    Returns None on ANY read failure (SP unreachable, HTTP 4xx/5xx, empty
-    response indistinguishable from filter-mismatch). Caller treats None
-    as "skip this tick" -- safer than firing an early false-positive.
+      1. template.yaml (in-memory via template_lookup) -- authoritative
+         per architect 2026-07-29. Setup Deliverables writes SP from this
+         same template; Default WI is included; template count == SP row
+         count == Postgres row count once import catches up. Zero network.
+      2. SP Deliverables_<customer> row count -- fallback when template
+         not cached (edge: first tick post-worker-boot before
+         template_lookup._CACHE populated, or customer with no template).
 
-    Uses the same get_items(entity='delivery_items', canonical_filters=...)
-    call the reconciler sync-2 already uses -- no new SP surface.
+    Returns None on both-sources-fail; caller treats as "skip this tick".
     """
+    # 1. Template first.
+    try:
+        from core.src.template_schema.template_lookup import (
+            get_expected_item_count_for_milestone,
+        )
+        n = get_expected_item_count_for_milestone(customer_id, device_id, milestone_id)
+        if n is not None:
+            return n
+    except Exception as exc:  # noqa: BLE001
+        _log.info(
+            "setup_complete_notification: template lookup raised "
+            "customer=%s milestone=%s: %s -- falling back to SP",
+            customer_id, milestone_id, type(exc).__name__,
+        )
+
+    # 2. SP fallback (adds ~200-500ms + has ~10s transient during initial
+    #    populate; template path is preferred and normally always available).
     from core.src.sharepoint_integration.config import ListScope
     try:
         rows = deps.sp_writer.get_items(
@@ -254,8 +283,8 @@ def _read_sp_expected_count(
         ) or []
     except Exception as exc:  # noqa: BLE001
         _log.warning(
-            "setup_complete_notification: SP delivery_items read failed "
-            "customer=%s device=%s milestone=%s: %s: %s",
+            "setup_complete_notification: SP delivery_items fallback read "
+            "failed customer=%s device=%s milestone=%s: %s: %s",
             customer_id, device_id, milestone_id,
             type(exc).__name__, str(exc)[:120],
         )

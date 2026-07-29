@@ -224,3 +224,58 @@ def get_delivery_path_template(customer_id: str) -> str | None:
     if isinstance(val, str) and val.strip():
         return val.strip()
     return None
+
+
+def get_expected_item_count_for_milestone(
+    customer_id: str, device_id: str, milestone_id: str,
+) -> int | None:
+    """SETUP-3 (2026-07-29): return the count of work_items the template
+    defines for (customer, device, milestone). Used by
+    setup_complete_notification's expected-count gate to avoid the
+    partial-import false-positive that fires "N items ready" mid-import.
+
+    Semantics:
+      * Returns len(milestone.work_items) if template cached AND device_id
+        is in milestone.devices (or the field is absent -- non-strict).
+      * Returns 0 if device_id is explicitly scoped out (this device
+        legitimately has no items for this milestone).
+      * Returns None if template not cached / milestone not present /
+        work_items missing -- caller falls back to an SP read.
+
+    Notes:
+      * Counts entries (not max item_no) so reserved-but-skipped item_no
+        gaps (e.g., #85 reserved but #86 skipped in yaml) don't inflate
+        the expected count.
+      * INCLUDES the Default WI. Per architect 2026-07-29: template.yaml
+        already carries the Default WI (single row with item_type=Default);
+        Setup Deliverables writes it to SP alongside the rest; HILDA's
+        instantiate_default_work_item no-ops when the row already exists.
+        Template count == SP row count == Postgres row count; no Default-WI
+        offset to worry about on the Postgres-side comparison.
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+
+    milestones = template.get("milestones") or {}
+    if isinstance(milestones, list):
+        milestones = {
+            m.get("milestone_id"): m
+            for m in milestones
+            if isinstance(m, dict) and m.get("milestone_id")
+        }
+    if not isinstance(milestones, dict):
+        return None
+
+    milestone = milestones.get(milestone_id)
+    if not isinstance(milestone, dict):
+        return None
+
+    scope = milestone.get("devices")
+    if isinstance(scope, list) and scope and device_id not in scope:
+        return 0
+
+    work_items = milestone.get("work_items") or []
+    if not isinstance(work_items, list):
+        return None
+    return len(work_items)

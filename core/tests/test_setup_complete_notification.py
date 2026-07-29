@@ -251,11 +251,11 @@ class TestCompletionCheck:
         assert r["sends_succeeded"] == 0  # but skipped at TPM lookup
 
 
-class TestSpExpectedCountGate:
-    """SETUP-3 (2026-07-29): compare Postgres item count to SP-authoritative
-    Deliverables_<customer> filtered row count. Skip send until they match --
-    prevents "N items ready" emails firing mid-import when only some ADDED
-    alerts have been processed."""
+class TestExpectedCountGateSpFallback:
+    """SETUP-3 (2026-07-29): expected-count gate falls back to SP
+    Deliverables_<customer> row count when template not cached. Existing
+    tests exercise this SP-fallback path (template._CACHE is empty in tests
+    unless explicitly seeded)."""
 
     _SCOPE = ("MMK", "SM-S671U1", "DRR")
 
@@ -321,6 +321,91 @@ class TestSpExpectedCountGate:
         monkeypatch.setattr(
             "core.src.workflow_engine.tasks.tpm_notification._read_tpm_email",
             lambda deps_, c, d: ("t.arasu@samsung.com", "T"),
+        )
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 0
+        assert deps._sends == []
+
+
+class TestExpectedCountGateTemplateFirst:
+    """SETUP-3 (2026-07-29): when template.yaml is cached, the gate uses
+    the in-memory template count (no SP round-trip). This is the normal
+    steady-state path -- SP fallback only fires when template is unavailable.
+    """
+
+    _SCOPE = ("MMK", "SM-S671U1", "DRR")
+
+    def _seed_template(self, monkeypatch, work_item_count: int, device_id="SM-S671U1"):
+        # Patch template_lookup._CACHE entry for MMK. Include one Default WI
+        # explicitly in work_items count (per architect 2026-07-29:
+        # template already carries Default WI as item_type=Default, so
+        # len(work_items) == SP row count == Postgres row count).
+        from core.src.template_schema import template_lookup
+        work_items = [
+            {"item_no": i + 1, "item_type": "test_tech_waiver_report"}
+            for i in range(work_item_count - 1)
+        ]
+        work_items.append({"item_no": work_item_count, "item_type": "Default"})
+        template = {
+            "milestones": {
+                "DRR": {
+                    "devices":    [device_id],
+                    "work_items": work_items,
+                },
+            },
+        }
+        monkeypatch.setitem(template_lookup._CACHE, "MMK", template)
+
+    def test_send_when_postgres_matches_template(self, deps_and_patches, monkeypatch):
+        # 87 work_items in template (incl. Default), 87 in Postgres -> fire.
+        # SP mock left at its default (mirror) but should never be called.
+        self._seed_template(monkeypatch, work_item_count=87)
+        items = [_mk_item("MMK", "SM-S671U1", "DRR", i, "Open") for i in range(1, 88)]
+        deps = deps_and_patches(items_by_milestone={"DRR": items})
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.setup_complete_notification._list_scopes",
+            lambda deps_: [self._SCOPE],
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.tpm_notification._read_tpm_email",
+            lambda deps_, c, d: ("t.arasu@samsung.com", "T"),
+        )
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 1
+        assert r["sends_succeeded"] == 1
+        # SP get_items must NOT have been called for delivery_items entity
+        # -- template path bypasses SP entirely.
+        delivery_reads = [
+            c for c in deps.sp_writer.get_items.call_args_list
+            if c.kwargs.get("entity") == "delivery_items"
+        ]
+        assert delivery_reads == [], (
+            f"expected zero SP delivery_items reads (template path), got "
+            f"{len(delivery_reads)}"
+        )
+
+    def test_skip_when_postgres_less_than_template(self, deps_and_patches, monkeypatch):
+        # Template says 87, Postgres has 4 -- partial import mid-cascade.
+        self._seed_template(monkeypatch, work_item_count=87)
+        items = [_mk_item("MMK", "SM-S671U1", "DRR", i, "Open") for i in range(1, 5)]
+        deps = deps_and_patches(items_by_milestone={"DRR": items})
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.setup_complete_notification._list_scopes",
+            lambda deps_: [self._SCOPE],
+        )
+        r = setup_complete_notification_tick_task(None, None)
+        assert r["sends_attempted"] == 0
+        assert deps._sends == []
+
+    def test_skip_when_device_out_of_milestone_scope(self, deps_and_patches, monkeypatch):
+        # Template's milestone.devices lists only SM-S671U1. Tick asks about
+        # SM-M777U -> template returns 0 -> Postgres has 5 -> 5 != 0 -> skip.
+        self._seed_template(monkeypatch, work_item_count=87, device_id="SM-S671U1")
+        items = [_mk_item("MMK", "SM-M777U", "DRR", i, "Open") for i in range(1, 6)]
+        deps = deps_and_patches(items_by_milestone={"DRR": items})
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.setup_complete_notification._list_scopes",
+            lambda deps_: [("MMK", "SM-M777U", "DRR")],
         )
         r = setup_complete_notification_tick_task(None, None)
         assert r["sends_attempted"] == 0
