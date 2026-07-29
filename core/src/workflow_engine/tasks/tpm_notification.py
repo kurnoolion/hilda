@@ -361,16 +361,24 @@ def _extract_user_field_email_name(
             or field.get("mail")
         )
         # Name keys in preference order:
-        #   Title / DisplayName — clean display shape when present
-        #   Name — corp AD often returns Distinguished-Name shape with `/`
-        #          delimiters ("Thendral Arasu.../Device Management/..."),
-        #          so split on first `/` and take the head.
-        #   First name + Last name — compose when neither above is set.
-        name = field.get("Title") or field.get("DisplayName")
-        if not name:
-            name_dn = field.get("Name")
-            if isinstance(name_dn, str) and name_dn.strip():
-                name = name_dn.split("/", 1)[0].strip()
+        #   Title / DisplayName — normally clean but corp SP-2017 populates
+        #     these with the Distinguished-Name shape too ("Thendral Arasu
+        #     Panneer Selvam/Device Management/MNOs Lab/Senior Professional/
+        #     Samsung Electronics"), so apply the same `/`-split as `Name`.
+        #   Name — DN-shape with `/` delimiters.
+        #   First name + Last name — compose when nothing else is set.
+        # SETUP-6 (2026-07-29): all sources go through _split_dn so
+        # downstream greetings ("Dear <name>,") always get just the
+        # person's name -- not the full org path.
+        name = (
+            field.get("Title")
+            or field.get("DisplayName")
+            or field.get("Name")
+        )
+        if isinstance(name, str) and name.strip():
+            name = name.split("/", 1)[0].strip()
+        else:
+            name = None
         if not name:
             first = (field.get("First name") or field.get("FirstName") or "").strip()
             last = (field.get("Last name") or field.get("LastName") or "").strip()

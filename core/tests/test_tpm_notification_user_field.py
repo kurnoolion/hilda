@@ -115,6 +115,31 @@ class TestCorpUserProfileDict:
         field = {"Work email": "t@x.com", "Title": "T A", "Name": "Full/DN/Value"}
         assert _extract_user_field_email_name(field) == ("t@x.com", "T A")
 
+    def test_title_dn_shape_split(self):
+        # SETUP-6 (2026-07-29): corp SP-2017 populates Title with the same
+        # DN shape as Name in some responses -- "Thendral Arasu Panneer
+        # Selvam/Device Management/MNOs Lab./Senior Professional/Samsung
+        # Electronics". User-facing greetings "Dear <name>" leaked the
+        # full org path. Fix: split Title on first `/` too (safe for clean
+        # names -- no `/`, no change).
+        field = {
+            "Work email": "t.arasu@samsung.com",
+            "Title": "Thendral Arasu Panneer Selvam/Device Management/MNOs Lab./Senior Professional/Samsung Electronics",
+        }
+        email, name = _extract_user_field_email_name(field)
+        assert email == "t.arasu@samsung.com"
+        assert name == "Thendral Arasu Panneer Selvam"
+
+    def test_displayname_dn_shape_split(self):
+        # DisplayName follows the same treatment as Title.
+        field = {"Email": "x@y.com", "DisplayName": "Someone Full Name/Dept/Corp"}
+        assert _extract_user_field_email_name(field) == ("x@y.com", "Someone Full Name")
+
+    def test_clean_title_unchanged(self):
+        # Clean names (no `/`) must remain unchanged after the split logic.
+        field = {"Email": "x@y.com", "Title": "Jane Q. Smith"}
+        assert _extract_user_field_email_name(field) == ("x@y.com", "Jane Q. Smith")
+
     def test_first_plus_last_fallback_when_all_display_names_missing(self):
         field = {
             "Work email": "t@x.com",
