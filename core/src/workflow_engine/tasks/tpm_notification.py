@@ -1070,11 +1070,9 @@ def _handle_missing_target_date(
         "device_id":    device_id,
         "milestone_id": milestone_id,
     })
-    _log.warning(
-        "tpm_notification_missing_target_date: customer=%s device=%s milestone=%s "
-        "-- target_date absent on Milestones SP row; ops alert emitted",
-        customer_id, device_id, milestone_id,
-    )
+    # Log emission silenced 2026-07-30: TPMs are actively setting up milestones
+    # and target_date is routinely absent during that window. Audit row still
+    # written so history is preserved for later analysis.
 
 
 # ---------------------------------------------------------------------------

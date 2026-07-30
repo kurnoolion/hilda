@@ -440,22 +440,9 @@ class DeliveryItemBase(_Base):
 
     @model_validator(mode="after")
     def _v_doc_count_consistency(self) -> "DeliveryItemBase":
-        """Per FR-82 architect lock 2026-06-20 — doc_count must equal len(item_description).
-        Emits TSC-W008 warning (not blocking). Skipped for confirmation items + default WI
-        where doc_count=0 and item_description is allowed to be None."""
-        if self.item_type in (ItemType.CONFIRMATION.value, ItemType.DEFAULT.value):
-            return self
-        if self.item_description is None:
-            # Non-confirmation/non-default items should have item_description, but allow
-            # None at this layer; storage layer enforces final consistency.
-            return self
-        if len(self.item_description) != self.doc_count:
-            msg = get_code("TSC-W008").message.format(
-                item_id=self.item_id,
-                doc_count=self.doc_count,
-                tag_set_count=len(self.item_description),
-            )
-            _log.warning(msg)
+        # TSC-W008 warning silenced 2026-07-30: doc_count varies per study while
+        # item_description is per-work-item; the equality check is not a valid
+        # invariant. Revisit the whole rule (may be removed entirely).
         return self
 
 
