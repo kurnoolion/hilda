@@ -54,6 +54,7 @@ _log = logging.getLogger(__name__)
 
 # -- State constants (mirror the existing task file constants) ------------------
 _STATE_NOT_STARTED         = "Not Started"
+_STATE_OPEN                 = "Open"
 _STATE_READY_FOR_SUBMISSION = "ReadyForSubmission"
 _STATE_UNDER_PM_REVIEW      = "UnderPMReview"
 _STATE_SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"
@@ -246,6 +247,49 @@ def _sp_read_delivery_items(
         return []
 
 
+def _sp_read_delivery_items_count(
+    deps: Any, customer_id: str, device_id: str, milestone_id: str,
+) -> int | None:
+    """RECON-1 (2026-07-30): count-first probe for sync-1. Returns the number
+    of rows in SP Deliverables_<customer> filtered by (project_model,
+    milestone_id) WITHOUT paying the full-row payload cost.
+
+    Uses the same get_items() call as the full read but the underlying SP
+    HTTP surface should support $top=1 + inline-count. If get_items doesn't
+    expose count-only mode, this falls back to the full-row read (no
+    optimization gain but correctness preserved). Returns None on read
+    failure (caller skips this tick).
+    """
+    from core.src.sharepoint_integration.config import ListScope
+    # Try count-only shape first. If sp_writer.get_items supports a
+    # count_only=True kwarg it'll return an int; otherwise it'll return
+    # a list and we take len(). Both shapes are handled.
+    try:
+        result = deps.sp_writer.get_items(
+            entity="delivery_items",
+            scope=ListScope(customer_id=customer_id),
+            canonical_filters={
+                "project_model": device_id,
+                "milestone_id":  milestone_id,
+            },
+            count_only=True,
+        )
+    except TypeError:
+        # get_items doesn't accept count_only -- fall back to full-row read.
+        result = _sp_read_delivery_items(deps, customer_id, device_id, milestone_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "reconcile_sp_count_failed: customer=%s device=%s milestone=%s: %s",
+            customer_id, device_id, milestone_id, type(exc).__name__,
+        )
+        return None
+    if isinstance(result, int):
+        return result
+    if isinstance(result, list):
+        return len(result)
+    return None
+
+
 def _elapsed_seconds(sp_timestamp_iso: Any) -> float | None:
     """Parse SP timestamp string; return seconds elapsed from that time to now
     (UTC per architect Q2 lock 2026-07-02). Returns None on parse failure.
@@ -293,9 +337,32 @@ def _sync_1_delivery_item_count(
     if sp_milestone.get("milestone_submission_triggered_at"):
         return  # submit already clicked; count is frozen
 
+    # RECON-1 (2026-07-30): count-first optimization. Fetch Postgres count +
+    # SP count first; only do the full-row SP fetch on mismatch. Saves the
+    # 87-row payload transfer on every tick when scope is already in sync
+    # (the steady-state common case).
+    pg_items_probe = deps.storage.list_items_for_milestone(milestone_id, None) or []
+    pg_count = sum(
+        1 for it in pg_items_probe
+        if getattr(it, "device_id", None) == device_id
+    )
+    sp_count = _sp_read_delivery_items_count(
+        deps, customer_id, device_id, milestone_id,
+    )
+    if sp_count is None:
+        stats["sync_1_skipped"] += 1
+        return
+    if sp_count == 0:
+        return  # no items in SP either; nothing to backfill
+    if pg_count >= sp_count:
+        # In sync (or Postgres has more -- reverse drift is not handled Ph-1
+        # per user Q1 lock). Skip the full-row fetch.
+        return
+
+    # Mismatch -- fetch full rows to know which specific item_no's to backfill.
     sp_items = _sp_read_delivery_items(deps, customer_id, device_id, milestone_id)
     if not sp_items:
-        return  # no items in SP either; nothing to backfill
+        return  # racy: count said N but read returned 0; skip this tick
 
     sp_by_item_no: dict[int, dict[str, Any]] = {}
     for r in sp_items:
@@ -410,15 +477,21 @@ def _sync_2_start_collection(
     pg_items = [it for it in pg_items if getattr(it, "device_id", None) == device_id]
     if not pg_items:
         return
-    # ALL still in Not Started predicate:
-    if not all((getattr(it, "delivery_state", None) or "") == _STATE_NOT_STARTED for it in pg_items):
-        return  # at least one moved past NS; kickoff email was received
+    # RECON-1 (2026-07-30): predicate was _STATE_NOT_STARTED but per task #123
+    # (D-144 auto-transition NS -> Open at import time), items post-setup are
+    # in OPEN, not NotStarted. Prior predicate silently never matched -> sync-2
+    # never fired in production. Correct predicate: "all items still in OPEN"
+    # (i.e., kickoff never advanced any to OutreachSent). If any item is past
+    # Open, kickoff was received -- existing flow handles the rest.
+    if not all((getattr(it, "delivery_state", None) or "") == _STATE_OPEN for it in pg_items):
+        return  # at least one advanced past OPEN; kickoff email was received
 
     from core.src.workflow_engine.tasks.sp_alert_imports import (
         kickoff_collection_task,
     )
     event_ctx = {
         "customer_id":    customer_id,
+        "device_id":      device_id,
         "milestone_id":   milestone_id,
         "correlation_id": correlation_id,
         "trigger_source": "sync_backfill_kickoff",
@@ -493,9 +566,16 @@ def _sync_3_pm_approval(
         sp_row = sp_by_item_no.get(it_no_int)
         if sp_row is None:
             continue
-        sp_state = sp_row.get("delivery_state")
         sp_approval_at = sp_row.get("pm_approval_at")
-        if sp_state != _STATE_READY_FOR_SUBMISSION or not sp_approval_at:
+        # RECON-1 (2026-07-30): SP UI Approve button no longer writes
+        # delivery_state=RFS (SP UI engineer confirmed 2026-07-30 -- waits
+        # on HILDA to drive the state advance). Prior predicate required
+        # both sp_state==RFS AND sp_approval_at to fire; the sp_state
+        # check would never match -> sync-3 never fired. Correct predicate:
+        # pm_approval_at is set + elapsed >threshold. Postgres-side check
+        # (item still in UnderPMReview) is unchanged and remains the
+        # "did the normal Pattern A email path already handle it?" gate.
+        if not sp_approval_at:
             continue
         elapsed = _elapsed_seconds(sp_approval_at)
         if elapsed is None or elapsed < sub_cfg.elapsed_threshold_sec:
@@ -509,7 +589,8 @@ def _sync_3_pm_approval(
             "trigger_source":   "sync_backfill_pm_approval",
             "derived_fields": {
                 "body_kvs": {
-                    "delivery_state":     _STATE_READY_FOR_SUBMISSION,
+                    # SP UI no longer writes delivery_state on approve; only
+                    # pm_approval_at + pm_approval_pm_id. HILDA drives RFS.
                     "pm_approval_at":     str(sp_approval_at),
                     "pm_approval_pm_id":  str(sp_row.get("pm_approval_pm_id") or ""),
                 },

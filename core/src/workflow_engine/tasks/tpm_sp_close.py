@@ -237,6 +237,31 @@ def apply_tpm_sp_close_in_progress_task(
             "new_value": new_value,
         }
 
+    # RECON-1 (2026-07-30): if item is already CLOSED in Postgres, skip
+    # both hops. sync-6 (CIP-4 reconciler) may have already force-advanced
+    # this item; a late-arriving SP CHANGED alert with delivery_state='
+    # CloseInProgress' would otherwise re-mirror CloseInProgress on top of
+    # CLOSED, then hop 2 would advance to CLOSED again -- creating a
+    # CLOSED -> CloseInProgress -> CLOSED audit trail. Final state is
+    # correct but the intermediate state overwrite is noise. Guard skips
+    # the whole 2-hop when the terminal state is already reached.
+    try:
+        _current = deps.storage.get_delivery_item(delivery_item_id)
+        _current_state = (getattr(_current, "delivery_state", None) or "") if _current else ""
+    except Exception:  # noqa: BLE001
+        _current_state = ""
+    if _current_state == "Closed":
+        _log.info(
+            "apply_tpm_sp_close_in_progress: skipping delivery_item_id=%s "
+            "-- already CLOSED (sync-6 or prior run already advanced)",
+            delivery_item_id,
+        )
+        return {
+            "outcome": "skipped_already_closed",
+            "delivery_item_id": delivery_item_id,
+            "prior_value": prior_value,
+        }
+
     # ---------- Hop 1: mirror CloseInProgress to Postgres ----------
     now_utc = datetime.now(timezone.utc)
     try:

@@ -52,8 +52,12 @@ class ReconcileConfig(BaseModel):
     sync_1_delivery_item_count: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=0
     )
+    # sync_2 threshold raised 300->900 on 2026-07-30 per architect: under Ph-1
+    # peak volume (kickoff email + SP alert batch delivery), SP-side "email
+    # sent -> mailbox seen" latency plus HILDA's 60s poll cadence can exceed
+    # 5 min; 15 min is a safer window before assuming the alert was lost.
     sync_2_start_collection: SyncTypeConfig = SyncTypeConfig(
-        enabled=True, elapsed_threshold_sec=300
+        enabled=True, elapsed_threshold_sec=900
     )
     sync_3_pm_approval: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=300

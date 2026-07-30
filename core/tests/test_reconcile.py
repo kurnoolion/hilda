@@ -198,37 +198,64 @@ class TestSync2StartCollection:
         assert stats["sync_2_dispatched"] == 0
 
     def test_below_threshold_noop(self):
+        # RECON-1 (2026-07-30): threshold raised 300 -> 900s. 60s still below.
         cfg = ReconcileConfig()
         deps = _mk_deps()
         stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
-        sp_milestone = {"milestone_collection_started_at": _iso_ago(60)}  # 60s < 300s
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(60)}  # 60s < 900s
+        _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
+        assert stats["sync_2_dispatched"] == 0
+
+    def test_at_600s_still_below_new_threshold(self):
+        # RECON-1: prior threshold was 300s so 600s fired; new threshold 900s
+        # holds off at 600s. Validates the config bump landed.
+        cfg = ReconcileConfig()
+        pg_items = [_mk_item(1, "SM-1", "Open"), _mk_item(2, "SM-1", "Open")]
+        deps = _mk_deps(pg_items=pg_items)
+        stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(600)}
         _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
         assert stats["sync_2_dispatched"] == 0
 
     def test_partial_completion_no_dispatch(self):
-        """If ANY item advanced past Not Started, sync-2 does NOT fire (per user
-        Q2 lock: existing flow handles remaining stragglers)."""
+        """If ANY item advanced past Open (i.e., OutreachSent+), sync-2 does
+        NOT fire -- kickoff email was received, existing flow handles the rest.
+        RECON-1: predicate is now 'all still in OPEN' (was NS, but D-144 auto-
+        transitions NS->Open at import time so items post-setup are Open)."""
         cfg = ReconcileConfig()
-        pg_items = [_mk_item(1, "SM-1", "Not Started"), _mk_item(2, "SM-1", "OutreachSent")]
+        pg_items = [_mk_item(1, "SM-1", "Open"), _mk_item(2, "SM-1", "OutreachSent")]
         deps = _mk_deps(pg_items=pg_items)
         stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
-        sp_milestone = {"milestone_collection_started_at": _iso_ago(600)}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}  # >900s
         _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
         assert stats["sync_2_dispatched"] == 0
 
-    def test_all_still_ns_fires(self):
-        """All items still in Not Started AND >5min elapsed = fire kickoff."""
+    def test_all_still_open_fires(self):
+        """All items still in Open AND >15min elapsed = fire kickoff. RECON-1:
+        renamed from test_all_still_ns_fires; predicate now uses OPEN state."""
         cfg = ReconcileConfig()
-        pg_items = [_mk_item(1, "SM-1", "Not Started"), _mk_item(2, "SM-1", "Not Started")]
+        pg_items = [_mk_item(1, "SM-1", "Open"), _mk_item(2, "SM-1", "Open")]
         deps = _mk_deps(pg_items=pg_items)
         stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
-        sp_milestone = {"milestone_collection_started_at": _iso_ago(600)}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}  # >900s
         with patch(
             "core.src.workflow_engine.tasks.sp_alert_imports.kickoff_collection_task"
         ) as mock_kickoff:
             mock_kickoff.apply.return_value = SimpleNamespace(result={"outcome": "fired"})
             _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
         assert stats["sync_2_dispatched"] == 1
+
+    def test_all_still_ns_does_not_fire_post_recon1(self):
+        """RECON-1: if items are somehow still in NS (import auto-transition
+        didn't run yet), sync-2 does NOT fire -- 'all Open' predicate fails.
+        Guards against firing on incomplete import state."""
+        cfg = ReconcileConfig()
+        pg_items = [_mk_item(1, "SM-1", "Not Started"), _mk_item(2, "SM-1", "Not Started")]
+        deps = _mk_deps(pg_items=pg_items)
+        stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}
+        _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
+        assert stats["sync_2_dispatched"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -348,14 +375,44 @@ class TestSync3PmApproval:
 
     def test_sp_still_upr_no_dispatch(self):
         """SP hasn't recorded the approval yet -> reconciler exits (nothing to
-        mirror)."""
+        mirror). Post RECON-1: 'no pm_approval_at' = nothing to mirror."""
         cfg = ReconcileConfig()
         pg_items = [_mk_item(1, "SM-1", "UnderPMReview")]
-        sp_items = [{"item_no": 1, "delivery_state": "UnderPMReview"}]
+        sp_items = [{"item_no": 1, "delivery_state": "UnderPMReview"}]  # no pm_approval_at
         deps = _mk_deps(pg_items=pg_items, sp_items=sp_items)
         stats = {"sync_3_dispatched": 0, "sync_3_skipped": 0}
         _sync_3_pm_approval(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
         assert stats["sync_3_dispatched"] == 0
+
+    def test_pm_approval_at_only_fires_even_without_sp_state_rfs(self):
+        """RECON-1 (2026-07-30): SP UI Approve button no longer writes
+        delivery_state=RFS. sync-3 must fire on pm_approval_at alone;
+        sp_state may still be UnderPMReview or be missing entirely."""
+        cfg = ReconcileConfig()
+        pg_items = [_mk_item(1, "SM-1", "UnderPMReview")]
+        # NOTE: no delivery_state=RFS in SP row -- only pm_approval_at + pm_id.
+        sp_items = [{
+            "item_no":            1,
+            "pm_approval_at":     _iso_ago(600),
+            "pm_approval_pm_id":  "pm@corp.com",
+            # delivery_state NOT set (or set to UnderPMReview per SP UI actual)
+        }]
+        deps = _mk_deps(pg_items=pg_items, sp_items=sp_items)
+        stats = {"sync_3_dispatched": 0, "sync_3_skipped": 0}
+        with patch(
+            "core.src.workflow_engine.tasks.pm_approval.apply_pm_approval_task"
+        ) as mock_pm:
+            mock_pm.apply.return_value = SimpleNamespace(result={"outcome": "mirrored"})
+            _sync_3_pm_approval(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_3_dispatched"] == 1
+        # Verify event_ctx does NOT carry delivery_state (SP UI didn't write it)
+        # apply.call_args.kwargs = {'args': (params, event_ctx), 'throw': False}
+        args_tuple = mock_pm.apply.call_args.kwargs["args"]
+        _, event_ctx = args_tuple
+        body_kvs = (event_ctx.get("derived_fields") or {}).get("body_kvs", {})
+        assert "delivery_state" not in body_kvs
+        assert body_kvs.get("pm_approval_at") is not None
+        assert body_kvs.get("pm_approval_pm_id") == "pm@corp.com"
 
 
 # ---------------------------------------------------------------------------

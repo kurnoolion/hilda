@@ -247,6 +247,37 @@ class TestApplyTpmSpCloseInProgress:
         # Hop 1 mirror DID land -- item is at CloseInProgress in Postgres
         patched_deps.storage.update_delivery_item.assert_called_once()
 
+    def test_skip_when_postgres_already_closed(self, patched_deps, monkeypatch):
+        """RECON-1 (2026-07-30): sync-6 reconciler may have force-advanced
+        this item to CLOSED before the SP CHANGED alert arrives. In that
+        case, apply_tpm_sp_close_in_progress must skip BOTH hops -- otherwise
+        it re-mirrors CloseInProgress on top of CLOSED then re-advances,
+        producing a CLOSED->CloseInProgress->CLOSED audit trail (correct
+        final state, noisy intermediate).
+        """
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        # Fresh get returns an item already CLOSED
+        patched_deps.storage.get_delivery_item = MagicMock(
+            return_value=SimpleNamespace(delivery_state="Closed"),
+        )
+        stub_update = MagicMock()
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.tpm_sp_close.update_delivery_state",
+            stub_update,
+        )
+
+        result = apply_tpm_sp_close_in_progress_task({}, {
+            "delivery_item_id": "MMK-SM-S671U1-DRR-10",
+            "field_deltas": {"delivery_state": ["Open", "CloseInProgress"]},
+            "correlation_id": "corr-late-alert",
+        })
+
+        assert result["outcome"] == "skipped_already_closed"
+        # Neither hop ran
+        patched_deps.storage.update_delivery_item.assert_not_called()
+        stub_update.assert_not_called()
+
     def test_hop2_guard_denial_reports_outcome(self, patched_deps, monkeypatch):
         """If hop 2 returns a non-success outcome (e.g., guard_denied even
         with bypass_guards=True somehow), surface it in the return."""
