@@ -444,3 +444,26 @@ class TestIterTuples:
         finally:
             template_lookup._CACHE.clear()
             template_lookup._CACHE.update(saved)
+
+    def test_milestone_without_devices_defaults_to_all(self):
+        """MMK convention 2026-07-30: milestones omit devices: list; the
+        reconciler must fall back to the top-level devices dict per FR-40."""
+        from core.src.template_schema import template_lookup
+        saved = dict(template_lookup._CACHE)
+        template_lookup._CACHE.clear()
+        template_lookup._CACHE["MMK"] = {
+            "devices":    {"SM-A012U": {}, "SM-A012U1": {}, "SM-M456U": {}},
+            "milestones": {
+                "DRR": {"work_items": []},  # no `devices:` key
+            },
+        }
+        try:
+            deps = MagicMock()
+            tuples = list(_iter_tuples(deps))
+            assert ("MMK", "SM-A012U",  "DRR", "DRR") in tuples
+            assert ("MMK", "SM-A012U1", "DRR", "DRR") in tuples
+            assert ("MMK", "SM-M456U",  "DRR", "DRR") in tuples
+            assert len(tuples) == 3
+        finally:
+            template_lookup._CACHE.clear()
+            template_lookup._CACHE.update(saved)

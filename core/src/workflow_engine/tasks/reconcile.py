@@ -182,12 +182,18 @@ def _iter_tuples(deps: Any):
         for milestone_id, milestone in milestones.items():
             if not isinstance(milestone, dict):
                 continue
+            # Milestone-level `devices:` list is optional. Per FR-40 the same
+            # work-items apply across every device in the customer template, so
+            # a milestone that omits `devices:` (MMK convention 2026-07-30)
+            # falls back to the full top-level `devices` dict. Explicit
+            # per-milestone scope still honored for customers that use it.
             scope = milestone.get("devices")
-            if not isinstance(scope, list):
-                continue
-            for device_id in scope:
-                if device_id in devices:
-                    yield customer_id, device_id, milestone_id, milestone_id
+            if isinstance(scope, list):
+                device_ids = [d for d in scope if d in devices]
+            else:
+                device_ids = list(devices.keys())
+            for device_id in device_ids:
+                yield customer_id, device_id, milestone_id, milestone_id
 
 
 # ---------------------------------------------------------------------------
