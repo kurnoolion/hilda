@@ -17,8 +17,10 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.ext.asyncio import (
@@ -39,6 +41,7 @@ __all__ = [
     "DocumentIndexTable",
     "DocumentItemAssociationTable",
     "DocumentVersionTable",
+    "FeedbackTicketTable",
     "TGFolderRoutingTable",
     "TagCatalogTable",
     "configure_engine",
@@ -347,6 +350,61 @@ class AutomationRuleOverrideTable(Base):
     set_by_pm_id: Mapped[str] = mapped_column(String(128))
     set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FeedbackTicketTable(Base):
+    """Ph-1 early-access feedback tickets from /feedback/<customer>/<device>/<milestone>.
+
+    Two-dropdown submit form (category + bug_type) + free-text description +
+    optional single inline attachment (max 5MB, enforced at API layer).
+    Ticket display id is `<customer>-<device>-<milestone>-<seq_in_scope>`
+    where seq_in_scope is per-scope autoincrement; ticket_pk is the DB-level
+    autoincrement primary key. UniqueConstraint on the scope+seq quadruple
+    is the anti-race backstop for the SELECT-max+1 assignment pattern.
+
+    Status is ops-managed via SQL in Ph-1 (open / in-process / closed);
+    TPMs can only submit + view. Resolution note filled by ops on close.
+    """
+    __tablename__ = "feedback_ticket"
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id", "device_id", "milestone_id", "seq_in_scope",
+            name="uq_ft_scope_seq",
+        ),
+        Index("ix_ft_scope", "customer_id", "device_id", "milestone_id"),
+        Index("ix_ft_status", "status"),
+        Index("ix_ft_created", "created_at"),
+    )
+
+    # Identity
+    ticket_pk: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
+    seq_in_scope: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Scope
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    milestone_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Payload
+    category: Mapped[str] = mapped_column(String(32), nullable=False)   # "bug" | "improvement"
+    bug_type: Mapped[str] = mapped_column(String(512), nullable=False)  # composed "PHASE-description"
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Attachment (inline; 5MB cap enforced at API layer; A-of-A-or-B choice
+    # per architect 2026-07-30 -- filesystem path option deferred).
+    attachment_filename: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    attachment_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attachment_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    attachment_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Status lifecycle -- ops-managed via SQL in Ph-1.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 # --- Engine / session management ----------------------------------------------
