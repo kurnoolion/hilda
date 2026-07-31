@@ -26,6 +26,7 @@ from core.src.workflow_engine.tasks.reconcile import (
     _sync_3_pm_approval,
     _sync_4_submit_to_carrier,
     _sync_5_close_all_items,
+    _sync_6_close_in_progress,
 )
 
 
@@ -461,6 +462,118 @@ class TestSync3PmApproval:
         assert "delivery_state" not in body_kvs
         assert body_kvs.get("pm_approval_at") is not None
         assert body_kvs.get("pm_approval_pm_id") == "pm@corp.com"
+
+
+# ---------------------------------------------------------------------------
+# sync-6 close-in-progress (RECON-5: SP-driven)
+# ---------------------------------------------------------------------------
+
+
+def _mk_sp_cip_row(item_no: int, modified_ago_sec: int = 1000) -> dict:
+    return {
+        "item_no":        item_no,
+        "delivery_state": "CloseInProgress",
+        "Modified":       _iso_ago(modified_ago_sec),
+    }
+
+
+class TestSync6CloseInProgress:
+    def test_disabled_increments_skipped(self):
+        cfg = ReconcileConfig(sync_6_close_in_progress=SyncTypeConfig(enabled=False))
+        deps = _mk_deps()
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats == {"sync_6_advanced": 0, "sync_6_skipped": 1}
+
+    def test_no_sp_cip_rows_noop(self):
+        cfg = ReconcileConfig()
+        deps = _mk_deps(sp_items=[
+            {"item_no": 1, "delivery_state": "Open"},
+            {"item_no": 2, "delivery_state": "OutreachSent"},
+        ])
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats == {"sync_6_advanced": 0, "sync_6_skipped": 0}
+
+    def test_sp_cip_pg_open_advances(self):
+        """User's staging case: SP shows CIP, Postgres still Open (SP CHANGED
+        alert lost). Force-advance to CLOSED via bypass_guards."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(
+            sp_items=[_mk_sp_cip_row(1, modified_ago_sec=1000)],
+            pg_items=[_mk_item(1, "SM-1", "Open")],
+        )
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        with patch(
+            "core.src.tracker.transitions.update_delivery_state"
+        ) as mock_uds:
+            mock_uds.return_value = SimpleNamespace(outcome="transitioned")
+            _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_6_advanced"] == 1
+        assert mock_uds.call_args.kwargs["bypass_guards"] is True
+
+    def test_sp_cip_pg_outreach_sent_advances(self):
+        """User's staging case #2: SP CIP, Postgres OutreachSent (TPM closed
+        after Start-Collection but SP alert was lost). Also advances."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(
+            sp_items=[_mk_sp_cip_row(1, modified_ago_sec=1000)],
+            pg_items=[_mk_item(1, "SM-1", "OutreachSent")],
+        )
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        with patch(
+            "core.src.tracker.transitions.update_delivery_state"
+        ) as mock_uds:
+            mock_uds.return_value = SimpleNamespace(outcome="transitioned")
+            _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_6_advanced"] == 1
+
+    def test_sp_cip_pg_already_closed_skips(self):
+        """RECON-1 already-closed pattern: SP shows CIP but Postgres is Closed
+        (e.g., HILDA already advanced but SP writeback race). Skip."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(
+            sp_items=[_mk_sp_cip_row(1, modified_ago_sec=1000)],
+            pg_items=[_mk_item(1, "SM-1", "Closed")],
+        )
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        with patch(
+            "core.src.tracker.transitions.update_delivery_state"
+        ) as mock_uds:
+            _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_6_advanced"] == 0
+        assert mock_uds.call_count == 0
+
+    def test_sp_cip_too_fresh_skips(self):
+        """Modified within threshold -- primary apply_tpm_sp_close_in_progress
+        alert path may still be running; don't race it."""
+        cfg = ReconcileConfig()  # sync_6 default threshold 300s
+        deps = _mk_deps(
+            sp_items=[_mk_sp_cip_row(1, modified_ago_sec=60)],  # 60s < 300s
+            pg_items=[_mk_item(1, "SM-1", "Open")],
+        )
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        with patch(
+            "core.src.tracker.transitions.update_delivery_state"
+        ) as mock_uds:
+            _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_6_advanced"] == 0
+        assert mock_uds.call_count == 0
+
+    def test_sp_cip_no_matching_pg_item_skips(self):
+        """SP has a CIP item HILDA never imported; nothing to advance."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(
+            sp_items=[_mk_sp_cip_row(99, modified_ago_sec=1000)],
+            pg_items=[],
+        )
+        stats = {"sync_6_advanced": 0, "sync_6_skipped": 0}
+        with patch(
+            "core.src.tracker.transitions.update_delivery_state"
+        ) as mock_uds:
+            _sync_6_close_in_progress(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        assert stats["sync_6_advanced"] == 0
+        assert mock_uds.call_count == 0
 
 
 # ---------------------------------------------------------------------------

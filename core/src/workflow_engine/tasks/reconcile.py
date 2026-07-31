@@ -807,75 +807,97 @@ def _sync_6_close_in_progress(
     deps: Any, cfg: ReconcileConfig, stats: dict[str, int], correlation_id: str,
     customer_id: str, device_id: str, milestone_id: str,
 ) -> None:
-    """Force-advance items stranded at CloseInProgress past the elapsed
-    threshold. Normally apply_tpm_sp_close_in_progress_task's 2-hop
-    completes in ~1s; anything at CloseInProgress older than the threshold
-    is genuinely stuck (worker crash between hop 1 and hop 2, or SP write
-    in hop 2 that raised, etc.).
+    """RECON-5 (2026-07-30): SP is the authoritative TPM close-intent source.
+
+    Scan SP for items in CloseInProgress and force-advance to CLOSED in both
+    SP and Postgres regardless of Postgres state (Open, OutreachSent, CIP,
+    etc.). Handles the missed-SP-alert case: TPM clicks Close on SP UI, SP
+    writes CIP, the CHANGED alert email to HILDA is lost; without this sync
+    Postgres stays behind indefinitely and SP shows CIP forever.
+
+    Prior implementation (CIP-4 2026-07-28) scanned Postgres for CIP -- only
+    caught the hop-2-crash case (<1s window) and missed the far more common
+    lost-alert case entirely.
 
     Force-advance uses update_delivery_state with bypass_guards=True +
     trigger_source='manual_tpm_override' (reuse of the CLOSE-1 escape
-    hatch; same pattern the primary task uses for hop 2). SP writeback is
-    handled inside update_delivery_state.
+    hatch). SP writeback happens inside update_delivery_state.
 
     No-op when:
       * sync_6 disabled in config
-      * no CloseInProgress items in this scope
-      * item's last_updated within the threshold (still could be racing
-        the primary task's hop 2)
+      * SP read returns no items or no CIP items in this scope
+      * Postgres item is already CLOSED (RECON-1 already-closed pattern)
+      * SP row's Modified timestamp within the elapsed threshold (avoids
+        racing the primary apply_tpm_sp_close_in_progress_task alert path)
     """
     sync_cfg = cfg.sync_6_close_in_progress
     if not sync_cfg.enabled:
         stats["sync_6_skipped"] += 1
         return
 
-    list_items = getattr(deps.storage, "list_items_for_milestone", None)
-    if list_items is None:
-        stats["sync_6_skipped"] += 1
+    sp_items = _sp_read_delivery_items(deps, customer_id, device_id, milestone_id)
+    if not sp_items:
         return
+    sp_cip_rows = [
+        r for r in sp_items
+        if (r.get("delivery_state") or "").strip() == _STATE_CLOSE_IN_PROGRESS
+    ]
+    if not sp_cip_rows:
+        return   # normal case -- no CIP intent on SP for this scope
 
-    try:
-        items = list_items(milestone_id, states=[_STATE_CLOSE_IN_PROGRESS])
-    except Exception as exc:  # noqa: BLE001
-        _log.warning(
-            "sync_6_list_failed: milestone=%s: %s",
-            milestone_id, type(exc).__name__,
-        )
-        stats["sync_6_skipped"] += 1
-        return
-
-    if not items:
-        return  # normal case -- no stragglers
+    pg_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
+    pg_by_item_no: dict[int, Any] = {}
+    for it in pg_items:
+        if (getattr(it, "device_id", None) or "") != device_id:
+            continue
+        it_no = getattr(it, "item_no", None)
+        if it_no is None:
+            continue
+        try:
+            pg_by_item_no[int(it_no)] = it
+        except (TypeError, ValueError):
+            continue
 
     from core.src.template_schema.enums import DeliveryState
     from core.src.tracker.transitions import update_delivery_state
 
     threshold_sec = sync_cfg.elapsed_threshold_sec
-    now_utc = datetime.now(timezone.utc)
 
-    for item in items:
-        # Scope filter: reconciler iterates all customers x devices x
-        # milestones; only touch items belonging to this specific tuple.
-        if device_id and (getattr(item, "device_id", None) or "") != device_id:
+    for sp_row in sp_cip_rows:
+        sp_item_no = sp_row.get("item_no")
+        if sp_item_no is None:
             continue
-        item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
+        try:
+            item_no_int = int(sp_item_no)
+        except (TypeError, ValueError):
+            continue
+        pg_item = pg_by_item_no.get(item_no_int)
+        if pg_item is None:
+            continue   # SP has an item HILDA didn't import; skip
+        pg_state = (getattr(pg_item, "delivery_state", None) or "")
+        if pg_state == _STATE_CLOSED:
+            continue   # already done
+
+        # SP Modified is the closest signal to "when did TPM click Close".
+        # Fall back to Postgres last_updated when SP row lacks Modified.
+        sp_modified = (
+            sp_row.get("Modified")
+            or sp_row.get("modified")
+            or sp_row.get("last_updated")
+        )
+        elapsed = _elapsed_seconds(sp_modified) if sp_modified else None
+        if elapsed is not None and elapsed < threshold_sec:
+            continue   # too fresh, could still be racing the alert path
+
+        item_id = getattr(pg_item, "item_id", None) or getattr(pg_item, "delivery_item_id", None)
         if item_id is None:
             continue
-        last_updated = getattr(item, "last_updated", None) or getattr(item, "state_changed_at", None)
-        elapsed = None
-        if isinstance(last_updated, datetime):
-            lu = last_updated if last_updated.tzinfo else last_updated.replace(tzinfo=timezone.utc)
-            elapsed = (now_utc - lu).total_seconds()
-        # If elapsed is None (missing timestamp) treat as stuck to be safe
-        # -- worker crashes usually don't update last_updated either.
-        if elapsed is not None and elapsed < threshold_sec:
-            continue   # still within the racing window
 
         try:
             result = update_delivery_state(
                 delivery_item_id=item_id,
                 target_state=DeliveryState.CLOSED,
-                params={"closed_via": "reconcile_sync_6_stuck_close_in_progress"},
+                params={"closed_via": "reconcile_sync_6_sp_close_in_progress"},
                 event_context={
                     "correlation_id":   correlation_id,
                     "customer_id":      customer_id,
@@ -897,16 +919,17 @@ def _sync_6_close_in_progress(
 
         if result.outcome in ("transitioned", "no_op_idempotent"):
             stats["sync_6_advanced"] += 1
-            _write_audit(
+            _audit(
                 deps,
-                action_type="reconcile_sync_6_close_in_progress_advanced",
-                delivery_item_id=item_id,
-                details={
+                "reconcile_sync_6_sp_close_in_progress_advanced",
+                item_id,
+                {
                     "milestone_id":    milestone_id,
                     "customer_id":     customer_id,
                     "device_id":       device_id,
                     "correlation_id":  correlation_id,
                     "elapsed_sec":     elapsed,
+                    "pg_state_prior":  pg_state,
                     "trigger_source":  "sync_backfill_close_in_progress",
                 },
             )
