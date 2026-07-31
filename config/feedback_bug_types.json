@@ -1,0 +1,47 @@
+{
+    "_note": "Feedback bug-type registry for /feedback/<customer>/<device>/<milestone> submit form. Category prefix + description forms the display bug_type. Ops edits + hilda-api restart to pick up changes. Add 'OTHER' entries per category if the fixed list is too narrow.",
+    "bug_types_by_category": {
+        "SETUP": [
+            "setup button not available / does not work",
+            "did not receive setup complete notification email",
+            "missing / incorrect work items loaded",
+            "not all items moving to OPEN state after 1 hour"
+        ],
+        "START-COLLECTION": [
+            "collect deliverables button not available / not working",
+            "all/some items not moving to outreach sent even after 1 hour"
+        ],
+        "OWNER-RESPONSE": [
+            "work item not moving to document received",
+            "document routed to incorrect work item",
+            "work item not moving to UnderPMReview even after owner closure confirmation",
+            "the outreach email does not have correct email contents"
+        ],
+        "APPROVE": [
+            "approve icon / button not available / not working",
+            "stays in approval in progress for more than an hour"
+        ],
+        "CLOSE-ITEM": [
+            "closure button / icon not available / not working",
+            "stays in Closing for more than an hour"
+        ],
+        "CLOSE-MILESTONE": [
+            "close-milestone button / icon not available / not working",
+            "milestone stays in \"closing\" for more than an hour"
+        ],
+        "DELETE-MILESTONE": [
+            "delete-milestone button not available / not working",
+            "items and documents not cleaned up after delete",
+            "deletion re-creates the milestone on next SP alert"
+        ],
+        "FINAL-DRR": [
+            "email with final DRR status of items not received on milestone target_date - 1",
+            "email with final DRR status of items not received on milestone target_date",
+            "email with final DRR status of items does not have attachment or body contents incorrect",
+            "email with final DRR status of items has incorrect calculation in attached excel sheet"
+        ],
+        "OTHER": [
+            "OTHER"
+        ]
+    }
+}
