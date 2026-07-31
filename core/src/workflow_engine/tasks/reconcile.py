@@ -483,14 +483,28 @@ def _sync_2_start_collection(
     pg_items = [it for it in pg_items if getattr(it, "device_id", None) == device_id]
     if not pg_items:
         return
-    # RECON-1 (2026-07-30): predicate was _STATE_NOT_STARTED but per task #123
-    # (D-144 auto-transition NS -> Open at import time), items post-setup are
-    # in OPEN, not NotStarted. Prior predicate silently never matched -> sync-2
-    # never fired in production. Correct predicate: "all items still in OPEN"
-    # (i.e., kickoff never advanced any to OutreachSent). If any item is past
-    # Open, kickoff was received -- existing flow handles the rest.
-    if not all((getattr(it, "delivery_state", None) or "") == _STATE_OPEN for it in pg_items):
-        return  # at least one advanced past OPEN; kickoff email was received
+    # RECON-4 (2026-07-30): predicate was "all items still in OPEN" (RECON-1
+    # 2026-07-30 morning) but user reported case where TPM manually closed
+    # 2 items BEFORE Start-Collection was clicked -- 2 in Closed + 84 in Open,
+    # so all-open predicate never matches and sync-2 doesn't fire. Manual
+    # closure is not evidence of kickoff processing (kickoff writes
+    # OutreachSent, not Closed). Correct predicate: no item is in a state
+    # reachable ONLY via kickoff (OutreachSent or later along the collection
+    # path, plus the owner-holding states Delayed/Blocked which are reachable
+    # only from OutreachSent onwards per DeliveryState.CLOSE_IN_PROGRESS
+    # docstring). Closed items are TPM-manual overrides and ignored. Requires
+    # at least one Open item so we don't fire on a milestone where every item
+    # is TPM-closed.
+    _KICKOFF_EVIDENCE_STATES = frozenset({
+        "OutreachSent", "DocumentReceived", "OwnerClosed", "UnderPMReview",
+        "ReadyForSubmission", "SubmittedToCustomer", "CloseInProgress",
+        "Delayed", "Blocked",
+    })
+    states = [(getattr(it, "delivery_state", None) or "") for it in pg_items]
+    if any(s in _KICKOFF_EVIDENCE_STATES for s in states):
+        return  # kickoff email was received -- existing flow handles the rest
+    if not any(s == _STATE_OPEN for s in states):
+        return  # nothing waiting on kickoff (all Closed / NotStarted)
 
     from core.src.workflow_engine.tasks.sp_alert_imports import (
         kickoff_collection_task,

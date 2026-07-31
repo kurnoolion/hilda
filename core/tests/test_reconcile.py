@@ -246,11 +246,59 @@ class TestSync2StartCollection:
         assert stats["sync_2_dispatched"] == 1
 
     def test_all_still_ns_does_not_fire_post_recon1(self):
-        """RECON-1: if items are somehow still in NS (import auto-transition
-        didn't run yet), sync-2 does NOT fire -- 'all Open' predicate fails.
-        Guards against firing on incomplete import state."""
+        """RECON-1/RECON-4: if items are only in NS (no Open, no
+        kickoff-evidence states), sync-2 does NOT fire -- nothing waiting on
+        kickoff (guard: requires at least one Open item)."""
         cfg = ReconcileConfig()
         pg_items = [_mk_item(1, "SM-1", "Not Started"), _mk_item(2, "SM-1", "Not Started")]
+        deps = _mk_deps(pg_items=pg_items)
+        stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}
+        _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
+        assert stats["sync_2_dispatched"] == 0
+
+    def test_open_plus_tpm_closed_fires_recon4(self):
+        """RECON-4 (2026-07-30): TPM manually closed 2 items BEFORE Start-
+        Collection was clicked; 84 Open + 2 Closed. Kickoff was never
+        received (no items in OutreachSent+). Sync-2 must fire to retry the
+        kickoff for the 84 Open items. Closed items are TPM-manual overrides
+        and don't count as kickoff evidence."""
+        cfg = ReconcileConfig()
+        pg_items = (
+            [_mk_item(i, "SM-1", "Open") for i in range(1, 85)]
+            + [_mk_item(85, "SM-1", "Closed"), _mk_item(86, "SM-1", "Closed")]
+        )
+        deps = _mk_deps(pg_items=pg_items)
+        stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}
+        with patch(
+            "core.src.workflow_engine.tasks.sp_alert_imports.kickoff_collection_task"
+        ) as mock_kickoff:
+            mock_kickoff.apply.return_value = SimpleNamespace(result={"outcome": "fired"})
+            _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
+        assert stats["sync_2_dispatched"] == 1
+
+    def test_all_closed_no_dispatch_recon4(self):
+        """RECON-4: milestone where every item is TPM-Closed (no Open
+        remaining) -- nothing waiting on kickoff, so no dispatch."""
+        cfg = ReconcileConfig()
+        pg_items = [_mk_item(1, "SM-1", "Closed"), _mk_item(2, "SM-1", "Closed")]
+        deps = _mk_deps(pg_items=pg_items)
+        stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}
+        _sync_2_start_collection(deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone)
+        assert stats["sync_2_dispatched"] == 0
+
+    def test_any_outreach_sent_blocks_dispatch_recon4(self):
+        """RECON-4: any item in a kickoff-evidence state (OutreachSent, later
+        collection states, or Delayed/Blocked) proves kickoff was received.
+        Mix of Open + OutreachSent + Closed must NOT re-fire kickoff."""
+        cfg = ReconcileConfig()
+        pg_items = [
+            _mk_item(1, "SM-1", "Open"),
+            _mk_item(2, "SM-1", "OutreachSent"),
+            _mk_item(3, "SM-1", "Closed"),
+        ]
         deps = _mk_deps(pg_items=pg_items)
         stats = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
         sp_milestone = {"milestone_collection_started_at": _iso_ago(1000)}
