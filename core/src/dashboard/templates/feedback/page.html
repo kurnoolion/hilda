@@ -1,98 +1,199 @@
-{# FB-3 placeholder -- minimal functional shell. FB-4 replaces with polished UI. #}
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>HILDA Feedback -- {{ customer }} / {{ device }} / {{ milestone }}</title>
-</head>
-<body>
-  <h1>Feedback</h1>
-  <p>Scope: <strong>{{ customer }}</strong> / <strong>{{ device }}</strong> / <strong>{{ milestone }}</strong></p>
+{% extends "base.html" %}
+{% block title %}HILDA Feedback — {{ customer }} / {{ device }} / {{ milestone }}{% endblock %}
+{% block content %}
+<style>
+    /* Feedback-specific overlay on base.html shared styles. */
+    .scope-meta {
+        background: #f0f4fa;
+        border-left: 4px solid #1a3a6c;
+        padding: 0.6em 1em;
+        margin-bottom: 1.2em;
+        font-size: 0.95em;
+    }
+    .scope-meta code { background: #fff; padding: 1px 6px; border-radius: 3px; }
+    .form-card {
+        background: #fafbfd;
+        border: 1px solid #d7dde6;
+        border-radius: 6px;
+        padding: 1.2em 1.5em;
+        margin-bottom: 1.5em;
+    }
+    .form-row { margin-bottom: 1em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6em; }
+    .form-row label.field-label { min-width: 160px; font-weight: 600; color: #333; }
+    .form-row select, .form-row input[type="file"], .form-row textarea {
+        padding: 0.4em; border: 1px solid #c5ccd6; border-radius: 3px;
+        font-family: inherit; font-size: 0.95em; background: #fff;
+    }
+    .form-row select:disabled { background: #eef1f4; color: #888; cursor: not-allowed; }
+    .form-row textarea { flex: 1 1 400px; min-height: 5em; resize: vertical; }
+    .form-row select { min-width: 300px; }
+    .required-mark { color: #b22222; font-weight: 700; margin-left: 0.2em; }
+    .required-mark.hidden { visibility: hidden; }
+    .submit-btn {
+        background: #1a3a6c; color: #fff; border: 0; padding: 0.6em 1.4em;
+        font-size: 1em; border-radius: 3px; cursor: pointer;
+    }
+    .submit-btn:hover { background: #295091; }
+    .form-hint { color: #666; font-size: 0.85em; margin-left: 0.3em; }
 
-  <h2>Submit</h2>
-  <form method="post"
-        action="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/submit"
-        enctype="multipart/form-data">
-    <label>
-      Category:
-      <select name="category" id="category-select">
-        {% for c in categories %}
-          <option value="{{ c }}">{{ c }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <br>
-    <label>
-      Bug type:
-      <select name="bug_type" id="bug-type-select">
-        {% for phase, entries in bug_types_grouped.items() %}
-          <optgroup label="{{ phase }}">
-            {% for entry in entries %}
-              <option value="{{ phase }}-{{ entry }}">{{ entry }}</option>
-            {% endfor %}
-          </optgroup>
-        {% endfor %}
-      </select>
-    </label>
-    <br>
-    <label>
-      Description:
-      <textarea name="description" rows="4" cols="60"></textarea>
-    </label>
-    <br>
-    <label>
-      Target milestone:
-      <select name="target_milestone">
-        {% for m in milestone_options %}
-          <option value="{{ m }}" {% if m == milestone %}selected{% endif %}>{{ m }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <br>
-    <label>
-      Attachment (optional, max {{ max_attachment_mb }} MB):
-      <input type="file" name="attachment">
-    </label>
-    <br>
-    <button type="submit">Submit</button>
-  </form>
+    .ticket-id {
+        font-family: "Consolas", "Menlo", monospace; font-size: 0.9em;
+        background: #eef1f4; padding: 2px 6px; border-radius: 3px;
+    }
+    .badge-cat-bug         { background: #f8d7da; color: #721c24; }
+    .badge-cat-improvement { background: #d1e7f6; color: #0b3d66; }
+    .badge-status-open        { background: #fff3cd; color: #856404; }
+    .badge-status-in-process  { background: #d1e7f6; color: #0b3d66; }
+    .badge-status-closed      { background: #d4edda; color: #155724; }
 
-  <h2>Tickets ({{ tickets|length }})</h2>
-  {% if tickets %}
-    <table border="1" cellpadding="4">
-      <thead>
+    .attachment-thumb {
+        max-width: 120px; max-height: 90px;
+        border: 1px solid #c5ccd6; border-radius: 3px;
+        vertical-align: middle;
+    }
+    .description-cell { max-width: 420px; white-space: pre-wrap; }
+</style>
+
+<h1>HILDA Feedback</h1>
+
+<div class="scope-meta">
+    <strong>Scope:</strong>
+    <code>{{ customer }}</code> /
+    <code>{{ device }}</code> /
+    <code>{{ milestone }}</code>
+    &nbsp;&mdash;&nbsp;
+    Anyone with this URL can submit + view tickets.
+</div>
+
+<h2>Submit</h2>
+<div class="form-card">
+    <form method="post"
+          action="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/submit"
+          enctype="multipart/form-data">
+
+        <div class="form-row">
+            <label class="field-label" for="category-select">Category<span class="required-mark">*</span></label>
+            <select name="category" id="category-select">
+                {% for c in categories %}
+                    <option value="{{ c }}">{{ c }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label class="field-label" for="bug-type-select">Bug type<span class="required-mark">*</span></label>
+            <select name="bug_type" id="bug-type-select">
+                {% for phase, entries in bug_types_grouped.items() %}
+                    <optgroup label="{{ phase }}">
+                        {% for entry in entries %}
+                            <option value="{{ phase }}-{{ entry }}"
+                                    {% if phase == "OTHER" %}data-improvement-default="1"{% endif %}>{{ entry }}</option>
+                        {% endfor %}
+                    </optgroup>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label class="field-label" for="description-input">
+                Description<span class="required-mark hidden" id="description-required">*</span>
+            </label>
+            <textarea name="description" id="description-input"
+                      placeholder="Additional detail for bug reports; required text for improvements."></textarea>
+        </div>
+
+        <div class="form-row">
+            <label class="field-label" for="target-milestone-select">Target milestone</label>
+            <select name="target_milestone" id="target-milestone-select">
+                {% for m in milestone_options %}
+                    <option value="{{ m }}" {% if m == milestone %}selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-row">
+            <label class="field-label" for="attachment-input">Attachment</label>
+            <input type="file" name="attachment" id="attachment-input">
+            <span class="form-hint">Optional. Max {{ max_attachment_mb }} MB. Screenshots inline; other files download-only.</span>
+        </div>
+
+        <div class="form-row">
+            <button type="submit" class="submit-btn">Submit ticket</button>
+        </div>
+    </form>
+</div>
+
+<h2>Tickets ({{ tickets|length }})</h2>
+{% if tickets %}
+<table>
+    <thead>
         <tr>
-          <th>Ticket</th>
-          <th>Created</th>
-          <th>Category</th>
-          <th>Bug type</th>
-          <th>Description</th>
-          <th>Attachment</th>
-          <th>Status</th>
+            <th>Ticket ID</th>
+            <th>Created</th>
+            <th>Category</th>
+            <th>Bug type</th>
+            <th>Description</th>
+            <th>Attachment</th>
+            <th>Status</th>
         </tr>
-      </thead>
-      <tbody>
+    </thead>
+    <tbody>
         {% for t in tickets %}
-          <tr>
-            <td>{{ t.ticket_id }}</td>
+        <tr>
+            <td><span class="ticket-id">{{ t.ticket_id }}</span></td>
             <td>{{ t.created_at.strftime('%Y-%m-%d %H:%M UTC') if t.created_at else '' }}</td>
-            <td>{{ t.category }}</td>
+            <td><span class="badge badge-cat-{{ t.category }}">{{ t.category }}</span></td>
             <td>{{ t.bug_type }}</td>
-            <td>{{ t.description or '' }}</td>
+            <td class="description-cell">{{ t.description or '' }}</td>
             <td>
-              {% if t.attachment_filename %}
-                <a href="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/attachment/{{ t.ticket_pk }}">
-                  {{ t.attachment_filename }}
-                </a>
-              {% endif %}
+                {% if t.attachment_filename %}
+                    {% set att_url = "/feedback/" ~ customer ~ "/" ~ device ~ "/" ~ milestone ~ "/attachment/" ~ t.ticket_pk %}
+                    {% if t.attachment_content_type and t.attachment_content_type.startswith("image/") %}
+                        <a href="{{ att_url }}" class="download-link" title="{{ t.attachment_filename }}">
+                            <img src="{{ att_url }}" alt="{{ t.attachment_filename }}" class="attachment-thumb">
+                        </a>
+                    {% else %}
+                        <a href="{{ att_url }}" class="download-link">{{ t.attachment_filename }}</a>
+                    {% endif %}
+                {% endif %}
             </td>
-            <td>{{ t.status }}</td>
-          </tr>
+            <td><span class="badge badge-status-{{ t.status }}">{{ t.status }}</span></td>
+        </tr>
         {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p><em>No tickets yet for this scope.</em></p>
-  {% endif %}
-</body>
-</html>
+    </tbody>
+</table>
+{% else %}
+<p class="placeholder">No tickets yet for this scope.</p>
+{% endif %}
+
+<script>
+    // Cascading dropdown: when category=improvement, force bug_type=OTHER-OTHER
+    // (server also enforces this; UI just keeps the form honest) + mark
+    // description required. When category=bug, allow bug_type selection +
+    // clear the required indicator.
+    (function () {
+        const categorySelect  = document.getElementById("category-select");
+        const bugTypeSelect   = document.getElementById("bug-type-select");
+        const descriptionInput = document.getElementById("description-input");
+        const requiredMark    = document.getElementById("description-required");
+        const improvementBugType = {{ improvement_bug_type | tojson }};
+
+        function applyCategoryRules() {
+            const isImprovement = categorySelect.value === "improvement";
+            if (isImprovement) {
+                bugTypeSelect.value = improvementBugType;
+                bugTypeSelect.disabled = true;
+                descriptionInput.required = true;
+                requiredMark.classList.remove("hidden");
+            } else {
+                bugTypeSelect.disabled = false;
+                descriptionInput.required = false;
+                requiredMark.classList.add("hidden");
+            }
+        }
+
+        categorySelect.addEventListener("change", applyCategoryRules);
+        applyCategoryRules();
+    })();
+</script>
+{% endblock %}
