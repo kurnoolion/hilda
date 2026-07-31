@@ -1,0 +1,98 @@
+{# FB-3 placeholder -- minimal functional shell. FB-4 replaces with polished UI. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HILDA Feedback -- {{ customer }} / {{ device }} / {{ milestone }}</title>
+</head>
+<body>
+  <h1>Feedback</h1>
+  <p>Scope: <strong>{{ customer }}</strong> / <strong>{{ device }}</strong> / <strong>{{ milestone }}</strong></p>
+
+  <h2>Submit</h2>
+  <form method="post"
+        action="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/submit"
+        enctype="multipart/form-data">
+    <label>
+      Category:
+      <select name="category" id="category-select">
+        {% for c in categories %}
+          <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <br>
+    <label>
+      Bug type:
+      <select name="bug_type" id="bug-type-select">
+        {% for phase, entries in bug_types_grouped.items() %}
+          <optgroup label="{{ phase }}">
+            {% for entry in entries %}
+              <option value="{{ phase }}-{{ entry }}">{{ entry }}</option>
+            {% endfor %}
+          </optgroup>
+        {% endfor %}
+      </select>
+    </label>
+    <br>
+    <label>
+      Description:
+      <textarea name="description" rows="4" cols="60"></textarea>
+    </label>
+    <br>
+    <label>
+      Target milestone:
+      <select name="target_milestone">
+        {% for m in milestone_options %}
+          <option value="{{ m }}" {% if m == milestone %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <br>
+    <label>
+      Attachment (optional, max {{ max_attachment_mb }} MB):
+      <input type="file" name="attachment">
+    </label>
+    <br>
+    <button type="submit">Submit</button>
+  </form>
+
+  <h2>Tickets ({{ tickets|length }})</h2>
+  {% if tickets %}
+    <table border="1" cellpadding="4">
+      <thead>
+        <tr>
+          <th>Ticket</th>
+          <th>Created</th>
+          <th>Category</th>
+          <th>Bug type</th>
+          <th>Description</th>
+          <th>Attachment</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tickets %}
+          <tr>
+            <td>{{ t.ticket_id }}</td>
+            <td>{{ t.created_at.strftime('%Y-%m-%d %H:%M UTC') if t.created_at else '' }}</td>
+            <td>{{ t.category }}</td>
+            <td>{{ t.bug_type }}</td>
+            <td>{{ t.description or '' }}</td>
+            <td>
+              {% if t.attachment_filename %}
+                <a href="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/attachment/{{ t.ticket_pk }}">
+                  {{ t.attachment_filename }}
+                </a>
+              {% endif %}
+            </td>
+            <td>{{ t.status }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p><em>No tickets yet for this scope.</em></p>
+  {% endif %}
+</body>
+</html>

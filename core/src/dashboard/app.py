@@ -740,4 +740,20 @@ def build_app(
     from .document_view_routes import register_document_view_routes
     register_document_view_routes(app, cfg, templates)
 
+    # Ph-1 early-access feedback UI: /feedback/<customer>/<device>/<milestone>.
+    # Requires python-multipart for the submit form's Form/File parsing.
+    # In production (hilda-api container) multipart is installed via
+    # requirements.txt; in some local dev environments it may be missing --
+    # in that case skip route registration rather than crash build_app so
+    # non-feedback tests still run. Warning logged on skip.
+    try:
+        from .feedback_routes import register_feedback_routes
+        register_feedback_routes(app, cfg, templates)
+    except RuntimeError as exc:  # Form(...) triggers ensure_multipart_is_installed
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "feedback routes NOT registered: %s: %s",
+            type(exc).__name__, str(exc)[:200],
+        )
+
     return app
