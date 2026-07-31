@@ -273,6 +273,120 @@ class TestAttachmentDownload:
         assert "no attachment" in r.text
 
 
+class TestNotifyBot:
+    """FB-5 best-effort email notification."""
+
+    def _mk_client_with_sender(self, sender=None, cred_username="hilda-bot@corp"):
+        cfg = DashboardConfig(mock_auth=True, ph1_minimal=False,
+                              reverse_proxy_origin="https://hilda.corp.test")
+        from core.src.dashboard import build_app
+        app = build_app(cfg)
+
+        # Override the best-effort wiring done in build_app with an explicit
+        # test double so we can assert on it.
+        class _FakeCred:
+            def __init__(self, username):
+                self.username = username
+
+        class _FakeCredSvc:
+            def __init__(self, username):
+                self._username = username
+                self.calls: list[tuple[str, str]] = []
+
+            async def get_credential(self, pm_id, system_type, customer_id=None):
+                self.calls.append((pm_id, system_type))
+                return _FakeCred(self._username)
+
+        class _FakeSender:
+            def __init__(self):
+                self.calls: list[dict] = []
+
+            async def send(self, to, cc, subject, body,
+                           in_reply_to=None, attachments=None):
+                self.calls.append({
+                    "to": list(to), "cc": list(cc),
+                    "subject": subject, "body": body,
+                })
+                return "<msgid@test>"
+
+        app.state.credential_service = _FakeCredSvc(cred_username)
+        app.state.email_sender = sender if sender is not None else _FakeSender()
+        return TestClient(app, follow_redirects=False), app.state.email_sender
+
+    def test_notify_sends_email_after_successful_submit(self):
+        client, sender = self._mk_client_with_sender()
+        r = client.post(
+            "/feedback/MMK/SM-A012U/DRR/submit",
+            data={"category": "bug",
+                  "bug_type": "SETUP-setup button not available / does not work",
+                  "description": "clicked, nothing happened",
+                  "target_milestone": "DRR"},
+        )
+        assert r.status_code == 303
+        assert len(sender.calls) == 1
+        call = sender.calls[0]
+        assert call["to"] == ["hilda-bot@corp"]
+        assert "MMK-SM-A012U-DRR-1" in call["subject"]
+        assert "bug" in call["subject"]
+        assert "SETUP" in call["subject"]
+        assert "MMK-SM-A012U-DRR-1" in call["body"]
+        assert "clicked, nothing happened" in call["body"]
+        # Base URL from cfg.reverse_proxy_origin
+        assert "https://hilda.corp.test/feedback/MMK/SM-A012U/DRR" in call["body"]
+
+    def test_notify_includes_attachment_metadata_when_present(self):
+        client, sender = self._mk_client_with_sender()
+        r = client.post(
+            "/feedback/MMK/SM-A012U/DRR/submit",
+            data={"category": "bug", "bug_type": "OTHER-OTHER",
+                  "description": "see file",
+                  "target_milestone": "DRR"},
+            files={"attachment": ("screenshot.png", io.BytesIO(b"data" * 100),
+                                  "image/png")},
+        )
+        assert r.status_code == 303
+        assert len(sender.calls) == 1
+        body = sender.calls[0]["body"]
+        assert "screenshot.png" in body
+        assert "400 bytes" in body
+
+    def test_submit_succeeds_when_email_send_raises(self):
+        # Sender that always raises -- ticket submit should still 303.
+        class _BoomSender:
+            async def send(self, to, cc, subject, body,
+                           in_reply_to=None, attachments=None):
+                raise RuntimeError("EWS down")
+        client, _ = self._mk_client_with_sender(sender=_BoomSender())
+        r = client.post(
+            "/feedback/MMK/SM-A012U/DRR/submit",
+            data={"category": "bug",
+                  "bug_type": "SETUP-setup button not available / does not work",
+                  "description": "",
+                  "target_milestone": "DRR"},
+        )
+        assert r.status_code == 303
+        # Ticket persisted.
+        view = client.get("/feedback/MMK/SM-A012U/DRR")
+        assert "MMK-SM-A012U-DRR-1" in view.text
+
+    def test_submit_succeeds_when_no_sender_wired(self):
+        # No sender/credential -- notify branch is a silent no-op.
+        cfg = DashboardConfig(mock_auth=True, ph1_minimal=False)
+        from core.src.dashboard import build_app
+        app = build_app(cfg)
+        app.state.email_sender = None
+        app.state.credential_service = None
+        with TestClient(app, follow_redirects=False) as c:
+            r = c.post(
+                "/feedback/MMK/SM-A012U/DRR/submit",
+                data={"category": "bug",
+                      "bug_type": "SETUP-setup button not available / does not work",
+                      "description": "",
+                      "target_milestone": "DRR"},
+            )
+            assert r.status_code == 303
+
+
 class TestCrossScopeIndependence:
     def test_ticket_seq_independent_per_scope(self, client):
         # Submit one per scope; each starts at seq 1.

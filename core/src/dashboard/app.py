@@ -740,6 +740,35 @@ def build_app(
     from .document_view_routes import register_document_view_routes
     register_document_view_routes(app, cfg, templates)
 
+    # FB-5 (2026-07-30): optional email sender for feedback submit
+    # notifications. Best-effort wired at build_app so /feedback/*/submit can
+    # await email_sender.send() directly. On failure (config missing, sops
+    # unwrapped, EWS unreachable) leaves app.state.email_sender=None; the
+    # submit route swallows and logs -- ticket create still succeeds.
+    try:
+        import os as _os
+        from core.src.email_service import build_sender as _build_email_sender
+        from core.src.email_service.config import EmailServiceConfig as _EmailServiceConfig
+        from core.src.credential_service.service import SopsCredentialService as _SopsCredentialService
+        from pathlib import Path as _P
+        _age_key_env = _os.environ.get("SOPS_AGE_KEY_FILE")
+        _sops_kwargs: dict = {}
+        if _age_key_env:
+            _sops_kwargs["age_key_path"] = _P(_age_key_env)
+        _cred_svc = _SopsCredentialService(**_sops_kwargs)
+        _email_cfg = _EmailServiceConfig.from_sources()
+        app.state.email_sender = _build_email_sender(_email_cfg, _cred_svc)
+        app.state.credential_service = _cred_svc
+    except Exception as _exc:  # noqa: BLE001 -- optional wiring; log + carry on
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "feedback email_sender NOT wired (feedback submit will skip notify): "
+            "%s: %s",
+            type(_exc).__name__, str(_exc)[:200],
+        )
+        app.state.email_sender = None
+        app.state.credential_service = None
+
     # Ph-1 early-access feedback UI: /feedback/<customer>/<device>/<milestone>.
     # Requires python-multipart for the submit form's Form/File parsing.
     # In production (hilda-api container) multipart is installed via

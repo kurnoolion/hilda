@@ -44,6 +44,78 @@ from core.src.storage.feedback_ops import FeedbackStorage
 
 __all__ = ["register_feedback_routes"]
 
+
+async def _notify_bot_of_new_ticket(
+    app: FastAPI, cfg: Any, ticket: Any,
+) -> None:
+    """Send a best-effort notification email to the BOT self mailbox
+    announcing a new ticket. Silent no-op when email_sender or
+    credential_service isn't wired (dev / test setups). Any failure is
+    swallowed with a warning log -- ticket create already succeeded and
+    email is a nudge, not a guarantee.
+    """
+    sender = getattr(app.state, "email_sender", None)
+    cred_svc = getattr(app.state, "credential_service", None)
+    if sender is None or cred_svc is None:
+        _log.info(
+            "feedback notify skipped for ticket_id=%s: email_sender or "
+            "credential_service not wired",
+            getattr(ticket, "ticket_id", "?"),
+        )
+        return
+    try:
+        cred = await cred_svc.get_credential(pm_id="ops", system_type="email")
+        bot_addr = getattr(cred, "username", None)
+        if not bot_addr:
+            _log.warning(
+                "feedback notify skipped for ticket_id=%s: EMAIL credential "
+                "has no username",
+                getattr(ticket, "ticket_id", "?"),
+            )
+            return
+        subject = (
+            f"[HILDA Feedback] {ticket.customer_id}/{ticket.device_id}/"
+            f"{ticket.milestone_id} {ticket.ticket_id} -- {ticket.category}: "
+            f"{ticket.bug_type}"
+        )
+        base_url = (getattr(cfg, "reverse_proxy_origin", "") or "").rstrip("/")
+        view_url = (
+            f"{base_url}/feedback/{ticket.customer_id}/{ticket.device_id}/"
+            f"{ticket.milestone_id}"
+        )
+        att_line = (
+            f"\nAttachment: {ticket.attachment_filename} "
+            f"({ticket.attachment_size or 0} bytes)"
+            if ticket.attachment_filename else ""
+        )
+        body = (
+            f"A new feedback ticket has been submitted.\n\n"
+            f"Ticket ID:  {ticket.ticket_id}\n"
+            f"Scope:      {ticket.customer_id} / {ticket.device_id} / "
+            f"{ticket.milestone_id}\n"
+            f"Category:   {ticket.category}\n"
+            f"Bug type:   {ticket.bug_type}\n"
+            f"Status:     {ticket.status}\n"
+            f"Created:    {ticket.created_at.isoformat() if ticket.created_at else '?'}"
+            f"{att_line}\n\n"
+            f"Description:\n{ticket.description or '(none)'}\n\n"
+            f"View + manage: {view_url}\n"
+        )
+        await sender.send(
+            to=[bot_addr], cc=[], subject=subject, body=body,
+        )
+        _log.info(
+            "feedback notify sent for ticket_id=%s to %s",
+            ticket.ticket_id, bot_addr,
+        )
+    except Exception as exc:  # noqa: BLE001 -- best-effort per architect ask
+        _log.warning(
+            "feedback notify FAILED for ticket_id=%s: %s: %s (ticket already "
+            "committed; UI submit succeeded)",
+            getattr(ticket, "ticket_id", "?"),
+            type(exc).__name__, str(exc)[:200],
+        )
+
 _log = logging.getLogger(__name__)
 
 _MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024   # 5 MB
@@ -198,7 +270,7 @@ def register_feedback_routes(
 
         store: FeedbackStorage = request.app.state.feedback_storage
         try:
-            store.create_ticket(
+            ticket = store.create_ticket(
                 customer_id=customer,
                 device_id=device,
                 milestone_id=target_milestone,
@@ -219,6 +291,10 @@ def register_feedback_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to create ticket: {type(exc).__name__}",
             )
+
+        # FB-5: best-effort notification to BOT self mailbox. Ticket already
+        # committed to Postgres above -- email failure never fails the submit.
+        await _notify_bot_of_new_ticket(request.app, cfg, ticket)
 
         return RedirectResponse(
             url=f"/feedback/{customer}/{device}/{target_milestone}",
