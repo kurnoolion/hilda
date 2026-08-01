@@ -36,6 +36,11 @@ _ENV_MAP = {
     "final_deliverable_milestone_names": "HILDA_TPM_NOTIFICATION_FINAL_DELIVERABLE_MILESTONE_NAMES",
     "setup_complete_enabled":              "HILDA_TPM_NOTIFICATION_SETUP_COMPLETE_ENABLED",
     "setup_complete_beat_interval_seconds": "HILDA_TPM_NOTIFICATION_SETUP_COMPLETE_BEAT_INTERVAL_SECONDS",
+    # UR-8 (Ph-2 2026-08-01): ops weekly digest for unrouted (_unknownTG) files.
+    "ops_unrouted_digest_enabled":                "HILDA_TPM_NOTIFICATION_OPS_UNROUTED_DIGEST_ENABLED",
+    "ops_unrouted_digest_beat_interval_seconds":  "HILDA_TPM_NOTIFICATION_OPS_UNROUTED_DIGEST_BEAT_INTERVAL_SECONDS",
+    "ops_unrouted_digest_recipient":              "HILDA_TPM_NOTIFICATION_OPS_UNROUTED_DIGEST_RECIPIENT",
+    "ops_unrouted_digest_min_count":              "HILDA_TPM_NOTIFICATION_OPS_UNROUTED_DIGEST_MIN_COUNT",
 }
 
 
@@ -72,6 +77,17 @@ class TpmNotificationConfig(BaseModel):
     # (option A per architect 2026-07-28; option B "delta emails" deferred).
     setup_complete_enabled:                bool = True
     setup_complete_beat_interval_seconds:  int  = 60
+
+    # UR-8 (Ph-2 2026-08-01) ops weekly digest for unrouted files. Beat task
+    # scans every (customer, device, milestone) scope with document_index
+    # rows and aggregates the /_unknownTG bucket counts into one email to
+    # `ops_unrouted_digest_recipient`. Weekly cadence keeps ops signal-to-
+    # noise high; per-scope zeroes are suppressed. When the recipient is
+    # empty the tick short-circuits (same enabled=false semantics).
+    ops_unrouted_digest_enabled:               bool = True
+    ops_unrouted_digest_beat_interval_seconds: int  = 604800    # 7 days
+    ops_unrouted_digest_recipient:             str  = ""
+    ops_unrouted_digest_min_count:             int  = 1         # send only when total >= this
 
     @field_validator("final_deliverable_milestone_names", mode="before")
     @classmethod

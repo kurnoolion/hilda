@@ -30,6 +30,7 @@ from core.src.template_schema import DocType, IngestSource
 from core.src.storage.nsd import NSDPath
 from core.src.storage.unrouted_ops import (
     count_unrouted_for_scope,
+    list_all_unrouted_scopes,
     list_route_candidates_for_scope,
     list_unrouted_for_scope,
     route_unrouted_to_item,
@@ -193,6 +194,27 @@ class TestCountUnrouted:
         await add_document_index_row(_mk_doc(file_hash=HASH_A, customer="OTHER"))
         await add_document_index_row(_mk_doc(file_hash=HASH_B, milestone="OtherMs"))
         assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 0
+
+
+class TestListAllUnroutedScopes:
+    """UR-8: enumerate distinct (customer, device, milestone) tuples in
+    document_index for the weekly ops digest scan."""
+
+    async def test_empty(self):
+        assert await list_all_unrouted_scopes() == []
+
+    async def test_returns_distinct_scopes(self):
+        # Two docs in same scope + one in another -> 2 distinct scopes
+        await add_document_index_row(_mk_doc(file_hash=HASH_A))
+        await add_document_index_row(_mk_doc(file_hash=HASH_B))
+        await add_document_index_row(_mk_doc(
+            file_hash=HASH_C, customer="OTHER", milestone="GCF",
+        ))
+        scopes = set(await list_all_unrouted_scopes())
+        assert scopes == {
+            ("MMK", "SM-A012U", "DRR"),
+            ("OTHER", "SM-A012U", "GCF"),
+        }
 
 
 class TestListRouteCandidates:

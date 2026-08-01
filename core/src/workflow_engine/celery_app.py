@@ -118,6 +118,17 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "schedule": 60.0,
             "options":  {"queue": "default", "expires": 55},
         },
+        # UR-8 (Ph-2 2026-08-01) — weekly ops digest of unrouted files (the
+        # _unknownTG bucket). Aggregates counts across every scope with
+        # document_index rows and emails ops. Interval hard-coded here at 7d;
+        # runtime cadence + recipient + min-count threshold + kill switch all
+        # live on TpmNotificationConfig (ops_unrouted_digest_*). Empty
+        # recipient short-circuits the tick.
+        "ops_unrouted_digest_weekly": {
+            "task":     "core.src.workflow_engine.tasks.ops_digest.ops_unrouted_digest_tick",
+            "schedule": 604800.0,
+            "options":  {"queue": "default", "expires": 3600},
+        },
     }
     return app
 

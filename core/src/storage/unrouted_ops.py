@@ -58,6 +58,7 @@ __all__ = [
     "UnroutedFileRow",
     "RouteResult",
     "count_unrouted_for_scope",
+    "list_all_unrouted_scopes",
     "list_unrouted_for_scope",
     "list_route_candidates_for_scope",
     "route_unrouted_to_item",
@@ -91,6 +92,32 @@ class RouteResult:
     target_delivery_item_id: str | None = None
     target_nsd_path: str | None = None    # relative
     error: str | None = None
+
+
+async def list_all_unrouted_scopes() -> list[tuple[str, str, str]]:
+    """UR-8 (2026-08-01): enumerate every distinct (customer_id, device_id,
+    milestone_id) tuple present in document_index. The ops digest task
+    consumes this + count_unrouted_for_scope to build the weekly per-
+    scope report.
+
+    Only rows with all three columns populated qualify -- legacy rows
+    without customer_id/device_id (pre UR-1) are excluded. Empty list
+    on any error is fine here: the ops digest treats zero scopes as
+    "nothing to report".
+    """
+    async with session_scope() as session:
+        result = await session.execute(
+            select(
+                DocumentIndexTable.customer_id,
+                DocumentIndexTable.device_id,
+                DocumentIndexTable.milestone_id,
+            ).where(
+                DocumentIndexTable.customer_id.is_not(None),
+                DocumentIndexTable.device_id.is_not(None),
+                DocumentIndexTable.milestone_id.is_not(None),
+            ).distinct()
+        )
+        return [(c, d, m) for (c, d, m) in result.all()]
 
 
 async def count_unrouted_for_scope(

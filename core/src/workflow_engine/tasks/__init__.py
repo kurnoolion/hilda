@@ -34,6 +34,7 @@ from . import (  # noqa: F401
     tpm_notification,  # added 2026-07-15: scheduled DRR closure final-status email to TPM (Phase C serialization ask)
     tpm_sp_close,      # added 2026-07-23: mirror SP-authored delivery_state='Closed' from TPM SP UI clicks
     setup_complete_notification,  # SETUP-1 added 2026-07-28: TPM email when all items in a scope are past Not Started
+    ops_digest,   # UR-8 added 2026-08-01: weekly ops digest of unrouted files
 )
 
 __all__ = [
@@ -54,4 +55,5 @@ __all__ = [
     "tpm_notification",
     "tpm_sp_close",
     "setup_complete_notification",
+    "ops_digest",
 ]
