@@ -67,6 +67,9 @@ def _row_to_model(row: DocumentIndexTable) -> DocumentIndexRow:
     return DocumentIndexRow(
         file_hash=row.file_hash,
         milestone_id=row.milestone_id,
+        # UR-1 (Ph-2 2026-08-01): hydrate carrier + device_id back into the model.
+        customer_id=row.customer_id,
+        device_id=row.device_id,
         doc_type=DocType(row.doc_type),
         doc_id_slug=row.doc_id_slug,
         rev_number=row.rev_number,
@@ -117,6 +120,9 @@ async def add_document_index_row(row: DocumentIndexRow) -> None:
             DocumentIndexTable(
                 file_hash=row.file_hash,
                 milestone_id=row.milestone_id,
+                # UR-1 (Ph-2 2026-08-01): carrier + device scoping for /_unknownTG UI.
+                customer_id=row.customer_id,
+                device_id=row.device_id,
                 doc_type=row.doc_type.value,
                 doc_id_slug=row.doc_id_slug,
                 rev_number=row.rev_number,

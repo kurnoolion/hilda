@@ -71,10 +71,27 @@ class DocumentIndexTable(Base):
             postgresql_where=text("doc_id_slug IS NOT NULL AND rev_number IS NOT NULL"),
             sqlite_where=text("doc_id_slug IS NOT NULL AND rev_number IS NOT NULL"),
         ),
+        # UR-1 (Ph-2 2026-08-01): scoped lookup for the /_unknownTG UI --
+        # `WHERE routing_resolution='unrouted' AND customer_id=? AND device_id=?
+        # AND milestone_id=?`. Same milestone_name can exist across carriers,
+        # same device_id across carriers, so all three columns are needed to
+        # scope unrouted files to a single browse view.
+        Index(
+            "ix_di_unrouted_scope",
+            "routing_resolution", "customer_id", "device_id", "milestone_id",
+        ),
     )
 
     file_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     milestone_id: Mapped[str] = mapped_column(String(64), index=True)
+    # UR-1 (Ph-2 2026-08-01): carrier + device_id populated at ingest so the
+    # /_unknownTG UI can scope unrouted files correctly. Nullable so existing
+    # rows and any future edge-case ingests without full scope info don't
+    # break. Legacy rows (pre-UR-1) will have NULL here and won't appear in
+    # the new UI -- accepted one-time gap (they've been sitting unrouted
+    # since before the feature existed; ops handles them via SQL if needed).
+    customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     doc_type: Mapped[str] = mapped_column(String(64))
     # Widened to 256 (2026-06-30): real Samsung filenames produce slugs up to
     # ~70 chars (e.g. SM-A176U Qualification Workspace - Qualified Product

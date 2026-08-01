@@ -127,6 +127,13 @@ class DocumentIndexRow(BaseModel):
 
     file_hash: str                          # PK — SHA-256 per [D-039] Step 0
     milestone_id: str                       # FR-79 single-milestone invariant keeps this stable
+    # UR-1 (Ph-2 2026-08-01): carrier + device scoping so the /_unknownTG UI
+    # can list unrouted files per (customer, device, milestone). Same
+    # milestone_name can exist across carriers; same device_id can too.
+    # Both default None for backward compat with existing callers not yet
+    # updated to pass them (populated at ingest paths in UR-2).
+    customer_id: str | None = None
+    device_id: str | None = None
     doc_type: DocType                       # 5-value enum; UNRESOLVED is a sentinel value, never None
     doc_id_slug: str | None = None          # stable across revisions per FR-57; NULL while staged
     rev_number: int | None = None           # 1 new, ≥2 revisions per FR-17; NULL while staged

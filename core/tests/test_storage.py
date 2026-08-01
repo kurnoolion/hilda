@@ -245,6 +245,27 @@ class TestDocumentIndex:
         revs = await list_revisions("ms-1", "report-a")
         assert [r.rev_number for r in revs] == [1, 2]
 
+    async def test_ur1_carrier_device_columns_default_none_and_round_trip(self):
+        """UR-1 (Ph-2 2026-08-01): new customer_id + device_id columns default
+        None for backward compat, and round-trip through the ORM when set."""
+        # Default None
+        await add_document_index_row(make_doc(file_hash=HASH_A))
+        row = await get_document_index_row_by_hash(HASH_A)
+        assert row is not None
+        assert row.customer_id is None
+        assert row.device_id is None
+
+        # Explicit values round-trip -- different slug avoids colliding with
+        # HASH_A's row on the (milestone, slug, rev) unique index.
+        await add_document_index_row(make_doc(
+            file_hash=HASH_B, slug="report-b",
+            customer_id="MMK", device_id="SM-A012U",
+        ))
+        row = await get_document_index_row_by_hash(HASH_B)
+        assert row is not None
+        assert row.customer_id == "MMK"
+        assert row.device_id == "SM-A012U"
+
     async def test_update_review_findings_unknown_raises_e002(self):
         with pytest.raises(PipelineError) as exc:
             await update_review_findings("f" * 64, None, None)
