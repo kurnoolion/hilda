@@ -29,6 +29,7 @@ from core.src.storage.nsd import NSDPath
 from core.src.template_schema import DocType, IngestSource
 from core.src.storage.nsd import NSDPath
 from core.src.storage.unrouted_ops import (
+    count_unrouted_for_scope,
     list_route_candidates_for_scope,
     list_unrouted_for_scope,
     route_unrouted_to_item,
@@ -161,6 +162,37 @@ class TestListUnrouted:
         ))
         result = await list_unrouted_for_scope("MMK", "SM-A012U", "DRR")
         assert result == []
+
+
+class TestCountUnrouted:
+    """UR-7 landing-badge count helper — same predicate as list, single COUNT."""
+
+    async def test_zero_when_empty(self):
+        assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 0
+
+    async def test_counts_in_scope_unrouted(self):
+        await add_document_index_row(_mk_doc(file_hash=HASH_A))
+        await add_document_index_row(_mk_doc(file_hash=HASH_B))
+        assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 2
+
+    async def test_excludes_associated_rows(self):
+        await add_document_index_row(_mk_doc(file_hash=HASH_A))
+        await add_document_index_row(_mk_doc(file_hash=HASH_B))
+        await add_document_item_association(DocumentItemAssociation(
+            file_hash=HASH_A,
+            delivery_item_id="MMK-SM-A012U-DRR-99",
+            milestone_id="DRR",
+            local_nsd_path="internal/MMK/SM-A012U/DRR/CPM/item_99/report.pdf",
+            nsd_path_type=NSDPathType.CLASSIFIED,
+            owner_corp_id="owner-1",
+            associated_at=NOW,
+        ))
+        assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 1
+
+    async def test_scope_filters(self):
+        await add_document_index_row(_mk_doc(file_hash=HASH_A, customer="OTHER"))
+        await add_document_index_row(_mk_doc(file_hash=HASH_B, milestone="OtherMs"))
+        assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 0
 
 
 class TestListRouteCandidates:

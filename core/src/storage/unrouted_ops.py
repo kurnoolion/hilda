@@ -57,6 +57,7 @@ from core.src.template_schema.enums import DocType, IngestSource, ItemType
 __all__ = [
     "UnroutedFileRow",
     "RouteResult",
+    "count_unrouted_for_scope",
     "list_unrouted_for_scope",
     "list_route_candidates_for_scope",
     "route_unrouted_to_item",
@@ -90,6 +91,28 @@ class RouteResult:
     target_delivery_item_id: str | None = None
     target_nsd_path: str | None = None    # relative
     error: str | None = None
+
+
+async def count_unrouted_for_scope(
+    customer_id: str, device_id: str, milestone_id: str,
+) -> int:
+    """UR-7 (2026-08-01): landing-page count badge for the _unknownTG
+    bucket. Same predicate as list_unrouted_for_scope (in-scope
+    document_index row with NO association) but a single SELECT COUNT --
+    avoids loading rows + the second dup-hash query the list helper does.
+    """
+    async with session_scope() as session:
+        result = await session.execute(
+            select(func.count()).select_from(DocumentIndexTable).where(
+                DocumentIndexTable.customer_id == customer_id,
+                DocumentIndexTable.device_id == device_id,
+                DocumentIndexTable.milestone_id == milestone_id,
+                ~select(DocumentItemAssociationTable.file_hash).where(
+                    DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash
+                ).exists(),
+            )
+        )
+        return int(result.scalar() or 0)
 
 
 async def list_unrouted_for_scope(
@@ -376,6 +399,13 @@ class UnroutedStorage:
         self, *, customer_id: str, device_id: str, milestone_id: str,
     ) -> list[UnroutedFileRow]:
         return run_async_sync(lambda: list_unrouted_for_scope(
+            customer_id, device_id, milestone_id,
+        ))
+
+    def count_unrouted(
+        self, *, customer_id: str, device_id: str, milestone_id: str,
+    ) -> int:
+        return run_async_sync(lambda: count_unrouted_for_scope(
             customer_id, device_id, milestone_id,
         ))
 

@@ -428,17 +428,26 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         principal=Depends(_auth),
     ):
         from core.src.storage import list_tg_names_for_scope
+        from core.src.storage.unrouted_ops import count_unrouted_for_scope
         entries = await list_tg_names_for_scope(
             customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        )
+        # UR-7 (2026-08-01): _unknownTG bucket count -- surface an entry
+        # for the manual-routing page even when zero, so TPMs learn where
+        # unrouted files go when the first one lands.
+        unrouted_count = await count_unrouted_for_scope(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id,
         )
         return templates.TemplateResponse(
             request,
             "view_tree_landing.html",
             {
-                "customer_id":  customer_id,
-                "device_id":    device_id,
-                "milestone_id": milestone_id,
-                "tg_entries":   entries,
+                "customer_id":    customer_id,
+                "device_id":      device_id,
+                "milestone_id":   milestone_id,
+                "tg_entries":     entries,
+                "unrouted_count": unrouted_count,
             },
         )
 

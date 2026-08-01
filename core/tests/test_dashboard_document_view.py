@@ -166,6 +166,52 @@ class TestBrowseRoutes:
         assert r.status_code == 200
         assert "hw_reports" in r.text
 
+    async def test_landing_always_shows_unknownTG_bucket(self, cfg):
+        """UR-7: even with zero unrouted files the bucket row renders so
+        TPMs learn where unrouted files go once the first one lands."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("r.xlsx",),
+            content=b"x", saved_by="pm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/")
+        assert r.status_code == 200
+        assert "_unknownTG" in r.text
+        assert "/browse/MMK/SM-S671U1/DRR/_unknownTG/" in r.text
+        # No badge when count is zero
+        assert "unrouted</span>" not in r.text
+
+    async def test_landing_shows_badge_when_unrouted_present(self, cfg):
+        """UR-7: highlighted badge appears when unrouted count > 0."""
+        from datetime import datetime, timezone
+        from core.src.storage import add_document_index_row
+        from core.src.storage.models import (
+            DocumentIndexRow, RoutingResolution,
+        )
+        from core.src.template_schema import DocType, IngestSource
+        await add_document_index_row(DocumentIndexRow(
+            file_hash="a" * 64, milestone_id="DRR",
+            customer_id="MMK", device_id="SM-S671U1",
+            doc_type=DocType.TEST_REPORT, doc_id_slug=None, rev_number=None,
+            ingest_source=IngestSource.EMAIL, original_filename="orphan.pdf",
+            routing_resolution=RoutingResolution.STAGED_DEFAULT,
+            ingested_at=datetime.now(timezone.utc),
+        ))
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/")
+        assert r.status_code == 200
+        assert "1 unrouted" in r.text
+
+    async def test_landing_empty_and_no_unrouted_shows_empty_message(self, cfg):
+        """UR-7 regression: the empty-state message still fires when
+        BOTH tg_entries AND unrouted are empty (previously only checked
+        tg_entries)."""
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/")
+        assert r.status_code == 200
+        assert "No documents received yet" in r.text
+
     async def test_tg_files_page_lists_files_and_actions(self, cfg):
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
