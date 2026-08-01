@@ -343,14 +343,25 @@ async def _process_archive_attachment(
     file_hash = getattr(attachment, "file_hash", "") or ""
 
     milestone_id = ""
+    customer_id: str | None = None
+    device_id: str | None = None
     if candidate_items:
         milestone_id = candidate_items[0].get("milestone_id") or ""
+        # UR-2 (Ph-2 2026-08-01): scope carrier + device from the first
+        # candidate; the whole batch shares customer + milestone by
+        # construction. Device is per-item so this picks the first
+        # candidate's device; sufficient for /_unknownTG which shows the
+        # outer archive alongside its unrouted inner files.
+        customer_id = candidate_items[0].get("customer_id")
+        device_id = candidate_items[0].get("device_id")
 
     # Step 1: outer archive audit row — idempotent.
     try:
         deps.storage.add_document_index_row(DocumentIndexRow(
             file_hash=file_hash,
             milestone_id=milestone_id,
+            customer_id=customer_id,
+            device_id=device_id,
             doc_type="",                               # archive: no doc_type
             doc_id_slug=None,
             rev_number=None,
@@ -892,6 +903,18 @@ async def _persist_routed_attachment(
         or (candidate_items[0].get("milestone_id") if candidate_items else None)
         or ""
     )
+    # UR-2 (Ph-2 2026-08-01): customer + device for /_unknownTG scoping. Same
+    # resolution as milestone above -- primary match wins, else first
+    # candidate. Left None (nullable column) when neither is available,
+    # which means the row won't show up in the /_unknownTG UI.
+    customer_id = (
+        (primary_item_dict or {}).get("customer_id")
+        or (candidate_items[0].get("customer_id") if candidate_items else None)
+    )
+    device_id = (
+        (primary_item_dict or {}).get("device_id")
+        or (candidate_items[0].get("device_id") if candidate_items else None)
+    )
 
     # Architect 2026-06-30: bounded retry on transient asyncpg session blips
     # (STR-E001). Each storage op opens its own session, so a one-off connection
@@ -915,6 +938,8 @@ async def _persist_routed_attachment(
             deps.storage.add_document_index_row(DocumentIndexRow(
                 file_hash=routed.file_hash,
                 milestone_id=milestone_id,
+                customer_id=customer_id,
+                device_id=device_id,
                 doc_type=routed.doc_type,
                 doc_id_slug=routed.doc_id_slug,
                 rev_number=routed.rev_number,
