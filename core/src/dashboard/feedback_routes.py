@@ -27,6 +27,7 @@ ops-managed lifecycle (open / in-process / closed).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
@@ -64,13 +65,33 @@ async def _notify_bot_of_new_ticket(
         )
         return
     try:
-        cred = await cred_svc.get_credential(pm_id="ops", system_type="email")
-        bot_addr = getattr(cred, "username", None)
+        # Recipient address resolution:
+        # 1. HILDA_FEEDBACK_NOTIFY_TO env var if set (ops override; wins).
+        # 2. Otherwise derive from EMAIL credential's username, stripping any
+        #    "DOMAIN\" AD prefix (Windows Exchange stores the auth username as
+        #    "SEA\OMADM_BOT" which is a valid login but NOT a valid RFC5322
+        #    recipient address). If the sanitized value has no '@', we can't
+        #    guess the domain safely -- log + skip.
+        bot_addr = os.environ.get("HILDA_FEEDBACK_NOTIFY_TO", "").strip()
+        if not bot_addr:
+            cred = await cred_svc.get_credential(pm_id="ops", system_type="email")
+            raw = (getattr(cred, "username", None) or "").strip()
+            # Strip DOMAIN\ prefix if present (AD login format).
+            bot_addr = raw.rsplit("\\", 1)[-1] if "\\" in raw else raw
         if not bot_addr:
             _log.warning(
-                "feedback notify skipped for ticket_id=%s: EMAIL credential "
-                "has no username",
+                "feedback notify skipped for ticket_id=%s: no recipient "
+                "address (HILDA_FEEDBACK_NOTIFY_TO unset + EMAIL credential "
+                "username empty)",
                 getattr(ticket, "ticket_id", "?"),
+            )
+            return
+        if "@" not in bot_addr:
+            _log.warning(
+                "feedback notify skipped for ticket_id=%s: derived recipient "
+                "'%s' has no '@' -- set HILDA_FEEDBACK_NOTIFY_TO to a full "
+                "mailbox address like user@domain.tld",
+                getattr(ticket, "ticket_id", "?"), bot_addr,
             )
             return
         subject = (
