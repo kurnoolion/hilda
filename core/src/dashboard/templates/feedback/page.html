@@ -52,6 +52,11 @@
         vertical-align: middle;
     }
     .description-cell { max-width: 420px; white-space: pre-wrap; }
+    .resolution-cell  {
+        max-width: 320px; white-space: pre-wrap;
+        color: #155724; font-style: italic;
+    }
+    .resolution-placeholder { color: #999; font-style: italic; }
 </style>
 
 <div style="float:right;">
@@ -141,6 +146,7 @@
             <th>Description</th>
             <th>Attachment</th>
             <th>Status</th>
+            <th>Resolution</th>
         </tr>
     </thead>
     <tbody>
@@ -164,6 +170,13 @@
                 {% endif %}
             </td>
             <td><span class="badge badge-status-{{ t.status }}">{{ t.status }}</span></td>
+            <td class="resolution-cell">
+                {% if t.resolution_note %}
+                    {{ t.resolution_note }}
+                {% elif t.status == "closed" %}
+                    <span class="resolution-placeholder">— (no note provided)</span>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
     </tbody>

@@ -109,12 +109,29 @@ DELETE FROM feedback_ticket WHERE description LIKE 'smoke-test%';
 Ph-1: status transitions are ops-managed via SQL. TPMs only submit + view.
 
 ```sql
+-- Moving to in-process (with an optional short note explaining what's happening):
 UPDATE feedback_ticket
-   SET status='in-process', updated_at=now(), resolution_note='<notes>'
- WHERE ticket_id='MMK-SM-A012U-DRR-3';
+   SET status = 'in-process',
+       updated_at = now(),
+       resolution_note = 'Working on it -- suspected sync-3 race. ETA end of week.'
+ WHERE ticket_id = 'MMK-SM-A012U-DRR-3';
+
+-- Closing a ticket -- ALWAYS include resolution_note so the TPM knows why.
+-- The view page renders resolution_note verbatim in a "Resolution" column;
+-- if you close without a note, the TPM sees a "— (no note provided)"
+-- placeholder which is fine for trivial dupes but confusing for real fixes.
+UPDATE feedback_ticket
+   SET status = 'closed',
+       updated_at = now(),
+       resolution_note = 'Fixed in commit abc1234 -- deploy tomorrow after DRR window.'
+ WHERE ticket_id = 'MMK-SM-A012U-DRR-3';
 ```
 
 Valid status values: `open` (default), `in-process`, `closed`.
+
+The `resolution_note` field is Text (unlimited length), rendered as
+pre-wrapped text so line breaks are preserved. Keep it short and
+TPM-readable -- ops-jargon-heavy notes belong in the audit log, not here.
 
 ### Add / remove a bug type
 
