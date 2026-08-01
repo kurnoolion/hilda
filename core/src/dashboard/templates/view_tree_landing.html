@@ -3,6 +3,12 @@
 {% block title %}HILDA — Documents ({{ milestone_id }}){% endblock %}
 
 {% block content %}
+<div style="float:right;">
+  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+     style="display:inline-block; background:#1a3a6c; color:#fff;
+            padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
+            font-size:0.9em;">Report issue / feedback</a>
+</div>
 <h1>Documents — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
 
 <p>Choose a technology group (tg) to browse its documents. Every document

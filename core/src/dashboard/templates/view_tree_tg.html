@@ -3,6 +3,12 @@
 {% block title %}HILDA — {{ tg_name }} · {{ milestone_id }}{% endblock %}
 
 {% block content %}
+<div style="float:right;">
+  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+     style="display:inline-block; background:#1a3a6c; color:#fff;
+            padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
+            font-size:0.9em;">Report issue / feedback</a>
+</div>
 <p><a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
 
 <h1>{{ tg_name }} — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
