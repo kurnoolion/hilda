@@ -48,9 +48,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from fastapi import (
-    APIRouter, Body, Depends, FastAPI, Header, HTTPException, Request, status,
+    APIRouter, Body, Depends, FastAPI, Form, Header, HTTPException, Request,
+    status,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse,
+)
 
 __all__ = ["register_document_view_routes"]
 
@@ -586,6 +589,10 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             }
             for u in unrouted
         ]
+        # UR-6 (Ph-2 2026-08-01): outcome flash from redirect (POST -> 303 GET)
+        flash_outcome = request.query_params.get("outcome") or None
+        flash_target  = request.query_params.get("target")  or None
+        flash_error   = request.query_params.get("error")   or None
         return templates.TemplateResponse(
             request,
             "view_tree_unrouted.html",
@@ -595,7 +602,60 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "milestone_id": milestone_id,
                 "unrouted":     rows,
                 "candidates":   candidate_rows,
+                "flash_outcome":flash_outcome,
+                "flash_target": flash_target,
+                "flash_error":  flash_error,
             },
+        )
+
+    # UR-6 (Ph-2 2026-08-01): manual route commit. POST-Redirect-Get:
+    # returns 303 back to /_unknownTG/ with outcome + target as query
+    # params so the GET renders a flash message. Never renders inline --
+    # keeps refresh-safe.
+    @app.post(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/_unknownTG/route",
+        response_class=HTMLResponse, response_model=None,
+    )
+    async def browse_unrouted_route(
+        customer_id: str, device_id: str, milestone_id: str,
+        request: Request,
+        file_hash: str = Form(...),
+        target_delivery_item_id: str = Form(...),
+        principal=Depends(_auth),
+    ):
+        """Commit a manual routing decision from the /_unknownTG/ UI.
+
+        Delegates to storage.unrouted_ops.route_unrouted_to_item, then 303s
+        back to the /_unknownTG/ page with ?outcome=<code>&target=<item>
+        (or &error=<detail> on failed) so the browser refresh doesn't
+        replay the POST.
+        """
+        from core.src.storage.unrouted_ops import route_unrouted_to_item
+
+        tpm_id = (
+            getattr(principal, "corp_id", None)
+            or getattr(principal, "user_id", None)
+            or "unknown"
+        )
+        result = await route_unrouted_to_item(
+            file_hash=file_hash,
+            target_delivery_item_id=target_delivery_item_id,
+            tpm_id=tpm_id,
+        )
+
+        from urllib.parse import urlencode
+        params: dict[str, str] = {"outcome": result.outcome}
+        if result.target_delivery_item_id:
+            params["target"] = result.target_delivery_item_id
+        if result.error:
+            # Keep the flash short — full detail is in audit + logs.
+            params["error"] = result.error[:200]
+        redirect_url = (
+            f"/browse/{customer_id}/{device_id}/{milestone_id}/_unknownTG/"
+            f"?{urlencode(params)}"
+        )
+        return RedirectResponse(
+            url=redirect_url, status_code=status.HTTP_303_SEE_OTHER,
         )
 
     # ----- Chunk 7: per-file versions list ---------------------------------

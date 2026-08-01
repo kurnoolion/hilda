@@ -13,6 +13,36 @@
 
 <h1>Unrouted files — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
 
+{% if flash_outcome %}
+  {% if flash_outcome == 'routed' %}
+    <p style="background:#efe; border:1px solid #6c6; padding:0.6em 0.8em;">
+      ✓ Routed to <code>{{ flash_target }}</code>.
+    </p>
+  {% elif flash_outcome == 'already_routed_to_this_item' %}
+    <p style="background:#eef; border:1px solid #66c; padding:0.6em 0.8em;">
+      Already routed to <code>{{ flash_target }}</code> — nothing to do.
+    </p>
+  {% elif flash_outcome == 'already_routed_elsewhere' %}
+    <p style="background:#fee; border:1px solid #c66; padding:0.6em 0.8em;">
+      Rejected: this file is already associated with a different item
+      ({{ flash_error }}). Route it there or from that item's page instead.
+    </p>
+  {% elif flash_outcome == 'doc_not_found' %}
+    <p style="background:#fee; border:1px solid #c66; padding:0.6em 0.8em;">
+      Doc not found in the index — it may have been reconciled away.
+      Refresh and try again.
+    </p>
+  {% elif flash_outcome == 'target_not_found' %}
+    <p style="background:#fee; border:1px solid #c66; padding:0.6em 0.8em;">
+      Target work item <code>{{ flash_target }}</code> not found.
+    </p>
+  {% else %}
+    <p style="background:#fee; border:1px solid #c66; padding:0.6em 0.8em;">
+      Routing failed: {{ flash_outcome }}{% if flash_error %} — {{ flash_error }}{% endif %}
+    </p>
+  {% endif %}
+{% endif %}
+
 <p>Files that landed for this milestone but the router could not match to a
 specific work item. Pick the intended work item from the dropdown and
 click <strong>Route</strong>: HILDA will move the file into that item's

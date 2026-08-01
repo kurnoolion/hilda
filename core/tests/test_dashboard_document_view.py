@@ -1058,3 +1058,149 @@ class TestUnroutedBrowse:
         assert r.status_code == 200
         assert "No eligible target work items" in r.text
         assert "disabled" in r.text
+
+
+# ---------------------------------------------------------------------------
+# UR-6 (Ph-2 2026-08-01): POST /_unknownTG/route handler
+# ---------------------------------------------------------------------------
+
+# python-multipart is required for Form(...) parsing; skip UR-6 POST tests
+# when the runner lacks it (mirrors the feedback_routes test convention).
+pytest.importorskip(
+    "multipart",
+    reason="python-multipart not installed; skipping POST route tests",
+)
+
+
+class TestUnroutedRoutePost:
+    """POST /browse/{c}/{d}/{m}/_unknownTG/route -- PRG pattern: 303 back to
+    the /_unknownTG/ GET with outcome/target/error as query params."""
+
+    from datetime import datetime, timezone
+    _NOW = datetime.now(timezone.utc)
+
+    def _mk_doc_row(self, *, file_hash, filename="report.pdf",
+                    customer="MMK", device="SM-A012U", milestone="DRR"):
+        from core.src.storage.models import DocumentIndexRow, RoutingResolution
+        from core.src.template_schema import DocType, IngestSource
+        return DocumentIndexRow(
+            file_hash=file_hash, milestone_id=milestone,
+            customer_id=customer, device_id=device,
+            doc_type=DocType.TEST_REPORT,
+            doc_id_slug=None, rev_number=None,
+            ingest_source=IngestSource.EMAIL,
+            original_filename=filename,
+            routing_resolution=RoutingResolution.STAGED_DEFAULT,
+            ingested_at=self._NOW,
+        )
+
+    def _mk_item(self, *, item_id="MMK-SM-A012U-DRR-5", item_no=5,
+                 customer="MMK", device="SM-A012U", milestone="DRR",
+                 tg_name="CPM", item_type="test_tech_waiver_report",
+                 item_name="Some deliverable"):
+        from core.src.template_schema import DeliveryItemBase
+        return DeliveryItemBase(
+            item_id=item_id, item_no=item_no, milestone_id=milestone,
+            customer_id=customer, device_id=device, item_name=item_name,
+            item_type=item_type, tg_name=tg_name,
+            delivery_state="Open", tracking_modality=["Email"],
+            no_customer_upload=False, last_updated=self._NOW,
+            sort_order=item_no, path_id=f"item-{item_no}",
+            force_tracking_enabled=True, owner_corp_id="owner-1",
+            item_path_id=f"item_{item_no}", tg_path_id=tg_name,
+        )
+
+    async def _seed_routable(self, filename="orphan.pdf",
+                             file_hash="a" * 64) -> tuple[str, str]:
+        """Doc row + target item + source file on NSD. Returns (hash, item_id)."""
+        from core.src.storage import add_document_index_row, write_file
+        from core.src.storage.delivery_item_ops import create_delivery_item
+        from core.src.storage.nsd import NSDPath
+
+        await add_document_index_row(self._mk_doc_row(
+            file_hash=file_hash, filename=filename,
+        ))
+        item = self._mk_item()
+        await create_delivery_item(item)
+        src = NSDPath.internal_default_workitem(
+            "MMK", "SM-A012U", "DRR", "_unknown_tg", filename,
+        )
+        async def _b():
+            yield b"payload"
+        await write_file(src, _b())
+        return file_hash, item.item_id
+
+    async def test_post_redirects_303_on_success(self, cfg):
+        file_hash, target_id = await self._seed_routable()
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            "/browse/MMK/SM-A012U/DRR/_unknownTG/route",
+            data={
+                "file_hash": file_hash,
+                "target_delivery_item_id": target_id,
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303, r.text
+        loc = r.headers["location"]
+        assert loc.startswith("/browse/MMK/SM-A012U/DRR/_unknownTG/?")
+        assert "outcome=routed" in loc
+        assert f"target={target_id}" in loc
+
+    async def test_post_missing_form_returns_422(self, cfg):
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            "/browse/MMK/SM-A012U/DRR/_unknownTG/route",
+            data={},  # no fields
+            follow_redirects=False,
+        )
+        assert r.status_code == 422  # FastAPI Form validation
+
+    async def test_post_doc_not_found_flashes_error(self, cfg):
+        """No doc row -> route_unrouted_to_item returns doc_not_found;
+        POST still redirects with the outcome in the query."""
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            "/browse/MMK/SM-A012U/DRR/_unknownTG/route",
+            data={
+                "file_hash": "z" * 64,
+                "target_delivery_item_id": "MMK-SM-A012U-DRR-1",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "outcome=doc_not_found" in r.headers["location"]
+
+    async def test_get_after_post_renders_flash(self, cfg):
+        """PRG round-trip: POST, follow redirect, verify the outcome banner
+        shows on the resulting GET."""
+        file_hash, target_id = await self._seed_routable(
+            filename="orphan2.pdf", file_hash="b" * 64,
+        )
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            "/browse/MMK/SM-A012U/DRR/_unknownTG/route",
+            data={
+                "file_hash": file_hash,
+                "target_delivery_item_id": target_id,
+            },
+            follow_redirects=True,
+        )
+        assert r.status_code == 200
+        assert "Routed to" in r.text and target_id in r.text
+
+    async def test_target_not_found_flash(self, cfg):
+        from core.src.storage import add_document_index_row
+        await add_document_index_row(self._mk_doc_row(file_hash="c" * 64))
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            "/browse/MMK/SM-A012U/DRR/_unknownTG/route",
+            data={
+                "file_hash": "c" * 64,
+                "target_delivery_item_id": "does-not-exist",
+            },
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "outcome=target_not_found" in r.headers["location"]
+        assert "target=does-not-exist" in r.headers["location"]
