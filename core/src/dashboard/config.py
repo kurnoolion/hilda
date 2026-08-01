@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 __all__ = ["DashboardConfig"]
 
@@ -29,6 +29,9 @@ _ENV_MAP = {
     "wopi_jwt_secret":            "HILDA_DASHBOARD_WOPI_JWT_SECRET",
     "onlyoffice_public_url":      "HILDA_DASHBOARD_ONLYOFFICE_PUBLIC_URL",
     "onlyoffice_internal_url":    "HILDA_DASHBOARD_ONLYOFFICE_INTERNAL_URL",
+    # UR-4 (Ph-2 2026-08-01): manual routing UI exclusion (/_unknownTG).
+    "manual_routing_excluded_item_names":      "HILDA_DASHBOARD_MANUAL_ROUTING_EXCLUDED_ITEM_NAMES",
+    "manual_routing_excluded_milestone_names": "HILDA_DASHBOARD_MANUAL_ROUTING_EXCLUDED_MILESTONE_NAMES",
 }
 
 
@@ -63,6 +66,31 @@ class DashboardConfig(BaseModel):
     wopi_jwt_secret:            str        = ""
     onlyoffice_public_url:      str        = ""
     onlyoffice_internal_url:    str        = ""
+
+    # UR-4 (Ph-2 2026-08-01) manual routing exclusion — Final-DRR pattern
+    # from tpm_notification_config.py. Any DeliveryItem whose `item_name`
+    # appears in `manual_routing_excluded_item_names` is filtered out of
+    # the /_unknownTG target-picker dropdown (UR-5). Empty default = no
+    # exclusion. When `manual_routing_excluded_milestone_names` is non-
+    # empty, the item-name exclusion applies ONLY inside those milestones
+    # (per architect ask 2026-08-01: MMK's item 85 should be excluded in
+    # DRR milestone only, not globally). Empty milestone list = apply the
+    # item-name exclusion everywhere.
+    manual_routing_excluded_item_names:      list[str] = []
+    manual_routing_excluded_milestone_names: list[str] = []
+
+    @field_validator(
+        "manual_routing_excluded_item_names",
+        "manual_routing_excluded_milestone_names",
+        mode="before",
+    )
+    @classmethod
+    def _parse_str_list(cls, v):
+        """Accept comma-separated string (from env var) or list. Mirrors
+        tpm_notification_config._parse_milestone_names."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
     @classmethod
     def from_sources(
