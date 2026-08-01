@@ -222,7 +222,13 @@ def register_feedback_routes(
     async def submit_feedback(
         customer: str, device: str, milestone: str, request: Request,
         category: str = Form(...),
-        bug_type: str = Form(...),
+        # bug_type is Form("") not Form(...) because the client-side JS
+        # disables the bug_type <select> when category=improvement, and
+        # browsers OMIT disabled form elements from POST bodies. If we
+        # required the field, improvement submissions would 422 before
+        # our server-side "force to OTHER-OTHER" logic could run. Empty
+        # string is still rejected below when category=bug via is_valid_bug_type.
+        bug_type: str = Form(""),
         description: str = Form(""),
         target_milestone: str = Form(...),
         attachment: UploadFile | None = File(None),

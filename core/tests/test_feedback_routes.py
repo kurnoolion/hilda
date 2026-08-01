@@ -131,6 +131,46 @@ class TestSubmitValidation:
         r2 = client.get("/feedback/MMK/SM-A012U/DRR")
         assert "OTHER-OTHER" in r2.text
 
+    def test_submit_improvement_without_bug_type_field(self, client):
+        """Live regression 2026-07-30: the client-side JS DISABLES the
+        bug_type <select> when category=improvement -- browsers omit
+        disabled form fields from the POST body entirely. Before FB-9 the
+        route declared bug_type = Form(...) (required), so FastAPI 422'd
+        with 'missing bug_type' before the server-side improvement->
+        OTHER-OTHER force could run. Fix made bug_type optional; the
+        server's category==improvement branch still overrides to
+        OTHER-OTHER."""
+        r = client.post(
+            "/feedback/MMK/SM-A012U/DRR/submit",
+            data={
+                "category": "improvement",
+                # NO bug_type key at all
+                "description": "would like sortable columns",
+                "target_milestone": "DRR",
+            },
+        )
+        assert r.status_code == 303
+        r2 = client.get("/feedback/MMK/SM-A012U/DRR")
+        assert "OTHER-OTHER" in r2.text
+        assert "sortable columns" in r2.text
+
+    def test_submit_bug_without_bug_type_field_rejected(self, client):
+        """Empty bug_type must still be rejected when category=bug --
+        can't silently succeed with garbage. Client-side JS never disables
+        the field when category=bug, so an empty submission means the
+        request came from a script or a broken form."""
+        r = client.post(
+            "/feedback/MMK/SM-A012U/DRR/submit",
+            data={
+                "category": "bug",
+                # NO bug_type key
+                "description": "",
+                "target_milestone": "DRR",
+            },
+        )
+        assert r.status_code == 400
+        assert "invalid bug_type" in r.text
+
     def test_submit_improvement_without_description_rejected(self, client):
         r = client.post(
             "/feedback/MMK/SM-A012U/DRR/submit",
