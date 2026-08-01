@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — Unrouted files · {{ milestone_id }}{% endblock %}
+
+{% block content %}
+<div style="float:right;">
+  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+     style="display:inline-block; background:#1a3a6c; color:#fff;
+            padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
+            font-size:0.9em;">Report issue / feedback</a>
+</div>
+<p><a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
+
+<h1>Unrouted files — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
+
+<p>Files that landed for this milestone but the router could not match to a
+specific work item. Pick the intended work item from the dropdown and
+click <strong>Route</strong>: HILDA will move the file into that item's
+staged folder, associate it, and audit the assignment.</p>
+
+{% if unrouted|length == 0 %}
+  <p><em>No unrouted files in this milestone. Nothing to triage.</em></p>
+{% else %}
+  {% if candidates|length == 0 %}
+    <p style="background:#fee; border:1px solid #c66; padding:0.6em 0.8em;">
+      <strong>No eligible target work items.</strong> Every non-Confirmation,
+      non-Default item in this milestone is on the exclusion list, or no items
+      exist yet. Routing is disabled until at least one candidate is available.
+    </p>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>Filename</th>
+        <th>Doc type</th>
+        <th>Ingested</th>
+        <th>Route to work item</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in unrouted %}
+      <tr>
+        <td>
+          <code>{{ f.original_filename }}</code>
+          {% if f.is_dup_hash_elsewhere %}
+            <span title="These same file bytes are already associated with a different work item elsewhere. Routing this hash again is unusual — verify before proceeding."
+                  style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #c60;
+                         color:#c60; border-radius:3px; font-size:0.85em;">⚠ dup elsewhere</span>
+          {% endif %}
+        </td>
+        <td>{{ f.doc_type }}</td>
+        <td>{{ f.ingested_at_pretty }}</td>
+        <td>
+          <form method="post"
+                action="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/_unknownTG/route"
+                style="margin:0; display:inline-block;">
+            <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
+            <select name="target_delivery_item_id" required
+                    {% if candidates|length == 0 %}disabled{% endif %}>
+              <option value="">— pick a work item —</option>
+              {% for c in candidates %}
+                <option value="{{ c.delivery_item_id }}">
+                  #{{ c.item_no }} · {{ c.tg_name }} · {{ c.item_name }}
+                  ({{ c.delivery_state }})
+                </option>
+              {% endfor %}
+            </select>
+            <button type="submit"
+                    {% if candidates|length == 0 %}disabled{% endif %}>
+              Route
+            </button>
+          </form>
+        </td>
+        <td>
+          {# Placeholder — UR-6 wires the POST. Nothing extra to show yet. #}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

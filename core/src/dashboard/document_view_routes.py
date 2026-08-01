@@ -518,6 +518,86 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             },
         )
 
+    # ----- UR-5 (Ph-2 2026-08-01): manual routing UI for _unknownTG bucket --
+
+    @app.get(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/_unknownTG/",
+        response_class=HTMLResponse,
+    )
+    async def browse_unrouted(
+        customer_id: str, device_id: str, milestone_id: str,
+        request: Request,
+        principal=Depends(_auth),
+    ):
+        """/_unknownTG landing per architect ask 2026-08-01: lists documents
+        that landed in the _unrouted bucket for this (customer, device,
+        milestone), lets the TPM pick a work item as the manual route target
+        via dropdown, POST goes to UR-6.
+
+        Excluded from the target dropdown per DashboardConfig
+        (manual_routing_excluded_item_names + _milestone_names): Confirmation
+        items, Default WIs, and any configured item_name -- scoped to the
+        configured milestones when set (see UR-4 comment on cfg). MMK's
+        item 85 config lives at HILDA_DASHBOARD_MANUAL_ROUTING_EXCLUDED_*.
+        """
+        from core.src.storage.unrouted_ops import (
+            list_route_candidates_for_scope, list_unrouted_for_scope,
+        )
+        # Load exclusion policy from cfg (UR-4). The milestone gate keeps
+        # MMK's "item 85 in DRR only" ask literal: exclusion applies here
+        # iff this milestone is on the whitelist (or the whitelist is empty
+        # -> apply everywhere).
+        excluded_names = list(cfg.manual_routing_excluded_item_names or [])
+        excluded_milestones = list(cfg.manual_routing_excluded_milestone_names or [])
+        apply_exclusion = (
+            (not excluded_milestones) or (milestone_id in excluded_milestones)
+        )
+        excluded_arg = excluded_names if apply_exclusion else None
+
+        unrouted = await list_unrouted_for_scope(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id,
+        )
+        candidates = await list_route_candidates_for_scope(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id, excluded_item_names=excluded_arg,
+        )
+        # Shape candidates for the template: DeliveryItemTable rows carry
+        # attributes the Jinja template shouldn't reach into directly.
+        candidate_rows = [
+            {
+                # DeliveryItemTable primary key column is `item_id`; the UR-6
+                # POST expects target_delivery_item_id — pass it as that.
+                "delivery_item_id": c.item_id,
+                "item_no":          c.item_no,
+                "item_name":        c.item_name,
+                "tg_name":          c.tg_name,
+                "delivery_state":   c.delivery_state,
+            }
+            for c in candidates
+        ]
+        rows = [
+            {
+                "file_hash":             u.file_hash,
+                "original_filename":     u.original_filename,
+                "doc_type":              u.doc_type or "—",
+                "ingested_at_pretty":    _fmt_dt(u.ingested_at),
+                "is_dup_hash_elsewhere": u.is_dup_hash_elsewhere,
+            }
+            for u in unrouted
+        ]
+        return templates.TemplateResponse(
+            request,
+            "view_tree_unrouted.html",
+            {
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+                "unrouted":     rows,
+                "candidates":   candidate_rows,
+            },
+        )
+
     # ----- Chunk 7: per-file versions list ---------------------------------
 
     @app.get("/browse/versions/{token}", response_class=HTMLResponse)
