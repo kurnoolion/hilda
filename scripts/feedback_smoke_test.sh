@@ -40,13 +40,13 @@ pass "302 redirect"
 
 # 2. View page renders
 log "2/6 GET /feedback/${SCOPE}  (expect 200 with form + table)"
-BODY=$(curl -k -s "${BASE}/feedback/${SCOPE}")
-CODE=$(printf "%s" "$BODY" | head -c 0; echo -n "")  # placeholder to avoid pipefail
-CODE=$(curl "${CURL_OPTS[@]}" "${BASE}/feedback/${SCOPE}")
+# Single fetch that captures both body and code (writes code to a temp header line).
+BODY=$(curl -k -s -w "\n__HTTPCODE__%{http_code}" "${BASE}/feedback/${SCOPE}")
+CODE="${BODY##*__HTTPCODE__}"
+BODY="${BODY%__HTTPCODE__*}"
 [[ "$CODE" == "200" ]] || fail "view page expected 200, got $CODE"
 grep -q "HILDA Feedback"    <<< "$BODY" || fail "view page missing title"
 grep -q "Submit ticket"     <<< "$BODY" || fail "view page missing submit button"
-grep -q "$SCOPE" | true  # scope shown somewhere in body
 pass "view page renders form + tickets section"
 
 # 3. Submit a plain bug (no attachment)
