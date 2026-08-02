@@ -239,7 +239,7 @@ async def _process_regular_attachment(
     # see exactly what the router had available. Points 1 + 3 combined.
     if _ROUTE_TRACE:
         fname = getattr(attachment, "filename", "") or ""
-        _log.info(
+        _log.warning(
             "ROUTE_TRACE stage=pre-router filename=%r batch=%s candidates=%d",
             fname, batch_id, len(candidate_items),
         )
@@ -253,7 +253,7 @@ async def _process_regular_attachment(
                             and g[0].strip().lower() == "default":
                         has_default = True
                         break
-            _log.info(
+            _log.warning(
                 "ROUTE_TRACE stage=candidate filename=%r item=%s tg=%s "
                 "type=%s state=%s ft=%s ncu=%s has_default=%s desc_len=%s",
                 fname, c.get("item_id"), c.get("tg_name"),
@@ -267,7 +267,7 @@ async def _process_regular_attachment(
 
     if _ROUTE_TRACE:
         fname = getattr(attachment, "filename", "") or ""
-        _log.info(
+        _log.warning(
             "ROUTE_TRACE stage=post-router filename=%r matches=%s resolution=%s "
             "is_duplicate=%s",
             fname,

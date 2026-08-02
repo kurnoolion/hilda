@@ -532,7 +532,7 @@ class Fr52AttachmentRouter:
             by_tg.setdefault(tg, []).append(c)
 
         if _ROUTE_TRACE:
-            logger.info(
+            logger.warning(
                 "ROUTE_TRACE stage=by_tg filename=%r buckets=%s",
                 filename, {tg: len(items) for tg, items in by_tg.items()},
             )
@@ -566,7 +566,7 @@ class Fr52AttachmentRouter:
                     "evidence": ev,
                 } for tg, (m, r, ev) in per_tg.items()
             }
-            logger.info(
+            logger.warning(
                 "ROUTE_TRACE stage=per_tg filename=%r tgs_with_evidence=%s per_tg=%s",
                 filename, tgs_with_evidence, summary,
             )
@@ -651,7 +651,7 @@ class Fr52AttachmentRouter:
                 matches.append(cand)
 
         if _ROUTE_TRACE:
-            logger.info(
+            logger.warning(
                 "ROUTE_TRACE stage=within_tg filename=%r tg=%s items=%d matches=%s",
                 filename, tg_name, len(items),
                 [m["item_id"] for m in matches],
@@ -659,7 +659,7 @@ class Fr52AttachmentRouter:
 
         if len(matches) == 1:
             if _ROUTE_TRACE:
-                logger.info(
+                logger.warning(
                     "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
                     "branch=single_match winner=%s",
                     filename, tg_name, matches[0]["item_id"],
@@ -677,7 +677,7 @@ class Fr52AttachmentRouter:
             # Multi-match: TG-default tiebreaker per D-151.
             default_items = [c for c in matches if self._has_default_tag_set(c)]
             if _ROUTE_TRACE:
-                logger.info(
+                logger.warning(
                     "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
                     "branch=multi_match matches=%s default_items=%s",
                     filename, tg_name,
@@ -853,7 +853,7 @@ class Fr52AttachmentRouter:
             ):
                 if self._filename_matches_imei_excel(filename):
                     if _ROUTE_TRACE:
-                        logger.info(
+                        logger.warning(
                             "ROUTE_TRACE stage=group_match filename=%r "
                             "hit_group=%s kind=imei_excel",
                             filename, group,
@@ -863,7 +863,7 @@ class Fr52AttachmentRouter:
             # Normal FR-82 substring AND-of-OR.
             if all(tag.lower() in filename for tag in group):
                 if _ROUTE_TRACE:
-                    logger.info(
+                    logger.warning(
                         "ROUTE_TRACE stage=group_match filename=%r "
                         "hit_group=%s kind=substring",
                         filename, group,
