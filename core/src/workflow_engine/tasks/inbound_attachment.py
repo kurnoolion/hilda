@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -38,6 +39,12 @@ from core.src.workflow_engine.task_deps import get_task_deps
 __all__ = ["process_inbound_attachments_task"]
 
 _log = logging.getLogger(__name__)
+
+# RTRC-1 (Ph-2 2026-08-02): env-gated ROUTE_TRACE logging. When
+# HILDA_ROUTE_TRACE=true, logs the full candidate table + router decision
+# per attachment. Grep with `grep ROUTE_TRACE hilda-worker.log`. Off by
+# default; zero perf cost when disabled.
+_ROUTE_TRACE = os.getenv("HILDA_ROUTE_TRACE", "").lower() in ("1", "true", "yes")
 
 
 @hilda_celery_app.task(
@@ -228,7 +235,47 @@ async def _process_regular_attachment(
     Extracted 2026-07-26 for D-155 (was inline in the main loop). Behavior
     unchanged from prior code path for regular files.
     """
+    # RTRC-1: log the full candidate table BEFORE router runs so we can
+    # see exactly what the router had available. Points 1 + 3 combined.
+    if _ROUTE_TRACE:
+        fname = getattr(attachment, "filename", "") or ""
+        _log.info(
+            "ROUTE_TRACE stage=pre-router filename=%r batch=%s candidates=%d",
+            fname, batch_id, len(candidate_items),
+        )
+        for c in candidate_items:
+            desc = c.get("item_description")
+            has_default = False
+            if isinstance(desc, list):
+                for g in desc:
+                    if isinstance(g, list) and len(g) == 1 \
+                            and isinstance(g[0], str) \
+                            and g[0].strip().lower() == "default":
+                        has_default = True
+                        break
+            _log.info(
+                "ROUTE_TRACE stage=candidate filename=%r item=%s tg=%s "
+                "type=%s state=%s ft=%s ncu=%s has_default=%s desc_len=%s",
+                fname, c.get("item_id"), c.get("tg_name"),
+                c.get("item_type"), c.get("delivery_state"),
+                c.get("force_tracking_enabled"), c.get("no_customer_upload"),
+                has_default,
+                len(desc) if isinstance(desc, list) else 0,
+            )
+
     routed = await router.route(attachment, batch_id, candidate_items)
+
+    if _ROUTE_TRACE:
+        fname = getattr(attachment, "filename", "") or ""
+        _log.info(
+            "ROUTE_TRACE stage=post-router filename=%r matches=%s resolution=%s "
+            "is_duplicate=%s",
+            fname,
+            [m.item_id for m in (routed.matches or [])],
+            getattr(routed, "routing_resolution", None),
+            getattr(routed, "is_duplicate", None),
+        )
+
     stats = {
         "processed": 1,
         "routed_with_match": 0,

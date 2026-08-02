@@ -19,6 +19,7 @@ Ph-1 first cut narrowing (per llm/MODULE.md phasing + MODULE.md test-scenario):
 """
 from __future__ import annotations
 
+import os
 import re
 import logging
 from datetime import datetime, timezone
@@ -45,6 +46,13 @@ if TYPE_CHECKING:
 __all__ = ["Fr52AttachmentRouter", "StorageBackend", "TgResolverProtocol", "load_doc_type_rules"]
 
 logger = logging.getLogger(__name__)
+
+# RTRC-1 (Ph-2 2026-08-02): env-gated ROUTE_TRACE. Off by default; set
+# HILDA_ROUTE_TRACE=true on hilda-worker to enable per-attachment routing
+# decision trace. Companion to the pre/post-router trace in
+# inbound_attachment.py so the whole pipeline can be reconstructed from
+# `grep ROUTE_TRACE`.
+_ROUTE_TRACE = os.getenv("HILDA_ROUTE_TRACE", "").lower() in ("1", "true", "yes")
 
 
 class StorageBackend(Protocol):
@@ -523,6 +531,12 @@ class Fr52AttachmentRouter:
                 continue
             by_tg.setdefault(tg, []).append(c)
 
+        if _ROUTE_TRACE:
+            logger.info(
+                "ROUTE_TRACE stage=by_tg filename=%r buckets=%s",
+                filename, {tg: len(items) for tg, items in by_tg.items()},
+            )
+
         # D-153 architect 2026-07-25: a doc lives under exactly ONE TG folder
         # in the view tree (view/<cust>/<dev>/<mile>/<tg>/<...>) — the router
         # therefore MUST NEVER route a single doc to items in multiple TGs.
@@ -543,6 +557,19 @@ class Fr52AttachmentRouter:
             per_tg[tg_name] = (match, resolution, has_evidence)
 
         tgs_with_evidence = [tg for tg, (_, _, ev) in per_tg.items() if ev]
+
+        if _ROUTE_TRACE:
+            summary = {
+                tg: {
+                    "match": m.item_id if m else None,
+                    "resolution": str(r),
+                    "evidence": ev,
+                } for tg, (m, r, ev) in per_tg.items()
+            }
+            logger.info(
+                "ROUTE_TRACE stage=per_tg filename=%r tgs_with_evidence=%s per_tg=%s",
+                filename, tgs_with_evidence, summary,
+            )
 
         # Case A: >1 TG has substring evidence → cross-TG ambiguity → Default WI.
         # Case B: exactly 1 TG has evidence → use that TG's resolution (may
@@ -623,7 +650,20 @@ class Fr52AttachmentRouter:
             if self._any_group_matches(filename, groups):
                 matches.append(cand)
 
+        if _ROUTE_TRACE:
+            logger.info(
+                "ROUTE_TRACE stage=within_tg filename=%r tg=%s items=%d matches=%s",
+                filename, tg_name, len(items),
+                [m["item_id"] for m in matches],
+            )
+
         if len(matches) == 1:
+            if _ROUTE_TRACE:
+                logger.info(
+                    "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
+                    "branch=single_match winner=%s",
+                    filename, tg_name, matches[0]["item_id"],
+                )
             return (
                 AttachmentItemMatch(
                     item_id=matches[0]["item_id"],
@@ -636,6 +676,14 @@ class Fr52AttachmentRouter:
         if len(matches) > 1:
             # Multi-match: TG-default tiebreaker per D-151.
             default_items = [c for c in matches if self._has_default_tag_set(c)]
+            if _ROUTE_TRACE:
+                logger.info(
+                    "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
+                    "branch=multi_match matches=%s default_items=%s",
+                    filename, tg_name,
+                    [m["item_id"] for m in matches],
+                    [d["item_id"] for d in default_items],
+                )
             if len(default_items) >= 1:
                 if len(default_items) > 1:
                     logger.warning(
@@ -804,10 +852,22 @@ class Fr52AttachmentRouter:
                 and group[0].strip().lower() == self._IMEI_XLS_TAG
             ):
                 if self._filename_matches_imei_excel(filename):
+                    if _ROUTE_TRACE:
+                        logger.info(
+                            "ROUTE_TRACE stage=group_match filename=%r "
+                            "hit_group=%s kind=imei_excel",
+                            filename, group,
+                        )
                     return True
                 continue  # explicit skip — don't fall into substring path
             # Normal FR-82 substring AND-of-OR.
             if all(tag.lower() in filename for tag in group):
+                if _ROUTE_TRACE:
+                    logger.info(
+                        "ROUTE_TRACE stage=group_match filename=%r "
+                        "hit_group=%s kind=substring",
+                        filename, group,
+                    )
                 return True
         return False
 
