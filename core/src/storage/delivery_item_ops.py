@@ -276,13 +276,31 @@ async def delete_milestone_cascade(
         item_ids: list[str] = list(item_ids_result.scalars().all())
 
         if not item_ids:
+            # MDEL-6 (2026-08-02): even with zero delivery_items, unrouted
+            # document_index rows may linger from a prior partial cascade
+            # or from ingest that outraced item creation. Sweep them here
+            # so a re-run of the cascade is idempotent-to-zero.
+            unrouted_only_del = await session.execute(
+                delete(DocumentIndexTable).where(
+                    DocumentIndexTable.customer_id == customer_id,
+                    DocumentIndexTable.device_id == device_id,
+                    DocumentIndexTable.milestone_id == milestone_id,
+                    ~select(DocumentItemAssociationTable.file_hash).where(
+                        DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash
+                    ).exists(),
+                )
+            )
+            unrouted_only_deleted = unrouted_only_del.rowcount or 0
+            if unrouted_only_deleted:
+                await session.commit()
             return {
-                "items_deleted":    0,
-                "assocs_deleted":   0,
-                "audit_deleted":    0,
-                "versions_deleted": 0,
-                "index_deleted":    0,
-                "orphan_hashes":    [],
+                "items_deleted":          0,
+                "assocs_deleted":         0,
+                "audit_deleted":          0,
+                "versions_deleted":       0,
+                "index_deleted":          0,
+                "unrouted_index_deleted": unrouted_only_deleted,
+                "orphan_hashes":          [],
             }
 
         # Step 2: hashes referenced by items in this scope (may be shared
@@ -387,6 +405,33 @@ async def delete_milestone_cascade(
             )
             index_deleted = index_del.rowcount or 0
 
+        # Step 7b (MDEL-6 2026-08-02): unrouted document_index rows in scope.
+        # Step 4 above only surfaces hashes that HAD an association to a
+        # scope item. Unrouted docs (the /_unknownTG bucket -- doc landed
+        # but router returned no match) have no association and are
+        # invisible to steps 3+4+7. Without this sweep, they survive the
+        # cascade and clog the next test cycle's /_unknownTG UI.
+        #
+        # Uses UR-1's customer_id + device_id columns (populated at ingest
+        # per UR-2). Legacy pre-UR-2 rows with NULL customer_id/device_id
+        # stay put -- accepted gap, mirrors the same limitation in the
+        # /_unknownTG list UI itself.
+        #
+        # Cross-milestone dedup semantic preserved via the NOT EXISTS
+        # sub-select: if a hash is still referenced by ANY association
+        # anywhere (even in another milestone), the index row survives.
+        unrouted_index_del = await session.execute(
+            delete(DocumentIndexTable).where(
+                DocumentIndexTable.customer_id == customer_id,
+                DocumentIndexTable.device_id == device_id,
+                DocumentIndexTable.milestone_id == milestone_id,
+                ~select(DocumentItemAssociationTable.file_hash).where(
+                    DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash
+                ).exists(),
+            )
+        )
+        unrouted_index_deleted = unrouted_index_del.rowcount or 0
+
         # Step 8: delivery_item rows themselves.
         items_del = await session.execute(
             delete(DeliveryItemTable).where(
@@ -404,12 +449,13 @@ async def delete_milestone_cascade(
         await session.commit()
 
         return {
-            "items_deleted":    items_deleted,
-            "assocs_deleted":   assocs_deleted,
-            "audit_deleted":    audit_deleted,
-            "versions_deleted": versions_deleted,
-            "index_deleted":    index_deleted,
-            "orphan_hashes":    orphan_hashes,
+            "items_deleted":         items_deleted,
+            "assocs_deleted":        assocs_deleted,
+            "audit_deleted":         audit_deleted,
+            "versions_deleted":      versions_deleted,
+            "index_deleted":         index_deleted,
+            "unrouted_index_deleted": unrouted_index_deleted,
+            "orphan_hashes":         orphan_hashes,
         }
 
 

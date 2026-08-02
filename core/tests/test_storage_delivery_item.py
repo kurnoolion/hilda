@@ -258,6 +258,113 @@ async def test_delete_milestone_cascade_idempotent_on_empty_scope():
     )
     assert summary["items_deleted"] == 0
     assert summary["orphan_hashes"] == []
+    assert summary["unrouted_index_deleted"] == 0
+
+
+async def test_delete_milestone_cascade_purges_unrouted_document_index():
+    """MDEL-6 (2026-08-02): unrouted docs (document_index rows with NO
+    association) live in the /_unknownTG bucket. Prior to MDEL-6 the
+    cascade left them behind because it only looked at hashes referenced
+    BY the scope's associations. Verify they're now swept."""
+    from datetime import datetime, timezone
+    from core.src.storage import add_document_index_row
+    from core.src.storage.models import DocumentIndexRow, RoutingResolution
+    from core.src.template_schema import DocType, IngestSource
+    from core.src.storage.db import DocumentIndexTable, session_scope
+    from sqlalchemy import select
+
+    NOW = datetime.now(timezone.utc)
+
+    # 3 unrouted docs in scope + 1 unrouted doc in a DIFFERENT device
+    # (should survive).
+    for i, (hash_, dev) in enumerate([
+        ("a" * 64, "SM-S671U1"),
+        ("b" * 64, "SM-S671U1"),
+        ("c" * 64, "SM-S671U1"),
+        ("d" * 64, "SM-OTHER"),
+    ]):
+        await add_document_index_row(DocumentIndexRow(
+            file_hash=hash_, milestone_id="DRR",
+            customer_id="MMK", device_id=dev,
+            doc_type=DocType.TEST_REPORT,
+            doc_id_slug=None, rev_number=None,
+            ingest_source=IngestSource.EMAIL,
+            original_filename=f"orphan{i}.pdf",
+            routing_resolution=RoutingResolution.STAGED_DEFAULT,
+            ingested_at=NOW,
+        ))
+
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert summary["unrouted_index_deleted"] == 3
+
+    # Verify: only the OTHER-device doc survived.
+    async with session_scope() as session:
+        remaining = list((await session.execute(
+            select(DocumentIndexTable.file_hash)
+        )).scalars().all())
+    assert remaining == ["d" * 64]
+
+
+async def test_delete_milestone_cascade_preserves_associated_document_index():
+    """MDEL-6: document_index rows WITH a still-referenced association
+    survive (dedup preservation). Only unrouted-in-scope rows get swept."""
+    from datetime import datetime, timezone
+    from core.src.storage import add_document_index_row, add_document_item_association
+    from core.src.storage.models import (
+        DocumentIndexRow, DocumentItemAssociation, NSDPathType, RoutingResolution,
+    )
+    from core.src.template_schema import DocType, IngestSource
+
+    NOW = datetime.now(timezone.utc)
+
+    # An unrouted doc in scope + one that's associated with an item in
+    # ANOTHER milestone (should survive because still referenced elsewhere).
+    await add_document_index_row(DocumentIndexRow(
+        file_hash="a" * 64, milestone_id="DRR",
+        customer_id="MMK", device_id="SM-S671U1",
+        doc_type=DocType.TEST_REPORT,
+        doc_id_slug=None, rev_number=None,
+        ingest_source=IngestSource.EMAIL,
+        original_filename="unrouted.pdf",
+        routing_resolution=RoutingResolution.STAGED_DEFAULT,
+        ingested_at=NOW,
+    ))
+    await add_document_index_row(DocumentIndexRow(
+        file_hash="b" * 64, milestone_id="DRR",
+        customer_id="MMK", device_id="SM-S671U1",
+        doc_type=DocType.TEST_REPORT,
+        doc_id_slug=None, rev_number=None,
+        ingest_source=IngestSource.EMAIL,
+        original_filename="shared.pdf",
+        routing_resolution=RoutingResolution.SUBSTRING_MATCH,
+        ingested_at=NOW,
+    ))
+    # Association points to ANOTHER milestone's item -- the hash is
+    # cross-milestone shared and MUST survive the cascade.
+    await add_document_item_association(DocumentItemAssociation(
+        file_hash="b" * 64,
+        delivery_item_id="MMK-SM-S671U1-OTHER-99",  # not in the DRR scope
+        milestone_id="OTHER",
+        local_nsd_path="internal/MMK/SM-S671U1/OTHER/tg/item_99/shared.pdf",
+        nsd_path_type=NSDPathType.CLASSIFIED,
+        owner_corp_id="owner-1",
+        associated_at=NOW,
+    ))
+
+    summary = await delete_milestone_cascade(
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert summary["unrouted_index_deleted"] == 1     # only "a" swept
+    # "b" still exists because association still references it
+    from core.src.storage.db import DocumentIndexTable, session_scope
+    from sqlalchemy import select
+    async with session_scope() as session:
+        remaining = set((await session.execute(
+            select(DocumentIndexTable.file_hash)
+        )).scalars().all())
+    assert remaining == {"b" * 64}
 
 
 async def test_delete_milestone_cascade_device_scope_isolation():
