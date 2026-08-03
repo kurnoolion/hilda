@@ -218,6 +218,26 @@ def _is_archive_attachment(attachment) -> bool:
     return is_archive_filename(getattr(attachment, "filename", "") or "")
 
 
+def _is_archive_filename(name: str) -> bool:
+    """NEST-1 (2026-08-03): same check as _is_archive_attachment but on a
+    plain filename string (inner archive entries synthesize a filename
+    before the InboundAttachment wraps them). Kept next to
+    _is_archive_attachment so extension-list drift stays visible."""
+    from core.src.storage.archive_extractor import is_archive_filename
+    return is_archive_filename(name)
+
+
+# NEST-1 (2026-08-03) — safety rails for recursive archive extraction.
+#
+# _MAX_ARCHIVE_RECURSION_DEPTH: max nesting depth. depth=0 is the outer
+# archive received via email. Beyond this cap, deeper inner archives are
+# treated as opaque blobs (routed through _process_regular_attachment)
+# so TPM can still see + download them. Prevents pathologically-nested
+# archive DoS. Per-archive size cap already lives in archive_extractor,
+# so total decompressed size is naturally bounded to depth * per-archive.
+_MAX_ARCHIVE_RECURSION_DEPTH = 5
+
+
 async def _process_regular_attachment(
     *,
     deps,
@@ -346,6 +366,9 @@ async def _process_archive_attachment(
     candidate_items: list[dict],
     batch_id: str,
     correlation_id: str,
+    _depth: int = 0,
+    _seen_hashes: set[str] | None = None,
+    _path_prefix: str = "",
 ) -> dict[str, Any]:
     """D-155 — process an archive attachment (.zip / .7z).
 
@@ -354,10 +377,15 @@ async def _process_archive_attachment(
          archive (no doc_type classification, no associations, no doc_count
          increment). Idempotent — re-sending same archive skips silently.
       2. Extract inner entries via storage.archive_extractor.
-      3. On extract success: iterate inner entries. Each becomes a synthesized
-         InboundAttachment (filename=inner path preserving subdirs, own hash)
-         and runs through _process_regular_attachment — same routing + dedup
-         + per-item association + view-tree writes.
+      3. On extract success: iterate inner entries. Non-archive entries become
+         a synthesized InboundAttachment (filename=inner path preserving
+         subdirs, own hash) and run through _process_regular_attachment.
+         Archive entries recurse into this same function (NEST-1) with
+         _depth+1 and _path_prefix set so their inner leaves carry a full
+         path like `inner.zip/d.xlsx`. Recursion capped at
+         _MAX_ARCHIVE_RECURSION_DEPTH; deeper archives fall through as
+         opaque blobs. Cycles (self-referential archives) detected via
+         _seen_hashes.
       4. On extract failure (bad archive / password / oversized / library
          missing): audit event; outer archive is left in document_index for
          audit; no inner processing. TPM can see the outer arrived + why
@@ -365,10 +393,14 @@ async def _process_archive_attachment(
       5. Save outer archive to view-tree in the TG(s) that received inner
          matches (so TPM sees "here's the archive these files came from").
          Skipped when no inner file matched — outer bytes reachable via NSD.
+         Recursive calls (_depth > 0) SKIP replication — only the outermost
+         archive gets replicated.
 
-    Returns telemetry deltas aggregated across all inner entries. Outer archive
-    itself does NOT contribute to routed_with_match / routed_unrouted counts —
-    it's a container, not a routed document.
+    Returns telemetry deltas aggregated across all inner entries (recursively).
+    Archive entries themselves do NOT contribute to routed_with_match /
+    routed_unrouted / doc_count — only leaf (non-archive) files reaching
+    _process_regular_attachment do. This is the requested doc_count semantic:
+    intermediate archive containers are transparent to counting.
     """
     from core.src.email_service.protocol import InboundAttachment
     from core.src.storage.archive_extractor import extract_archive
@@ -385,9 +417,33 @@ async def _process_archive_attachment(
         "events_fired": 0,
     }
 
+    # NEST-1: initialize recursion state on the outer call.
+    if _seen_hashes is None:
+        _seen_hashes = set()
+
     filename = getattr(attachment, "filename", "") or ""
     content = getattr(attachment, "content", b"") or b""
     file_hash = getattr(attachment, "file_hash", "") or ""
+
+    # NEST-1 cycle detection — if this exact archive hash appeared higher
+    # in the recursion chain, bail with an audit row + empty stats. Skip
+    # extraction to avoid infinite recursion via self-referential archives.
+    if file_hash and file_hash in _seen_hashes:
+        _log.warning(
+            "process_inbound_attachments: NEST-1 cycle detected "
+            "hash=%s filename=%r depth=%d — skipping extraction",
+            file_hash[:12], filename, _depth,
+        )
+        await _audit(deps, "archive_recursion_cycle_detected", None, {
+            "batch_id": batch_id,
+            "file_hash": file_hash,
+            "filename": filename[:120],
+            "depth": _depth,
+            "correlation_id": correlation_id,
+        })
+        return stats
+    if file_hash:
+        _seen_hashes.add(file_hash)
 
     milestone_id = ""
     customer_id: str | None = None
@@ -454,7 +510,11 @@ async def _process_archive_attachment(
     # replicate the outer archive to each of them (step 5).
     matched_tgs: set[tuple[str, str, str, str, str]] = set()
     for entry in result.entries:
-        inner_rel = "/".join(entry.relative_parts)
+        # NEST-1: prefix inner path with the caller's _path_prefix so nested
+        # archive contents carry a full path like `inner.zip/d.xlsx`. Empty
+        # prefix at depth=0 leaves top-level entries un-prefixed.
+        entry_rel = "/".join(entry.relative_parts)
+        inner_rel = f"{_path_prefix}/{entry_rel}" if _path_prefix else entry_rel
         inner_bytes = entry.content
         inner_hash = _sha256_hex(inner_bytes)
         inner_attachment = InboundAttachment(
@@ -464,14 +524,46 @@ async def _process_archive_attachment(
             file_hash=inner_hash,
         )
         try:
-            inner_stats = await _process_regular_attachment(
-                deps=deps,
-                router=router,
-                attachment=inner_attachment,
-                candidate_items=candidate_items,
-                batch_id=batch_id,
-                correlation_id=correlation_id,
+            # NEST-1: recurse into archive entries; treat non-archive
+            # entries as leaves via _process_regular_attachment. Depth cap
+            # + cycle-detected inner archives fall through to
+            # _process_regular_attachment (opaque blob route) so TPM can
+            # still see + download them.
+            is_inner_archive = _is_archive_filename(entry_rel)
+            can_recurse = (
+                is_inner_archive
+                and _depth + 1 < _MAX_ARCHIVE_RECURSION_DEPTH
+                and inner_hash not in _seen_hashes
             )
+            if is_inner_archive and not can_recurse:
+                _log.warning(
+                    "process_inbound_attachments: NEST-1 not recursing into "
+                    "inner archive %r (depth=%d, in_seen=%s) — routing as "
+                    "opaque blob",
+                    inner_rel, _depth,
+                    inner_hash in _seen_hashes,
+                )
+            if can_recurse:
+                inner_stats = await _process_archive_attachment(
+                    deps=deps,
+                    router=router,
+                    attachment=inner_attachment,
+                    candidate_items=candidate_items,
+                    batch_id=batch_id,
+                    correlation_id=correlation_id,
+                    _depth=_depth + 1,
+                    _seen_hashes=_seen_hashes,
+                    _path_prefix=inner_rel,
+                )
+            else:
+                inner_stats = await _process_regular_attachment(
+                    deps=deps,
+                    router=router,
+                    attachment=inner_attachment,
+                    candidate_items=candidate_items,
+                    batch_id=batch_id,
+                    correlation_id=correlation_id,
+                )
         except Exception as exc:  # noqa: BLE001
             stats["failed"] += 1
             _log.warning(
@@ -513,8 +605,11 @@ async def _process_archive_attachment(
                     break
 
     # Step 5: replicate outer archive to each matched TG's view-tree root
-    # so TPM can see "here's the archive these files came from".
-    if matched_tgs:
+    # so TPM can see "here's the archive these files came from". NEST-1:
+    # only the outermost archive replicates. Inner archives are container
+    # bytes already inside the outer's payload — no need to re-materialize
+    # each nested container as a separate view-tree file.
+    if matched_tgs and _depth == 0:
         await _replicate_outer_archive_to_tgs(
             filename=filename, content=bytes(content), targets=matched_tgs,
         )
