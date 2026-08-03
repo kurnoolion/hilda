@@ -601,7 +601,24 @@ class Fr52AttachmentRouter:
             _, m, r = tg_single_hits[0]
             return [m], r
 
-        # 0 or >1 TG_SINGLE_ITEM hits → fall to Default WI.
+        # TDN-1 (2026-08-02): TG_DEFAULT_NOMATCH hits — a TG has a
+        # ["default"]-tagged item and 0 matches happened for the filename in
+        # that TG. Route to it ONLY when exactly one TG qualifies:
+        #   * Ph-2 (owner-per-TG → 1 TG in scope): unambiguous → route
+        #   * Ph-1 (universal TPM → many TGs in scope): if every TG has its
+        #     own default, we'd have N candidates and no principled tiebreak
+        #     → fall to milestone Default WI (TPM triages via _unknownTG)
+        # Zero TG-default hits → also fall to milestone Default WI.
+        tg_default_nomatch_hits = [
+            (tg, m, r) for tg, (m, r, _) in per_tg.items()
+            if m is not None and r == RoutingResolution.TG_DEFAULT_NOMATCH
+        ]
+        if len(tg_default_nomatch_hits) == 1:
+            _, m, r = tg_default_nomatch_hits[0]
+            return [m], r
+
+        # 0 or >1 TG_SINGLE_ITEM/TG_DEFAULT_NOMATCH hits → fall to milestone
+        # Default WI.
         return [], RoutingResolution.SUBSTRING_MATCH
 
     def _route_within_tg(
@@ -699,8 +716,30 @@ class Fr52AttachmentRouter:
                     ),
                     RoutingResolution.TG_DEFAULT_MULTIMATCH,
                 )
-            # Multi-match with no ["default"] item → ambiguous; let caller
-            # fall through so B5 (milestone Default WI) can catch.
+            # Multi-match with no ["default"] item AMONG THE MATCHES.
+            # TDN-1 (2026-08-02): if the TG has a separate ["default"]-tagged
+            # item that didn't itself substring-match, route to it. Semantic:
+            # "TG has a designated default → all ambiguity inside that TG
+            # collapses to its default." Extends D-151's TG-default tiebreaker
+            # to cover the "default sits in a different item than any of the
+            # matched ones" case.
+            tg_defaults_all = [c for c in items if self._has_default_tag_set(c)]
+            if len(tg_defaults_all) >= 1:
+                if _ROUTE_TRACE:
+                    logger.warning(
+                        "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
+                        "branch=multi_match_tg_default winner=%s",
+                        filename, tg_name, tg_defaults_all[0]["item_id"],
+                    )
+                return (
+                    AttachmentItemMatch(
+                        item_id=tg_defaults_all[0]["item_id"],
+                        confidence=1.0,
+                        source=RoutingResolution.TG_DEFAULT_NOMATCH,
+                    ),
+                    RoutingResolution.TG_DEFAULT_NOMATCH,
+                )
+            # Fall through to caller so B5 (milestone Default WI) can catch.
             return (None, RoutingResolution.SUBSTRING_MATCH)
 
         # Stage 0 fallback (was Stage 0 shortcut in initial D-151):
@@ -727,27 +766,42 @@ class Fr52AttachmentRouter:
                 RoutingResolution.TG_SINGLE_ITEM,
             )
 
-        # Stage 2 TG_DEFAULT_NOMATCH deferred to Ph-2 per architect 2026-07-22.
-        # Restore path when re-enabling:
-        # default_items = [c for c in items if self._has_default_tag_set(c)]
-        # if len(default_items) >= 1:
-        #     if len(default_items) > 1:
-        #         logger.warning(
-        #             "attachment_router: TG %r has %d items marked with "
-        #             "['default'] tag-set — template config error; taking first "
-        #             "(item_id=%s)",
-        #             tg_name, len(default_items), default_items[0]["item_id"],
-        #         )
-        #     return (
-        #         AttachmentItemMatch(
-        #             item_id=default_items[0]["item_id"],
-        #             confidence=1.0,
-        #             source=RoutingResolution.TG_DEFAULT_NOMATCH,
-        #         ),
-        #         RoutingResolution.TG_DEFAULT_NOMATCH,
-        #     )
+        # TDN-1 (2026-08-02): TG_DEFAULT_NOMATCH re-enabled after the Ph-2
+        # deferral (originally 2026-07-22). Semantic: 0 matches inside this
+        # TG, but the TG has a designated ["default"]-tagged item → route to
+        # it as a per-TG catchall.
+        #
+        # The Ph-1-vs-Ph-2 concern that drove the original deferral (universal
+        # owner + all-TGs candidates → many TGs each with a default → arbitrary
+        # tiebreak needed) is now handled ONE LEVEL UP in _tg_scoped_route Case
+        # C: it counts how many TGs returned TG_DEFAULT_NOMATCH and routes only
+        # when exactly one qualifies, else falls to milestone Default WI. So we
+        # can safely return the per-TG default here.
+        default_items_all = [c for c in items if self._has_default_tag_set(c)]
+        if len(default_items_all) >= 1:
+            if len(default_items_all) > 1:
+                logger.warning(
+                    "attachment_router: TG %r has %d items marked with "
+                    "['default'] tag-set — template config error; taking first "
+                    "(item_id=%s)",
+                    tg_name, len(default_items_all), default_items_all[0]["item_id"],
+                )
+            if _ROUTE_TRACE:
+                logger.warning(
+                    "ROUTE_TRACE stage=within_tg_decision filename=%r tg=%s "
+                    "branch=nomatch_tg_default winner=%s",
+                    filename, tg_name, default_items_all[0]["item_id"],
+                )
+            return (
+                AttachmentItemMatch(
+                    item_id=default_items_all[0]["item_id"],
+                    confidence=1.0,
+                    source=RoutingResolution.TG_DEFAULT_NOMATCH,
+                ),
+                RoutingResolution.TG_DEFAULT_NOMATCH,
+            )
 
-        # No match, TG=1 shortcut didn't apply → this TG rejects.
+        # No match, TG=1 shortcut didn't apply, no ["default"] item → reject.
         return (None, RoutingResolution.SUBSTRING_MATCH)
 
     def _any_substring_hit(self, filename: str, items: list[dict]) -> bool:

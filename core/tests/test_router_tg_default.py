@@ -143,13 +143,11 @@ class TestTgScopedRoute:
         assert matches == []           # falls through -> caller uses B5 default
         assert res == RoutingResolution.SUBSTRING_MATCH
 
-    @pytest.mark.skip(reason=(
-        "Ph-2 deferred per architect 2026-07-22 Q3: TG_DEFAULT_NOMATCH "
-        "(a TG's [\"default\"]-tagged item catching Stage-1-missed docs) "
-        "is excluded from Ph-1 runtime. Restore this test when the "
-        "commented block in _route_within_tg is re-enabled in Ph-2."
-    ))
-    def test_stage2_no_match_uses_tg_default_PH2(self):
+    def test_stage2_no_match_uses_tg_default(self):
+        """TDN-1 (2026-08-02): re-enabled after Ph-2 deferral. When 0 items
+        substring-match in the sole TG in scope but that TG has a
+        ["default"]-tagged item, route to it. Handles both Ph-2 (one owner
+        per TG) and Ph-1 (single-TG milestone) cases."""
         r = _mk_router()
         matches, res = r._tg_scoped_route(
             "zzz_random.pdf",
@@ -361,6 +359,107 @@ class TestTgScopedRoute:
         )
         assert res == RoutingResolution.TG_DEFAULT_MULTIMATCH
         assert matches[0].item_id == "A2"
+
+    # -----------------------------------------------------------------------
+    # TDN-1 (2026-08-02): TG_DEFAULT_NOMATCH — TG default catches BOTH the
+    # zero-match AND the multi-match-no-default-among-matches cases.
+    # -----------------------------------------------------------------------
+
+    def test_tdn1_multi_match_no_default_among_matches_tg_has_separate_default(self):
+        """User ask 2026-08-02: 3 items match ["waiver"] in TG-A, none of
+        them has the ["default"] tag, but a 4th item in TG-A carries
+        ["default"] with a different substring tag. Route to the 4th item
+        (the TG's designated default) instead of falling to milestone
+        Default WI. Semantic: TG default catches ALL intra-TG ambiguity."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "waiver.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A3", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A4", tg_name="TG-A",
+                      item_description=[["compliance"], ["default"]]),
+            ],
+        )
+        assert res == RoutingResolution.TG_DEFAULT_NOMATCH
+        assert len(matches) == 1
+        assert matches[0].item_id == "A4"
+
+    def test_tdn1_zero_match_single_tg_with_default_ph2(self):
+        """TDN-1 Ph-2 case: only one TG in scope (owner-per-TG), 0 matches,
+        TG has a default → route to it."""
+        r = _mk_router(ph1=False)
+        matches, res = r._tg_scoped_route(
+            "unrelated.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["default"]]),
+            ],
+        )
+        assert res == RoutingResolution.TG_DEFAULT_NOMATCH
+        assert matches[0].item_id == "A2"
+
+    def test_tdn1_zero_match_single_tg_with_default_ph1(self):
+        """Ph-1 with single TG in scope behaves the same as Ph-2 — the
+        ambiguity concern only manifests when MULTIPLE TGs each have their
+        own default. Confirms the fix is not accidentally Ph-2-gated."""
+        r = _mk_router(ph1=True)
+        matches, res = r._tg_scoped_route(
+            "unrelated.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["default"]]),
+            ],
+        )
+        assert res == RoutingResolution.TG_DEFAULT_NOMATCH
+        assert matches[0].item_id == "A2"
+
+    def test_tdn1_zero_match_multiple_tg_defaults_ph1_ambiguity(self):
+        """Ph-1 universal-TPM case: 0 matches AND multiple TGs each have
+        their own ["default"] item. No principled tiebreak between them
+        → fall to milestone Default WI (TPM triages via _unknownTG)."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "unrelated.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["default"]]),
+                _item("B1", tg_name="TG-B", item_description=[["compliance"]]),
+                _item("B2", tg_name="TG-B", item_description=[["default"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_tdn1_multi_match_no_default_no_tg_default_still_falls_through(self):
+        """TDN-1 doesn't regress the existing D-151 fallback: if the multi-
+        matched TG has NO ["default"] item ANYWHERE, still fall to milestone
+        Default WI (unchanged pre-TDN-1 behavior)."""
+        r = _mk_router()
+        matches, res = r._tg_scoped_route(
+            "waiver.pdf",
+            [
+                _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+                _item("A2", tg_name="TG-A", item_description=[["waiver"]]),
+            ],
+        )
+        assert matches == []
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    def test_tdn1_within_tg_direct_multi_match_no_default_tg_has_default(self):
+        """_route_within_tg unit-level: multi-match no default AMONG matches
+        but TG has separate default → returns (default_item, TG_DEFAULT_NOMATCH)."""
+        r = _mk_router()
+        items = [
+            _item("A1", tg_name="TG-A", item_description=[["waiver"]]),
+            _item("A2", tg_name="TG-A", item_description=[["waiver"]]),
+            _item("A3", tg_name="TG-A",
+                  item_description=[["compliance"], ["default"]]),
+        ]
+        match, res = r._route_within_tg("waiver.pdf", "TG-A", items)
+        assert res == RoutingResolution.TG_DEFAULT_NOMATCH
+        assert match is not None and match.item_id == "A3"
 
 
 class TestImeiExcelReservedLiteral:
