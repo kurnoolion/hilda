@@ -4155,3 +4155,196 @@ Live evidence 2026-07-26: an owner sent a `.7z` containing files that individual
 - `test_inbound_attachment_archive.py` (new, 11 tests): dispatch helpers (`_is_archive_attachment`, `_sha256_hex`), enum-value stability (`ARCHIVE_CONTAINER == "ArchiveContainer"`), round-trip extraction through the abstraction confirming pipeline-shape contract.
 
 Full pipeline (router + storage + view-tree) coverage relies on composition of tested primitives — no integration test spins up the full router+MockStorage+task path, since the archive branch delegates to `_process_regular_attachment` which is already exercised via existing `test_workflow_engine_tasks.py::TestInboundAttachmentTaskEarlyExits` and the extractor+writer tests validate the specific archive-processing surface.
+
+## D-156: `no_customer_upload` semantic + DRR-milestone posture
+
+**Date**: 2026-08-03
+
+**Context**: Multi-session confusion resurfaced during the SM-S671U1 corp-box test cycle: is `no_customer_upload` a HILDA-outreach gate, a submit-to-carrier gate, or both? What are the correct per-item-type + per-milestone values? Ambiguity was masking a template.yaml data bug (D-141 tension flagged separately) and also masking a design question: does outreach send to items with `no_customer_upload=True` or `False`? Architect clarified the intent verbatim during 2026-08-03 debugging session.
+
+**Decision**: The field means "should HILDA forward the document(s) for this work item to the customer/carrier?" — a **submit-to-carrier authority flag**, not an outreach gate.
+
+**Semantics**:
+- `no_customer_upload = True` → do NOT forward to carrier. Consumed by the submit-to-carrier workflow.
+- `no_customer_upload = False` → DO forward to carrier. Also consumed only by submit-to-carrier.
+
+**Per-item-type expected values**:
+- **Confirmation items** — no document exists, nothing to forward → `no_customer_upload = True`, always.
+- **Non-Confirmation items in "forward" milestones** — external owner uploads a report, HILDA forwards to carrier → `no_customer_upload = False`.
+- **Non-Confirmation items in DRR milestone (specific carve-out)** — HILDA collects the docs for readiness check but does NOT forward the raw docs to carrier. Only the final DRR excel summary goes. So even non-Confirmation items in DRR have `no_customer_upload = True`. **The ONLY exception in DRR is item#85 "Final DRR status excel deliverable for carrier"**, which has `no_customer_upload = False` because that Excel IS what gets forwarded.
+
+**Outreach eligibility does NOT consult this field.** Per FR-52 + `sp_alert_imports.kickoff_collection` code (attachment_router.py:668-681), the outreach eligibility gate checks: `force_tracking_enabled=True` AND `delivery_state ∈ {Not Started, Open}` AND `item_type != "Default"` AND `device_id` matches the event's device. Full stop.
+
+**Rationale**: Two-fold. (1) Semantically clean — the field name reads as "no customer upload" i.e. HILDA doesn't upload to the customer/carrier. Overloading it as an outreach gate would silently couple two orthogonal concerns. (2) Empirical clarity — during the SM-S671U1 investigation, architect noted the field is repeatedly misread as an outreach signal because "customer" reads as "owner" to some readers. Codifying the correct semantic in DECISIONS.md pins the meaning for future readers + future ADRs.
+
+**Alternatives considered**:
+
+- **Rename the field** (`forward_to_carrier` or `carrier_upload_enabled`): rejected — would require SP column rename + template.yaml + code cascade + backfill; the semantic was already clear to the original architect, only recent readers got confused. Rename is a Ph-3+ hygiene item.
+- **Split into two fields** (`outreach_enabled` + `forward_to_carrier`): rejected — outreach already has its own gate (`force_tracking_enabled`); a redundant field creates two-source-of-truth risk.
+- **Make outreach consult this field** (make it a compound gate): rejected — DRR milestone case would then require every DRR item to also flip `force_tracking_enabled=False`, which is wrong (outreach IS needed to collect the docs even though carrier upload isn't).
+
+**Consequences**:
+
+- (a) The `Confirmation items MUST have no_customer_upload=True per [D-053] + tracker MODULE.md invariant` warning that DEBUG-1-style provenance logging emits remains correct — the warning fires when a Confirmation item somehow lands with `False`.
+- (b) Per-milestone value defaults are template.yaml responsibility (D-141): DRR templates should set `no_customer_upload: true` for ALL items except #85, non-DRR customer-milestones should set `false` for non-Confirmation items.
+- (c) The SM-S671U1 investigation surfaced that `no_customer_upload=false` on 84 of 86 items was NOT the outreach-blocker (outreach was blocked by `force_tracking_enabled=false`, D-141 tension); it IS however a submit-to-carrier bug (those items would incorrectly get forwarded to carrier when submit-to-carrier fires). Fix via template.yaml correction + SQL repair + reconciler settling.
+- (d) Future DRR-V2 Excel-template cascade (queued as next 6-chunk work) can rely on this semantic to filter which items participate in the "docs forwarded to carrier" column vs the "docs collected for readiness review" column.
+
+## D-157: `/feedback/*` early-access TPM feedback UI — Ph-1 scope-cut
+
+**Date**: 2026-07-31
+
+**Context**: 5 TPMs (early-access program) needed a lightweight channel to report bugs + feature requests during Ph-1 live testing. Slack/email fragmentation, no persistent record, no per-scope grouping, no attachment support. Architect proposed a dedicated `/feedback/{customer}/{device}/{milestone}` URL per scope; each TPM gets ONE URL for THEIR scope; no auth (5-TPM small-audience Ph-1 posture); server-side rendered form; attachment upload capped at 5MB; BOT self-email notify on submit so HILDA ops sees new tickets in their mailbox.
+
+**Decision**: Ship a scope-scoped feedback UI at `/feedback/{customer}/{device}/{milestone}` with:
+
+- **No authentication** (Ph-1 5-TPM posture — expected to widen to SSO in Ph-2 when audience grows).
+- **One URL per scope** — TPM bookmarks their (customer, device, milestone) URL. Cross-scope isolation: attachments served only from the ticket's own scope URL.
+- **Bug-type registry** in `config/feedback_bug_types.json` — 9 categories × 24 types (+ 1 improvement); server-side dropdown validation. Modifiable without code deploy (loader is lru-cached; container restart re-reads).
+- **Cascading dropdown** in the polished template — client-side JS filters bug_type by selected category; server-side re-validates.
+- **Attachment upload** — single file per ticket, ≤5MB, stored as `LargeBinary` in `FeedbackTicketTable.attachment` (Postgres bytea). Nginx `client_max_body_size 6m` required (documented in rollout runbook).
+- **Per-scope sequential ticket_id** — `<customer>-<device>-<milestone>-<seq>` where `seq` is a `SELECT max(seq)+1` pattern (per-scope monotonic; not globally unique). `UniqueConstraint uq_ft_scope_seq` prevents collisions.
+- **Best-effort BOT self-email notify** on new ticket to `HILDA_FEEDBACK_NOTIFY_TO` env var — never fails the submit if email delivery fails (audit logs the failure). Handles `SEA\OMADM_BOT` domain-prefix stripping + `@` validation.
+- **Ops-managed status transitions via SQL** — Ph-1 does NOT ship an ops UI for status changes. Ops updates `feedback_ticket.status` and `resolution_note` directly via `podman exec hilda-postgres psql ...`. Runbook documents the exact SQL patterns.
+- **Resolution note surfaced on view** — TPM sees WHY a ticket closed in the Resolution column when ops fills `resolution_note`. Discovered mid-cascade need after architect ask; retrofit landed as FB-8.
+- **Cross-link `/browse/` ↔ `/feedback/`** — every browse landing + tg-files page carries a "Report issue / feedback" button; every feedback page carries a back-link to the browse landing. FB-7.
+- **Improvement bug_type sentinel** — `IMPROVEMENT_BUG_TYPE = "OTHER-OTHER"` — when category=improvement, server FORCES `bug_type=OTHER-OTHER` (defensive; the form JS also disables the bug_type select). `Form("")` (empty-string default) accepted for `bug_type` because browsers omit disabled `<select>` elements from POST bodies (FB-9 422 fix).
+
+**Rationale**: Ph-1 scope demands a low-ceremony feedback surface. No-auth is defensible at 5 TPMs (URL-in-bookmark == identity); Ph-2 will add SSO when audience widens. Bug-type registry as JSON keeps ops-side maintenance out of code deploys. Per-scope URL prevents accidental cross-scope leaks (mismatched TPMs). Ops-managed SQL for status transitions avoids building an entire ops UI Ph-1; the SQL runbook is short and cheap. BOT self-email notify keeps HILDA ops in the loop without polling.
+
+**Alternatives considered**:
+
+- **Slack channel per scope**: rejected — Slack integration would require IT approval + Slack admin setup + would fragment feedback across N channels. Also no attachment persistence outside Slack.
+- **JIRA integration**: rejected — Ph-1 doesn't have a `customer_adapter` for JIRA (Ph-3+); building a one-off JIRA client for this would slip Ph-1.
+- **Global feedback URL** (single URL for all scopes, TPM picks scope from dropdown): rejected — accidental cross-scope submission risk; per-scope URL locks the scope into the URL itself.
+- **Auth via corp Kerberos/SSO Ph-1**: rejected — dashboard doesn't have SSO wired Ph-1 (Kerberos middleware is Ph-2 per Next); 5-TPM audience doesn't justify pulling the SSO cascade forward.
+
+**Consequences**:
+
+- (a) 5-TPM URL-in-bookmark = identity model. If a TPM shares the URL, anyone with the URL can submit. Acceptable at 5 TPMs; watch as audience grows.
+- (b) Per-scope `seq` allows gaps under `UniqueConstraint` race retry (rare at 5-TPM scale). `seq` is display-only, no gap risk to logic.
+- (c) Attachment storage as bytea grows Postgres. At 5MB × N tickets, not a Ph-1 concern; if volume grows, migrate to on-disk store (documented as Ph-2 candidate in runbook).
+- (d) Ops-side SQL for status changes means status transitions are NOT auditable by the standard audit trail — a `feedback_ticket.updated_at` timestamp update is the only signal. Runbook explicitly documents this as a Ph-1 tradeoff.
+- (e) BOT self-email notify uses the same `EmailSender` wiring as outreach — requires `email.enc.env` + sops age key + reverse-proxy origin configured. Ticket create still succeeds when email is misconfigured; ops sees the failure in the audit log.
+
+## D-158: `/_unknownTG` Ph-2 manual routing UI — the unrouted-doc triage surface
+
+**Date**: 2026-08-01
+
+**Context**: Ph-1 attachment router (FR-52) can fail to match an inbound doc to a specific work item — no substring hit, cross-TG evidence (D-153), CROSS-1 false positives, missing template tags, etc. Prior behavior: doc lands in the Default WI (milestone-level catchall) or `_unrouted/` NSD path with a `document_index` row but no `document_item_association`. Both cases are invisible to TPMs — the Default WI browse UI didn't distinguish "legitimate default" from "routing failure fallback", and unrouted docs were only visible via SQL. Architect needed a Ph-2 triage UI so TPMs can manually route these edge cases.
+
+**Decision**: Ship a `/_unknownTG` bucket on the `/browse/` landing per milestone, powered by:
+
+- **Schema (UR-1)** — `document_index.customer_id + device_id` nullable columns + composite index `ix_di_unrouted_scope (routing_resolution, customer_id, device_id, milestone_id)`. Legacy pre-UR-2 rows stay NULL (invisible to the UI — accepted gap).
+- **Ingest population (UR-2)** — `inbound_attachment.py` populates the new columns from `candidate_items[0]` at both archive-outer and routed-doc index-row writes. Two-tier resolution: primary_item_dict first, candidate_items[0] fallback.
+- **Storage helpers (UR-3)** — `list_unrouted_for_scope` (NOT EXISTS-association predicate; dup-elsewhere badge computed via secondary query), `list_route_candidates_for_scope` (filters Confirmation + Default + configured excluded item_names; DOES NOT filter by delivery_state — Closed items are legit targets per architect ask; late-arriving docs can be attached), `route_unrouted_to_item` (write-before-delete NSD move; sets `routing_resolution=TPM_REASSIGNED` + `inferred_tg_name`; creates association with `nsd_path_type=STAGED_NOT_CLASSIFIED`; audits via `manual_route_from_unrouted` action_type). Idempotency: repeated call on the same (file, target) after successful route is a no-op.
+- **Exclusion config (UR-4)** — DashboardConfig `manual_routing_excluded_item_names + _milestone_names` (env-tunable comma-separated lists). Item-name exclusion applies globally when milestone list is empty; applies ONLY inside listed milestones when non-empty. Concrete: MMK's item#85 "Final DRR status excel deliverable for carrier" excluded in DRR only (never a manual-route target because it's HILDA-generated).
+- **GET route (UR-5)** — `/browse/{c}/{d}/{m}/_unknownTG/` renders `view_tree_unrouted.html`: one row per unrouted doc with filename + doc_type + ingested_at + dup-elsewhere badge; target-item dropdown filtered by DashboardConfig exclusions; form POSTs to UR-6.
+- **POST route (UR-6)** — `/_unknownTG/route` — Post-Redirect-Get pattern with 303 back to the GET + `?outcome=<code>&target=<item>` query params. GET renders color-coded flash banner per outcome (routed → green; already_routed_to_this_item → blue; already_routed_elsewhere / doc_not_found / target_not_found → red).
+- **Landing bucket (UR-7)** — `view_tree_landing.html` always shows a `_unknownTG` row alongside the tg tables. When count > 0, the row is highlighted (soft orange) with an orange "N unrouted" pill. `count_unrouted_for_scope` helper (single COUNT query) keeps landing render fast. `list_all_unrouted_scopes` helper enumerates distinct scopes for the ops digest.
+- **Weekly ops digest (UR-8)** — `ops_unrouted_digest_tick_task` Celery beat weekly (604800s default). Aggregates unrouted counts across every scope into ONE HTML email with a table sorted by count-desc + per-scope triage links. 4 TpmNotificationConfig fields: `ops_unrouted_digest_enabled` (default True; kill switch), `_beat_interval_seconds` (default 604800), `_recipient` (default ""; empty short-circuits the tick), `_min_count` (default 1; scopes with fewer unrouted are dropped from the digest). Audit row `ops_unrouted_digest_sent` on success. No per-scope idempotency — ops WANT the periodic reminder.
+- **Rollout artifacts (UR-9)** — e2e test (`test_unrouted_ui_e2e.py`), read-only smoke script (`scripts/unrouted_smoke_test.sh`), runbook (`docs/compact/design-inputs/unrouted_ui_rollout.md`) with ALTER TABLE step, env-var setup, fire-manually diagnostic, ops SQL queries, failure-mode table.
+
+**Rationale**: `/_unknownTG` mirrors the visual convention of TG-scoped browsing (`/browse/{...}/tg/{tg_name}/`) so TPMs discover it naturally. Making it a first-class landing row (not a hidden URL) means new TPMs see it exists even when empty. Weekly digest closes the ops-side visibility gap. State-machine re-evaluation intentionally NOT triggered by manual route (kept storage helper pure per architect ask); reconciler tick catches up.
+
+**Alternatives considered**:
+
+- **Push unrouted docs to milestone Default WI unconditionally**: rejected — Default WI is a catchall for many failure modes; muddling it with router-can't-decide loses the diagnostic signal. Separate bucket keeps intent clean.
+- **Auto-retry routing via LLM when substring fails**: rejected as Ph-2 out of scope — LLM route-attachment (Branch B4) exists in code but gated off Ph-1; UR ships as an explicit TPM-in-loop surface, LLM automation is separate.
+- **Notify TPM immediately on every unrouted doc (per-doc email)**: rejected — high volume in early testing would drown TPM. Weekly digest at ops level is right cadence.
+- **Auto-suggest target item via LLM in the dropdown**: deferred Ph-2 — dropdown is currently unsorted per-scope-candidate list; sorting by LLM confidence is a Ph-2 UX enhancement.
+
+**Consequences**:
+
+- (a) `ALTER TABLE document_index ADD COLUMN customer_id + device_id + index` is a required ops step — first-ever `/_unknownTG` UI in this project needing schema change; runbook covers it. Idempotent (`IF NOT EXISTS`).
+- (b) Legacy pre-UR-2 doc rows (imported before customer_id/device_id populated) stay invisible in `/_unknownTG` — accepted gap. Backfill script is a Ph-2 candidate.
+- (c) `route_unrouted_to_item` doesn't trigger state re-evaluation; reconciler picks up doc_count increment + guard replay on next tick (~5min). Any race with owner reply during that window resolves cleanly via existing reconcile paths.
+- (d) MDEL cascade needs to also sweep unrouted `document_index` rows (formerly missed); MDEL-6 (same session) fixes this — the unrouted rows would otherwise clog the next test cycle's `/_unknownTG` UI.
+- (e) UR-1's `customer_id + device_id` denormalization on `document_index` improves query performance for many other future use cases (per-scope doc counts, cross-milestone hash lookups, etc.) — not just `/_unknownTG`.
+
+## D-159: TG_DEFAULT_NOMATCH re-enablement — TG default catches all intra-TG ambiguity
+
+**Date**: 2026-08-03
+
+**Context**: `[D-151]` shipped the `["default"]` tag-set as a per-TG tiebreaker: when multiple items in a TG substring-match a filename AND one of the matched items carries `["default"]`, route to that default-tagged item (`TG_DEFAULT_MULTIMATCH`). D-151 also defined `TG_DEFAULT_NOMATCH` — a per-TG fallback when 0 items substring-match — but explicitly deferred it to Ph-2 (architect Q3 2026-07-22 concern: Ph-1 universal-owner-TPM shape means all TGs are candidates, and 0-match on an off-topic doc would produce N candidate defaults across N TGs with no principled tiebreak). Architect surfaced 2026-08-03 that D-151's tiebreaker doesn't cover the case where multi-match hits WITHOUT `["default"]` among the matches BUT the TG has a separate `["default"]`-tagged item. Prior behavior fell to milestone Default WI in that case; architect asked whether the TG default should catch it. Same session raised the 0-match case — the Ph-2 deferral rationale is now solvable at the `_tg_scoped_route` level by counting hits.
+
+**Decision**: Enable `TG_DEFAULT_NOMATCH` for both cases previously falling through:
+
+**Case 1 — Multi-match, no `["default"]` among matches** (new `_route_within_tg` branch): after the D-151 default-among-matches tiebreaker fails, look at ALL items in the TG (not just matches) for a `["default"]`-tagged item. If exactly one exists, route to it with resolution `TG_DEFAULT_NOMATCH`. Else return `(None, SUBSTRING_MATCH)` (falls to milestone Default WI as before).
+
+**Case 2 — Zero-match in this TG** (was Ph-2-deferred; now enabled): look at all TG items for a `["default"]`-tagged item. If exists, return `(default_item, TG_DEFAULT_NOMATCH)`. Multiple defaults → template config error (log warning, take first). Zero defaults → return `(None, SUBSTRING_MATCH)`.
+
+**Ph-1 universal-TPM ambiguity handled at `_tg_scoped_route` Case C** (no config flag needed): count how many TGs returned `TG_DEFAULT_NOMATCH`. If **exactly one** → route to it (Ph-2 owner-per-TG shape naturally produces this; Ph-1 single-TG milestone also fits). If **>1** → fall to milestone Default WI (Ph-1 many-TGs-each-with-default ambiguity — TPM triages via `/_unknownTG`). Zero → same fall-through as before.
+
+**Semantic**: "A TG with a designated `["default"]`-tagged item catches ALL intra-TG ambiguity for that TG." Extends D-151's tiebreaker to cover the case where the default lives on a DIFFERENT item than any of the substring-matched ones. Also extends to the 0-match case where TG has a default but the filename matched nothing.
+
+**Composed behavior matrix**:
+
+| Scenario | Ph-1 (universal TPM) result | Ph-2 (owner-per-TG) result |
+|---|---|---|
+| Multi-match, one has `["default"]` | `TG_DEFAULT_MULTIMATCH` → matched-item-with-default | same |
+| Multi-match same TG, none has `["default"]`, TG has separate default | `TG_DEFAULT_NOMATCH` → TG default | same |
+| 0 matches, only 1 TG has a default | `TG_DEFAULT_NOMATCH` → TG default | same |
+| 0 matches, N>1 TGs each have their own default | `STAGED_DEFAULT` → milestone Default WI (auto) | `TG_DEFAULT_NOMATCH` → the sole in-scope TG default (auto, because Ph-2 by_tg has 1 entry) |
+| 0 matches, 0 TGs have defaults | `STAGED_DEFAULT` → milestone Default WI | same |
+
+**Rationale**: `TG_DEFAULT_NOMATCH` was designed correctly in D-151; the Ph-2 deferral was too broad. The universal-TPM ambiguity concern is real but scoped: it only manifests when multiple TGs each carry their own default AND the filename matches nothing. That case is genuinely ambiguous and correctly collapses to milestone Default WI. Every OTHER shape has a principled answer that the new code delivers. No config flag makes this a clean structural fix; Ph-1 vs Ph-2 behavior differs automatically because Ph-2 candidate sets are single-TG (by construction of owner-per-TG scoping), so multi-TG-default ambiguity CAN'T arise in Ph-2. Ph-1 still gets the multi-TG-default-ambiguity → milestone Default WI fallback for the pathological case.
+
+**Alternatives considered**:
+
+- **Config flag `cross_tg_guard_enabled`**: rejected — flag would gate whether cross-TG evidence collapses to Default WI (D-153 CROSS-1 behavior). Different concern from TDN-1. Not needed for TDN-1's specific ask.
+- **Route to milestone Default WI in all ambiguous cases** (status quo pre-TDN-1): rejected — architect explicitly asked for the TG default to catch multi-match-no-default. Milestone Default WI muddles the intent signal.
+- **Enable TG_DEFAULT_NOMATCH unconditionally (no Case C aggregation)**: rejected — would break Ph-1 universal-TPM shape by producing N candidate defaults with no tiebreak. Case C hit-counting is the correct guard.
+- **Only enable Case 1 (multi-match-no-default), keep 0-match deferred**: rejected — 0-match case has the same solvability now that Case C aggregation exists. No reason to leave it half-done.
+
+**Consequences**:
+
+- (a) A Ph-1 doc that legitimately has 0 matches AND lands in a scope where exactly one TG has a `["default"]` now routes to that TG's default instead of milestone Default WI. Loses the "TPM triages ambiguity in `/_unknownTG`" signal for those docs. Trade-off: fewer manual routes vs less visibility. Architect confirmed OK.
+- (b) `["default"]` tags in template.yaml become MORE consequential — they attract MORE routing (previously only via D-151 tiebreaker; now also via TDN-1 no-default-among-matches AND 0-match). Template authors should be intentional about which items get the tag.
+- (c) The `TG_DEFAULT_NOMATCH` resolution value in the enum is no longer un-emitted at runtime — ops queries filtering by `routing_resolution` need to account for it as a valid post-2026-08-03 value.
+- (d) Cascade with D-153 (CROSS-1 cross-TG guard) unchanged: when MULTIPLE TGs have substring evidence, still collapses to milestone Default WI (Case A). TDN-1 only activates when 0 or 1 TG has substring evidence AND that TG has an unresolvable-via-D-151 ambiguity.
+- (e) 7 new tests + 1 un-skipped in `test_router_tg_default.py`; 54/54 router tests green after change.
+
+## D-160: Recursive archive extraction (NEST-1) — inner archives as folder segments; doc_count excludes containers
+
+**Date**: 2026-08-03
+
+**Context**: `[D-155]` shipped single-level archive extraction: outer archive gets no router match (`ARCHIVE_CONTAINER` audit row), inner entries each get their own router+persist via `_process_regular_attachment`. Owner-side pattern of nesting archives (zip-inside-zip, 7z-inside-zip) was left unhandled: inner archive entries were routed on their filename (`inner.zip`) as opaque blobs; deeper leaves (`d.xlsx` inside `inner.zip`) never reached the router. Architect asked 2026-08-03 whether recursive extraction should ship, with the specific path semantic: `inner.zip` becomes a folder segment so `d.xlsx` becomes `inner.zip/d.xlsx` at routing time and NSD write time. Also asked for `doc_count` to exclude archive containers (only leaf files count).
+
+**Decision**: Recurse into `_process_archive_attachment` when an inner entry is itself an archive. Preserve archive-as-folder path semantics via prefix concatenation:
+
+- **Path prefix threading** — new `_path_prefix` kwarg on `_process_archive_attachment`. Empty at outermost call. When an inner entry `inner.zip` recurses, the recursion passes `_path_prefix="inner.zip"`. Recursed extraction's inner entries then get filenames prefixed: `inner.zip/d.xlsx`. Extends naturally to N-level nesting (`inner.zip/deeper.zip/leaf.pdf`).
+- **Downstream propagation is free** — NSD view-tree write (`NSDPath.view_tree(...)` accepts any number of relative_parts), Google Drive upload (`customer_adapter` uses same relative path), `/browse/` UI (UI-1 filename column display already handles subdir-prefixed paths per ZIP-1 fix). No downstream code changes needed.
+- **Depth cap `_MAX_ARCHIVE_RECURSION_DEPTH = 5`** — beyond this, deeper inner archives fall through to `_process_regular_attachment` as opaque blobs (TPM can still see + download). Prevents pathologically-nested archive DoS. Cumulative decompressed size naturally bounded to `depth × per-archive-cap` (per-archive cap in `archive_extractor` unchanged: 500MB decompressed).
+- **File-hash cycle detection** — new `_seen_hashes` kwarg (threaded set). When an inner archive's `file_hash` matches any entry in the set (i.e., appeared higher in the recursion chain), skip extraction, write `archive_recursion_cycle_detected` audit row, return empty stats. Catches self-referential archives.
+- **Outer-only replication** — `_replicate_outer_archive_to_tgs` gated by `if _depth == 0`. Inner archives are container bytes already inside the outer's payload — no need to re-materialize each nested container as a separate view-tree file.
+- **`doc_count` excludes archive containers** (architect ask 2026-08-03 verbatim: "doc count will exclude zip files, build it"). Only leaves reaching `_process_regular_attachment` count toward `stats["processed"]` / eventual `doc_count_received` increments. Intermediate archive containers are transparent to counting. Implementation is free — recursion never calls `_process_regular_attachment` on the container itself, only on its inner entries (or on the container-as-blob when depth cap trips).
+
+**Rationale**: The path-prefix "archive-as-folder" model is the natural mental model for TPMs — matches how they see archives locally when extracting with any Windows/Mac tool. NSD + GDrive + browse UI all preserve the path structure without additional code changes. Depth cap + cycle detection are standard zip-bomb / recursion-DoS mitigations. Doc_count semantic matches the architect's explicit ask + aligns with `[D-138]` per-file file_hash-as-atomic-tracked-unit invariant (containers aren't tracked units).
+
+**Alternatives considered**:
+
+- **Extract only inner archives that meet a whitelist (e.g., named `inner.zip`)**: rejected — brittle heuristic; owners nest arbitrarily.
+- **Flatten inner archive contents to outer scope (drop the folder prefix)**: rejected — filename collisions between outer top-level files and inner-archive top-level files would silently overwrite; folder-preservation avoids this AND preserves TPM intuition.
+- **Recurse without depth cap**: rejected — zip-bomb attack surface; a maliciously-nested archive could explode into millions of inner files.
+- **Recurse with cumulative-byte cap instead of depth cap**: rejected — depth cap is easier to reason about + already bounded by per-archive cap × depth (500MB × 5 = 2.5GB worst case, acceptable).
+- **Count containers toward doc_count too**: rejected per architect ask + [D-138] semantic (file_hash is the atomic unit; container is metadata about the transport).
+- **Replicate every inner archive to matched TGs (not just outermost)**: rejected — inner containers are inside the outer's replicated bytes; re-materializing them per-level adds redundant view-tree copies.
+
+**Consequences**:
+
+- (a) A single owner-sent `.zip` containing `.7z` containing `.zip` now cleanly routes each leaf. Prior behavior: leaves invisible → doc landed in Default WI / `/_unknownTG` → TPM manual triage.
+- (b) `/browse/` view-tree pages now show subdir-prefixed paths for nested-inner leaves (e.g., `inner.zip/d.xlsx` displays as folder + file). Matches how zip-extracted subdirs already display (`b/c.docx` for outer's top-level subdirs); consistent UX.
+- (c) DRM sniff (D-152) runs at leaf level unchanged. A NASCA-wrapped PDF inside a nested archive is correctly flagged as `is_drm_wrapped=True` — the sniff sees the actual PDF bytes returned by the extractor. Confirmed 2026-08-03 by user's SA VoNR.zip investigation (outer zip clean, inner PDF flagged; user verifying whether genuine or false positive).
+- (d) `_MAX_ARCHIVE_RECURSION_DEPTH = 5` is deliberately conservative. Ph-1 legitimate use-cases are typically 1-2 levels. Raise if a Ph-2 use case emerges.
+- (e) `archive_recursion_cycle_detected` audit action_type is new — ops queries filtering by action_type can add it. Empty stats returned on cycle detection means the outer archive's leaves that came BEFORE the cycle-triggering inner still count.
+- (f) 5 new tests in `test_inbound_attachment_archive.py` cover: nested-zip path prefixing, depth cap treats deep inner as blob, cycle detection via pre-seeded `_seen_hashes`, doc_count excludes containers, `_replicate` fires exactly once for outer. 125 broader router/attachment/archive tests green after change.
+
+## D-141 addendum (2026-08-03 impl note): template-first merge — silent-override risk flagged
+
+Per SM-S671U1 corp-box test cycle investigation 2026-08-03: `_tmpl_bool(tmpl, key, body_kvs, default)` precedence (template value wins if key present, even False; body_kvs is fallback; model default is last resort) protects against SP null-glitches at setup time BUT also silently overrides correct SP values with wrong template values. Concrete evidence: MMK/SM-S671U1/DRR imported with `force_tracking_enabled=false` + `no_customer_upload=false` on 84/86 items because template.yaml had those flags as False; SP's Yes/False values lost. Blocked kickoff outreach (only item#86 got the email); root-caused via RTRC-1 route-trace + template_lookup direct query.
+
+The design tension is real: template-first was designed for the "SP sometimes omits a field from the ADDED alert body" case, but the flip side is "template.yaml sometimes has stale/wrong values that silently override the truth from SP." Suspect the SP null-glitch concern may be less acute now than at 2026-07-02 design time (SP alerts have been more reliable since TPM-1..4 landed). Worth revisiting the precedence direction — or adding a per-field override mechanism — when a design window opens. For now, template.yaml treated as ground truth: correct values in template.yaml + reload cache + SQL-repair existing wrong Postgres rows is the operational fix.
+
+Related flag in STATUS.md: "Design tension flagged: template-first merge silently propagates template errors" — not yet a new ADR; may become one after DRR-V2 cascade if the tension shows up again.
+
