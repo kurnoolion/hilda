@@ -16,7 +16,7 @@ Pure types -- no IO. Implementations live in inbound/ + outbound/ + sp_alert_par
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import AsyncIterator, Literal, Protocol, runtime_checkable
 
@@ -95,6 +95,14 @@ class PerItemReplyUpdate:
     delivery_state: str | None      # OPEN / OWNER_CLOSED / DELAYED / BLOCKED / etc.
     owner_status_note: str | None
     confidence: float               # 1.0 for structured-block parse; LLM-derived for path (c)
+    # DRR-V2-3 (2026-08-03) — date owner marked the item completed.
+    # Extracted from a new "Completion Date" column in the outreach reply
+    # table. None when the owner didn't fill the cell OR the value failed
+    # to parse (best-effort — parser tries ISO YYYY-MM-DD, MM/DD/YYYY,
+    # DD-MMM-YYYY common shapes; unparseable → None + WARN log).
+    # Rendered in DRR-V2 Excel "Completion" column (C) with fallback to
+    # owner_closed_at / pm_approval_at in DRR-V2-5 excel builder.
+    owner_completion_date: "date | None" = None
 
 
 @dataclass(frozen=True)

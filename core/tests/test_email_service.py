@@ -513,6 +513,134 @@ class TestBodyParserTable:
         assert block.per_item_updates[1].delivery_state == "OPEN"
         assert block.per_item_updates[1].owner_status_note == "Working with sustainability team"
 
+    # -----------------------------------------------------------------------
+    # DRR-V2-3 (2026-08-03): "Completion Date" column parsing
+    # -----------------------------------------------------------------------
+
+    def _make_completion_body(self, batch_id: str, rows_html: str,
+                              header_cell: str = "Completion Date") -> str:
+        """5-column outreach body: item_no, item_title, status, <header_cell>,
+        owner_status_note. Matches the DRR-V2-3 outreach_table.j2 shape."""
+        return (
+            "<html><body>"
+            f"<p>HILDA-BATCH-ID: {batch_id}</p>"
+            "<table>"
+            "<thead><tr>"
+            "<th>Item No</th><th>Item Title</th><th>Current Status</th>"
+            f"<th>{header_cell}</th><th>Owner Comment</th>"
+            "</tr></thead>"
+            "<tbody>"
+            f"{rows_html}"
+            "</tbody></table>"
+            "</body></html>"
+        )
+
+    def test_completion_date_friendly_header_recognized(self):
+        """New 'Completion Date' column shipped in outreach_table.j2 for
+        DRR-V2 must be parsed into PerItemReplyUpdate.owner_completion_date."""
+        from datetime import date
+        rows = (
+            "<tr><td>1</td><td>x</td><td>Closed</td>"
+            "<td>2026-08-15</td><td>done</td></tr>"
+        )
+        body = self._make_completion_body("BATCH-cd1", rows)
+        msg = _msg(subject="Re: BATCH-cd1", body="", body_html=body)
+        block = parse_table_block(msg, "BATCH-cd1", [])
+        assert block is not None
+        assert len(block.per_item_updates) == 1
+        assert block.per_item_updates[0].owner_completion_date == date(2026, 8, 15)
+        assert block.per_item_updates[0].owner_status_note == "done"
+
+    def test_completion_date_snake_case_header_recognized(self):
+        """Some owners may echo the underlying field name. Alias table
+        accepts 'completion_date' + 'completion date' + 'completion'."""
+        from datetime import date
+        rows = (
+            "<tr><td>2</td><td>y</td><td>Closed</td>"
+            "<td>2026-08-01</td><td></td></tr>"
+        )
+        body = self._make_completion_body(
+            "BATCH-cd2", rows, header_cell="completion_date",
+        )
+        msg = _msg(subject="Re: BATCH-cd2", body="", body_html=body)
+        block = parse_table_block(msg, "BATCH-cd2", [])
+        assert block is not None
+        assert block.per_item_updates[0].owner_completion_date == date(2026, 8, 1)
+
+    def test_completion_date_multiple_formats_parsed(self):
+        """Owners will type any of these; parser tries a menu of common
+        shapes and returns date on first match."""
+        from datetime import date
+        cases = [
+            ("2026-08-15",   date(2026, 8, 15)),
+            ("08/15/2026",   date(2026, 8, 15)),
+            ("08/15/26",     date(2026, 8, 15)),
+            ("15-Aug-2026",  date(2026, 8, 15)),
+            ("Aug 15, 2026", date(2026, 8, 15)),
+            ("2026/08/15",   date(2026, 8, 15)),
+        ]
+        for i, (raw, expected) in enumerate(cases, start=1):
+            rows = (
+                f"<tr><td>{i}</td><td>x</td><td>Closed</td>"
+                f"<td>{raw}</td><td></td></tr>"
+            )
+            body = self._make_completion_body(f"BATCH-fmt{i}", rows)
+            msg = _msg(subject=f"Re: BATCH-fmt{i}", body="", body_html=body)
+            block = parse_table_block(msg, f"BATCH-fmt{i}", [])
+            assert block is not None, f"parse failed for {raw!r}"
+            got = block.per_item_updates[0].owner_completion_date
+            assert got == expected, f"format {raw!r}: got {got!r} expected {expected!r}"
+
+    def test_completion_date_empty_cell_yields_none(self):
+        """Owner left the Completion Date cell empty (e.g. Open/Blocked/Delayed
+        rows, or Closed row where owner forgot). Field must be None, not raise."""
+        rows = (
+            "<tr><td>3</td><td>x</td><td>Open</td>"
+            "<td></td><td>still working</td></tr>"
+        )
+        body = self._make_completion_body("BATCH-cd-empty", rows)
+        msg = _msg(subject="Re: BATCH-cd-empty", body="", body_html=body)
+        block = parse_table_block(msg, "BATCH-cd-empty", [])
+        assert block is not None
+        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].delivery_state == "OPEN"
+        assert block.per_item_updates[0].owner_status_note == "still working"
+
+    def test_completion_date_unparseable_cell_yields_none_and_warns(self, caplog):
+        """Ambiguous / typo'd date -> None, WARN logged for observability.
+        Reply-processing chain must NOT break."""
+        import logging
+        rows = (
+            "<tr><td>4</td><td>x</td><td>Closed</td>"
+            "<td>next Tuesday-ish</td><td>ok</td></tr>"
+        )
+        body = self._make_completion_body("BATCH-cd-bad", rows)
+        msg = _msg(subject="Re: BATCH-cd-bad", body="", body_html=body)
+        with caplog.at_level(
+            logging.WARNING,
+            logger="core.src.email_service.inbound.body_parser_table",
+        ):
+            block = parse_table_block(msg, "BATCH-cd-bad", [])
+        assert block is not None
+        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
+        assert any(
+            "Completion Date cell value" in r.getMessage()
+            for r in caplog.records
+        ), "expected WARN log for unparseable completion date"
+
+    def test_backward_compat_table_without_completion_date_column(self):
+        """Pre-DRR-V2-3 batches (or callers still emitting the 4-column
+        outreach) must continue to parse; owner_completion_date defaults
+        to None on every row without failure."""
+        rows = _row(9, "x", "Closed", "still ok")
+        # Uses the legacy 4-column _TABLE_REPLY_TEMPLATE (no Completion Date col)
+        msg = _table_msg("BATCH-legacy", rows)
+        block = parse_table_block(msg, "BATCH-legacy", [])
+        assert block is not None
+        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
+
 
 # ===========================================================================
 # TestBodyParserFreetext (Ph-2 stub)

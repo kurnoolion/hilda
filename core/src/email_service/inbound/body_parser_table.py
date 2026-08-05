@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date, datetime
 
 from core.src.email_service.inbound.body_parser_structured import resolve_sender_match
 from core.src.email_service.protocol import (
@@ -72,7 +73,52 @@ _HEADER_ALIASES = {
     "item title":        "item_title",
     "current status":    "status",
     "owner comment":     "owner_status_note",
+    # DRR-V2-3 (2026-08-03) — Completion Date column so owners can indicate
+    # when an item was actually completed. Rendered in the DRR-V2 Excel
+    # "Completion" column (C) as-is; fallback to owner_closed_at /
+    # pm_approval_at in the excel builder when this cell is empty.
+    "completion_date":   "owner_completion_date",
+    "completion date":   "owner_completion_date",
+    "completion":        "owner_completion_date",
 }
+
+
+# DRR-V2-3: date-cell parser. Owners will type freely; try common shapes.
+# All returned dates use `datetime.date`. Empty / unparseable → None
+# (never raises; we WARN-log for observability).
+_DATE_FORMATS = (
+    "%Y-%m-%d",    # ISO — canonical, matches what outreach template will suggest
+    "%m/%d/%Y",    # US
+    "%m/%d/%y",    # US 2-digit year
+    "%d/%m/%Y",    # EU
+    "%d-%b-%Y",    # 01-Aug-2026
+    "%d %b %Y",    # 01 Aug 2026
+    "%b %d, %Y",   # Aug 1, 2026
+    "%B %d, %Y",   # August 1, 2026
+    "%Y/%m/%d",    # Chinese/JP style
+)
+
+
+def _parse_completion_date_cell(raw: str) -> date | None:
+    """Best-effort date parse for the owner-typed 'Completion Date' cell.
+    Returns None on empty / unparseable. Logs WARN on unparseable-with-
+    non-empty so the diagnostic trail catches "owner typed something
+    ambiguous" cases without failing the whole reply parse.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    _log.warning(
+        "body_parser_table: Completion Date cell value %r did not match any "
+        "supported date format; owner_completion_date will be None",
+        s[:40],
+    )
+    return None
 
 # Owner-facing status cell -> PerItemReplyUpdate.delivery_state symbol.
 # SCREAMING_SNAKE per existing parser convention (see body_parser_structured.py).
@@ -168,6 +214,9 @@ def parse_table_block(
             symbol = raw_status.upper() or "UNKNOWN"
 
         note = cell_text("owner_status_note") or None
+        completion_date = _parse_completion_date_cell(
+            cell_text("owner_completion_date"),
+        )
 
         per_item.append(
             PerItemReplyUpdate(
@@ -175,6 +224,7 @@ def parse_table_block(
                 delivery_state=symbol,
                 owner_status_note=note,
                 confidence=1.0,
+                owner_completion_date=completion_date,
             )
         )
 
