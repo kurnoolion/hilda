@@ -38,6 +38,9 @@ __all__ = [
     "get_workitem",
     "get_customer_delivery_info",
     "get_delivery_path_template",
+    "get_expected_item_count_for_milestone",
+    "get_drr_version",
+    "get_drr_section_grouping",
     "clear_cache",
 ]
 
@@ -279,3 +282,135 @@ def get_expected_item_count_for_milestone(
     if not isinstance(work_items, list):
         return None
     return len(work_items)
+
+
+# ---------------------------------------------------------------------------
+# DRR-V2-1 (Ph-1 2026-08-03): DRR-Excel-generation helpers
+# ---------------------------------------------------------------------------
+#
+# The final DRR Excel deliverable (D-158 sibling / DRR-V2 cascade) needs
+# two structural pieces from template.yaml that don't fit the existing
+# get_workitem contract:
+#
+#   1. Customer-specific `{customer_id}_template_version` at the template
+#      root (e.g. `MMK_template_version: 5.7`, `ATT_template_version: 3.4`).
+#      Rendered in the DRR excel header as "DRR Version <N>".
+#
+#   2. Per-item `parent` + `P1_yellow_marker` under each DRR milestone
+#      work_item — `parent` names the section header row ("Product
+#      Documentation Review", "Pre-Submission items", etc.);
+#      `P1_yellow_marker` flags whether the row gets yellow highlighting
+#      in the Ph-1 Submission Gating banner.
+#
+# These helpers are intentionally read-only + tolerant (missing template
+# returns None; caller decides fail-loud). The excel builder (DRR-V2-5)
+# is where "parent MUST be present" is enforced -- keeping the check
+# there lets the fail-loud message be excel-context-rich.
+
+
+def get_drr_version(customer_id: str) -> str | None:
+    """Return the customer's DRR template version string from template.yaml
+    root -- key format `{customer_id}_template_version`. Returns None when
+    the template isn't cached OR the key is absent OR the value is empty.
+
+    Generic per-customer: `MMK_template_version`, `ATT_template_version`,
+    etc. Caller (DRR excel builder) renders as `DRR Version <N>` in the
+    header block; missing value emits blank + warning per architect ask
+    (2026-08-03 spec Q6).
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+    key = f"{customer_id}_template_version"
+    val = template.get(key)
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
+def get_drr_section_grouping(
+    customer_id: str, device_id: str, milestone_id: str,
+) -> list[dict[str, Any]] | None:
+    """Group work_items by their `parent` field, preserving item_no order.
+
+    Returns a list of {'section': <parent name>, 'work_items': [<wi>, ...]}
+    dicts in the order of first-occurrence -- section header emitted when
+    the current item's `parent` differs from the previous item's `parent`.
+
+    Excludes item#85 (Final DRR excel deliverable) and item#87 (Default WI)
+    per architect ask 2026-08-03 spec Q1 — they are not part of the check-
+    list Verizon sees. If those item_no values ever change per customer,
+    revisit this filter.
+
+    Returns None when template not cached or milestone not present. Missing
+    or empty `parent` on an item is NOT enforced here — caller (DRR excel
+    builder) fail-louds with the missing-parent item_nos so the error
+    message is excel-context-rich (architect ask Q3).
+
+    Sort key: int(item_no) ascending. Non-numeric item_no items sort last
+    (defensive; shouldn't happen in a healthy template).
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+
+    milestones = template.get("milestones") or {}
+    if isinstance(milestones, list):
+        milestones = {
+            m.get("milestone_id"): m
+            for m in milestones
+            if isinstance(m, dict) and m.get("milestone_id")
+        }
+    if not isinstance(milestones, dict):
+        return None
+
+    milestone = milestones.get(milestone_id)
+    if not isinstance(milestone, dict):
+        return None
+
+    scope = milestone.get("devices")
+    if isinstance(scope, list) and scope and device_id not in scope:
+        return None
+
+    raw = milestone.get("work_items") or []
+    if not isinstance(raw, list):
+        return None
+
+    # Filter: exclude item#85 + item#87 per architect ask; sort by item_no.
+    _EXCLUDED_ITEM_NOS = {85, 87}
+    filtered: list[dict[str, Any]] = []
+    for wi in raw:
+        if not isinstance(wi, dict):
+            continue
+        try:
+            n = int(wi.get("item_no", -1))
+        except (TypeError, ValueError):
+            n = -1
+        if n in _EXCLUDED_ITEM_NOS:
+            continue
+        filtered.append(wi)
+
+    def _sort_key(wi: dict[str, Any]) -> tuple[int, int]:
+        try:
+            return (0, int(wi.get("item_no", 999999)))
+        except (TypeError, ValueError):
+            return (1, 999999)
+
+    filtered.sort(key=_sort_key)
+
+    # Group-by-parent preserving first-occurrence order. Iterating a sorted
+    # list and starting a new group whenever `parent` differs from the
+    # previous item's parent is the correct emit order for the excel's
+    # section-header-then-rows pattern -- items sharing a `parent` are
+    # already adjacent by item_no assumption (template author responsibility).
+    groups: list[dict[str, Any]] = []
+    prev_parent: str | None = "__sentinel__"
+    for wi in filtered:
+        parent = wi.get("parent")
+        if parent != prev_parent:
+            groups.append({"section": parent, "work_items": []})
+            prev_parent = parent
+        groups[-1]["work_items"].append(wi)
+
+    return groups
