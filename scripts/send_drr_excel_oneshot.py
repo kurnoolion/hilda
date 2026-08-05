@@ -67,9 +67,10 @@ def main() -> int:
 
     # ---- 2. Build summary + body + Excel via tick's own helpers -------------
     from core.src.workflow_engine.tasks.tpm_notification import (
+        _build_drr_v2_context,
+        _build_subject,
         _compute_summary_and_pending,
         _render_body,
-        _build_subject,
     )
     from core.src.email_service.outbound.drr_report_excel import build_drr_report_excel
 
@@ -79,7 +80,19 @@ def main() -> int:
         summary=summary,
         pending_by_tg=pending_by_tg,
     )
-    xlsx_bytes = build_drr_report_excel(items)
+    # DRR-V2-6: same context builder the tick uses. Needs `deps` so SP
+    # reads (milestone + project header fields) work. Falls back to
+    # legacy 4-column mode when section_grouping is None.
+    from core.src.workflow_engine.task_deps import get_task_deps
+    try:
+        _deps_for_ctx = get_task_deps()
+    except Exception:
+        from core.src.workflow_engine.bootstrap import build_task_deps
+        _deps_for_ctx = build_task_deps().task_deps
+    drr_ctx = _build_drr_v2_context(
+        _deps_for_ctx, args.customer, args.device, args.milestone,
+    )
+    xlsx_bytes = build_drr_report_excel(items=items, **drr_ctx)
     xlsx_filename = f"DRR_{args.customer}_{args.device}_{args.milestone}_final.xlsx"
     subject = _build_subject(args.customer, args.device, args.milestone)
 
@@ -101,14 +114,8 @@ def main() -> int:
         return 0
 
     # ---- 3. Send via the same EmailSender the tick uses ---------------------
-    from core.src.workflow_engine.task_deps import get_task_deps
-    try:
-        deps = get_task_deps()
-    except Exception:
-        # Not running under Celery context — build a fresh deps.
-        from core.src.workflow_engine.bootstrap import build_task_deps
-        deps = build_task_deps().task_deps  # BootstrapResult().task_deps
-
+    # Reuse deps already loaded in step 2 (no need to bootstrap twice).
+    deps = _deps_for_ctx
     if deps.email_sender is None:
         print("ERROR: email_sender not wired in task_deps; cannot send.",
               file=sys.stderr)

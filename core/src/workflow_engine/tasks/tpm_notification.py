@@ -179,6 +179,15 @@ _CUSTOMER_CONFIG_DIRS = (
     Path("/app/customizations/sharepoint_config/customers"),
 )
 
+# DRR-V2-6 (2026-08-05): probe locations for the DRR-header brand logo
+# (customizations/branding/<name>.png). Both host + container paths;
+# whichever exists wins. Missing → None → excel builder silent-skips
+# the image embed and continues.
+_BRANDING_DIRS = (
+    Path("customizations/branding"),
+    Path("/app/customizations/branding"),
+)
+
 
 def _list_customer_ids() -> list[str]:
     """Enumerate customer_id values from customer YAML files.
@@ -540,6 +549,76 @@ def _read_project_headers(
 
 
 # ---------------------------------------------------------------------------
+# DRR-V2-6 (2026-08-05) — context builder for build_drr_report_excel
+# ---------------------------------------------------------------------------
+
+
+def _resolve_logo_path(customer_id: str) -> Path | None:
+    """Resolve the DRR-header logo path from template.yaml's
+    `drr_branding_logo` filename against the customizations/branding/
+    probe paths. Returns None when the template doesn't declare a logo
+    or the file isn't on disk -- excel builder silent-skips."""
+    from core.src.template_schema import template_lookup
+
+    filename = template_lookup.get_drr_logo_filename(customer_id)
+    if not filename:
+        return None
+    for base in _BRANDING_DIRS:
+        candidate = base / filename
+        if candidate.is_file():
+            return candidate
+    _log.warning(
+        "tpm_notification: DRR logo %r declared in template but not found "
+        "under %s -- excel will render without logo",
+        filename, [str(b) for b in _BRANDING_DIRS],
+    )
+    return None
+
+
+def _build_drr_v2_context(
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> dict[str, Any]:
+    """Compose every kwarg build_drr_report_excel() needs in DRR-V2 mode.
+
+    Returned dict is meant to be spread directly into the builder:
+
+        ctx = _build_drr_v2_context(deps, customer, device, milestone)
+        xlsx_bytes = build_drr_report_excel(items=items, **ctx)
+
+    When template_lookup can't resolve section_grouping (missing template
+    / missing milestone / template not cached), returned dict carries
+    section_grouping=None so the builder falls back to the legacy
+    4-column flat sheet. This preserves the pre-DRR-V2 behavior for
+    customers who haven't migrated their template.yaml yet.
+    """
+    from core.src.template_schema import template_lookup
+
+    section_grouping = template_lookup.get_drr_section_grouping(
+        customer_id, device_id, milestone_id,
+    )
+    drr_version = template_lookup.get_drr_version(customer_id)
+    milestone_headers = _read_milestone_headers(
+        deps, customer_id, device_id, milestone_id,
+    )
+    project_headers = _read_project_headers(deps, customer_id, device_id)
+    logo_path = _resolve_logo_path(customer_id)
+
+    return {
+        "customer_id":       customer_id,
+        "device_id":         device_id,
+        "milestone_id":      milestone_id,
+        "section_grouping":  section_grouping,
+        "drr_version":       drr_version,
+        "milestone_headers": milestone_headers,
+        "project_headers":   project_headers,
+        "logo_path":         str(logo_path) if logo_path else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Send-window logic
 # ---------------------------------------------------------------------------
 
@@ -667,9 +746,14 @@ def _send_notification(
         pending_by_tg=pending_by_tg,
     )
 
-    # Build Excel attachment bytes.
+    # Build Excel attachment bytes -- DRR-V2 shape (2026-08-05 cascade).
+    # Context builder composes drr_version + section_grouping +
+    # milestone/project header dicts + logo path from template_lookup +
+    # SP reads. When section_grouping is None (customer not migrated
+    # yet), builder falls back to legacy 4-column flat sheet.
     from core.src.email_service.outbound.drr_report_excel import build_drr_report_excel
-    xlsx_bytes = build_drr_report_excel(items)
+    drr_ctx = _build_drr_v2_context(deps, customer_id, device_id, milestone_id)
+    xlsx_bytes = build_drr_report_excel(items=items, **drr_ctx)
     xlsx_filename = f"DRR_{customer_id}_{device_id}_{milestone_id}_final.xlsx"
 
     subject = _build_subject(customer_id, device_id, milestone_id)

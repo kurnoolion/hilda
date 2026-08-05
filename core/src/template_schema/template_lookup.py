@@ -329,6 +329,28 @@ def get_drr_version(customer_id: str) -> str | None:
     return s if s else None
 
 
+def get_drr_logo_filename(customer_id: str) -> str | None:
+    """Return the DRR-header logo filename from template.yaml root-level
+    `drr_branding_logo` key (e.g. `verizon.png`). Returns None when the
+    template isn't cached OR the key is absent OR the value is empty.
+
+    DRR-V2-6 (2026-08-05): the customer may be delivering a
+    carrier-branded DRR excel (MMK -> Verizon), so the brand name is
+    controlled by template.yaml rather than derived from customer_id.
+    Caller (tpm_notification._resolve_logo_path) resolves the filename
+    against customizations/branding/ probe paths; missing file → None →
+    excel builder silent-skips the image embed.
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+    val = template.get("drr_branding_logo")
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
 def get_drr_section_grouping(
     customer_id: str, device_id: str, milestone_id: str,
 ) -> list[dict[str, Any]] | None:
