@@ -87,12 +87,17 @@ def main() -> int:
     # DRR-V2-6: same context builder the tick uses. Needs `deps` so SP
     # reads (milestone + project header fields) work. Falls back to
     # legacy 4-column mode when section_grouping is None.
+    #
+    # DRR-V2-6d (2026-08-05): the one-shot runs in a fresh python process
+    # (not the celery worker), so task_deps aren't wired yet. Bootstrap
+    # first, then get_task_deps() returns the initialized bundle.
     from core.src.workflow_engine.task_deps import get_task_deps
     try:
         _deps_for_ctx = get_task_deps()
     except Exception:
-        from core.src.workflow_engine.bootstrap import build_task_deps
-        _deps_for_ctx = build_task_deps().task_deps
+        from core.src.workflow_engine.bootstrap import bootstrap_task_deps
+        bootstrap_task_deps()          # sets deps as a side effect
+        _deps_for_ctx = get_task_deps()
     drr_ctx = _build_drr_v2_context(
         _deps_for_ctx, args.customer, args.device, args.milestone,
     )
