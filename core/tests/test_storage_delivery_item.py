@@ -129,6 +129,44 @@ async def test_update_delivery_item_patches_fields():
     assert after.last_reminder_triggered_at.replace(tzinfo=None) == new_ts.replace(tzinfo=None)
 
 
+async def test_owner_completion_date_round_trips():
+    """DRR-V2-2: date-only field, default None, patch via update_delivery_item."""
+    from datetime import date
+    item = _mk_item(item_id="drr-v2-2-test")
+    await create_delivery_item(item)
+
+    fetched = await get_delivery_item("drr-v2-2-test")
+    assert fetched.owner_completion_date is None    # default
+
+    new_date = date(2026, 8, 1)
+    await update_delivery_item("drr-v2-2-test", {
+        "owner_completion_date": new_date,
+    })
+    after = await get_delivery_item("drr-v2-2-test")
+    assert after.owner_completion_date == new_date
+
+    # Clearing to None also works (owner reopens item).
+    await update_delivery_item("drr-v2-2-test", {
+        "owner_completion_date": None,
+    })
+    reopened = await get_delivery_item("drr-v2-2-test")
+    assert reopened.owner_completion_date is None
+
+
+async def test_create_with_owner_completion_date_preserves_value():
+    """When an item is created with owner_completion_date already set
+    (e.g., late-import from a pre-existing SP row), the value round-trips
+    via create_delivery_item (not update)."""
+    from datetime import date
+    item = _mk_item(
+        item_id="drr-v2-2-create",
+        owner_completion_date=date(2026, 7, 15),
+    )
+    await create_delivery_item(item)
+    fetched = await get_delivery_item("drr-v2-2-create")
+    assert fetched.owner_completion_date == date(2026, 7, 15)
+
+
 async def test_update_delivery_item_noop_on_missing_id():
     # Should not raise
     await update_delivery_item("ghost-id", {"reminder_count": 99})

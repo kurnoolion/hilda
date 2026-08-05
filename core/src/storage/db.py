@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from typing import AsyncIterator
 
 from sqlalchemy import (
@@ -310,6 +310,15 @@ class DeliveryItemTable(Base):
     # 2026-06-29 race-resolution.
     owner_intent_closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
+    )
+    # DRR-V2-2 (2026-08-03) — date owner marked item complete; captured
+    # via new "Completion Date" column in the outreach reply table
+    # (DRR-V2-3 body-parser cascade wires the capture path). Rendered in
+    # DRR-V2 Excel "Completion" column (C) with fallback to owner_closed_at
+    # / pm_approval_at in DRR-V2-5 excel builder. Date only per architect
+    # spec 2026-08-03 -- owner types e.g. "2026-08-01", not a timestamp.
+    owner_completion_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True,
     )
 
     # TPM-resolution per FR-83 / FR-87

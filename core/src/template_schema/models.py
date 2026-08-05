@@ -330,6 +330,15 @@ class DeliveryItemBase(_Base):
     #   - subsequent owner reply status=Open (owner revokes intent)
     # Architect 2026-06-29 race-resolution: "owner can open after closure".
     owner_intent_closed_at:          datetime | None = None
+    # DRR-V2-2 (2026-08-03) — date the owner marked the item completed
+    # (Ph-1 path: extracted from a new "Completion Date" column in the
+    # outreach reply table; DRR-V2-3 body-parser cascade wires the
+    # capture path). Rendered in the DRR-V2 Excel "Completion" column
+    # (column C). Fallback logic lives in the excel builder (DRR-V2-5):
+    # when this field is None, use owner_closed_at (if state==OwnerClosed)
+    # or pm_approval_at (if state==Closed via PM). Date-only per
+    # architect spec 2026-08-03 -- owner types a date, not a timestamp.
+    owner_completion_date:           date | None = None
     # TPM-resolution fields per FR-83 / FR-87:
     tpm_reassignment_target_item_id: int | None = None
     tpm_resolved_doc_type:           str | None = None   # LIST/Choice per architect direction 2026-06-21
