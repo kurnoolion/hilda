@@ -100,9 +100,10 @@ class PerItemReplyUpdate:
     # table. None when the owner didn't fill the cell OR the value failed
     # to parse (best-effort — parser tries ISO YYYY-MM-DD, MM/DD/YYYY,
     # DD-MMM-YYYY common shapes; unparseable → None + WARN log).
-    # Rendered in DRR-V2 Excel "Completion" column (C) with fallback to
-    # owner_closed_at / pm_approval_at in DRR-V2-5 excel builder.
-    owner_completion_date: "date | None" = None
+    # DRR-V2-6c (2026-08-05): field renamed owner_completion_date ->
+    # actual_completion_date so the owner-reply write lands on the same
+    # canonical column TPM uses (single source of truth for DRR excel).
+    actual_completion_date: "date | None" = None
 
 
 @dataclass(frozen=True)

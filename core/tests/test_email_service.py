@@ -537,7 +537,7 @@ class TestBodyParserTable:
 
     def test_completion_date_friendly_header_recognized(self):
         """New 'Completion Date' column shipped in outreach_table.j2 for
-        DRR-V2 must be parsed into PerItemReplyUpdate.owner_completion_date."""
+        DRR-V2 must be parsed into PerItemReplyUpdate.actual_completion_date."""
         from datetime import date
         rows = (
             "<tr><td>1</td><td>x</td><td>Closed</td>"
@@ -548,7 +548,7 @@ class TestBodyParserTable:
         block = parse_table_block(msg, "BATCH-cd1", [])
         assert block is not None
         assert len(block.per_item_updates) == 1
-        assert block.per_item_updates[0].owner_completion_date == date(2026, 8, 15)
+        assert block.per_item_updates[0].actual_completion_date == date(2026, 8, 15)
         assert block.per_item_updates[0].owner_status_note == "done"
 
     def test_completion_date_snake_case_header_recognized(self):
@@ -565,7 +565,7 @@ class TestBodyParserTable:
         msg = _msg(subject="Re: BATCH-cd2", body="", body_html=body)
         block = parse_table_block(msg, "BATCH-cd2", [])
         assert block is not None
-        assert block.per_item_updates[0].owner_completion_date == date(2026, 8, 1)
+        assert block.per_item_updates[0].actual_completion_date == date(2026, 8, 1)
 
     def test_completion_date_multiple_formats_parsed(self):
         """Owners will type any of these; parser tries a menu of common
@@ -588,7 +588,7 @@ class TestBodyParserTable:
             msg = _msg(subject=f"Re: BATCH-fmt{i}", body="", body_html=body)
             block = parse_table_block(msg, f"BATCH-fmt{i}", [])
             assert block is not None, f"parse failed for {raw!r}"
-            got = block.per_item_updates[0].owner_completion_date
+            got = block.per_item_updates[0].actual_completion_date
             assert got == expected, f"format {raw!r}: got {got!r} expected {expected!r}"
 
     def test_completion_date_empty_cell_yields_none(self):
@@ -602,7 +602,7 @@ class TestBodyParserTable:
         msg = _msg(subject="Re: BATCH-cd-empty", body="", body_html=body)
         block = parse_table_block(msg, "BATCH-cd-empty", [])
         assert block is not None
-        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].actual_completion_date is None
         assert block.per_item_updates[0].delivery_state == "OPEN"
         assert block.per_item_updates[0].owner_status_note == "still working"
 
@@ -622,7 +622,7 @@ class TestBodyParserTable:
         ):
             block = parse_table_block(msg, "BATCH-cd-bad", [])
         assert block is not None
-        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].actual_completion_date is None
         assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
         assert any(
             "Completion Date cell value" in r.getMessage()
@@ -631,14 +631,14 @@ class TestBodyParserTable:
 
     def test_backward_compat_table_without_completion_date_column(self):
         """Pre-DRR-V2-3 batches (or callers still emitting the 4-column
-        outreach) must continue to parse; owner_completion_date defaults
+        outreach) must continue to parse; actual_completion_date defaults
         to None on every row without failure."""
         rows = _row(9, "x", "Closed", "still ok")
         # Uses the legacy 4-column _TABLE_REPLY_TEMPLATE (no Completion Date col)
         msg = _table_msg("BATCH-legacy", rows)
         block = parse_table_block(msg, "BATCH-legacy", [])
         assert block is not None
-        assert block.per_item_updates[0].owner_completion_date is None
+        assert block.per_item_updates[0].actual_completion_date is None
         assert block.per_item_updates[0].delivery_state == "OWNER_CLOSED"
 
 

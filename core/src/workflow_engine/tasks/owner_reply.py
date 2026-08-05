@@ -250,21 +250,22 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
         # action fails / guard-denies / illegal-transitions.
         await _audit(deps, "apply_owner_reply", delivery_item_id, common)
 
-        # DRR-V2-3 (2026-08-03): persist owner_completion_date FIRST — the
+        # DRR-V2-3 (2026-08-03): persist actual_completion_date FIRST — the
         # date is orthogonal to state (owner can indicate completion date
         # alongside any status: OPEN/CLOSED/etc.) so we write before the
         # state-branch fork below. Skip when None (owner didn't fill it or
         # the cell was unparseable). Best-effort — never fails the reply
-        # processing chain.
-        if upd.owner_completion_date is not None:
+        # processing chain. DRR-V2-6c (2026-08-05): writes to the single
+        # canonical `actual_completion_date` column shared with TPM.
+        if upd.actual_completion_date is not None:
             try:
                 deps.storage.update_delivery_item(
                     delivery_item_id,
-                    {"owner_completion_date": upd.owner_completion_date},
+                    {"actual_completion_date": upd.actual_completion_date},
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
-                    "owner_reply: failed to persist owner_completion_date "
+                    "owner_reply: failed to persist actual_completion_date "
                     "for item=%s: %s",
                     delivery_item_id, str(exc)[:120],
                 )

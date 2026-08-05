@@ -75,11 +75,13 @@ _HEADER_ALIASES = {
     "owner comment":     "owner_status_note",
     # DRR-V2-3 (2026-08-03) — Completion Date column so owners can indicate
     # when an item was actually completed. Rendered in the DRR-V2 Excel
-    # "Completion" column (C) as-is; fallback to owner_closed_at /
-    # pm_approval_at in the excel builder when this cell is empty.
-    "completion_date":   "owner_completion_date",
-    "completion date":   "owner_completion_date",
-    "completion":        "owner_completion_date",
+    # "Completion" column (C) as-is. DRR-V2-6c (2026-08-05): canonical
+    # key renamed owner_completion_date -> actual_completion_date so
+    # writes land on the same postgres column TPM uses (single source
+    # of truth for DRR excel Completion column).
+    "completion_date":   "actual_completion_date",
+    "completion date":   "actual_completion_date",
+    "completion":        "actual_completion_date",
 }
 
 
@@ -115,7 +117,7 @@ def _parse_completion_date_cell(raw: str) -> date | None:
             continue
     _log.warning(
         "body_parser_table: Completion Date cell value %r did not match any "
-        "supported date format; owner_completion_date will be None",
+        "supported date format; actual_completion_date will be None",
         s[:40],
     )
     return None
@@ -215,7 +217,7 @@ def parse_table_block(
 
         note = cell_text("owner_status_note") or None
         completion_date = _parse_completion_date_cell(
-            cell_text("owner_completion_date"),
+            cell_text("actual_completion_date"),
         )
 
         per_item.append(
@@ -224,7 +226,7 @@ def parse_table_block(
                 delivery_state=symbol,
                 owner_status_note=note,
                 confidence=1.0,
-                owner_completion_date=completion_date,
+                actual_completion_date=completion_date,
             )
         )
 
