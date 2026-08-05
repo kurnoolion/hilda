@@ -338,10 +338,12 @@ def get_drr_section_grouping(
     dicts in the order of first-occurrence -- section header emitted when
     the current item's `parent` differs from the previous item's `parent`.
 
-    Excludes item#85 (Final DRR excel deliverable) and item#87 (Default WI)
-    per architect ask 2026-08-03 spec Q1 — they are not part of the check-
-    list Verizon sees. If those item_no values ever change per customer,
-    revisit this filter.
+    Excludes item#85 (Final DRR excel deliverable), item#86 (Ph-1-only
+    non-DRR-docs placeholder — item_name "Stadium, Private Network, Skylo,
+    DR"; used to let TPM ingest non-DRR docs during Ph-1 program) and
+    item#87 (Default WI) per architect ask 2026-08-03 spec Q1 + 2026-08-04
+    #86 addition — they are not part of the checklist Verizon sees. If
+    those item_no values ever change per customer, revisit this filter.
 
     Returns None when template not cached or milestone not present. Missing
     or empty `parent` on an item is NOT enforced here — caller (DRR excel
@@ -377,8 +379,8 @@ def get_drr_section_grouping(
     if not isinstance(raw, list):
         return None
 
-    # Filter: exclude item#85 + item#87 per architect ask; sort by item_no.
-    _EXCLUDED_ITEM_NOS = {85, 87}
+    # Filter: exclude item#85 + item#86 + item#87 per architect ask; sort by item_no.
+    _EXCLUDED_ITEM_NOS = {85, 86, 87}
     filtered: list[dict[str, Any]] = []
     for wi in raw:
         if not isinstance(wi, dict):

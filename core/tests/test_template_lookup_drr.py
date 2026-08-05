@@ -122,19 +122,22 @@ class TestGetDrrSectionGrouping:
         assert [wi["item_no"] for wi in groups[0]["work_items"]] == [1, 2]
         assert [wi["item_no"] for wi in groups[1]["work_items"]] == [5, 6]
 
-    def test_excludes_item_85_and_87_per_architect_ask(self):
-        """Item#85 (Final DRR excel) + item#87 (Default WI) are NOT part of
-        the Verizon-facing checklist. Confirmed spec 2026-08-03 Q1."""
+    def test_excludes_items_85_86_87_per_architect_ask(self):
+        """Item#85 (Final DRR excel) + item#86 (Ph-1-only non-DRR-docs
+        placeholder "Stadium, Private Network, Skylo, DR") + item#87
+        (Default WI) are NOT part of the Verizon-facing checklist.
+        Confirmed spec 2026-08-03 Q1 + 2026-08-04 #86 addition."""
         _seed("MMK", _tmpl_with_drr_items([
             _wi(1, parent="Product Documentation Review"),
             _wi(85, parent="Deliverables to Carrier"),   # excluded
-            _wi(86, parent="Deliverables to Carrier"),
+            _wi(86, parent="Ph-1 Placeholder"),          # excluded
             _wi(87, parent="Default"),                   # excluded
         ]))
         groups = template_lookup.get_drr_section_grouping("MMK", "SM-S671U1", "DRR")
         surfaced = {wi["item_no"] for g in groups for wi in g["work_items"]}
-        assert surfaced == {1, 86}
+        assert surfaced == {1}
         assert 85 not in surfaced
+        assert 86 not in surfaced
         assert 87 not in surfaced
 
     def test_missing_parent_field_still_grouped_as_none_section(self):
