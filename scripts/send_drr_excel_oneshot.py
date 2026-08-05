@@ -10,9 +10,13 @@ body, and sends via the same email_sender. Skips: audit rows, idempotency
 checks, TPM SP lookup, day-of/day-before window classification, state
 transition of item_no=<final_deliverable_item_name>.
 
-Run inside the hilda-worker container (needs the same env + config):
+Run inside the hilda-worker container (needs the same env + config).
+`-w` sets the working directory so `-m scripts.<name>` resolves --
+without it Python starts in `/` and can't see the scripts/ package
+(container smoke 2026-08-05):
 
-  podman exec -it hilda-worker python -m scripts.send_drr_excel_oneshot \\
+  podman exec -w /home/omadm/hilda -it hilda-worker \\
+      python -m scripts.send_drr_excel_oneshot \\
       --customer MMK --device SM-S671U1 --milestone DRR \\
       --to t.arasu@samsung.com --tpm-name "Thendral Arasu"
 
