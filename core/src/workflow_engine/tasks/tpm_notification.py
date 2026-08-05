@@ -393,6 +393,153 @@ def _extract_user_field_email_name(
 
 
 # ---------------------------------------------------------------------------
+# DRR-V2-4 (2026-08-04) — Header-field reads for the Verizon-template DRR
+# Excel (DRR-V2-5). Two helpers, one per SP list, each returns a dict of
+# canonical field name -> raw value. Both are best-effort: SP miss / row
+# miss / blank field → None + WARN log (never raise). Excel builder decides
+# whether to render "N/A" or leave the cell blank.
+# ---------------------------------------------------------------------------
+
+_MILESTONE_HEADER_FIELDS: tuple[str, ...] = (
+    "fld_lockdown_date",
+    "req_version",
+    "target_date",
+)
+
+_PROJECT_HEADER_FIELDS: tuple[str, ...] = (
+    "LE",
+    "FFW",
+)
+
+
+def _read_milestone_headers(
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> dict[str, Any]:
+    """Read fld_lockdown_date + req_version + target_date from the Milestones
+    SP row keyed by (carrier=customer_id, device=device_id, milestone=milestone_id).
+
+    Returns a dict with those three keys; each value is the raw SP field
+    value (may be date / datetime / str) or None when the row is missing or
+    the field is blank. Emits a WARN log per missing field so operations
+    see gaps that would surface as blank cells in the DRR-V2 excel header.
+
+    Never raises. SP transport failures / row misses -> dict of Nones.
+    """
+    empty = {k: None for k in _MILESTONE_HEADER_FIELDS}
+    try:
+        rows = _read_milestones(deps, customer_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "tpm_notification: _read_milestone_headers: milestones read failed "
+            "customer=%s device=%s milestone=%s: %s: %s",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return empty
+
+    device_key = (device_id or "").strip()
+    milestone_key = (milestone_id or "").strip()
+    match = None
+    for r in rows:
+        r_device = (
+            _row_get(r, "project_model")
+            or _row_get(r, "device_id")
+            or ""
+        )
+        r_milestone = (
+            _row_get(r, "milestone_id")
+            or _row_get(r, "Title")
+            or ""
+        )
+        if str(r_device).strip() == device_key and str(r_milestone).strip() == milestone_key:
+            match = r
+            break
+    if match is None:
+        _log.warning(
+            "tpm_notification: _read_milestone_headers: no milestone row matched "
+            "customer=%s device=%s milestone=%s (scanned %d row(s))",
+            customer_id, device_id, milestone_id, len(rows),
+        )
+        return empty
+
+    out: dict[str, Any] = {}
+    for field in _MILESTONE_HEADER_FIELDS:
+        raw = _row_get(match, field)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            _log.warning(
+                "tpm_notification: _read_milestone_headers: field %r blank on "
+                "milestone customer=%s device=%s milestone=%s -- DRR header "
+                "cell will render blank",
+                field, customer_id, device_id, milestone_id,
+            )
+            out[field] = None
+        else:
+            out[field] = raw
+    return out
+
+
+def _read_project_headers(
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    """Read LE + FFW from the Projects_<customer_id> row keyed on
+    project_model=device_id.
+
+    Returns a dict {LE, FFW}; each value is the raw SP field value or None
+    when the row is missing or the field is blank. Emits WARN log per
+    missing field so operations see gaps that would surface as blank cells
+    in the DRR-V2 excel header.
+
+    Never raises. SP transport failures / row misses -> dict of Nones.
+    """
+    from core.src.sharepoint_integration.config import ListScope
+
+    empty = {k: None for k in _PROJECT_HEADER_FIELDS}
+    try:
+        rows = deps.sp_writer.get_items(
+            entity="projects",
+            scope=ListScope(customer_id=customer_id),
+            canonical_filters={"project_model": device_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "tpm_notification: _read_project_headers: projects read failed "
+            "customer=%s device=%s: %s: %s",
+            customer_id, device_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return empty
+
+    rows = list(rows or [])
+    if not rows:
+        _log.warning(
+            "tpm_notification: _read_project_headers: no Projects row matched "
+            "customer=%s device=%s -- DRR header LE + FFW cells will render blank",
+            customer_id, device_id,
+        )
+        return empty
+
+    match = rows[0]
+    out: dict[str, Any] = {}
+    for field in _PROJECT_HEADER_FIELDS:
+        raw = _row_get(match, field)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            _log.warning(
+                "tpm_notification: _read_project_headers: field %r blank on "
+                "project customer=%s device=%s -- DRR header cell will render blank",
+                field, customer_id, device_id,
+            )
+            out[field] = None
+        else:
+            out[field] = raw
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Send-window logic
 # ---------------------------------------------------------------------------
 
