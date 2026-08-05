@@ -121,36 +121,60 @@ class TestV2HeaderBlock:
 
     def test_row_1_oem_model_title(self):
         ws = _open_ws(self._v2_call())
-        assert ws.cell(row=1, column=2).value == "OEM Model"
+        # DRR-V2-5a (2026-08-05): merged A..F, title lives in column A.
+        assert ws.cell(row=1, column=1).value == "OEM Model"
 
     def test_row_3_device_readiness_review_subtitle(self):
         ws = _open_ws(self._v2_call())
-        assert ws.cell(row=3, column=2).value == "Device Readiness Review"
+        assert ws.cell(row=3, column=1).value == "Device Readiness Review"
 
     def test_row_4_drr_version(self):
         ws = _open_ws(self._v2_call())
-        assert ws.cell(row=4, column=2).value == "DRR Version 5.7"
+        assert ws.cell(row=4, column=1).value == "DRR Version 5.7"
+
+    def test_header_rows_1_3_4_13_span_column_a(self):
+        """Per user feedback 2026-08-05: title, subtitle, DRR-version and
+        the yellow-highlighting banner should visually occupy column A
+        as well (not just B..F). Verify each of those rows has a merge
+        range starting at column A."""
+        ws = _open_ws(self._v2_call())
+        merged_a_starts = {
+            m.min_row for m in ws.merged_cells.ranges if m.min_col == 1
+        }
+        assert 1 in merged_a_starts    # row 1 (OEM Model)
+        assert 3 in merged_a_starts    # row 3 (Device Readiness Review)
+        assert 4 in merged_a_starts    # row 4 (DRR Version)
+        assert 13 in merged_a_starts   # row 13 (yellow banner)
 
     def test_header_field_values_rendered(self):
         ws = _open_ws(self._v2_call())
-        # Row 6: Model Number -> device_id
+        # Row 6: Model Number -> device_id (plain string)
         assert ws.cell(row=6, column=2).value == "Model Number:"
         assert ws.cell(row=6, column=3).value == "SM-F976U"
-        # Row 7: Compliance Matrix Lockdown On -> fld_lockdown_date
+        # Row 7: fld_lockdown_date now a native date + number_format,
+        # NOT a pre-formatted string. openpyxl round-trips to datetime.
         assert ws.cell(row=7, column=2).value == "Compliance Matrix Lockdown On:"
-        assert ws.cell(row=7, column=3).value == "03/18/26"
-        # Row 8: VZW Requirements Version -> req_version
+        v7 = ws.cell(row=7, column=3).value
+        assert v7 is not None and hasattr(v7, "year") and v7.year == 2026 and v7.month == 3
+        # Row 8: req_version -> plain string ("Oct 25")
         assert ws.cell(row=8, column=3).value == "Oct 25"
-        # Row 10: DRR Date -> target_date
-        assert ws.cell(row=10, column=3).value == "04/29/26"
-        # Row 11: Ph1 Date -> FFW
-        assert ws.cell(row=11, column=3).value == "05/13/26"
-        # Row 12: Target TA Date -> LE
-        assert ws.cell(row=12, column=3).value == "06/11/26"
+        # Row 10: target_date -> native date
+        v10 = ws.cell(row=10, column=3).value
+        assert v10.year == 2026 and v10.month == 4 and v10.day == 29
+        # Row 11: FFW -> native date
+        v11 = ws.cell(row=11, column=3).value
+        assert v11.year == 2026 and v11.month == 5 and v11.day == 13
+        # Row 12: LE -> native date
+        v12 = ws.cell(row=12, column=3).value
+        assert v12.year == 2026 and v12.month == 6 and v12.day == 11
+        # Every date cell must carry the mm/dd/yy number_format so Excel
+        # doesn't flag it "number stored as text".
+        for r in (7, 10, 11, 12):
+            assert ws.cell(row=r, column=3).number_format == "mm/dd/yy"
 
     def test_row_13_yellow_note(self):
         ws = _open_ws(self._v2_call())
-        assert "Yellow Highlighting" in (ws.cell(row=13, column=2).value or "")
+        assert "Yellow Highlighting" in (ws.cell(row=13, column=1).value or "")
 
     def test_row_14_body_column_headers(self):
         ws = _open_ws(self._v2_call())
@@ -162,7 +186,8 @@ class TestV2HeaderBlock:
 
     def test_missing_drr_version_falls_back_to_bare_label(self):
         ws = _open_ws(self._v2_call(drr_version=None))
-        assert ws.cell(row=4, column=2).value == "DRR Version"
+        # Row 4 is now merged across A..F; value lives in column A.
+        assert ws.cell(row=4, column=1).value == "DRR Version"
 
     def test_blank_header_field_warns_and_emits_blank(self, caplog):
         with caplog.at_level(
@@ -176,8 +201,8 @@ class TestV2HeaderBlock:
                     "target_date": date(2026, 4, 29),
                 },
             ))
-        assert ws.cell(row=7, column=3).value in (None, "")   # fld_lockdown_date blank
-        assert ws.cell(row=8, column=3).value in (None, "")   # req_version blank
+        assert ws.cell(row=7, column=3).value is None    # fld_lockdown_date blank
+        assert ws.cell(row=8, column=3).value is None    # req_version blank
         blanks = [
             r for r in caplog.records
             if "header field" in r.getMessage() and "blank" in r.getMessage()
@@ -237,10 +262,41 @@ class TestV2Body:
         assert ws.cell(row=17, column=1).value == 2
         # Row 18 = section 2 header
         assert ws.cell(row=18, column=1).value == "Pre-Submission Items"
-        # Row 19 = item#5 with completion date formatted MM/DD/YY
+        # Row 19 = item#5 with completion date. Now written as native
+        # date + mm/dd/yy number_format (no green triangle in Excel).
         assert ws.cell(row=19, column=1).value == 5
-        assert ws.cell(row=19, column=3).value == "04/29/26"
+        v = ws.cell(row=19, column=3).value
+        assert v.year == 2026 and v.month == 4 and v.day == 29
+        assert ws.cell(row=19, column=3).number_format == "mm/dd/yy"
         assert ws.cell(row=19, column=4).value == "Closed"
+
+    def test_p1_yellow_marker_fills_description_cell(self):
+        """DRR-V2-5a (2026-08-05): a work_item flagged with
+        `P1_yellow_marker: true` in template.yaml gets its
+        Description-of-Task cell (column B) filled bright yellow
+        (FFFF00) to mirror Verizon's Phase 1 Submission Gating
+        highlight. Non-flagged rows have no fill on column B."""
+        grouping = [{
+            "section": "Sec",
+            "work_items": [
+                {"item_no": 1, "item_name": "Gating", "P1_yellow_marker": True},
+                {"item_no": 2, "item_name": "Not gating"},
+                {"item_no": 3, "item_name": "Also gating", "P1_yellow_marker": True},
+            ],
+        }]
+        ws = _open_ws(build_drr_report_excel(
+            items=[_item(1), _item(2), _item(3)],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        # Row 15 = section, rows 16-18 = the three items.
+        def _bg(cell):
+            return (cell.fill.start_color.rgb or "").upper()
+
+        assert "FFFF00" in _bg(ws.cell(row=16, column=2))
+        # Row 17 (Not gating) should NOT carry the yellow fill.
+        assert "FFFF00" not in _bg(ws.cell(row=17, column=2))
+        assert "FFFF00" in _bg(ws.cell(row=18, column=2))
 
     def test_missing_postgres_item_still_renders_template_no_and_name(self):
         """When section_grouping references an item_no that has no matching
@@ -387,5 +443,5 @@ class TestV2SummaryTables:
             section_grouping=[],
         )
         ws = _open_ws(out)
-        # No section/item rows; header block still present.
-        assert ws.cell(row=1, column=2).value == "OEM Model"
+        # No section/item rows; header block still present (title in col A).
+        assert ws.cell(row=1, column=1).value == "OEM Model"

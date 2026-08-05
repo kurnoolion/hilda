@@ -191,10 +191,10 @@ def _write_header_block(
     right = Alignment(horizontal="right", vertical="center")
     left = Alignment(horizontal="left", vertical="center")
 
-    # Row 1: "OEM Model" (title, merged B..F, centered)
-    ws.merge_cells(start_row=_HEADER_ROW_TITLE, start_column=2,
+    # Row 1: "OEM Model" (title, merged A..F, centered)
+    ws.merge_cells(start_row=_HEADER_ROW_TITLE, start_column=1,
                    end_row=_HEADER_ROW_TITLE, end_column=6)
-    c = ws.cell(row=_HEADER_ROW_TITLE, column=2, value="OEM Model")
+    c = ws.cell(row=_HEADER_ROW_TITLE, column=1, value="OEM Model")
     c.font = Font(bold=True, size=16)
     c.alignment = center
     ws.row_dimensions[_HEADER_ROW_TITLE].height = 24
@@ -203,22 +203,26 @@ def _write_header_block(
     ws.row_dimensions[_HEADER_ROW_LOGO].height = 40
     _embed_logo(ws, logo_path)
 
-    # Row 3: "Device Readiness Review" (merged B..F, centered, large)
-    ws.merge_cells(start_row=_HEADER_ROW_SUBTITLE, start_column=2,
+    # Row 3: "Device Readiness Review" (merged A..F, centered, large)
+    ws.merge_cells(start_row=_HEADER_ROW_SUBTITLE, start_column=1,
                    end_row=_HEADER_ROW_SUBTITLE, end_column=6)
-    c = ws.cell(row=_HEADER_ROW_SUBTITLE, column=2, value="Device Readiness Review")
+    c = ws.cell(row=_HEADER_ROW_SUBTITLE, column=1, value="Device Readiness Review")
     c.font = Font(bold=True, size=18)
     c.alignment = center
     ws.row_dimensions[_HEADER_ROW_SUBTITLE].height = 28
 
-    # Row 4: "DRR Version {N}" — top-left area
+    # Row 4: "DRR Version {N}" — merged A..F so it visually spans the band
     version_text = f"DRR Version {drr_version}" if drr_version else "DRR Version"
-    c = ws.cell(row=_HEADER_ROW_DRR_VERSION, column=2, value=version_text)
+    ws.merge_cells(start_row=_HEADER_ROW_DRR_VERSION, start_column=1,
+                   end_row=_HEADER_ROW_DRR_VERSION, end_column=6)
+    c = ws.cell(row=_HEADER_ROW_DRR_VERSION, column=1, value=version_text)
     c.font = Font(bold=True, size=11)
     c.alignment = left
 
     # Rows 6-8, 10-12: label/value pairs. Emit blank + WARN when the raw
-    # SP value is None (Q6 answer 2026-08-03).
+    # SP value is None (Q6 answer 2026-08-03). Dates written as native
+    # date objects + number_format so Excel doesn't flag them "number
+    # stored as text" (green triangle indicator).
     header_rows: list[tuple[int, str, Any, str]] = [
         (_HEADER_ROW_MODEL,           "Model Number:",                  device_id, "device_id"),
         (_HEADER_ROW_LOCKDOWN,        "Compliance Matrix Lockdown On:", milestone_headers.get("fld_lockdown_date"), "fld_lockdown_date"),
@@ -231,8 +235,7 @@ def _write_header_block(
         lc = ws.cell(row=row, column=2, value=label)
         lc.font = Font(bold=True)
         lc.alignment = right
-        vc = ws.cell(row=row, column=3, value=_format_header_value(raw))
-        vc.alignment = left
+        _write_value_cell(ws, row=row, column=3, raw=raw, alignment=left)
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             _log.warning(
                 "drr_report_excel: header field %r blank for "
@@ -240,13 +243,14 @@ def _write_header_block(
                 field_name, customer_id, device_id, milestone_id,
             )
 
-    # Row 13: yellow-highlighting note.
-    ws.merge_cells(start_row=_HEADER_ROW_YELLOW_NOTE, start_column=2,
+    # Row 13: yellow-highlighting note. Full-band A..F, saturated yellow
+    # (FFFF00) so it visually pops the way Verizon's template does.
+    ws.merge_cells(start_row=_HEADER_ROW_YELLOW_NOTE, start_column=1,
                    end_row=_HEADER_ROW_YELLOW_NOTE, end_column=6)
-    c = ws.cell(row=_HEADER_ROW_YELLOW_NOTE, column=2,
+    c = ws.cell(row=_HEADER_ROW_YELLOW_NOTE, column=1,
                 value="Yellow Highlighting indicates Phase 1 Submission Gating items")
     c.font = Font(bold=True, color="9C6500")
-    c.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    c.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     c.alignment = center
 
     # Row 14: body column headers — red fill.
@@ -286,6 +290,8 @@ def _embed_logo(ws: Any, logo_path: str | Path | None) -> None:
 
 
 def _format_header_value(raw: Any) -> str:
+    """Kept for backward compat / tests that read the string shape.
+    Live cell writes go through _write_value_cell below."""
     if raw is None:
         return ""
     if isinstance(raw, datetime):
@@ -293,6 +299,33 @@ def _format_header_value(raw: Any) -> str:
     if isinstance(raw, date):
         return raw.strftime("%m/%d/%y")
     return str(raw)
+
+
+# openpyxl date format code — matches "04/29/26" display shown in the
+# Verizon template screenshots.
+_DATE_NUMBER_FORMAT = "mm/dd/yy"
+
+
+def _write_value_cell(ws: Any, *, row: int, column: int, raw: Any,
+                       alignment: Any) -> None:
+    """Write a header value cell with the correct type.
+
+    Dates go in as native `date` objects + a `number_format`, so Excel
+    stores them as dates (no green "number stored as text" triangle
+    in the upper-left corner) but the on-screen display still reads
+    "MM/DD/YY" the way Verizon's template does.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        cell = ws.cell(row=row, column=column, value=None)
+    elif isinstance(raw, datetime):
+        cell = ws.cell(row=row, column=column, value=raw.date())
+        cell.number_format = _DATE_NUMBER_FORMAT
+    elif isinstance(raw, date):
+        cell = ws.cell(row=row, column=column, value=raw)
+        cell.number_format = _DATE_NUMBER_FORMAT
+    else:
+        cell = ws.cell(row=row, column=column, value=str(raw))
+    cell.alignment = alignment
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +381,7 @@ def _write_body(
         for wi in work_items:
             wi_no = wi.get("item_no")
             wi_name = wi.get("item_name") or ""
+            wi_p1_gating = bool(wi.get("P1_yellow_marker"))
             di = by_item_no.get(wi_no) if isinstance(wi_no, int) else None
             _write_item_row(
                 ws=ws,
@@ -355,11 +389,17 @@ def _write_body(
                 item_no=wi_no,
                 fallback_item_name=wi_name,
                 delivery_item=di,
+                p1_gating=wi_p1_gating,
                 left=left, center=center,
             )
             current_row += 1
 
     return current_row - 1
+
+
+# Bright yellow used on the row-13 banner AND on P1 gating item
+# Description-of-Task cells so the two visually agree.
+_P1_YELLOW_HEX = "FFFF00"
 
 
 def _write_item_row(
@@ -369,11 +409,14 @@ def _write_item_row(
     item_no: Any,
     fallback_item_name: str,
     delivery_item: Any,
+    p1_gating: bool,
     left: Any,
     center: Any,
 ) -> None:
     """One data row: A item_no | B name | C completion | D status |
-    E owner | F remarks."""
+    E owner | F remarks. When p1_gating=True, the Description-of-Task
+    cell (B) is filled bright yellow to mirror Verizon's Phase 1
+    Submission Gating highlight."""
     from openpyxl.styles import PatternFill
 
     if delivery_item is not None:
@@ -382,7 +425,7 @@ def _write_item_row(
             or fallback_item_name
             or f"Item {item_no or '?'}"
         )
-        completion = _format_completion(getattr(delivery_item, "actual_completion_date", None))
+        completion_raw = getattr(delivery_item, "actual_completion_date", None)
         status = status_for_item(delivery_item)
         owner = getattr(delivery_item, "tg_name", None) or ""
         remarks = getattr(delivery_item, "comment", None) or ""
@@ -391,7 +434,7 @@ def _write_item_row(
         # hasn't run yet, or the item was deleted). Render item_no +
         # template name only; leave the rest blank.
         item_name = fallback_item_name or f"Item {item_no or '?'}"
-        completion = ""
+        completion_raw = None
         status = ""
         owner = ""
         remarks = ""
@@ -400,24 +443,19 @@ def _write_item_row(
     a.alignment = center
     b = ws.cell(row=row, column=2, value=str(item_name))
     b.alignment = left
-    c = ws.cell(row=row, column=3, value=completion)
-    c.alignment = center
+    if p1_gating:
+        b.fill = PatternFill(start_color=_P1_YELLOW_HEX,
+                             end_color=_P1_YELLOW_HEX,
+                             fill_type="solid")
+    # Completion date: write native date + number_format so no green
+    # "number stored as text" marker appears.
+    _write_value_cell(ws, row=row, column=3, raw=completion_raw, alignment=center)
     d = ws.cell(row=row, column=4, value=status)
     d.alignment = center
     e = ws.cell(row=row, column=5, value=str(owner))
     e.alignment = left
     f = ws.cell(row=row, column=6, value=str(remarks))
     f.alignment = left
-
-
-def _format_completion(raw: Any) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, datetime):
-        return raw.date().strftime("%m/%d/%y")
-    if isinstance(raw, date):
-        return raw.strftime("%m/%d/%y")
-    return str(raw)
 
 
 # ---------------------------------------------------------------------------
