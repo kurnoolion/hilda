@@ -332,24 +332,67 @@ async def route_unrouted_to_item(
             doc.original_filename,
         )
 
-        # Step 6: NSD move (write-before-delete for no-loss ordering)
+        # Step 6: NSD move (write-before-delete for no-loss ordering).
+        # Capture the moved bytes so step 6b can write them to the view
+        # tree without re-reading disk.
         src_local = source_path.to_local()
         dst_local = target_path.to_local()
+        moved_bytes: bytes = b""
 
-        def _move() -> None:
+        def _move() -> bytes:
             if src_local.is_file():
+                data = src_local.read_bytes()
                 dst_local.parent.mkdir(parents=True, exist_ok=True)
-                dst_local.write_bytes(src_local.read_bytes())
+                dst_local.write_bytes(data)
                 src_local.unlink()
+                return data
+            return b""
 
         try:
-            await asyncio.to_thread(_move)
+            moved_bytes = await asyncio.to_thread(_move)
         except Exception as exc:  # noqa: BLE001
             return RouteResult(
                 outcome="failed", file_hash=file_hash,
                 target_delivery_item_id=target_delivery_item_id,
                 error=f"nsd_move_failed: {type(exc).__name__}: {str(exc)[:120]}",
             )
+
+        # Step 6b (UR-10 2026-08-06): mirror the file into the view tree so
+        # the browse-docs page renders it under the target TG. The internal
+        # move above lands the file at _staged_classification/, which is
+        # invisible to the dashboard's list_files_in_tg reader (dashboard
+        # only reads _data/view/...). Without this write, TPM-routed
+        # documents disappear from the UI after the manual-route action.
+        #
+        # Best-effort: a view-write failure DOES NOT roll back the
+        # association or the internal move (both already committed by
+        # this point). The doc still exists at the internal path + has
+        # the DB association; TPM can re-trigger the write via a future
+        # refresh path if needed. Failure is logged as WARNING.
+        if moved_bytes:
+            try:
+                from core.src.storage.document_view_writer import (
+                    write_attachment_to_view_tree,
+                )
+                await write_attachment_to_view_tree(
+                    customer_id=doc.customer_id or "",
+                    device_id=doc.device_id or "",
+                    milestone_id=doc.milestone_id,
+                    tg_name=target_tg,
+                    item_type=getattr(target, "item_type", "") or "",
+                    filename=doc.original_filename,
+                    content=moved_bytes,
+                    saved_by=tpm_id or "tpm",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "route_unrouted_to_item: view-tree write failed for "
+                    "file_hash=%s target=%s: %s: %s -- doc lives at "
+                    "internal path but will not appear in browse-docs "
+                    "until re-copied",
+                    file_hash[:12], target_delivery_item_id,
+                    type(exc).__name__, str(exc)[:120],
+                )
 
         # Step 7: create association
         session.add(

@@ -367,3 +367,51 @@ class TestRouteUnroutedToItem:
             tpm_id="tpm@corp",
         )
         assert result.outcome == "already_routed_to_this_item"
+
+    async def test_writes_view_tree_copy_after_manual_route(self, tmp_path):
+        """UR-10 (2026-08-06): manual route from _unrouted MUST also mirror
+        the bytes into the view tree so the browse-docs page renders it.
+        Prior to UR-10 the file only lived at _staged_classification/ in the
+        internal tree, invisible to list_files_in_tg (which reads only
+        _data/view/...) — TPM-routed docs vanished from the UI post-action.
+        """
+        file_hash, target_id = await self._seed()
+        result = await route_unrouted_to_item(
+            file_hash=file_hash,
+            target_delivery_item_id=target_id,
+            tpm_id="tpm@corp",
+        )
+        assert result.outcome == "routed"
+
+        # A DocumentVersionRow at the view path is what the browse UI reads
+        # (per D-150 view-tree contract). If UR-10 wired correctly the row
+        # exists AND the underlying file is on disk under _data/view/...
+        from core.src.storage.document_view_ops import (
+            get_current_version, list_files_in_tg,
+        )
+
+        view_rel = f"view/MMK/SM-A012U/DRR/CPM/report.pdf"
+        row = await get_current_version(view_rel)
+        assert row is not None, (
+            "expected DocumentVersionRow at "
+            f"{view_rel!r} after manual route; browse page "
+            "reads from this table -- missing row means the doc is invisible"
+        )
+        assert row.filename == "report.pdf"
+        assert row.tg_name == "CPM"
+        assert row.saved_by == "tpm@corp"
+        assert row.size_bytes > 0
+
+        # On-disk file also present so a download / view request can serve it
+        view_path = NSDPath.view_tree(
+            "MMK", "SM-A012U", "DRR", "CPM", "report.pdf",
+        )
+        assert view_path.to_local().is_file()
+
+        # And list_files_in_tg surfaces it (dashboard's reader)
+        files = await list_files_in_tg(
+            customer_id="MMK", device_id="SM-A012U",
+            milestone_id="DRR", tg_name="CPM",
+        )
+        filenames = [f.filename for f in files]
+        assert "report.pdf" in filenames
