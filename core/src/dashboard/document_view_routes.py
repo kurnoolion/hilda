@@ -646,10 +646,25 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             or getattr(principal, "user_id", None)
             or "unknown"
         )
+        # UR-10a (2026-08-06) breadcrumb: POST entry. Grep the worker log
+        # for `MANUAL_ROUTE` to trace every TPM routing action end-to-end.
+        _log.warning(
+            "MANUAL_ROUTE: POST /_unknownTG/route entered scope=%s/%s/%s "
+            "file_hash=%s target=%s tpm=%s",
+            customer_id, device_id, milestone_id,
+            file_hash[:12], target_delivery_item_id, tpm_id,
+        )
         result = await route_unrouted_to_item(
             file_hash=file_hash,
             target_delivery_item_id=target_delivery_item_id,
             tpm_id=tpm_id,
+        )
+        _log.warning(
+            "MANUAL_ROUTE: POST result outcome=%s file_hash=%s target=%s "
+            "target_nsd_path=%s error=%s",
+            result.outcome, file_hash[:12], target_delivery_item_id,
+            (result.target_nsd_path or "-")[:120],
+            (result.error or "-")[:120],
         )
 
         from urllib.parse import urlencode

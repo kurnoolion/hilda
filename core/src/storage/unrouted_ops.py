@@ -274,21 +274,55 @@ async def route_unrouted_to_item(
         Channel, CommunicationLogRow, Direction,
     )
 
+    # UR-10a (2026-08-06) breadcrumbs: worker root-log level is WARNING
+    # (RTRC-2 lesson), so INFO gets dropped. Every branch below emits
+    # WARNING-level with `MANUAL_ROUTE` tag so ops can grep the worker
+    # container log for a full trail of every TPM routing decision.
+    _log.warning(
+        "MANUAL_ROUTE: route_unrouted_to_item entered file_hash=%s target=%s tpm=%s",
+        file_hash[:12], target_delivery_item_id, tpm_id,
+    )
     async with session_scope() as session:
         # Step 1: fetch doc. "Unrouted" is defined by absence of
         # association (checked below at step 4), not by any
         # routing_resolution value -- see list_unrouted_for_scope docstring.
         doc = await session.get(DocumentIndexTable, file_hash)
         if doc is None:
+            _log.warning(
+                "MANUAL_ROUTE: DOC_NOT_FOUND file_hash=%s -- no "
+                "document_index row for this hash; UI-supplied hash may "
+                "be stale or the row was deleted",
+                file_hash[:12],
+            )
             return RouteResult(outcome="doc_not_found", file_hash=file_hash)
+        _log.warning(
+            "MANUAL_ROUTE: doc fetched file_hash=%s filename=%r "
+            "customer=%s device=%s milestone=%s routing_resolution=%s",
+            file_hash[:12], doc.original_filename,
+            doc.customer_id, doc.device_id, doc.milestone_id,
+            doc.routing_resolution,
+        )
 
         # Step 3: fetch target
         target = await session.get(DeliveryItemTable, target_delivery_item_id)
         if target is None:
+            _log.warning(
+                "MANUAL_ROUTE: TARGET_NOT_FOUND target=%s -- delivery_item "
+                "row missing; UI dropdown may be stale",
+                target_delivery_item_id,
+            )
             return RouteResult(
                 outcome="target_not_found", file_hash=file_hash,
                 target_delivery_item_id=target_delivery_item_id,
             )
+        _log.warning(
+            "MANUAL_ROUTE: target fetched item_id=%s item_no=%s tg=%s "
+            "item_type=%s item_name=%r",
+            target_delivery_item_id, getattr(target, "item_no", "?"),
+            getattr(target, "tg_name", None),
+            getattr(target, "item_type", None),
+            getattr(target, "item_name", None),
+        )
 
         # Step 4: existing association check
         assoc_result = await session.execute(
@@ -299,12 +333,23 @@ async def route_unrouted_to_item(
         existing_assocs = list(assoc_result.scalars().all())
         for a in existing_assocs:
             if a.delivery_item_id == target_delivery_item_id:
+                _log.warning(
+                    "MANUAL_ROUTE: ALREADY_ROUTED_TO_THIS_ITEM "
+                    "file_hash=%s target=%s -- idempotent no-op",
+                    file_hash[:12], target_delivery_item_id,
+                )
                 return RouteResult(
                     outcome="already_routed_to_this_item",
                     file_hash=file_hash,
                     target_delivery_item_id=target_delivery_item_id,
                 )
         if existing_assocs:
+            _log.warning(
+                "MANUAL_ROUTE: ALREADY_ROUTED_ELSEWHERE file_hash=%s "
+                "existing_item=%s -- rejecting new target=%s",
+                file_hash[:12], existing_assocs[0].delivery_item_id,
+                target_delivery_item_id,
+            )
             return RouteResult(
                 outcome="already_routed_elsewhere",
                 file_hash=file_hash,
@@ -339,6 +384,11 @@ async def route_unrouted_to_item(
         dst_local = target_path.to_local()
         moved_bytes: bytes = b""
 
+        _log.warning(
+            "MANUAL_ROUTE: file move planned src=%s dst=%s src_exists=%s",
+            src_local, dst_local, src_local.is_file(),
+        )
+
         def _move() -> bytes:
             if src_local.is_file():
                 data = src_local.read_bytes()
@@ -351,11 +401,19 @@ async def route_unrouted_to_item(
         try:
             moved_bytes = await asyncio.to_thread(_move)
         except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "MANUAL_ROUTE: MOVE_FAILED src=%s dst=%s: %s: %s",
+                src_local, dst_local, type(exc).__name__, str(exc)[:120],
+            )
             return RouteResult(
                 outcome="failed", file_hash=file_hash,
                 target_delivery_item_id=target_delivery_item_id,
                 error=f"nsd_move_failed: {type(exc).__name__}: {str(exc)[:120]}",
             )
+        _log.warning(
+            "MANUAL_ROUTE: move done bytes=%d dst=%s dst_exists_after=%s",
+            len(moved_bytes), dst_local, dst_local.is_file(),
+        )
 
         # Step 6b (UR-10 2026-08-06): mirror the file into the view tree so
         # the browse-docs page renders it under the target TG. The internal
@@ -370,11 +428,17 @@ async def route_unrouted_to_item(
         # the DB association; TPM can re-trigger the write via a future
         # refresh path if needed. Failure is logged as WARNING.
         if moved_bytes:
+            _log.warning(
+                "MANUAL_ROUTE: view-tree write planned tg=%s item_type=%s "
+                "filename=%r bytes=%d",
+                target_tg, getattr(target, "item_type", None),
+                doc.original_filename, len(moved_bytes),
+            )
             try:
                 from core.src.storage.document_view_writer import (
                     write_attachment_to_view_tree,
                 )
-                await write_attachment_to_view_tree(
+                view_paths = await write_attachment_to_view_tree(
                     customer_id=doc.customer_id or "",
                     device_id=doc.device_id or "",
                     milestone_id=doc.milestone_id,
@@ -384,15 +448,36 @@ async def route_unrouted_to_item(
                     content=moved_bytes,
                     saved_by=tpm_id or "tpm",
                 )
+                _log.warning(
+                    "MANUAL_ROUTE: view-tree write done wrote=%d path(s)=%r",
+                    len(view_paths or []), view_paths,
+                )
+                if not view_paths:
+                    _log.warning(
+                        "MANUAL_ROUTE: VIEW_WRITE_EMPTY tg=%s item_type=%s -- "
+                        "write_attachment_to_view_tree returned []; likely "
+                        "cause: item_type=default (view excludes Default WI) "
+                        "OR tg_name empty. Doc lives at internal path but "
+                        "will not appear in browse-docs.",
+                        target_tg, getattr(target, "item_type", None),
+                    )
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
-                    "route_unrouted_to_item: view-tree write failed for "
-                    "file_hash=%s target=%s: %s: %s -- doc lives at "
-                    "internal path but will not appear in browse-docs "
-                    "until re-copied",
+                    "MANUAL_ROUTE: VIEW_WRITE_FAILED file_hash=%s target=%s: "
+                    "%s: %s -- doc lives at internal path but will not "
+                    "appear in browse-docs until re-copied",
                     file_hash[:12], target_delivery_item_id,
                     type(exc).__name__, str(exc)[:120],
                 )
+        else:
+            _log.warning(
+                "MANUAL_ROUTE: SKIP_VIEW_WRITE moved_bytes=0 -- source file "
+                "not present at %s; DB association will still be created "
+                "but no bytes were copied. Likely cause: file was cleaned "
+                "up out-of-band or the source-path helper generated the "
+                "wrong location. Check the internal_default_workitem tree.",
+                src_local,
+            )
 
         # Step 7: create association
         session.add(
@@ -417,6 +502,12 @@ async def route_unrouted_to_item(
         doc.inferred_tg_name = target_tg
 
         await session.commit()
+        _log.warning(
+            "MANUAL_ROUTE: SUCCESS committed file_hash=%s target=%s tg=%s "
+            "internal_path=%s",
+            file_hash[:12], target_delivery_item_id, target_tg,
+            target_path.to_relative(),
+        )
 
     # Step 9: audit (best-effort; separate transaction)
     try:
