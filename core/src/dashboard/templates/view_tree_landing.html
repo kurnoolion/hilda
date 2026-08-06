@@ -4,6 +4,14 @@
 
 {% block content %}
 <div style="float:right;">
+  {# DRR-DL-1 (2026-08-06): on-demand DRR-status excel download. Same
+     workbook the beat tick produces at target_date−1 / target_date, but
+     built from Postgres + SP as-is at click time — no window check. #}
+  <a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/drr-status.xlsx"
+     style="display:inline-block; background:#0b6e3f; color:#fff;
+            padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
+            font-size:0.9em; margin-right:0.5em;"
+     title="Download the DRR-V2 excel with items as-is (open/closed status current)">Download DRR status</a>
   <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
      style="display:inline-block; background:#1a3a6c; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;

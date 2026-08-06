@@ -212,6 +212,109 @@ class TestBrowseRoutes:
         assert r.status_code == 200
         assert "No documents received yet" in r.text
 
+    async def test_landing_renders_download_drr_status_button(self, cfg):
+        """DRR-DL-1 (2026-08-06): landing toolbar carries a 'Download DRR
+        status' button pointing at the new .xlsx endpoint. Visible on
+        every scope's landing, not gated on unrouted count or tg presence."""
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/")
+        assert r.status_code == 200
+        assert "Download DRR status" in r.text
+        assert "/browse/MMK/SM-S671U1/DRR/drr-status.xlsx" in r.text
+
+
+class TestDownloadDrrStatus:
+    """DRR-DL-1 (2026-08-06): GET /browse/{c}/{d}/{m}/drr-status.xlsx
+    on-demand DRR-V2 excel download, bypasses the target_date window."""
+
+    async def test_404_when_no_items_in_scope(self, cfg):
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/drr-status.xlsx")
+        assert r.status_code == 404
+        assert "no delivery items in scope" in r.text
+
+    async def test_200_streams_xlsx_bytes_with_attachment_header(self, cfg, monkeypatch):
+        """Happy path: item exists, endpoint returns xlsx bytes with
+        Content-Disposition=attachment and a scope-derived filename.
+        _build_drr_v2_context is mocked so the test doesn't need a live
+        SP client. build_drr_report_excel is exercised for real."""
+        from datetime import datetime, timezone
+        from core.src.storage.delivery_item_ops import create_delivery_item
+        from core.src.template_schema import DeliveryItemBase
+
+        await create_delivery_item(DeliveryItemBase(
+            item_id="MMK-SM-S671U1-DRR-1",
+            item_no=1, milestone_id="DRR",
+            customer_id="MMK", device_id="SM-S671U1",
+            item_name="Test item", item_type="test_tech_waiver_report",
+            tg_name="CPM", delivery_state="Open",
+            tracking_modality=["Email"], no_customer_upload=False,
+            last_updated=datetime.now(timezone.utc), sort_order=1,
+            path_id="item-1", force_tracking_enabled=True,
+            owner_corp_id="owner-1",
+            item_path_id="item_1", tg_path_id="CPM",
+        ))
+
+        # Mock _build_drr_v2_context so the route doesn't try to bootstrap
+        # a full task_deps + SP client in the test env. section_grouping=None
+        # falls back to legacy 4-column mode (still exercises the builder).
+        import core.src.dashboard.document_view_routes as routes_mod
+        def _fake_ctx(deps, cid, did, mid):
+            return {
+                "customer_id":       cid,
+                "device_id":         did,
+                "milestone_id":      mid,
+                "section_grouping":  None,
+                "drr_version":       None,
+                "milestone_headers": {},
+                "project_headers":   {},
+                "logo_path":         None,
+            }
+        # Also stub the bootstrap call so it doesn't touch real infra.
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.tpm_notification._build_drr_v2_context",
+            _fake_ctx,
+        )
+
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/drr-status.xlsx")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        cd = r.headers["content-disposition"]
+        assert 'attachment' in cd
+        assert 'DRR_MMK_SM-S671U1_DRR_status.xlsx' in cd
+        assert len(r.content) > 0
+        # xlsx magic: zip container starts with PK\x03\x04
+        assert r.content[:4] == b"PK\x03\x04"
+
+    async def test_only_items_matching_scope_are_included(self, cfg, monkeypatch):
+        """The endpoint filters items by customer+device+milestone. An
+        item in a different device MUST NOT flip the scope to 200 when
+        the requested device has no items."""
+        from datetime import datetime, timezone
+        from core.src.storage.delivery_item_ops import create_delivery_item
+        from core.src.template_schema import DeliveryItemBase
+
+        # Item lives under a DIFFERENT device than the URL
+        await create_delivery_item(DeliveryItemBase(
+            item_id="MMK-OTHER-DRR-1",
+            item_no=1, milestone_id="DRR",
+            customer_id="MMK", device_id="SM-OTHER",
+            item_name="Wrong device", item_type="test_tech_waiver_report",
+            tg_name="CPM", delivery_state="Open",
+            tracking_modality=["Email"], no_customer_upload=False,
+            last_updated=datetime.now(timezone.utc), sort_order=1,
+            path_id="item-1", force_tracking_enabled=True,
+            owner_corp_id="owner-1",
+            item_path_id="item_1", tg_path_id="CPM",
+        ))
+
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/drr-status.xlsx")
+        assert r.status_code == 404
+
     async def test_tg_files_page_lists_files_and_actions(self, cfg):
         await save_view_document(
             customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",

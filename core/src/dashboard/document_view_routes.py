@@ -451,6 +451,109 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             },
         )
 
+    # ----- DRR-DL-1 (2026-08-06): on-demand Download DRR status ---------
+    #
+    # TPMs can grab the same DRR-V2 excel the beat tick produces at any
+    # time — no need to wait for target_date−1 / target_date windows.
+    # Reads current items from Postgres + fresh SP header fields, builds
+    # the workbook, streams the bytes as an .xlsx attachment. Auth is the
+    # same `/browse` gate as the rest of the module (no extra role check).
+    @app.get(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/drr-status.xlsx",
+    )
+    async def download_drr_status(
+        customer_id: str, device_id: str, milestone_id: str,
+        principal=Depends(_auth),
+    ):
+        _log.warning(
+            "DRR_DL: on-demand download requested customer=%s device=%s "
+            "milestone=%s principal=%s",
+            customer_id, device_id, milestone_id,
+            getattr(principal, "user_id", None)
+            or getattr(principal, "corp_id", "?"),
+        )
+
+        # 1. Load items for the milestone (sync helper, same as one-shot).
+        from core.src.storage.delivery_item_ops import list_items_for_milestone
+        all_items = await list_items_for_milestone(milestone_id) or []
+        items = [
+            it for it in all_items
+            if getattr(it, "customer_id", None) == customer_id
+            and getattr(it, "device_id", None) == device_id
+        ]
+        if not items:
+            _log.warning(
+                "DRR_DL: no items in scope customer=%s device=%s milestone=%s "
+                "(query returned %d items for milestone before device+customer "
+                "filter) -- returning 404",
+                customer_id, device_id, milestone_id, len(all_items),
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no delivery items in scope for customer={customer_id} "
+                    f"device={device_id} milestone={milestone_id}"
+                ),
+            )
+
+        # 2. Build DRR-V2 context (drr_version, section_grouping, header dicts,
+        #    logo path) via the same helper the beat tick uses. Requires
+        #    task_deps for SP reads; bootstrap on first miss (dashboard
+        #    process may not have wired them yet).
+        from core.src.workflow_engine.task_deps import get_task_deps
+        try:
+            deps = get_task_deps()
+        except Exception:
+            from core.src.workflow_engine.bootstrap import bootstrap_task_deps
+            bootstrap_task_deps()
+            deps = get_task_deps()
+
+        from core.src.workflow_engine.tasks.tpm_notification import (
+            _build_drr_v2_context,
+        )
+        drr_ctx = _build_drr_v2_context(
+            deps, customer_id, device_id, milestone_id,
+        )
+
+        # 3. Build the workbook bytes.
+        from core.src.email_service.outbound.drr_report_excel import (
+            build_drr_report_excel,
+        )
+        try:
+            xlsx_bytes = build_drr_report_excel(items=items, **drr_ctx)
+        except Exception as exc:
+            _log.warning(
+                "DRR_DL: build failed customer=%s device=%s milestone=%s: "
+                "%s: %s",
+                customer_id, device_id, milestone_id,
+                type(exc).__name__, str(exc)[:200],
+            )
+            raise HTTPException(status_code=500, detail=str(exc)[:200])
+
+        _log.warning(
+            "DRR_DL: built %d bytes customer=%s device=%s milestone=%s "
+            "items=%d section_grouping=%s",
+            len(xlsx_bytes), customer_id, device_id, milestone_id,
+            len(items),
+            "present" if drr_ctx.get("section_grouping") else "legacy-flat",
+        )
+
+        # 4. Stream as attachment. Content-Disposition triggers "save as"
+        #    in the browser — filename matches the beat-tick pattern.
+        from io import BytesIO
+        filename = f"DRR_{customer_id}_{device_id}_{milestone_id}_status.xlsx"
+        return StreamingResponse(
+            BytesIO(xlsx_bytes),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length":       str(len(xlsx_bytes)),
+            },
+        )
+
     @app.get(
         "/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/",
         response_class=HTMLResponse,
