@@ -214,6 +214,35 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
             # Silent drop (no-op SP CHANGE or Projects Ph-2)
             continue
 
+        # DEV-FILTER-1 (2026-08-06): drop SP alerts whose project_model
+        # isn't in the customer's template.yaml `devices:` whitelist.
+        # SP UI engineer's test environment feeds sample-device alerts
+        # into the shared inbox; without this filter, Postgres tables
+        # get polluted with mock-device rows.
+        #
+        # Pass-through rules (do NOT drop):
+        #   * project_model empty (Milestones-list alert, no device scope)
+        #   * customer_id empty (defensive)
+        #   * list_known_devices returns None or [] (template not cached
+        #     or `devices:` block absent — treat as "any allowed" to
+        #     avoid surprise drops during config windows)
+        _pm = (parsed.body_kvs or {}).get("project_model", "") or ""
+        _cid = parsed.routing_key.list_suffix or ""
+        if _pm and _cid:
+            from core.src.template_schema import template_lookup as _tl
+            _known = _tl.list_known_devices(_cid)
+            if _known and _pm not in _known:
+                _log.warning(
+                    "DEVICE_FILTER: dropped SP_ALERT project_model=%r "
+                    "customer=%s (not in template.yaml devices=%r) "
+                    "msg=%s subject=%r -- SP UI engineer test-device "
+                    "pollution guard",
+                    _pm, _cid, _known,
+                    getattr(m, "message_id", "?"),
+                    (getattr(m, "subject", "") or "")[:120],
+                )
+                continue
+
         # Write inbound-audit row BEFORE dispatch -- captures unmatched events too.
         try:
             await _audit_inbound_sp_alert(parsed, m)

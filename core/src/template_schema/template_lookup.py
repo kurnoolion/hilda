@@ -329,6 +329,35 @@ def get_drr_version(customer_id: str) -> str | None:
     return s if s else None
 
 
+def list_known_devices(customer_id: str) -> list[str] | None:
+    """Return the customer's whitelist of known device_ids from
+    template.yaml's `devices:` block (dict keys per [D-091]).
+
+    DEV-FILTER-1 (2026-08-06): SP UI engineer's test environment feeds
+    sample-device SP alerts into the shared inbox. The email_polling
+    filter uses this helper to drop any SP alert whose `project_model`
+    (device_id) isn't in the customer's template.yaml devices block --
+    keeps Postgres clean for the real devices only.
+
+    Returns:
+      * None  — customer's template.yaml not cached (fallback: caller
+                should PASS THROUGH the alert, not filter, so a config
+                miss doesn't accidentally drop real alerts).
+      * []    — template exists but `devices:` block absent or empty
+                (fallback: caller should PASS THROUGH too — treating
+                empty as "any device allowed" avoids surprise drops
+                during template-migration windows).
+      * list  — the device_ids the customer declares.
+    """
+    template = _CACHE.get(customer_id)
+    if template is None:
+        return None
+    devices = template.get("devices")
+    if not isinstance(devices, dict):
+        return []
+    return [str(k) for k in devices.keys() if k]
+
+
 def get_drr_logo_filename(customer_id: str) -> str | None:
     """Return the DRR-header logo filename from template.yaml root-level
     `drr_branding_logo` key (e.g. `verizon.png`). Returns None when the

@@ -245,6 +245,135 @@ async def test_poll_skips_silent_noop_parses(base_deps):
     assert fake_dispatcher.dispatch.call_count == 0
 
 
+# ---------------------------------------------------------------------------
+# DEV-FILTER-1 (2026-08-06): SP alert device-whitelist filter
+# ---------------------------------------------------------------------------
+
+
+def _mk_parsed(project_model: str = "SM-S671U1", list_suffix: str = "MMK"):
+    """Minimal parsed-SP-alert object mirroring what SpAlertParser returns."""
+    return SimpleNamespace(
+        action_type="added",
+        item_title="Item",
+        body_kvs={"project_model": project_model} if project_model else {},
+        field_deltas=None,
+        routing_key=SimpleNamespace(
+            list_name="Deliverables",
+            list_suffix=list_suffix,
+            milestone_name="P1",
+            project_id="2350",
+            item_number=5,
+        ),
+    )
+
+
+async def _run_poll_with_parsed(fake_parsed, base_deps, template_cache=None):
+    """Common driver: 1 SP_ALERT msg, mocked parser returns `fake_parsed`,
+    optional template_lookup._CACHE seed for the device-filter path."""
+    from core.src.email_service.protocol import EmailKind
+    from core.src.template_schema import template_lookup
+
+    template_lookup.clear_cache()
+    if template_cache:
+        template_lookup._CACHE.update(template_cache)      # noqa: SLF001
+
+    fake_dispatcher = MagicMock()
+    deps_with_dispatcher = TaskDeps(
+        storage=base_deps.storage,
+        sp_writer=base_deps.sp_writer,
+        audit=base_deps.audit,
+        dispatcher=fake_dispatcher,
+    )
+    msgs = [MagicMock(
+        message_id="msg-1", subject="SP alert",
+        body_text="body", sender="sp@corp", received_at=None,
+    )]
+    fake_receiver = MagicMock()
+    fake_receiver.fetch_once = AsyncMock(return_value=msgs)
+
+    with override_task_deps(deps_with_dispatcher), \
+         patch("core.src.email_service.build_receiver", return_value=fake_receiver), \
+         patch(
+             "core.src.email_service.config.EmailServiceConfig.from_sources",
+             return_value=MagicMock(),
+         ), \
+         patch("core.src.credential_service.service.SopsCredentialService") as mock_cred_cls, \
+         patch(
+             "core.src.email_service.inbound.classifier.classify",
+             return_value=EmailKind.SP_ALERT,
+         ), \
+         patch("core.src.email_service.sp_alert_parser.SpAlertParser") as mock_parser_cls:
+        mock_cred = MagicMock()
+        mock_cred.load = AsyncMock()
+        mock_cred_cls.return_value = mock_cred
+        mock_parser_cls.return_value = MagicMock(parse=MagicMock(return_value=fake_parsed))
+        result = await _run_poll()
+
+    template_lookup.clear_cache()
+    return result, fake_dispatcher
+
+
+async def test_dev_filter_drops_alert_with_unknown_project_model(base_deps):
+    """SP UI engineer's mock device — project_model='SM-MOCK-XYZ' — must
+    be dropped when the customer's template.yaml lists only real devices."""
+    fake_parsed = _mk_parsed(project_model="SM-MOCK-XYZ", list_suffix="MMK")
+    result, dispatcher = await _run_poll_with_parsed(
+        fake_parsed, base_deps,
+        template_cache={"MMK": {"devices": {"SM-S671U1": {}, "SM-A012U": {}}}},
+    )
+    # sp_alerts still counts the fetch, but dispatch never runs.
+    assert result["sp_alerts"] == 1
+    assert result["dispatched"] == 0
+    assert dispatcher.dispatch.call_count == 0
+
+
+async def test_dev_filter_passes_alert_with_known_project_model(base_deps):
+    """Real device — project_model matches an entry in template.yaml
+    devices — proceeds to dispatch."""
+    fake_parsed = _mk_parsed(project_model="SM-S671U1", list_suffix="MMK")
+    result, dispatcher = await _run_poll_with_parsed(
+        fake_parsed, base_deps,
+        template_cache={"MMK": {"devices": {"SM-S671U1": {}, "SM-A012U": {}}}},
+    )
+    assert result["sp_alerts"] == 1
+    assert result["dispatched"] == 1
+    assert dispatcher.dispatch.call_count == 1
+
+
+async def test_dev_filter_passes_when_template_not_cached(base_deps):
+    """Safety: template not cached -> pass through (don't drop real
+    alerts because of a config-load timing issue)."""
+    fake_parsed = _mk_parsed(project_model="SM-S671U1", list_suffix="UNMIGRATED")
+    result, dispatcher = await _run_poll_with_parsed(
+        fake_parsed, base_deps,
+        template_cache=None,   # cache empty
+    )
+    assert result["dispatched"] == 1
+
+
+async def test_dev_filter_passes_when_devices_block_absent(base_deps):
+    """Safety: template exists but no `devices:` block -> pass through
+    (empty whitelist treated as 'any allowed')."""
+    fake_parsed = _mk_parsed(project_model="SM-S671U1", list_suffix="MMK")
+    result, dispatcher = await _run_poll_with_parsed(
+        fake_parsed, base_deps,
+        template_cache={"MMK": {"milestones": {}}},   # no devices key
+    )
+    assert result["dispatched"] == 1
+
+
+async def test_dev_filter_passes_when_project_model_empty(base_deps):
+    """Alerts with empty project_model (e.g. Milestones-list, no
+    device scope) skip the filter regardless of template config."""
+    fake_parsed = _mk_parsed(project_model="", list_suffix="MMK")
+    result, dispatcher = await _run_poll_with_parsed(
+        fake_parsed, base_deps,
+        template_cache={"MMK": {"devices": {"SM-S671U1": {}}}},
+    )
+    # No project_model -> filter skips -> dispatch proceeds.
+    assert result["dispatched"] == 1
+
+
 def test_beat_schedule_includes_poll_ews_inbox():
     """celery_app.beat_schedule has the periodic poll entry."""
     from core.src.workflow_engine import hilda_celery_app
