@@ -234,7 +234,11 @@ def read_deliverables_comments(
             scope=ListScope(customer_id=customer_id),
             canonical_filters={
                 "project_model": device_id,
-                "milestone_name": milestone_id,
+                # Deliverables_<customer> canonical key is `milestone_id`
+                # (customer.yaml maps it to the SP internal column, usually
+                # "milestone_name"). Do NOT use `milestone_name` here --
+                # that's the Milestones-list canonical.
+                "milestone_id": milestone_id,
             },
         )
     except Exception as exc:  # noqa: BLE001
