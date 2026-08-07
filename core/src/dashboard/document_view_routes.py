@@ -562,12 +562,70 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             overlaid, len(items), customer_id, device_id, milestone_id,
         )
 
+        # 2d. DRR-V2-8b (2026-08-07): fetch the most recent xlsx routed
+        #     under APPS TG for this scope. That file is the owner's
+        #     reply to the outreach; it carries an "Applications"
+        #     worksheet we merge into our DRR excel's Applications tab.
+        #     Silent-skip on any error (no APPS file yet, read failure,
+        #     etc.) -- excel builder falls back to the placeholder note.
+        apps_bytes: bytes | None = None
+        try:
+            from core.src.storage import list_files_in_tg
+            from core.src.storage.nsd import NSDPath
+            apps_files = await list_files_in_tg(
+                customer_id=customer_id, device_id=device_id,
+                milestone_id=milestone_id, tg_name="APPS",
+            )
+            # Pick the most recent .xlsx by last_saved_at
+            xlsx_files = [
+                f for f in (apps_files or [])
+                if (f.filename or "").lower().endswith(".xlsx")
+                and not f.is_drm_wrapped
+            ]
+            if xlsx_files:
+                xlsx_files.sort(key=lambda f: f.last_saved_at, reverse=True)
+                latest = xlsx_files[0]
+                # Reconstruct absolute path from view_relative_path
+                # (e.g. "view/MMK/SM-A012U/DRR/APPS/reply.xlsx")
+                from pathlib import Path as _Path
+                from core.src.storage.config import get_storage_config
+                _cfg = get_storage_config()
+                _abs = _cfg.nsd_mount_root / latest.view_relative_path
+                if _abs.is_file():
+                    apps_bytes = _abs.read_bytes()
+                    _log.warning(
+                        "DRR_DL: APPS attachment loaded filename=%r "
+                        "size=%d saved_at=%s from %d candidate xlsx",
+                        latest.filename, len(apps_bytes),
+                        latest.last_saved_at, len(xlsx_files),
+                    )
+                else:
+                    _log.warning(
+                        "DRR_DL: APPS view path missing on disk: %s",
+                        _abs,
+                    )
+            else:
+                _log.warning(
+                    "DRR_DL: no APPS xlsx found for scope customer=%s "
+                    "device=%s milestone=%s -- Applications tab will "
+                    "show placeholder",
+                    customer_id, device_id, milestone_id,
+                )
+        except Exception as _exc:  # noqa: BLE001
+            _log.warning(
+                "DRR_DL: APPS attachment fetch failed: %s: %s -- "
+                "Applications tab will show placeholder",
+                type(_exc).__name__, str(_exc)[:120],
+            )
+
         # 3. Build the workbook bytes.
         from core.src.email_service.outbound.drr_report_excel import (
             build_drr_report_excel,
         )
         try:
-            xlsx_bytes = build_drr_report_excel(items=items, **drr_ctx)
+            xlsx_bytes = build_drr_report_excel(
+                items=items, applications_sheet_bytes=apps_bytes, **drr_ctx,
+            )
         except Exception as exc:
             _log.warning(
                 "DRR_DL: build failed customer=%s device=%s milestone=%s: "
