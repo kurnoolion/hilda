@@ -89,6 +89,7 @@ def build_drr_report_excel(
     milestone_headers: dict[str, Any] | None = None,
     project_headers: dict[str, Any] | None = None,
     logo_path: str | Path | None = None,
+    applications_sheet_bytes: bytes | None = None,
 ) -> bytes:
     """Return the DRR closure Excel bytes.
 
@@ -96,7 +97,17 @@ def build_drr_report_excel(
     Preserved so callers that haven't migrated to DRR-V2 still work.
 
     DRR-V2 mode: all keyword args populated → Verizon-template shape
-    with header block, section grouping, and summary tables.
+    with 4 worksheets in this tab order:
+      1. Version History  (hardcoded per architect ask 2026-08-07)
+      2. Checklist        (main content — header block + section rows +
+                           item rows + summary tables)
+      3. Applications     (populated from `applications_sheet_bytes` if
+                           provided, else a placeholder note)
+      4. Waivers          (empty template header row; content pending)
+
+    `applications_sheet_bytes`: raw .xlsx bytes of the APPS TG owner's
+    reply attachment. If provided, its "Applications" worksheet is
+    copied cell-by-cell into our workbook's Applications tab.
     """
     from openpyxl import Workbook
 
@@ -107,11 +118,17 @@ def build_drr_report_excel(
         return _build_legacy_flat(materialized)
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Checklist"
+    # Openpyxl auto-creates one default sheet; rename + reuse as Checklist
+    # AFTER we've prepended Version History at index 0.
+    checklist_ws = wb.active
+    checklist_ws.title = "Checklist"
 
+    # Tab 1 — Version History (create at index 0 so it renders first)
+    _write_version_history_sheet(wb)
+
+    # Tab 2 — Checklist (main content; already the default sheet, now at index 1)
     _write_header_block(
-        ws=ws,
+        ws=checklist_ws,
         customer_id=customer_id or "",
         device_id=device_id or "",
         milestone_id=milestone_id or "",
@@ -120,26 +137,204 @@ def build_drr_report_excel(
         project_headers=project_headers or {},
         logo_path=logo_path,
     )
-
-    # Section + item rows start at row 15 (row 14 = column headers).
     next_row = _write_body(
-        ws=ws,
+        ws=checklist_ws,
         section_grouping=section_grouping or [],
         items=materialized,
     )
-
     _write_summary_tables(
-        ws=ws,
-        start_row=next_row + 2,   # blank spacer row
+        ws=checklist_ws,
+        start_row=next_row + 2,
         section_grouping=section_grouping or [],
         items=materialized,
     )
+    _apply_column_widths(checklist_ws)
 
-    _apply_column_widths(ws)
+    # Tab 3 — Applications (from APPS TG reply attachment, else placeholder)
+    _write_applications_sheet(wb, applications_sheet_bytes)
+
+    # Tab 4 — Waivers (empty template header row)
+    _write_waivers_sheet(wb, device_id=device_id or "")
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Sheet writers — Version History / Applications / Waivers (DRR-V2-8)
+# ---------------------------------------------------------------------------
+
+
+# Static Verizon-provided version-history rows. Never changes per customer
+# or per download — hardcoded here so we don't pollute template.yaml with
+# what is effectively boilerplate documentation.
+_VERSION_HISTORY_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("5.2", "1/28/2020",  "Chris Kim",     "Added +1 Page confirmation"),
+    ("5.3", "1/29/2020",  "Chris Kim",     "Updated Warren IOT to Bedminster IOT"),
+    ("5.4", "4/8/2020",   "Chris Kim",     "Updated Sustainability certification form email address"),
+    ("5.5", "11/16/2020", "Kevin Cho",     "Added: 5G IOT, 5G lab conformance, and 5G OTA tests for FR1 and FR2"),
+    ("5.6", "3/25/2022",  "Kalpesh Kenia", "Added: DACC ID"),
+    ("5.7", "2/8/2024",   "Kalpesh Kenia", "Added: eSIM activation for MVA"),
+    ("5.8", "2/9/2024",   "Upesh Kumar",   "Added : IT IOT testing"),
+)
+
+
+def _write_version_history_sheet(wb: Any) -> None:
+    """Tab 1 — hardcoded Verizon version history table. Same content on
+    every download regardless of customer / device / milestone.
+
+    Layout mirrors the architect-provided screenshot:
+      row 1: "Version History" (yellow fill, merged A..D)
+      row 2: header row "Version | Date | Owner | Change Notes" (peach fill)
+      rows 3+: the static rows in _VERSION_HISTORY_ROWS
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    ws = wb.create_sheet(title="Version History", index=0)
+
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    # Row 1 title
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+    c = ws.cell(row=1, column=1, value="Version History")
+    c.font = Font(bold=True, size=14)
+    c.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    c.alignment = center
+
+    # Row 2 header
+    hdr_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    for col_idx, label in enumerate(("Version", "Date", "Owner", "Change Notes"), start=1):
+        h = ws.cell(row=2, column=col_idx, value=label)
+        h.font = Font(bold=True)
+        h.fill = hdr_fill
+        h.alignment = center
+
+    # Rows 3+ data
+    for offset, (ver, dt, owner, notes) in enumerate(_VERSION_HISTORY_ROWS, start=3):
+        ws.cell(row=offset, column=1, value=ver).alignment = center
+        ws.cell(row=offset, column=2, value=dt).alignment = center
+        ws.cell(row=offset, column=3, value=owner).alignment = center
+        ws.cell(row=offset, column=4, value=notes).alignment = left
+
+    # Column widths tuned to the screenshot proportions
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 70
+
+
+def _write_applications_sheet(wb: Any, applications_sheet_bytes: bytes | None) -> None:
+    """Tab 3 — Applications data from APPS TG owner's reply attachment.
+
+    When `applications_sheet_bytes` is provided (raw .xlsx bytes of the
+    reply), open with openpyxl and copy the "Applications" worksheet
+    cell-by-cell into our Applications tab. Column widths are also
+    copied so the layout looks like the source.
+
+    When None or empty, render a placeholder note so TPM sees the gap.
+    Chunk 2 (2026-08-07) wires the actual APPS-reply retrieval path.
+    """
+    from openpyxl.styles import Alignment, Font
+
+    ws = wb.create_sheet(title="Applications")
+
+    if not applications_sheet_bytes:
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+        c = ws.cell(
+            row=1, column=1,
+            value=(
+                "No Applications data received yet from APPS TG. "
+                "The Applications worksheet from the APPS owner's outreach "
+                "reply will render here once that email arrives."
+            ),
+        )
+        c.font = Font(italic=True, color="808080")
+        c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws.column_dimensions["A"].width = 100
+        return
+
+    try:
+        from openpyxl import load_workbook
+        src_wb = load_workbook(filename=io.BytesIO(applications_sheet_bytes), data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "drr_report_excel: Applications source .xlsx failed to open: %s: %s",
+            type(exc).__name__, str(exc)[:120],
+        )
+        c = ws.cell(row=1, column=1,
+                    value=f"[APPS attachment could not be read: {type(exc).__name__}]")
+        c.font = Font(italic=True, color="C00000")
+        return
+
+    src = None
+    for name in src_wb.sheetnames:
+        if name.strip().lower() == "applications":
+            src = src_wb[name]
+            break
+    if src is None:
+        _log.warning(
+            "drr_report_excel: source APPS xlsx has no 'Applications' sheet "
+            "(available: %s)",
+            src_wb.sheetnames,
+        )
+        c = ws.cell(row=1, column=1,
+                    value=(
+                        "[APPS attachment has no 'Applications' worksheet. "
+                        f"Sheets present: {', '.join(src_wb.sheetnames)}]"
+                    ))
+        c.font = Font(italic=True, color="C00000")
+        return
+
+    # Copy cell values (openpyxl cell-copy also lets us pull styles but for
+    # Ph-1 we just want the data; a plain value-copy renders readably).
+    for row_idx, row in enumerate(src.iter_rows(values_only=True), start=1):
+        for col_idx, val in enumerate(row, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=val)
+
+    # Copy column widths so wide-text columns don't render truncated.
+    for col_letter, col_dim in src.column_dimensions.items():
+        if col_dim.width:
+            ws.column_dimensions[col_letter].width = col_dim.width
+
+
+def _write_waivers_sheet(wb: Any, *, device_id: str) -> None:
+    """Tab 4 — empty Waivers template. Just the title row + column headers;
+    content is TPM-authored and will be added in a future chunk.
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    ws = wb.create_sheet(title="Waivers")
+
+    center = Alignment(horizontal="center", vertical="center")
+
+    # Row 1 title (mirrors "[Tab S12+] Waiver Status" pattern from the
+    # architect-provided screenshot; device model interpolated so ops
+    # can see which device the waiver context applies to).
+    title = f"[{device_id or 'Tab'}] Waiver Status"
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+    c = ws.cell(row=1, column=1, value=title)
+    c.font = Font(bold=True, size=12)
+    c.alignment = center
+
+    # Row 2 headers
+    hdr_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    headers = ("#", "Description", "Submitted Date", "Approval Date",
+               "Waiver #", "VZW / R&D Comments")
+    for col_idx, label in enumerate(headers, start=1):
+        h = ws.cell(row=2, column=col_idx, value=label)
+        h.font = Font(bold=True)
+        h.fill = hdr_fill
+        h.alignment = center
+
+    # Column widths tuned to the screenshot proportions
+    ws.column_dimensions["A"].width = 6
+    ws.column_dimensions["B"].width = 50
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 40
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +507,12 @@ def _write_value_cell(ws: Any, *, row: int, column: int, raw: Any,
 
     Dates go in as native `date` objects + a `number_format`, so Excel
     stores them as dates (no green "number stored as text" triangle
-    in the upper-left corner) but the on-screen display still reads
-    "MM/DD/YY" the way Verizon's template does.
+    in the upper-left corner) and displays in mm/dd/yy format.
+
+    DRR-V2-8 (2026-08-07): SP REST returns dates as ISO 8601 strings
+    like "2026-08-07T07:00:00Z". Parse those to `date` and drop the
+    time component instead of dumping the raw ISO string into the
+    cell (previous behavior showed the ugly full string).
     """
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         cell = ws.cell(row=row, column=column, value=None)
@@ -323,6 +522,27 @@ def _write_value_cell(ws: Any, *, row: int, column: int, raw: Any,
     elif isinstance(raw, date):
         cell = ws.cell(row=row, column=column, value=raw)
         cell.number_format = _DATE_NUMBER_FORMAT
+    elif isinstance(raw, str):
+        # Try ISO 8601 first. datetime.fromisoformat accepts "2026-08-07"
+        # AND "2026-08-07T07:00:00" AND "2026-08-07T07:00:00+00:00".
+        # SP's "Z" suffix isn't accepted by fromisoformat pre-Py3.11, so
+        # normalize to "+00:00" defensively.
+        _s = raw.strip()
+        _parsed: date | None = None
+        try:
+            _dt = datetime.fromisoformat(_s.replace("Z", "+00:00"))
+            _parsed = _dt.date()
+        except ValueError:
+            # Not a full ISO datetime. Try plain "YYYY-MM-DD".
+            try:
+                _parsed = date.fromisoformat(_s[:10])
+            except ValueError:
+                _parsed = None
+        if _parsed is not None:
+            cell = ws.cell(row=row, column=column, value=_parsed)
+            cell.number_format = _DATE_NUMBER_FORMAT
+        else:
+            cell = ws.cell(row=row, column=column, value=_s)
     else:
         cell = ws.cell(row=row, column=column, value=str(raw))
     cell.alignment = alignment

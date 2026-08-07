@@ -52,9 +52,16 @@ def _item(
 
 
 def _open_ws(xlsx_bytes: bytes):
-    """Parse the produced bytes back with openpyxl for cell assertions."""
+    """Parse the produced bytes back with openpyxl for cell assertions.
+
+    DRR-V2-8 (2026-08-07): after the 4-tab restructure the DEFAULT sheet
+    (`wb.active`) is now "Version History", not "Checklist". Existing
+    tests assert on Checklist content, so explicitly load that sheet.
+    """
     from openpyxl import load_workbook
     wb = load_workbook(filename=io.BytesIO(xlsx_bytes))
+    if "Checklist" in wb.sheetnames:
+        return wb["Checklist"]
     return wb.active
 
 
@@ -445,3 +452,170 @@ class TestV2SummaryTables:
         ws = _open_ws(out)
         # No section/item rows; header block still present (title in col A).
         assert ws.cell(row=1, column=1).value == "OEM Model"
+
+
+# ---------------------------------------------------------------------------
+# DRR-V2-8 (2026-08-07): 4-tab workbook + ISO date strip + APPS overlay
+# ---------------------------------------------------------------------------
+
+
+class TestV2FourTabWorkbook:
+    def _v2_call(self, **overrides):
+        defaults = dict(
+            items=[_item(1)],
+            customer_id="MMK",
+            device_id="SM-F976U",
+            milestone_id="DRR",
+            section_grouping=[{
+                "section": "Sec",
+                "work_items": [{"item_no": 1, "item_name": "Item 1"}],
+            }],
+            drr_version="5.7",
+        )
+        defaults.update(overrides)
+        return build_drr_report_excel(**defaults)
+
+    def _open_wb(self, xlsx_bytes: bytes):
+        from openpyxl import load_workbook
+        return load_workbook(filename=io.BytesIO(xlsx_bytes))
+
+    def test_four_sheets_in_expected_order(self):
+        wb = self._open_wb(self._v2_call())
+        assert wb.sheetnames == [
+            "Version History", "Checklist", "Applications", "Waivers",
+        ]
+
+    def test_version_history_hardcoded_content(self):
+        wb = self._open_wb(self._v2_call())
+        vh = wb["Version History"]
+        assert vh.cell(row=1, column=1).value == "Version History"
+        # Header row
+        assert vh.cell(row=2, column=1).value == "Version"
+        assert vh.cell(row=2, column=4).value == "Change Notes"
+        # First data row
+        assert vh.cell(row=3, column=1).value == "5.2"
+        assert vh.cell(row=3, column=3).value == "Chris Kim"
+        # Last data row (5.8 per architect screenshot)
+        assert vh.cell(row=9, column=1).value == "5.8"
+        assert vh.cell(row=9, column=3).value == "Upesh Kumar"
+
+    def test_waivers_headers_only_no_data_rows(self):
+        wb = self._open_wb(self._v2_call())
+        wv = wb["Waivers"]
+        # Title has device_id interpolated
+        assert "SM-F976U" in (wv.cell(row=1, column=1).value or "")
+        # Row 2 = the 6 canonical headers
+        assert wv.cell(row=2, column=1).value == "#"
+        assert wv.cell(row=2, column=2).value == "Description"
+        assert wv.cell(row=2, column=5).value == "Waiver #"
+        # Row 3 empty (no data rows)
+        assert wv.cell(row=3, column=1).value is None
+
+    def test_applications_placeholder_when_no_bytes(self):
+        wb = self._open_wb(self._v2_call())
+        apps = wb["Applications"]
+        assert "No Applications data received yet" in (apps.cell(row=1, column=1).value or "")
+
+    def test_applications_populated_from_source_bytes(self):
+        # Build a tiny source workbook with an "Applications" sheet
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        src["Applications"]["A1"] = "App"
+        src["Applications"]["B1"] = "Version"
+        src["Applications"]["A2"] = "VZ Family"
+        src["Applications"]["B2"] = "1.2.3"
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
+        apps = wb["Applications"]
+        assert apps.cell(row=1, column=1).value == "App"
+        assert apps.cell(row=2, column=1).value == "VZ Family"
+        assert apps.cell(row=2, column=2).value == "1.2.3"
+
+    def test_applications_error_note_on_missing_sheet_in_source(self):
+        # Source .xlsx exists but has no "Applications" sheet
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Something Else"
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
+        apps = wb["Applications"]
+        assert "no 'Applications' worksheet" in (apps.cell(row=1, column=1).value or "")
+
+
+class TestV2IsoDateStringHandling:
+    """DRR-V2-8 (2026-08-07): SP REST returns dates as ISO 8601 strings
+    like '2026-08-07T07:00:00Z'. Ensure they render as pure dates in
+    mm/dd/yy format, not the raw ISO string with time+timezone."""
+
+    def _open_wb(self, xlsx_bytes: bytes):
+        from openpyxl import load_workbook
+        return load_workbook(filename=io.BytesIO(xlsx_bytes))
+
+    def test_iso_datetime_string_renders_as_date(self):
+        out = build_drr_report_excel(
+            items=[_item(1)],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=[{
+                "section": "Sec",
+                "work_items": [{"item_no": 1, "item_name": "I1"}],
+            }],
+            milestone_headers={
+                "fld_lockdown_date": "2026-03-18T07:00:00Z",  # ISO string with Z
+                "req_version": "Oct 25",
+                "target_date": "2026-04-29T00:00:00+00:00",   # ISO string with offset
+            },
+        )
+        wb = self._open_wb(out)
+        ck = wb["Checklist"]
+        # Row 7 = Compliance Matrix Lockdown On value
+        v7 = ck.cell(row=7, column=3).value
+        assert v7.year == 2026 and v7.month == 3 and v7.day == 18
+        assert ck.cell(row=7, column=3).number_format == "mm/dd/yy"
+        # Row 10 = DRR Date value
+        v10 = ck.cell(row=10, column=3).value
+        assert v10.year == 2026 and v10.month == 4 and v10.day == 29
+        assert ck.cell(row=10, column=3).number_format == "mm/dd/yy"
+
+    def test_plain_yyyy_mm_dd_string_also_handled(self):
+        out = build_drr_report_excel(
+            items=[_item(1)],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=[{
+                "section": "Sec",
+                "work_items": [{"item_no": 1, "item_name": "I1"}],
+            }],
+            milestone_headers={
+                "fld_lockdown_date": "2026-03-18",             # plain YYYY-MM-DD
+                "req_version": "Oct 25",
+                "target_date": None,
+            },
+        )
+        wb = self._open_wb(out)
+        ck = wb["Checklist"]
+        v7 = ck.cell(row=7, column=3).value
+        assert v7.year == 2026 and v7.month == 3 and v7.day == 18
+
+    def test_non_iso_string_falls_back_to_raw(self):
+        """Not every string is a date -- req_version is 'Oct 25', that
+        must stay as-is, no parsing attempt applied."""
+        out = build_drr_report_excel(
+            items=[_item(1)],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=[{
+                "section": "Sec",
+                "work_items": [{"item_no": 1, "item_name": "I1"}],
+            }],
+            milestone_headers={
+                "fld_lockdown_date": None,
+                "req_version": "Oct 25",
+                "target_date": None,
+            },
+        )
+        wb = self._open_wb(out)
+        ck = wb["Checklist"]
+        assert ck.cell(row=8, column=3).value == "Oct 25"
