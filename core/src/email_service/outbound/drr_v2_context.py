@@ -25,6 +25,7 @@ __all__ = [
     "read_milestones",
     "read_milestone_headers",
     "read_project_headers",
+    "read_deliverables_comments",
     "resolve_logo_path",
     "build_drr_v2_context",
     "row_get",
@@ -201,6 +202,74 @@ def read_project_headers(
             out[field] = None
         else:
             out[field] = raw
+    return out
+
+
+def read_deliverables_comments(
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> dict[int, str]:
+    """Fetch fresh TPM-authored `comment` values from the deliverables_<customer_id>
+    SP list, keyed by item_no. Used by the DRR-V2 excel Remarks column so
+    the download reflects what TPM most recently typed in SP without
+    depending on the Deliverables-CHANGED alert path having synced to
+    Postgres yet.
+
+    COMMENT-SYNC-1 (2026-08-07): direct SP read at download time,
+    matching the header-block pattern (read_milestone_headers /
+    read_project_headers). Trade-off: one extra SP call per Download
+    click; always fresh, no alert-sync dependency.
+
+    Never raises. SP transport failure / row miss -> empty dict + WARN.
+    Rows missing item_no or comment are silently skipped.
+    """
+    from core.src.sharepoint_integration.config import ListScope
+
+    empty: dict[int, str] = {}
+    try:
+        rows = deps.sp_writer.get_items(
+            entity="delivery_items",
+            scope=ListScope(customer_id=customer_id),
+            canonical_filters={
+                "project_model": device_id,
+                "milestone_name": milestone_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "drr_v2_context: read_deliverables_comments: SP read failed "
+            "customer=%s device=%s milestone=%s: %s: %s -- Remarks column "
+            "will fall back to Postgres comment values",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return empty
+
+    out: dict[int, str] = {}
+    scanned = 0
+    for r in rows or []:
+        scanned += 1
+        raw_no = row_get(r, "item_no")
+        try:
+            item_no = int(raw_no) if raw_no is not None else None
+        except (TypeError, ValueError):
+            item_no = None
+        if item_no is None:
+            continue
+        raw_comment = row_get(r, "comment")
+        if raw_comment is None:
+            continue
+        s = str(raw_comment).strip()
+        if not s:
+            continue
+        out[item_no] = s
+    _log.info(
+        "drr_v2_context: read_deliverables_comments: %d non-empty comments "
+        "from %d rows for customer=%s device=%s milestone=%s",
+        len(out), scanned, customer_id, device_id, milestone_id,
+    )
     return out
 
 

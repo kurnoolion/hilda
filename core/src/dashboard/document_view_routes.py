@@ -531,9 +531,35 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
 
         from core.src.email_service.outbound.drr_v2_context import (
             build_drr_v2_context,
+            read_deliverables_comments,
         )
         drr_ctx = build_drr_v2_context(
             deps_stub, customer_id, device_id, milestone_id,
+        )
+
+        # 2c. COMMENT-SRC-1 (2026-08-07): fetch fresh Remarks (SP `comment`
+        #     column) directly from SP at click time. Bypasses the
+        #     Deliverables-CHANGED alert sync path, so a TPM edit lands in
+        #     the excel on the very next Download click even if the alert
+        #     hasn't propagated yet. Overlay onto the Postgres items --
+        #     SP wins where present; Postgres value stays for items SP
+        #     doesn't return.
+        sp_comments = read_deliverables_comments(
+            deps_stub, customer_id, device_id, milestone_id,
+        )
+        overlaid = 0
+        for _it in items:
+            _no = getattr(_it, "item_no", None)
+            if isinstance(_no, int) and _no in sp_comments:
+                try:
+                    _it.comment = sp_comments[_no]
+                    overlaid += 1
+                except Exception:  # noqa: BLE001 -- frozen models fall through
+                    pass
+        _log.warning(
+            "DRR_DL: SP comment overlay: %d/%d items updated from live SP "
+            "customer=%s device=%s milestone=%s",
+            overlaid, len(items), customer_id, device_id, milestone_id,
         )
 
         # 3. Build the workbook bytes.

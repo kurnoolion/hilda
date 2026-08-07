@@ -247,3 +247,80 @@ class TestReadProjectHeaders:
         got = _read_project_headers(deps, "MMK", "SM-S671U1")
         assert got["LE"] == "first-LE"
         assert got["FFW"] == "first-FFW"
+
+
+# ---------------------------------------------------------------------------
+# read_deliverables_comments (COMMENT-SRC-1 2026-08-07)
+# ---------------------------------------------------------------------------
+
+
+def _mk_deps_with_deliverables(rows: list[dict]) -> SimpleNamespace:
+    sp_writer = MagicMock()
+    def _get_items(*, entity, scope=None, canonical_filters=None, **kwargs):
+        if entity == "delivery_items":
+            return list(rows)
+        return []
+    sp_writer.get_items.side_effect = _get_items
+    return SimpleNamespace(sp_writer=sp_writer)
+
+
+class TestReadDeliverablesComments:
+    def test_returns_item_no_to_comment_map(self):
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        deps = _mk_deps_with_deliverables([
+            {"item_no": 1, "comment": "first note"},
+            {"item_no": 2, "comment": "second note"},
+            {"item_no": 3, "comment": "third note"},
+        ])
+        got = read_deliverables_comments(deps, "MMK", "SM-S671U1", "DRR")
+        assert got == {1: "first note", 2: "second note", 3: "third note"}
+
+    def test_strips_whitespace_and_skips_empty(self):
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        deps = _mk_deps_with_deliverables([
+            {"item_no": 1, "comment": "  padded  "},
+            {"item_no": 2, "comment": "   "},          # blank -> skip
+            {"item_no": 3, "comment": None},           # None -> skip
+            {"item_no": 4},                            # missing -> skip
+            {"item_no": 5, "comment": "real"},
+        ])
+        got = read_deliverables_comments(deps, "MMK", "X", "DRR")
+        assert got == {1: "padded", 5: "real"}
+
+    def test_skips_rows_with_non_int_item_no(self):
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        deps = _mk_deps_with_deliverables([
+            {"item_no": "not-a-number", "comment": "ignored"},
+            {"item_no": None, "comment": "also ignored"},
+            {"item_no": 7, "comment": "kept"},
+        ])
+        got = read_deliverables_comments(deps, "MMK", "X", "DRR")
+        assert got == {7: "kept"}
+
+    def test_sp_transport_failure_returns_empty_and_warns(self, caplog):
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        deps = SimpleNamespace(sp_writer=MagicMock())
+        deps.sp_writer.get_items.side_effect = RuntimeError("SP transport boom")
+        with caplog.at_level(
+            logging.WARNING,
+            logger="core.src.email_service.outbound.drr_v2_context",
+        ):
+            got = read_deliverables_comments(deps, "MMK", "SM-S671U1", "DRR")
+        assert got == {}
+        assert any("SP read failed" in r.getMessage() for r in caplog.records)
+
+    def test_empty_rows_returns_empty(self):
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        deps = _mk_deps_with_deliverables([])
+        got = read_deliverables_comments(deps, "MMK", "X", "DRR")
+        assert got == {}
