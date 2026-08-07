@@ -160,6 +160,39 @@ def apply_pm_approval_task(
         )
         return {"outcome": "skipped_no_pm_fields", "fields_mirrored": []}
 
+    # ACD-BACKFILL-1 (2026-08-06): if the item's actual_completion_date is
+    # still None at PM-approval time (owner closed via email reply without
+    # filling the outreach Completion Date cell, and TPM didn't set it in
+    # SP either), backfill from pm_approval_at so the final DRR excel has
+    # SOME completion date. Falls back to today() if pm_approval_at isn't
+    # a parseable datetime for any reason. Idempotent: only fires when
+    # current value is None.
+    if "actual_completion_date" not in mirror_fields:
+        try:
+            _current = deps.storage.get_delivery_item(delivery_item_id)
+        except Exception:  # noqa: BLE001
+            _current = None
+        _current_acd = (
+            getattr(_current, "actual_completion_date", None)
+            if _current else None
+        )
+        if _current_acd is None:
+            from datetime import date as _date, datetime as _dt
+            _pm_at = mirror_fields.get("pm_approval_at")
+            if isinstance(_pm_at, _dt):
+                _acd = _pm_at.date()
+            else:
+                _acd = _date.today()
+            mirror_fields["actual_completion_date"] = _acd
+            _log.warning(
+                "apply_pm_approval: actual_completion_date backfill for "
+                "item=%s: was None -> setting to %s (source=%s). Owner "
+                "reply did not carry Completion Date; DRR excel needs "
+                "a date so the Completion cell isn't blank.",
+                delivery_item_id, _acd,
+                "pm_approval_at" if isinstance(_pm_at, _dt) else "today()",
+            )
+
     # Mirror to local Postgres. Field-level patch; when SP writes delivery_state
     # atomically (legacy Pattern A [D-068] 3-field write), it's included here
     # and Postgres reflects RFS immediately. Under the 2026-07-15 serialization

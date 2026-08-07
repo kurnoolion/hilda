@@ -1597,7 +1597,11 @@ class TestPMApproval:
                 args=({}, _pm_approval_event_context())
             ).get()
         assert result["outcome"] == "applied"
+        # ACD-BACKFILL-1 (2026-08-06): fields_mirrored now includes
+        # actual_completion_date since the fixture item has no ACD set
+        # -> backfill fires with pm_approval_at.date().
         assert sorted(result["fields_mirrored"]) == [
+            "actual_completion_date",
             "delivery_state", "pm_approval_at", "pm_approval_pm_id",
         ]
         # Verify storage write captured all 3 fields with NEW values
@@ -1608,9 +1612,12 @@ class TestPMApproval:
         assert fields["delivery_state"]    == "ReadyForSubmission"
         # pm_approval_at: coerced from ISO string -> datetime per 032ad19 fix
         # (asyncpg rejects raw strings for DateTime columns -> STR-E001).
-        from datetime import datetime, timezone
+        from datetime import date, datetime, timezone
         assert fields["pm_approval_at"] == datetime(2026, 6, 28, 22, 0, 0, tzinfo=timezone.utc)
         assert fields["pm_approval_pm_id"] == "tarasu@sea.samsung.com"
+        # ACD-BACKFILL-1: derived from pm_approval_at.date() since fixture
+        # item lacks a prior actual_completion_date value.
+        assert fields["actual_completion_date"] == date(2026, 6, 28)
 
     def test_audit_attribution_uses_pm_corp_email(self, deps):
         from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
@@ -1628,7 +1635,8 @@ class TestPMApproval:
 
     def test_partial_field_deltas_mirrors_what_present(self, deps):
         """Defensive: if SP somehow writes fewer than 3 fields, mirror what's
-        there; don't fail."""
+        there; don't fail. ACD-BACKFILL-1: since fixture item has no
+        prior ACD, backfill still fires alongside the partial write."""
         from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
         ctx_partial = _pm_approval_event_context(field_deltas={
             "pm_approval_at": (None, "2026-06-28T22:00:00+00:00"),
@@ -1638,7 +1646,48 @@ class TestPMApproval:
                 args=({}, ctx_partial)
             ).get()
         assert result["outcome"] == "applied"
-        assert result["fields_mirrored"] == ["pm_approval_at"]
+        # ACD-BACKFILL-1: actual_completion_date joins the mirror since the
+        # item's prior ACD is None. Still exercises the "partial deltas
+        # tolerated" contract -- what SP wrote gets mirrored regardless.
+        assert sorted(result["fields_mirrored"]) == [
+            "actual_completion_date", "pm_approval_at",
+        ]
+
+    def test_acd_backfill_uses_pm_approval_at_date(self, deps):
+        """ACD-BACKFILL-1 (2026-08-06): when item's actual_completion_date
+        is None at PM-approval time, backfill with pm_approval_at.date()
+        so DRR excel Completion column isn't blank for owner-closed items
+        where the owner didn't fill the outreach Completion Date cell."""
+        from datetime import date
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, _pm_approval_event_context())
+            ).get()
+        assert result["outcome"] == "applied"
+        fields = deps.storage.di_updates[0][1]
+        # pm_approval_at was "2026-06-28T22:00:00+00:00" -> date == 6/28
+        assert fields["actual_completion_date"] == date(2026, 6, 28)
+
+    def test_acd_backfill_skipped_when_already_set(self, deps):
+        """Idempotent: prior ACD present -> backfill DOES NOT overwrite."""
+        from datetime import date
+        from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
+        # Pre-seed item with an existing ACD value
+        deps.storage.items["MMK-SM-S671U1-P1-1"] = SimpleNamespace(
+            actual_completion_date=date(2026, 5, 1),
+        )
+        with override_task_deps(deps):
+            result = apply_pm_approval_task.apply_async(
+                args=({}, _pm_approval_event_context())
+            ).get()
+        assert result["outcome"] == "applied"
+        fields = deps.storage.di_updates[0][1]
+        # actual_completion_date NOT in the mirror -> prior value preserved
+        assert "actual_completion_date" not in fields
+        assert sorted(result["fields_mirrored"]) == [
+            "delivery_state", "pm_approval_at", "pm_approval_pm_id",
+        ]
 
     def test_empty_field_deltas_skips(self, deps):
         from core.src.workflow_engine.tasks.pm_approval import apply_pm_approval_task
