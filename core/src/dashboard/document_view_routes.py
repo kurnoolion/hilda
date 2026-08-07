@@ -505,11 +505,26 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         #    the helpers into a shared drr_v2_context module for exactly
         #    this reason.
         #
-        # The context helper needs an object with .sp_writer to reach SP.
-        # Dashboard has its own sp_writer wired via app.state (SP-write
-        # channel for browse-page refresh). Pull it from there; fall back
-        # to a stub with .sp_writer=None if not wired -- SP reads then
-        # return dict-of-Nones (blank header cells) rather than crashing.
+        # 2a. Seed template_lookup._CACHE lazily on first call. In the
+        #     worker container bootstrap_task_deps() loads all customer
+        #     templates at startup; the dashboard container skips that
+        #     (celery-free path). Without templates cached,
+        #     get_drr_section_grouping returns None and the builder
+        #     falls back to the legacy 4-column flat sheet -- exactly
+        #     the symptom seen on the corp-box smoke 2026-08-06.
+        from core.src.template_schema import template_lookup
+        if not template_lookup._CACHE:      # noqa: SLF001
+            _log.warning(
+                "DRR_DL: template_lookup cache empty at first call -- "
+                "seeding from customizations/template_schemas/",
+            )
+            template_lookup.load_all_customer_templates()
+        # 2b. The context helper needs an object with .sp_writer to reach
+        #     SP. Dashboard has its own sp_writer wired via app.state
+        #     (SP-write channel for browse-page refresh). Pull it from
+        #     there; fall back to a stub with .sp_writer=None if not
+        #     wired -- SP reads then return dict-of-Nones (blank header
+        #     cells) rather than crashing.
         from types import SimpleNamespace
         sp_writer = getattr(request.app.state, "sp_writer", None)
         deps_stub = SimpleNamespace(sp_writer=sp_writer)
