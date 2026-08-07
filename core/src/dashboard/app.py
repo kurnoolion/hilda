@@ -223,6 +223,46 @@ def build_app(
     except Exception:  # noqa: BLE001 — degrade to no-audit rather than crash boot
         app.state.task_deps = None
 
+    # DRR-DL-1c (2026-08-06) — sp_writer wiring for the on-demand DRR
+    # download route. That route calls drr_v2_context.read_milestone_headers
+    # + read_project_headers, both of which need deps.sp_writer.get_items()
+    # to reach SP for the header-block values (Compliance Matrix Lockdown
+    # On / VZW Requirements Version / DRR Date / Ph1 Date / Target TA
+    # Date). Without this wiring, all five header cells render blank.
+    #
+    # Mirrors bootstrap._build_sp_writer's wiring (same imports, same
+    # config discovery); duplicated here rather than imported to avoid
+    # pulling workflow_engine.bootstrap into the dashboard image (that
+    # module's top imports hilda_celery_app -- would break the
+    # celery-free dashboard container).
+    try:
+        from core.src.sharepoint_integration.config import GlobalSharePointConfig
+        from core.src.sharepoint_integration.list_crud import SpCrud
+        from core.src.sharepoint_integration.list_provider import FileBasedListProvider
+        from core.src.sharepoint_integration.sp_client import SpClient
+        from core.src.sharepoint_integration.sp_writer_impl import SpCrudWriter
+        from pathlib import Path as _Path
+        _sp_cfg_path: _Path | None = None
+        for _candidate in (
+            _Path("config/sharepoint_integration.json"),
+            _Path("/app/config/sharepoint_integration.json"),
+        ):
+            if _candidate.exists():
+                _sp_cfg_path = _candidate
+                break
+        _sp_cfg = GlobalSharePointConfig.from_sources(config_path=_sp_cfg_path)
+        _sp_client = SpClient(_sp_cfg)
+        _sp_provider = FileBasedListProvider(_Path("customizations/sharepoint_config"))
+        app.state.sp_writer = SpCrudWriter(SpCrud(_sp_client, _sp_provider))
+    except Exception as _exc:  # noqa: BLE001 — degrade to blank header cells rather than crash boot
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "dashboard build_app: sp_writer wiring failed: %s: %s -- "
+            "DRR download header cells will render blank",
+            type(_exc).__name__, str(_exc)[:120],
+        )
+        app.state.sp_writer = None
+
     # ---- Liveness probe for container orchestration ----
     @app.get("/healthz")
     async def healthz() -> dict:
