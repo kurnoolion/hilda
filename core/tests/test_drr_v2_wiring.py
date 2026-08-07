@@ -22,6 +22,7 @@ import pytest
 
 from core.src.template_schema import template_lookup
 from core.src.workflow_engine.tasks import tpm_notification
+from core.src.email_service.outbound import drr_v2_context
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +93,7 @@ class TestResolveLogoPath:
     def test_returns_none_when_file_not_on_disk(self, caplog):
         _seed_template("MMK", {"drr_branding_logo": "verizon.png"})
         with patch.object(
-            tpm_notification, "_BRANDING_DIRS",
+            drr_v2_context, "BRANDING_DIRS",
             (Path("/no/such/dir/a"), Path("/no/such/dir/b")),
         ):
             with caplog.at_level(
@@ -116,7 +117,7 @@ class TestResolveLogoPath:
 
         _seed_template("MMK", {"drr_branding_logo": "verizon.png"})
         with patch.object(
-            tpm_notification, "_BRANDING_DIRS", (dir_a, dir_b),
+            drr_v2_context, "BRANDING_DIRS", (dir_a, dir_b),
         ):
             got = tpm_notification._resolve_logo_path("MMK")
         assert got == dir_b / "verizon.png"
@@ -131,7 +132,7 @@ class TestResolveLogoPath:
 
         _seed_template("MMK", {"drr_branding_logo": "verizon.png"})
         with patch.object(
-            tpm_notification, "_BRANDING_DIRS", (dir_a, dir_b),
+            drr_v2_context, "BRANDING_DIRS", (dir_a, dir_b),
         ):
             got = tpm_notification._resolve_logo_path("MMK")
         assert got == dir_a / "verizon.png"
@@ -175,7 +176,7 @@ class TestBuildDrrV2Context:
             }],
         )
 
-        with patch.object(tpm_notification, "_BRANDING_DIRS", (tmp_path,)):
+        with patch.object(drr_v2_context, "BRANDING_DIRS", (tmp_path,)):
             ctx = tpm_notification._build_drr_v2_context(
                 deps, "MMK", "SM-S671U1", "DRR",
             )

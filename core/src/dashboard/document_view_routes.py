@@ -463,6 +463,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
     )
     async def download_drr_status(
         customer_id: str, device_id: str, milestone_id: str,
+        request: Request,
         principal=Depends(_auth),
     ):
         _log.warning(
@@ -497,22 +498,27 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             )
 
         # 2. Build DRR-V2 context (drr_version, section_grouping, header dicts,
-        #    logo path) via the same helper the beat tick uses. Requires
-        #    task_deps for SP reads; bootstrap on first miss (dashboard
-        #    process may not have wired them yet).
-        from core.src.workflow_engine.task_deps import get_task_deps
-        try:
-            deps = get_task_deps()
-        except Exception:
-            from core.src.workflow_engine.bootstrap import bootstrap_task_deps
-            bootstrap_task_deps()
-            deps = get_task_deps()
+        #    logo path) via the celery-free helper. Dashboard container
+        #    doesn't ship celery, so this must NOT reach into
+        #    workflow_engine.tasks.tpm_notification (that module's top
+        #    imports hilda_celery_app). DRR-DL-1a (2026-08-06) extracted
+        #    the helpers into a shared drr_v2_context module for exactly
+        #    this reason.
+        #
+        # The context helper needs an object with .sp_writer to reach SP.
+        # Dashboard has its own sp_writer wired via app.state (SP-write
+        # channel for browse-page refresh). Pull it from there; fall back
+        # to a stub with .sp_writer=None if not wired -- SP reads then
+        # return dict-of-Nones (blank header cells) rather than crashing.
+        from types import SimpleNamespace
+        sp_writer = getattr(request.app.state, "sp_writer", None)
+        deps_stub = SimpleNamespace(sp_writer=sp_writer)
 
-        from core.src.workflow_engine.tasks.tpm_notification import (
-            _build_drr_v2_context,
+        from core.src.email_service.outbound.drr_v2_context import (
+            build_drr_v2_context,
         )
-        drr_ctx = _build_drr_v2_context(
-            deps, customer_id, device_id, milestone_id,
+        drr_ctx = build_drr_v2_context(
+            deps_stub, customer_id, device_id, milestone_id,
         )
 
         # 3. Build the workbook bytes.

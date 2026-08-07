@@ -255,10 +255,10 @@ class TestDownloadDrrStatus:
             item_path_id="item_1", tg_path_id="CPM",
         ))
 
-        # Mock _build_drr_v2_context so the route doesn't try to bootstrap
-        # a full task_deps + SP client in the test env. section_grouping=None
-        # falls back to legacy 4-column mode (still exercises the builder).
-        import core.src.dashboard.document_view_routes as routes_mod
+        # Mock build_drr_v2_context so the route doesn't need a live SP
+        # client. section_grouping=None falls back to legacy 4-column mode
+        # (still exercises the builder). DRR-DL-1a moved this helper to the
+        # celery-free drr_v2_context module — patch target updated to match.
         def _fake_ctx(deps, cid, did, mid):
             return {
                 "customer_id":       cid,
@@ -270,9 +270,8 @@ class TestDownloadDrrStatus:
                 "project_headers":   {},
                 "logo_path":         None,
             }
-        # Also stub the bootstrap call so it doesn't touch real infra.
         monkeypatch.setattr(
-            "core.src.workflow_engine.tasks.tpm_notification._build_drr_v2_context",
+            "core.src.email_service.outbound.drr_v2_context.build_drr_v2_context",
             _fake_ctx,
         )
 
