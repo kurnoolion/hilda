@@ -325,15 +325,57 @@ def _write_applications_sheet(
         c.font = Font(italic=True, color="C00000")
         return
 
+    # Source's own header block carries the model-specific values
+    # (Model Number, DRR Date, etc.). Prefer those over HILDA-derived
+    # values so the Applications tab reflects what the owner sent.
+    source_headers = _read_source_header_values(src)
+
     _write_applications_header_block(
         ws=ws,
         device_id=device_id,
         milestone_headers=milestone_headers or {},
         project_headers=project_headers or {},
+        source_headers=source_headers,
         logo_path=logo_path,
     )
     _write_applications_column_headers(ws)
     _copy_applications_data_rows(ws, src)
+
+
+def _read_source_header_values(src: Any) -> dict[str, Any]:
+    """Scan source rows 1-11 for known Verizon-header labels and return
+    {short_key: value} for whatever we found. Value is taken from the
+    cell immediately to the right of each label cell (Verizon template
+    convention). Silent on missing labels -- caller falls back to
+    HILDA-derived values.
+
+    Returned keys (all optional): model_number, lockdown, req_version,
+    drr_date, phase_1_date.
+    """
+    wanted: dict[str, str] = {
+        "model_number": "model number",
+        "lockdown":     "compliance matrix lockdown",
+        "req_version":  "vzw requirements version",
+        "drr_date":     "drr date",
+        "phase_1_date": "phase 1 date",
+    }
+    found: dict[str, Any] = {}
+    max_col = min(src.max_column or 0, 12)
+    for r in range(1, 12):
+        for col in range(1, max_col + 1):
+            v = src.cell(row=r, column=col).value
+            if not isinstance(v, str):
+                continue
+            norm = v.strip().lower().rstrip(":").strip()
+            for key, needle in wanted.items():
+                if key in found:
+                    continue
+                if needle in norm:
+                    val = src.cell(row=r, column=col + 1).value
+                    if val is not None and not (isinstance(val, str) and not val.strip()):
+                        found[key] = val
+                    break
+    return found
 
 
 def _write_applications_header_block(
@@ -342,17 +384,25 @@ def _write_applications_header_block(
     device_id: str,
     milestone_headers: dict[str, Any],
     project_headers: dict[str, Any],
+    source_headers: dict[str, Any] | None,
     logo_path: str | Path | None,
 ) -> None:
     """Applications-tab header rows 1-8. Distinct layout from Checklist:
     row 1 title spans all data cols (A..H); row 2 has logo + subtitle
     side-by-side; header pairs sit side-by-side (left B-C, right G-H)
-    instead of stacked."""
+    instead of stacked.
+
+    Value precedence per cell: source APPS xlsx header value (when the
+    Verizon-template header block was filled by the owner) → HILDA
+    (device_id / milestone_headers / project_headers). This matches
+    the intent that the Applications tab reflects what the owner sent."""
     from openpyxl.styles import Alignment, Font
 
     center = Alignment(horizontal="center", vertical="center")
     right = Alignment(horizontal="right", vertical="center")
     left = Alignment(horizontal="left", vertical="center")
+
+    src_hdr = source_headers or {}
 
     # Row 1: "OEM Model" title merged across all data cols
     ws.merge_cells(start_row=_APPS_HEADER_ROW_TITLE, start_column=1,
@@ -372,16 +422,23 @@ def _write_applications_header_block(
     c.font = Font(bold=True, size=18)
     c.alignment = center
 
+    # Resolve each value with source-first precedence
+    v_model    = src_hdr.get("model_number") if src_hdr.get("model_number") is not None else device_id
+    v_lockdown = src_hdr.get("lockdown")     if src_hdr.get("lockdown")     is not None else milestone_headers.get("fld_lockdown_date")
+    v_reqver   = src_hdr.get("req_version")  if src_hdr.get("req_version")  is not None else milestone_headers.get("req_version")
+    v_drrdate  = src_hdr.get("drr_date")     if src_hdr.get("drr_date")     is not None else milestone_headers.get("target_date")
+    v_ph1date  = src_hdr.get("phase_1_date") if src_hdr.get("phase_1_date") is not None else project_headers.get("FFW")
+
     # Header label/value pairs. Left pair at cols B (label) + C (value);
     # right pair at cols G (label) + H (value). Row 8 has no right pair.
     left_pairs: list[tuple[int, str, Any]] = [
-        (_APPS_HEADER_ROW_MODEL,       "Model Number:",                  device_id),
-        (_APPS_HEADER_ROW_LOCKDOWN,    "Compliance Matrix Lockdown On:", milestone_headers.get("fld_lockdown_date")),
-        (_APPS_HEADER_ROW_REQ_VERSION, "VZW Requirements Version:",      milestone_headers.get("req_version")),
+        (_APPS_HEADER_ROW_MODEL,       "Model Number:",                  v_model),
+        (_APPS_HEADER_ROW_LOCKDOWN,    "Compliance Matrix Lockdown On:", v_lockdown),
+        (_APPS_HEADER_ROW_REQ_VERSION, "VZW Requirements Version:",      v_reqver),
     ]
     right_pairs: list[tuple[int, str, Any]] = [
-        (_APPS_HEADER_ROW_MODEL,    "DRR Date:",     milestone_headers.get("target_date")),
-        (_APPS_HEADER_ROW_LOCKDOWN, "Phase 1 Date:", project_headers.get("FFW")),
+        (_APPS_HEADER_ROW_MODEL,    "DRR Date:",     v_drrdate),
+        (_APPS_HEADER_ROW_LOCKDOWN, "Phase 1 Date:", v_ph1date),
     ]
     for row, label, raw in left_pairs:
         lc = ws.cell(row=row, column=2, value=label)
@@ -641,18 +698,40 @@ def _write_header_block(
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
+_LOGO_FALLBACK_PATHS: tuple[Path, ...] = (
+    Path("customizations/branding/verizon.png"),
+    Path("/app/customizations/branding/verizon.png"),
+)
+
+
 def _embed_logo(ws: Any, logo_path: str | Path | None) -> None:
-    """Anchor the verizon.png at cell A2. Silent-skip when path is not
-    provided or the file doesn't exist -- corp deploy drops the PNG in
-    customizations/branding/; local test runs don't need it."""
+    """Anchor the verizon.png at cell A2. When no logo_path is provided
+    (e.g., template.yaml lacks `drr_branding_logo`), fall back to the
+    standard `customizations/branding/verizon.png` location so DRR-V2
+    downloads always render the brand mark. Silent-skip only when both
+    the passed path and both fallbacks are missing (local test runs)."""
     if not logo_path:
-        return
+        for candidate in _LOGO_FALLBACK_PATHS:
+            if candidate.is_file():
+                logo_path = candidate
+                break
+        if not logo_path:
+            return
     path = Path(logo_path)
     if not path.is_file():
-        _log.warning(
-            "drr_report_excel: logo path %s not found; skipping image embed", path,
-        )
-        return
+        # Explicit-path miss: try fallbacks before giving up
+        for candidate in _LOGO_FALLBACK_PATHS:
+            if candidate.is_file():
+                path = candidate
+                break
+        else:
+            _log.warning(
+                "drr_report_excel: logo path %s not found and no fallback "
+                "at %s; skipping image embed",
+                logo_path,
+                [str(p) for p in _LOGO_FALLBACK_PATHS],
+            )
+            return
     try:
         from openpyxl.drawing.image import Image as XlImage
         img = XlImage(str(path))

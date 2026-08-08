@@ -651,6 +651,72 @@ class TestV2FourTabWorkbook:
         fill = apps.cell(row=14, column=2).fill
         assert fill.fgColor.rgb in ("00D9D9D9", "FFD9D9D9", "D9D9D9")
 
+    def test_applications_header_values_prefer_source_over_hilda(self):
+        # DRR-V2-8d: source APPS xlsx has its own header block with
+        # Model Number / DRR Date / etc. Those values must win over
+        # HILDA-provided milestone_headers/project_headers.
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        s = src["Applications"]
+        # Verizon-template header block in source (label col B, value col C)
+        s.cell(row=6, column=2, value="Model Number:")
+        s.cell(row=6, column=3, value="SM-SOURCE-999")
+        s.cell(row=7, column=2, value="Compliance Matrix Lockdown On:")
+        s.cell(row=7, column=3, value="12/01/26")
+        s.cell(row=8, column=2, value="VZW Requirements Version:")
+        s.cell(row=8, column=3, value="Nov 2026")
+        # DRR Date / Phase 1 Date on right-hand side (cols H/I in source)
+        s.cell(row=6, column=8, value="DRR Date:")
+        s.cell(row=6, column=9, value="July 4, 2026")
+        s.cell(row=7, column=8, value="Phase 1 Date:")
+        s.cell(row=7, column=9, value="Aug 1, 2026")
+        # A data row so template shell renders
+        s.cell(row=12, column=2, value="Dummy App")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(
+            applications_sheet_bytes=buf.getvalue(),
+            # HILDA values intentionally different so we can detect
+            # which one wins
+            milestone_headers={"fld_lockdown_date": "2026-05-12",
+                                "req_version": "Feb 2026",
+                                "target_date": "2026-07-01"},
+            project_headers={"FFW": "2026-07-15"},
+        ))
+        apps = wb["Applications"]
+
+        # Source values win in all 5 cells
+        assert apps.cell(row=6, column=3).value == "SM-SOURCE-999"       # not SM-F976U
+        assert apps.cell(row=6, column=8).value == "July 4, 2026"         # not 2026-07-01
+        assert apps.cell(row=7, column=3).value == "12/01/26"             # not 2026-05-12
+        assert apps.cell(row=7, column=8).value == "Aug 1, 2026"          # not 2026-07-15
+        assert apps.cell(row=8, column=3).value == "Nov 2026"             # not Feb 2026
+
+    def test_applications_header_values_fall_back_to_hilda_when_source_silent(self):
+        # DRR-V2-8d: when source has no header labels, HILDA-provided
+        # values render (same as pre-8d behavior).
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        # Only a data row; no header labels/values in source
+        src["Applications"].cell(row=12, column=2, value="Dummy")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(
+            applications_sheet_bytes=buf.getvalue(),
+            milestone_headers={"fld_lockdown_date": "2026-05-12",
+                                "req_version": "Feb 2026",
+                                "target_date": "2026-07-01"},
+            project_headers={"FFW": "2026-07-15"},
+        ))
+        apps = wb["Applications"]
+        # Fallbacks: device_id + milestone_headers + project_headers
+        assert apps.cell(row=6, column=3).value == "SM-F976U"
+        assert apps.cell(row=8, column=3).value == "Feb 2026"
+
     def test_applications_error_note_on_missing_sheet_in_source(self):
         # Source .xlsx exists but has no "Applications" sheet
         from openpyxl import Workbook
