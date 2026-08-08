@@ -518,7 +518,15 @@ def _write_applications_column_headers(ws: Any) -> None:
     ws.column_dimensions["H"].width = 28     # Comments
 
 
-_APPS_SEPARATOR_TEXT_NEEDLE = "list all additional pre-loaded applications"
+# Substring hints for the "List all additional pre-loaded applications
+# below" separator row. Multiple candidates because the exact source
+# phrasing varies (pre-loaded vs preloaded; "below" sometimes omitted;
+# etc.). Any match triggers the merge/center/bold treatment.
+_APPS_SEPARATOR_NEEDLES: tuple[str, ...] = (
+    "list all additional",
+    "additional pre-loaded",
+    "additional preloaded",
+)
 _APPS_SEPARATOR_MERGE_END_COL = 7   # merge A..G
 
 
@@ -541,10 +549,17 @@ def _copy_applications_data_rows(ws: Any, src: Any) -> None:
     for r in range(_APPS_DATA_START_ROW, src_max + 1):
         # Pass 1: detect separator (scan all cols before writing anything
         # so we don't half-copy a row that gets the merge treatment).
+        # Scan cols 1..12 (a bit wider than data table's 1..8) because
+        # the source template sometimes places the separator text in a
+        # cell past col H (e.g., an anchor cell for a wider merge).
         separator_text: str | None = None
-        for col_idx in range(1, _APPS_COL_COUNT + 1):
+        max_scan_col = max(_APPS_COL_COUNT, 12)
+        for col_idx in range(1, max_scan_col + 1):
             v = src.cell(row=r, column=col_idx).value
-            if isinstance(v, str) and _APPS_SEPARATOR_TEXT_NEEDLE in v.strip().lower():
+            if not isinstance(v, str):
+                continue
+            lowered = v.strip().lower()
+            if any(needle in lowered for needle in _APPS_SEPARATOR_NEEDLES):
                 separator_text = v.strip()
                 break
 
