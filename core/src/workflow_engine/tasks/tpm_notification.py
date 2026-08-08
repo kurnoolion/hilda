@@ -545,6 +545,43 @@ def _send_notification(
         )
         return False
 
+    # DRR-V2-8j (2026-08-08): overlay live SP `comment` values from
+    # deliverables_<customer> onto the loaded items so the Checklist
+    # Remarks column reflects what TPM most recently typed in SP.
+    # Mirrors the dashboard's Download route (D-162 live-SP-read
+    # pattern); without this, beat-tick emails render Remarks blank
+    # for rows where the SP alert -> sync-task -> Postgres pipeline
+    # hasn't propagated the latest comment yet. Best-effort: SP read
+    # failure returns empty dict + WARN log; Postgres value stays.
+    try:
+        from core.src.email_service.outbound.drr_v2_context import (
+            read_deliverables_comments,
+        )
+        sp_comments = read_deliverables_comments(
+            deps, customer_id, device_id, milestone_id,
+        )
+        overlaid = 0
+        for _it in items:
+            _no = getattr(_it, "item_no", None)
+            if isinstance(_no, int) and _no in sp_comments:
+                try:
+                    _it.comment = sp_comments[_no]
+                    overlaid += 1
+                except Exception:  # noqa: BLE001 -- frozen models fall through
+                    pass
+        _log.warning(
+            "DRR_TICK_COMMENT: SP comment overlay: %d/%d items updated "
+            "from live SP customer=%s device=%s milestone=%s",
+            overlaid, len(items), customer_id, device_id, milestone_id,
+        )
+    except Exception as _c_exc:  # noqa: BLE001
+        _log.warning(
+            "DRR_TICK_COMMENT: overlay failed customer=%s device=%s "
+            "milestone=%s: %s: %s -- Remarks column will use Postgres values",
+            customer_id, device_id, milestone_id,
+            type(_c_exc).__name__, str(_c_exc)[:120],
+        )
+
     summary, pending_by_tg = _compute_summary_and_pending(items)
 
     # Compose body.
