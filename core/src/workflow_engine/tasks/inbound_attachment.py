@@ -405,7 +405,7 @@ async def _process_archive_attachment(
     from core.src.email_service.protocol import InboundAttachment
     from core.src.storage.archive_extractor import extract_archive
     from core.src.storage.models import DocumentIndexRow, RoutingResolution
-    from core.src.template_schema.enums import IngestSource
+    from core.src.template_schema.enums import DocType, IngestSource
 
     stats = {
         "processed": 0,
@@ -465,7 +465,7 @@ async def _process_archive_attachment(
             milestone_id=milestone_id,
             customer_id=customer_id,
             device_id=device_id,
-            doc_type="",                               # archive: no doc_type
+            doc_type=DocType.ARCHIVE_CONTAINER.value,  # DOCTYPE-1 (2026-08-08): sentinel for outer-archive audit rows; prior "" failed Pydantic validation and silently dropped the row
             doc_id_slug=None,
             rev_number=None,
             ingest_source=IngestSource.EMAIL.value,

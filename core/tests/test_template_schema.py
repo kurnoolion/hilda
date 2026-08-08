@@ -108,7 +108,8 @@ class TestExtensibilityRegistries:
         """DocTypeRegistry seeded from DocType enum per FR-7 amendment."""
         for d in DocType:
             assert d.value in DocTypeRegistry
-        assert len(DocTypeRegistry) == 5
+        # DOCTYPE-1 (2026-08-08): 6 values (5 classification + archive_container sentinel).
+        assert len(DocTypeRegistry) == 6
 
     def test_rule_action_registry_seeded_from_enum(self) -> None:
         """RuleActionRegistry seeded from RuleActionType (18 Ph-1 + 6 Ph-2) per FR-29."""
@@ -686,16 +687,20 @@ class TestEnums:
             "Email", "CorporatePLM", "NetworkSharedDrive", "SharePointUI",
         }
 
-    def test_doc_type_5_values_per_d053(self) -> None:
-        """Per [D-053] impl note 2026-06-08 — 5-value enum (test_report, tech_report,
-        waiver, compliance_certification_release_notes, unresolved)."""
-        assert len(DocType) == 5
+    def test_doc_type_6_values_per_d053_plus_doctype1(self) -> None:
+        """Per [D-053] impl note 2026-06-08 — 5 classification values
+        (test_report, tech_report, waiver, compliance_certification_release_notes,
+        unresolved). DOCTYPE-1 (2026-08-08) adds the archive_container
+        sentinel for outer-archive audit rows — never emitted by
+        classification; container rows are audit-only."""
+        assert len(DocType) == 6
         assert {s.value for s in DocType} == {
             "test_report",
             "tech_report",
             "waiver",
             "compliance_certification_release_notes",
             "unresolved",
+            "archive_container",
         }
 
     def test_customer_delivery_modality_4_values_per_d054(self) -> None:

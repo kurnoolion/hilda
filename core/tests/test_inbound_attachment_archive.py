@@ -71,6 +71,66 @@ class TestArchiveContainerEnumValue:
         assert RoutingResolution.ARCHIVE_CONTAINER.value == "ArchiveContainer"
 
 
+class TestDocTypeArchiveContainerSentinel:
+    """DOCTYPE-1 (2026-08-08): outer-archive audit row must persist. Prior
+    fix wrote `doc_type=""` which failed Pydantic validation and silently
+    dropped the row. `DocType.ARCHIVE_CONTAINER` sentinel now satisfies
+    the enum-typed `doc_type` field."""
+
+    def test_archive_container_enum_value(self):
+        from core.src.template_schema.enums import DocType
+        assert DocType.ARCHIVE_CONTAINER.value == "archive_container"
+
+    def test_document_index_row_accepts_archive_container_doc_type(self):
+        # Regression: pre-fix, this constructor raised ValidationError
+        # (doc_type="" is not a valid DocType member).
+        from datetime import datetime, timezone
+        from core.src.storage.models import DocumentIndexRow, RoutingResolution
+        from core.src.template_schema.enums import DocType, IngestSource
+        row = DocumentIndexRow(
+            file_hash="a" * 64,
+            milestone_id="ms-1",
+            customer_id="MMK",
+            device_id="SM-TEST",
+            doc_type=DocType.ARCHIVE_CONTAINER.value,
+            doc_id_slug=None,
+            rev_number=None,
+            ingest_source=IngestSource.EMAIL.value,
+            original_filename="pack.zip",
+            first_page_excerpt="",
+            is_final=False,
+            inferred_tg_name=None,
+            routing_resolution=RoutingResolution.ARCHIVE_CONTAINER.value,
+            ingested_at=datetime.now(timezone.utc),
+        )
+        assert row.doc_type == DocType.ARCHIVE_CONTAINER
+        assert row.routing_resolution == RoutingResolution.ARCHIVE_CONTAINER.value
+
+    def test_empty_string_doc_type_still_rejected(self):
+        # Guard against a well-meaning refactor re-introducing the bug.
+        import pydantic
+        from datetime import datetime, timezone
+        from core.src.storage.models import DocumentIndexRow, RoutingResolution
+        from core.src.template_schema.enums import IngestSource
+        with pytest.raises(pydantic.ValidationError):
+            DocumentIndexRow(
+                file_hash="a" * 64,
+                milestone_id="ms-1",
+                customer_id="MMK",
+                device_id="SM-TEST",
+                doc_type="",
+                doc_id_slug=None,
+                rev_number=None,
+                ingest_source=IngestSource.EMAIL.value,
+                original_filename="pack.zip",
+                first_page_excerpt="",
+                is_final=False,
+                inferred_tg_name=None,
+                routing_resolution=RoutingResolution.ARCHIVE_CONTAINER.value,
+                ingested_at=datetime.now(timezone.utc),
+            )
+
+
 class TestZipRoundTripThroughExtractor:
     """Confirms the extractor path used by _process_archive_attachment
     hands back inner entries in the shape the pipeline expects. Guards

@@ -69,7 +69,7 @@ class IngestSource(str, Enum):
     SHAREPOINT_UI        = "SharePointUI"   # PM-uploaded via SP UI per FR-62 (Ph-2)
 
 class DocType(str, Enum):
-    """Five doc_type values per `[D-053]` impl note 2026-06-08 (supersedes the prior 4-value enum
+    """Six doc_type values per `[D-053]` impl note 2026-06-08 (supersedes the prior 4-value enum
     + the withdrawn "1:1 derivation from item.item_type" framing). `doc_type` is classified per
     inbound document via the FR-85 2-step ladder (filename regex Step 1 + LLM CLASSIFY_DOC_TYPE
     Step 2 restricted to {test_report, tech_report, waiver}) — NOT derived from item.item_type.
@@ -85,6 +85,7 @@ class DocType(str, Enum):
     WAIVER                                 = "waiver"                                  # triggers FR-53 LLM review when review_required=true (type 2 items only)
     COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"  # renamed from prior `default` 2026-06-08 — bundle for compliance docs / certification docs / release notes; FR-16/FR-46/FR-53 do NOT fire for this doc_type; auto-assigned for type 3 items; detected by filename regex only (no LLM)
     UNRESOLVED                             = "unresolved"                              # FR-85 Step 2 low-confidence outcome OR Default-routed-undetermined state; no downstream actions fire; awaits TPM resolution via FR-87 step (B) on `staged-not-classified` NSD path
+    ARCHIVE_CONTAINER                      = "archive_container"                       # DOCTYPE-1 (2026-08-08): sentinel for outer-archive `document_index` audit rows written by `_process_archive_attachment` (D-155 / D-160). Never emitted by FR-85 classification; container rows are audit-only + don't route to items. Semantically-parallel to `RoutingResolution.ARCHIVE_CONTAINER`. Downstream doc_type whitelists (FR-87 TPM-resolve, attachment_router actionability, tracker reassignment matcher) MUST NOT include this value.
 
 class CustomerDeliveryModality(str, Enum):
     """Per-item delivery modality to the customer/carrier. Phase-scoped values per `[D-054]`

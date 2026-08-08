@@ -110,6 +110,14 @@ class DocType(str, Enum):
     WAIVER                                 = "waiver"
     COMPLIANCE_CERTIFICATION_RELEASE_NOTES = "compliance_certification_release_notes"
     UNRESOLVED                             = "unresolved"
+    # DOCTYPE-1 (2026-08-08): sentinel for the outer-archive `document_index`
+    # audit row written by `_process_archive_attachment` (D-155 / D-160).
+    # Never emitted by FR-85 classification -- container rows are audit-only
+    # and don't route to items. Prior to this fix `doc_type=""` was written,
+    # which failed Pydantic validation and silently dropped the audit row.
+    # Same semantic as UNRESOLVED for actionable checks: not a classifiable
+    # doc; downstream filters that whitelist doc_types must NOT include it.
+    ARCHIVE_CONTAINER                      = "archive_container"
 
 
 class CustomerDeliveryModality(str, Enum):
