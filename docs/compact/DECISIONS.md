@@ -4348,3 +4348,90 @@ The design tension is real: template-first was designed for the "SP sometimes om
 
 Related flag in STATUS.md: "Design tension flagged: template-first merge silently propagates template errors" — not yet a new ADR; may become one after DRR-V2 cascade if the tension shows up again.
 
+## D-161: Celery-free helper extraction; celery-owning callers re-export for BC
+
+**Date**: 2026-08-07
+
+**Context**: DRR-DL-1a (on-demand Download DRR status button on milestone landing page) needed the same `_build_drr_v2_context` / `_read_milestone_headers` / `_read_project_headers` / `_resolve_logo_path` helpers that the beat-tick's `tpm_notification._send_notification` already uses. Problem: `workflow_engine/tasks/tpm_notification.py` imports `celery_app` at module top, and the dashboard container's build does not include celery. Importing tpm_notification from the dashboard route would explode at import time.
+
+**Decision**: Extract shared helpers into a new plain-python module (`core/src/email_service/outbound/drr_v2_context.py`) that imports only from stdlib + `template_lookup` + `sharepoint_integration.config.ListScope` (all celery-free). The celery-owning caller (`tpm_notification.py`) re-exports the names from `drr_v2_context` for backward compat with any callers still importing from the old location. Establishes the pattern:
+
+- **When a helper is called by both a celery task and a non-celery entry-point** (dashboard route, one-shot script, unit test), house it in a module that does NOT `from ... import celery_app` at the top level.
+- **Backward-compat re-exports live at the celery-owning module**, not the celery-free module — so the celery-free module stays celery-agnostic and its dependency graph doesn't grow.
+- **Test surface** for the extracted helpers moves to a dedicated test file that imports celery-free (dashboard tests don't drag celery in).
+
+**Alternatives considered**:
+
+- **Add celery to the dashboard image**: rejected — dashboard is a lightweight FastAPI process; celery pulls kombu + billiard + a full worker-runtime dep chain. Bloats image, adds cold-start time, adds attack surface. Dashboard is not a task consumer.
+- **Duplicate the helpers into `dashboard/`**: rejected — DRR-V2 context builder has non-trivial SP-read logic (canonical filter selection, blank-field WARN semantics, safety fallbacks); two copies would drift.
+
+The chosen path preserves the beat-tick call site's public API (BC re-export) while making the helpers reachable from any container.
+
+**Consequences**:
+
+- (a) Any future helper called from both celery tasks and non-celery entry points follows this pattern — put it in a celery-free module, re-export from the celery-owning module.
+- (b) `email_service/outbound/` now houses both celery-free (`drr_v2_context.py`, `drr_report_excel.py`) and celery-adjacent (`composer.py`) modules; if this grows further, consider a `email_service/context/` sub-package.
+- (c) Dashboard startup does not call `bootstrap_task_deps`, so any celery-free helper that depends on module-level caches (e.g., `template_lookup._CACHE`) must lazy-seed on first use. Precedent: `document_view_routes.py` calls `template_lookup.load_all_customer_templates()` on first template miss. See DRR-DL-1b commit.
+- (d) A follow-up refactor could introduce a `dashboard_bootstrap.py` helper so future SP-consuming routes don't duplicate the SP-writer construction that DRR-DL-1c added to `build_app`.
+
+## D-162: Live SP-read at render time for TPM-typed fields (skip sync path)
+
+**Date**: 2026-08-07
+
+**Context**: TPM types free-text `comment` values into deliverables_MMK SP list. DRR excel's Remarks column stayed blank on downloads because Postgres `delivery_item.comment` was None: (1) the SP → Postgres sync via `sync_deliverable_fields` task didn't include `comment` in `_STR_FIELDS`; (2) even if it did, `customer.yaml deliverables.columns:` likely lacked the mapping, so the sync would have failed silently. The header block for DRR-V2 (DRR-V2-4) had already established a precedent: `fld_lockdown_date`, `req_version`, `target_date` (Milestones list) and `LE`, `FFW` (Projects_<customer> list) are read live from SP at excel-build time, not from Postgres.
+
+**Decision**: For TPM-typed SP fields that render on a user-triggered page, read SP live at render time — skip the SP-alert → sync-task → Postgres pipeline entirely. Specifically:
+
+- **Applies to** — fields TPM authors in SP by hand, that are never machine-authoritative in Postgres, and are rendered on a user-triggered path (Download click, dashboard view, one-shot script).
+- **Does NOT apply to** — fields HILDA writes to SP (`pm_approval_at`, `delivery_state`, `actual_completion_date` — SP is downstream, Postgres is truth) or fields queried at scale (import task, reconciler, batch jobs).
+- **Contract of the helper** — never raises; SP transport failure / row miss / blank field returns an empty container + WARN log; caller renders blank cell / degrades gracefully.
+- **Cost model** — one extra SP call per user-triggered render. Acceptable for Download/dashboard cadence; unacceptable for import-time or reconciler paths.
+
+Current call sites: `read_milestone_headers` + `read_project_headers` + `read_deliverables_comments` (all in `drr_v2_context.py`), all read at excel-build time.
+
+**Alternatives considered**:
+
+- **Fix the sync path (add `comment` to `_STR_FIELDS`, add `comment` mapping in customer.yaml)**: rejected in the moment because the round-trip (SP alert fires → parser routes to sync task → sync writes Postgres → next Download reads Postgres) is subject to SP alert lossiness ([D-117] pattern) and customer.yaml drift. The Remarks column is a bug-report loop concern for the TPM — freshness matters more than DB efficiency.
+- **Add a background refresher (celery beat task) that periodically re-syncs TPM-typed fields**: rejected — adds a moving part with its own failure modes to solve a problem that live-read solves directly and simply.
+
+The chosen path trades one SP call per Download for always-fresh values with no dependency on sync-task ordering or customer.yaml completeness.
+
+**Consequences**:
+
+- (a) Future TPM-typed SP columns rendered on user-triggered pages should follow this pattern rather than being added to `_STR_FIELDS` and the sync path. Candidates worth evaluating: `owner_status_note`, `plm_id`, `email_cc_list`.
+- (b) Dashboard render cost scales with number of live-read fields × number of user clicks. If a future page renders many such fields per row across many rows, revisit — batch reads, or fall back to sync-path caching.
+- (c) `customer.yaml deliverables.columns:` completeness is now load-bearing for live-read paths too — the canonical-filter mapping (`milestone_id: milestone_name` for the delivery_items entity) is required. The COMMENT-SRC-1a bug (wrong canonical key) was traced to this in ~15 min; formalizing the pattern makes such misses easier to spot.
+- (d) Meta-question worth an architect discussion: should HILDA formalize "SP live-read at render time" as a named architecture stance vs continuing case-by-case, and where to draw the line before every dashboard render becomes N SP calls?
+- (e) 5 new tests in `test_drr_v2_context.py` + 4 dashboard tests updated.
+
+## D-163: SP alert device whitelist filter — drop alerts for devices not in template.yaml
+
+**Date**: 2026-08-06
+
+**Context**: SP UI engineer's mock/test environment sends sample-device (e.g., `SM-MOCK-XYZ`) SP alerts into the shared HILDA inbox to validate their SP-side flows. HILDA's polling task was routing these through the parser → creating fake delivery_items in Postgres → polluting real device state alongside legitimate carrier devices. TPM saw a Postgres row for a device that was never onboarded, breaking dashboard views and metrics. Ph-1 has no isolation between test-env and prod inbox streams; corp-side inbox split is not on the roadmap.
+
+**Decision**: Add a whitelist gate on the SP alert intake path (`email_polling._async_poll_and_dispatch`) keyed on `template.yaml devices:`. After the parser produces a parsed alert:
+
+- **If `project_model` is empty** → pass through unchanged (many milestone/carrier-level alerts have no device — dropping them would break real routing).
+- **If `customer_id` is empty** → pass through unchanged (safety: unknown-customer alerts already have their own downstream handling).
+- **If the customer's template.yaml is not cached / has no `devices:` block** → pass through unchanged (safety: don't drop alerts because a customer isn't fully onboarded).
+- **If `project_model` is present, customer template is cached, `devices:` block exists AND is non-empty, AND `project_model` NOT in the whitelist** → drop the alert with a `DEVICE_FILTER:`-tagged WARN log; do not proceed to dispatch.
+
+New helper: `template_lookup.list_known_devices(customer_id) -> list[str] | None` returns the keys of the customer's template.yaml `devices:` block; returns None if template not cached (triggers the safety pass-through).
+
+**Alternatives considered**:
+
+- **Route unknown-device alerts to a separate `_unknown_device/` bucket** (like `_unknownTG` for unrouted docs): rejected — SP UI engineer's test devices are not TPM-triage-actionable; they're pure noise. `/_unknownTG` exists for docs a TPM might want to route; a `/_unknownDevice` for alerts would just fill up.
+- **Filter downstream in the import task** (drop the row at storage-write time): rejected — the alert still consumes parser cycles, generates audit rows, and pollutes the dispatch metric. Filtering at intake is cheaper and closer to the source.
+- **Coordinate with corp IT to isolate SP UI engineer's alerts** (separate inbox / DL): rejected — organizational blocker; not shipping in Ph-1.
+
+Filtering at the intake path with safety-first fallthroughs preserves onboarding flexibility (a new device landing in SP before it's in template.yaml can still get imported) while dropping the pure-noise case.
+
+**Consequences**:
+
+- (a) A device NOT in the customer's `template.yaml devices:` block will silently disappear from HILDA's SP alert intake. The `DEVICE_FILTER:`-tagged WARN log is the sole trace — `podman logs hilda-worker | grep DEVICE_FILTER` is the ops-diagnostic command. Documented in STATUS.md.
+- (b) Onboarding order matters: template.yaml `devices:` entry must exist BEFORE the first ADDED SP alert for that device. If a new device is added to SP before template.yaml is updated + reloaded, that ADDED alert is dropped. Recovery is a reconciler-driven backfill or a manual re-fire once template.yaml catches up.
+- (c) Empty `devices:` block or missing template.yaml both fall through the safety branch. Explicitly opting IN to filtering requires a non-empty `devices:` block — matches the principle that filtering is off by default until the customer's device set is authoritatively known.
+- (d) Future adjacent filters (owner whitelist, milestone_id whitelist) could follow this pattern using additional template_lookup helpers. Establishes template.yaml as the authoritative source for "what alerts are we willing to accept for this customer."
+- (e) 5 new tests in `test_email_polling_device_filter.py`; 11/11 green.
+
