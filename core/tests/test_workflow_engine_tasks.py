@@ -698,6 +698,38 @@ class TestOutreachTasks:
             "prior bug wrote both send_initial_outreach + send_initial_outreach_failed"
         )
 
+    def test_send_email_propagates_coro_raised_runtimeerror_unchanged(self):
+        """RUNTIMEERR-1 (2026-08-08): coroutine-raised RuntimeError must
+        propagate unchanged from _send_email's sync bridge. Prior
+        `except RuntimeError:` was too broad -- it also caught the coro's
+        error, then re-awaited the already-consumed coro on a new loop,
+        replacing the original message with the confusing "cannot reuse
+        already awaited coroutine". Narrow-catch fix limits the except
+        to loop-lifecycle RuntimeErrors ("no current event loop" /
+        "event loop is closed"); everything else re-raises."""
+        raising_sender = _RaisingAsyncEmailSender(
+            error_type=RuntimeError, message="EWS auth token expired"
+        )
+        d = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=raising_sender,
+        )
+        from core.src.workflow_engine.tasks.outreach import send_initial_outreach_task
+        with override_task_deps(d):
+            with pytest.raises(RuntimeError, match="EWS auth token expired"):
+                send_initial_outreach_task.apply_async(
+                    args=({"template": "std_outreach"},
+                          ctx(owner_corp_usa_email="alice@corp.example"))
+                ).get()
+        # Original error surfaces; no "cannot reuse" masking
+        assert raising_sender.attempts == 1
+        failure_logs = [a for a in d.audit.logs if a[0] == "send_initial_outreach_failed"]
+        assert len(failure_logs) == 1
+        details = failure_logs[0][3]
+        assert details["error_type"] == "RuntimeError"
+        assert "EWS auth token expired" in details["error"]
+        assert "cannot reuse" not in details["error"].lower()
+
     def test_send_initial_outreach_success_still_writes_success_audit_only(self):
         """REL-1 regression guard: happy path unchanged -- only
         send_initial_outreach (success) audit lands, no failure row."""

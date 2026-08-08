@@ -702,7 +702,17 @@ def _send_email(deps: Any, *, to: str, subject: str, body_marker: str) -> str:
             finally:
                 new_loop.close()
         return loop.run_until_complete(coro)
-    except RuntimeError:
+    except RuntimeError as exc:
+        # RUNTIMEERR-1 (2026-08-08): only catch loop-lifecycle RuntimeErrors
+        # (asyncio.get_event_loop() raising "no current event loop" on
+        # Python 3.12+ / non-main threads; loop already closed). Any
+        # RuntimeError raised BY the coroutine itself (e.g., adapter
+        # auth-expiry, invalid state) must propagate -- re-awaiting the
+        # already-consumed coro on a new loop would only replace the real
+        # error with the confusing "cannot reuse already awaited coroutine".
+        msg = str(exc).lower()
+        if "no current event loop" not in msg and "event loop is closed" not in msg:
+            raise
         new_loop = asyncio.new_event_loop()
         try:
             return new_loop.run_until_complete(coro)

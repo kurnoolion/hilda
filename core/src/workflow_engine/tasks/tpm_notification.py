@@ -743,7 +743,15 @@ def _send_via_email_sender(
             finally:
                 new_loop.close()
         return loop.run_until_complete(coro)
-    except RuntimeError:
+    except RuntimeError as exc:
+        # RUNTIMEERR-1 (2026-08-08): mirror the narrow-catch fix from
+        # outreach._send_email. Loop-lifecycle RuntimeErrors fall through
+        # to new_event_loop(); coro-raised RuntimeErrors propagate so the
+        # original error surfaces instead of "cannot reuse already awaited
+        # coroutine".
+        msg = str(exc).lower()
+        if "no current event loop" not in msg and "event loop is closed" not in msg:
+            raise
         new_loop = asyncio.new_event_loop()
         try:
             return new_loop.run_until_complete(coro)
