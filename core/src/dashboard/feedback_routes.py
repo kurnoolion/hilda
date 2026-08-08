@@ -284,7 +284,7 @@ def register_feedback_routes(
             data = await attachment.read()
             if len(data) > _MAX_ATTACHMENT_BYTES:
                 raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                     detail=(
                         f"attachment exceeds {_MAX_ATTACHMENT_BYTES // (1024 * 1024)}MB "
                         f"limit (uploaded {len(data)} bytes)"
