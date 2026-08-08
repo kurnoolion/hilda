@@ -79,9 +79,15 @@ _HEADER_ALIASES = {
     # key renamed owner_completion_date -> actual_completion_date so
     # writes land on the same postgres column TPM uses (single source
     # of truth for DRR excel Completion column).
-    "completion_date":   "actual_completion_date",
-    "completion date":   "actual_completion_date",
-    "completion":        "actual_completion_date",
+    "completion_date":                  "actual_completion_date",
+    "completion date":                  "actual_completion_date",
+    "completion":                       "actual_completion_date",
+    # DRR-V2-8k (2026-08-08): outreach template header now advertises the
+    # expected date format inline as "Completion Date (MM/DD/YYYY)" to
+    # steer owners away from EU-vs-US-ambiguous dates like 3/4/2026.
+    # Legacy aliases above still resolve so in-flight batches parse.
+    "completion date (mm/dd/yyyy)":     "actual_completion_date",
+    "completion date (yyyy-mm-dd)":     "actual_completion_date",
 }
 
 
