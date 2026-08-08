@@ -1152,7 +1152,7 @@ class TestRegistryIntegration:
         assert ActionKind.IMPORT_DELIVERABLE_TRACKER in ACTION_KIND_TO_TASK
         assert ActionKind.KICKOFF_COLLECTION in ACTION_KIND_TO_TASK
 
-    def test_22_of_24_action_kinds_registered_now(self):
+    def test_25_of_27_action_kinds_registered_now(self):
         # state(2) + milestone(4: MILESTONE_STORAGE_CLEANUP, HALT_MILESTONE_POLLING,
         #             FINAL_SWEEP, CLOSE_ALL_ITEMS added 2026-07-02 per architect
         #             close-all-items cascade) + routing_resolution(3) + escalation(2) +
@@ -1165,10 +1165,13 @@ class TestRegistryIntegration:
         # submit_to_carrier(1: SUBMIT_TO_CARRIER added 2026-06-30 per architect
         #             submit-to-carrier milestone orchestrator design pass) +
         # sync_deliverable_fields(1: SYNC_DELIVERABLE_FIELDS added 2026-07-02
-        #             per architect template-merge null-guard design pass) = 22.
-        # Remaining 2 await downstream module integration:
-        # TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
-        assert len(ACTION_KIND_TO_TASK) == 22
+        #             per architect template-merge null-guard design pass) +
+        # tpm_sp_close(2: APPLY_TPM_SP_CLOSE 2026-07-27 [TPM-CLOSE-1] +
+        #             APPLY_TPM_SP_CLOSE_IN_PROGRESS 2026-07-30 [CIP-3]) +
+        # milestone-delete(1: APPLY_MILESTONE_DELETE 2026-07-31 [MDEL-3]) = 25.
+        # Remaining 2 (of 27 in the enum) await downstream module
+        # integration: TRIGGER_PARSER + TRIGGER_AI_REVIEW (llm Ph-1 next pass).
+        assert len(ACTION_KIND_TO_TASK) == 25
 
     def test_outreach_actions_registered(self):
         assert ActionKind.SEND_INITIAL_OUTREACH in ACTION_KIND_TO_TASK
@@ -1352,7 +1355,11 @@ class TestImportDeliverableTracker:
         assert item.no_customer_upload is False          # "No" -> False
         assert item.review_required is False
         assert item.milestone_gating is True
-        assert item.delivery_state == "Not Started"
+        # Per architect 2026-07-15 serialization: import_deliverable_tracker
+        # auto-transitions Not Started -> Open in the same task (see
+        # sp_alert_imports.py:501 "Auto-transition Not Started -> Open").
+        # Final Postgres state is Open, not Not Started.
+        assert item.delivery_state == "Open"
 
 
 # ===========================================================================
