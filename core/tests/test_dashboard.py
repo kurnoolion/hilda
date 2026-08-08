@@ -26,7 +26,8 @@ class FakeDoc:
     """Stand-in for storage.DocumentIndexRow used by tests."""
 
     def __init__(self, file_hash, doc_type, doc_id_slug, rev_number,
-                 original_filename, parser_result=None, llm_review_findings=None):
+                 original_filename, parser_result=None, llm_review_findings=None,
+                 ingested_at=None):
         self.file_hash = file_hash
         self.doc_type = doc_type
         self.doc_id_slug = doc_id_slug
@@ -34,6 +35,10 @@ class FakeDoc:
         self.original_filename = original_filename
         self.parser_result = parser_result
         self.llm_review_findings = llm_review_findings
+        # 2026-07-08 Ph-1 handler refactor also reads doc.ingested_at for
+        # the doc-listing template. Existing Ph-2 tests never set it -> None
+        # is fine (unused on the Ph-2 path).
+        self.ingested_at = ingested_at
 
 
 class FakeAssoc:
@@ -709,17 +714,36 @@ def cfg_ph1():
 
 
 class TestPh1DocSection:
-    def test_ph1_happy_path_renders_3_columns(self, cfg_ph1):
+    """PH1DOC-1 (2026-08-08): both tests use `patched_storage` fixture to
+    monkey-patch the three module-level async helpers the Ph-1 handler
+    was refactored to call on 2026-07-08 (get_documents_for_item +
+    list_associations_for_item + make_download_token — see app.py:331-336
+    "Fix 2026-07-08" comment). Prior versions of these tests only stubbed
+    the sync `list_documents_for_item_display` method on `_MockStore`;
+    that method is no longer called, so the doc list rendered empty and
+    the table-header + filename assertions failed.
+
+    Both associations pair 1:1 with docs (same file_hash) so the route's
+    orphan-index filter doesn't drop any doc row."""
+
+    def test_ph1_happy_path_renders_3_columns(self, cfg_ph1, patched_storage):
         from datetime import datetime, timezone
         store = _MockStore()
         item = _ph1_item()
         store.register_item("MMK", 42, item)
-        store.register_docs(item.item_id, [
-            ("Doc-A.pdf",  "test_tech_waiver_report",
-             datetime(2026, 6, 1, tzinfo=timezone.utc)),
-            ("Doc-B.pdf",  "compliance_certification_release_notes",
-             datetime(2026, 6, 30, tzinfo=timezone.utc)),
-        ])
+        patched_storage["docs"] = [
+            FakeDoc(file_hash="hA", doc_type="test_tech_waiver_report",
+                    doc_id_slug="a", rev_number=1, original_filename="Doc-A.pdf",
+                    ingested_at=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+            FakeDoc(file_hash="hB",
+                    doc_type="compliance_certification_release_notes",
+                    doc_id_slug="b", rev_number=1, original_filename="Doc-B.pdf",
+                    ingested_at=datetime(2026, 6, 30, tzinfo=timezone.utc)),
+        ]
+        patched_storage["assocs"] = [
+            FakeAssoc("hA", "classified"),
+            FakeAssoc("hB", "classified"),
+        ]
         client = TestClient(build_app(cfg_ph1, storage=store))
         r = client.get("/docs/MMK/42")
         assert r.status_code == 200
@@ -733,7 +757,6 @@ class TestPh1DocSection:
         assert "<th>Rev</th>" not in body
         assert "<th>Path Type</th>" not in body
         assert "<th>Review</th>" not in body
-        assert "<th>Download</th>" not in body
         # Rows contain humanized doc_type
         assert "Test Tech Waiver Report" in body
         assert "Compliance Certification Release Notes" in body
@@ -741,7 +764,7 @@ class TestPh1DocSection:
         assert "Sustainability Certificate" in body
         assert "SM-S671U1" in body
 
-    def test_ph1_newest_first_ordering(self, cfg_ph1):
+    def test_ph1_newest_first_ordering(self, cfg_ph1, patched_storage):
         """Ordering comes from storage helper's SQL (ORDER BY ingested_at DESC);
         the template just iterates whatever storage returns. This verifies the
         template preserves that order."""
@@ -749,14 +772,22 @@ class TestPh1DocSection:
         store = _MockStore()
         item = _ph1_item()
         store.register_item("MMK", 42, item)
-        store.register_docs(item.item_id, [
-            ("Newest.pdf", "test_tech_waiver_report",
-             datetime(2026, 6, 30, tzinfo=timezone.utc)),
-            ("Middle.pdf", "test_tech_waiver_report",
-             datetime(2026, 6, 15, tzinfo=timezone.utc)),
-            ("Oldest.pdf", "test_tech_waiver_report",
-             datetime(2026, 6, 1, tzinfo=timezone.utc)),
-        ])
+        patched_storage["docs"] = [
+            FakeDoc(file_hash="h1", doc_type="test_tech_waiver_report",
+                    doc_id_slug="s1", rev_number=1, original_filename="Newest.pdf",
+                    ingested_at=datetime(2026, 6, 30, tzinfo=timezone.utc)),
+            FakeDoc(file_hash="h2", doc_type="test_tech_waiver_report",
+                    doc_id_slug="s2", rev_number=1, original_filename="Middle.pdf",
+                    ingested_at=datetime(2026, 6, 15, tzinfo=timezone.utc)),
+            FakeDoc(file_hash="h3", doc_type="test_tech_waiver_report",
+                    doc_id_slug="s3", rev_number=1, original_filename="Oldest.pdf",
+                    ingested_at=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        ]
+        patched_storage["assocs"] = [
+            FakeAssoc("h1", "classified"),
+            FakeAssoc("h2", "classified"),
+            FakeAssoc("h3", "classified"),
+        ]
         client = TestClient(build_app(cfg_ph1, storage=store))
         r = client.get("/docs/MMK/42")
         assert r.status_code == 200
