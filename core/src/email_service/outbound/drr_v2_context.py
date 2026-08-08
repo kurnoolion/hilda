@@ -373,24 +373,43 @@ def read_apps_tg_xlsx_bytes_sync(
     """Sync bridge to read_apps_tg_xlsx_bytes for celery-task callers
     (tpm_notification._send_notification is sync per Celery worker model).
     Mirrors the asyncio-loop lifecycle pattern used by
-    tpm_notification._send_via_email_sender."""
+    tpm_notification._send_via_email_sender.
+
+    DRR-V2-8h (2026-08-08): entry/branch logs at WARN so ops can trace
+    which asyncio-bridge branch executed and whether it returned bytes
+    or raised."""
     import asyncio
+    _log.warning(
+        "DRR_APPS_SYNC: entered customer=%s device=%s milestone=%s",
+        customer_id, device_id, milestone_id,
+    )
     coro = read_apps_tg_xlsx_bytes(customer_id, device_id, milestone_id)
+    result: bytes | None = None
+    branch: str = "?"
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
+            branch = "get_event_loop+running=True->new_loop"
             new_loop = asyncio.new_event_loop()
             try:
-                return new_loop.run_until_complete(coro)
+                result = new_loop.run_until_complete(coro)
             finally:
                 new_loop.close()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
+        else:
+            branch = "get_event_loop+running=False->reuse_loop"
+            result = loop.run_until_complete(coro)
+    except RuntimeError as exc:
+        branch = f"RuntimeError({str(exc)[:60]})->new_loop"
         new_loop = asyncio.new_event_loop()
         try:
-            return new_loop.run_until_complete(coro)
+            result = new_loop.run_until_complete(coro)
         finally:
             new_loop.close()
+    _log.warning(
+        "DRR_APPS_SYNC: exit branch=%s bytes=%s",
+        branch, (f"{len(result)}B" if result else "None"),
+    )
+    return result
 
 
 def build_drr_v2_context(

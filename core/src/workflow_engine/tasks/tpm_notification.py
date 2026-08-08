@@ -567,7 +567,27 @@ def _send_notification(
     # DRR-V2-8g (2026-08-07): beat-tick path must also fetch the APPS TG
     # xlsx so Applications tab renders with real data, not the empty
     # placeholder. Same source as dashboard's Download route.
-    apps_bytes = read_apps_tg_xlsx_bytes_sync(customer_id, device_id, milestone_id)
+    # DRR-V2-8h (2026-08-08): loud entry/exit log so ops can confirm this
+    # path executed via `podman logs hilda-worker | grep DRR_TICK_8G`.
+    _log.warning(
+        "DRR_TICK_8G: about to fetch APPS xlsx for beat-tick DRR email "
+        "customer=%s device=%s milestone=%s",
+        customer_id, device_id, milestone_id,
+    )
+    try:
+        apps_bytes = read_apps_tg_xlsx_bytes_sync(customer_id, device_id, milestone_id)
+    except Exception as _apps_exc:  # noqa: BLE001
+        _log.warning(
+            "DRR_TICK_8G: APPS fetch raised (should never happen; helper "
+            "is supposed to swallow): %s: %s -- falling back to None",
+            type(_apps_exc).__name__, str(_apps_exc)[:200],
+        )
+        apps_bytes = None
+    _log.warning(
+        "DRR_TICK_8G: APPS fetch returned bytes=%s customer=%s device=%s milestone=%s",
+        (f"{len(apps_bytes)}B" if apps_bytes else "None"),
+        customer_id, device_id, milestone_id,
+    )
     xlsx_bytes = build_drr_report_excel(
         items=items, applications_sheet_bytes=apps_bytes, **drr_ctx,
     )
