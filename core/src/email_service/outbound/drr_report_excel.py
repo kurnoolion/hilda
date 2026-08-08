@@ -278,7 +278,18 @@ def _write_applications_sheet(
 
     ws = wb.create_sheet(title="Applications")
 
+    # DRR-V2-8h (2026-08-08): loud entry log to trace which branch fires
+    # when the beat-tick DRR email renders empty. bytes-arg is truthy
+    # when we should render the template shell + copy data; empty/None
+    # falls to the placeholder note branch below.
+    _log.warning(
+        "DRR_APPS_WRITE: _write_applications_sheet entered bytes=%s device=%s",
+        (f"{len(applications_sheet_bytes)}B" if applications_sheet_bytes else "None"),
+        device_id,
+    )
+
     if not applications_sheet_bytes:
+        _log.warning("DRR_APPS_WRITE: branch=placeholder (no bytes)")
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
         c = ws.cell(
             row=1, column=1,
@@ -306,6 +317,10 @@ def _write_applications_sheet(
         c.font = Font(italic=True, color="C00000")
         return
 
+    _log.warning(
+        "DRR_APPS_WRITE: source workbook loaded, sheetnames=%s",
+        src_wb.sheetnames,
+    )
     src = None
     for name in src_wb.sheetnames:
         if name.strip().lower() == "applications":
@@ -313,8 +328,7 @@ def _write_applications_sheet(
             break
     if src is None:
         _log.warning(
-            "drr_report_excel: source APPS xlsx has no 'Applications' sheet "
-            "(available: %s)",
+            "DRR_APPS_WRITE: branch=no-Applications-sheet (available: %s)",
             src_wb.sheetnames,
         )
         c = ws.cell(row=1, column=1,
@@ -330,6 +344,11 @@ def _write_applications_sheet(
     # values so the Applications tab reflects what the owner sent.
     source_headers = _read_source_header_values(src)
 
+    _log.warning(
+        "DRR_APPS_WRITE: branch=render-template max_row=%s max_col=%s "
+        "source_headers=%s",
+        src.max_row, src.max_column, list((source_headers or {}).keys()),
+    )
     _write_applications_header_block(
         ws=ws,
         device_id=device_id,
@@ -340,6 +359,10 @@ def _write_applications_sheet(
     )
     _write_applications_column_headers(ws)
     _copy_applications_data_rows(ws, src)
+    _log.warning(
+        "DRR_APPS_WRITE: branch=render-template DONE dest_max_row=%s",
+        ws.max_row,
+    )
 
 
 def _read_source_header_values(src: Any) -> dict[str, Any]:
