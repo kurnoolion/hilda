@@ -27,6 +27,8 @@ __all__ = [
     "read_project_headers",
     "read_deliverables_comments",
     "resolve_logo_path",
+    "read_apps_tg_xlsx_bytes",
+    "read_apps_tg_xlsx_bytes_sync",
     "build_drr_v2_context",
     "row_get",
 ]
@@ -295,6 +297,100 @@ def resolve_logo_path(customer_id: str) -> Path | None:
         filename, [str(b) for b in BRANDING_DIRS],
     )
     return None
+
+
+async def read_apps_tg_xlsx_bytes(
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> bytes | None:
+    """Fetch the most-recent .xlsx routed under APPS TG for this scope
+    from the NSD view tree. Returns raw bytes for build_drr_report_excel's
+    `applications_sheet_bytes` kwarg, or None when: no APPS file exists,
+    the view path is missing on disk, or the read failed.
+
+    Shared by the dashboard's Download route (DRR-DL-1) and the beat-tick
+    _send_notification path (DRR-V2-8g). Extracted here so the two paths
+    can't diverge on APPS-fetch behavior.
+
+    Never raises. Errors log a `DRR_APPS:`-tagged WARNING and return None
+    so the excel builder falls back to the empty-Applications placeholder."""
+    try:
+        from core.src.storage import list_files_in_tg
+        from core.src.storage.config import get_storage_config
+        from pathlib import Path as _Path
+
+        apps_files = await list_files_in_tg(
+            customer_id=customer_id, device_id=device_id,
+            milestone_id=milestone_id, tg_name="APPS",
+        )
+        xlsx_files = [
+            f for f in (apps_files or [])
+            if f.filename and f.filename.lower().endswith(".xlsx")
+            and not getattr(f, "is_drm_wrapped", False)
+        ]
+        if not xlsx_files:
+            _log.warning(
+                "DRR_APPS: no APPS xlsx for scope customer=%s device=%s "
+                "milestone=%s -- Applications tab will show placeholder",
+                customer_id, device_id, milestone_id,
+            )
+            return None
+        xlsx_files.sort(key=lambda f: f.last_saved_at, reverse=True)
+        latest = xlsx_files[0]
+        _cfg = get_storage_config()
+        abs_path = _Path(_cfg.nsd_mount_root) / latest.view_relative_path
+        if not abs_path.is_file():
+            _log.warning(
+                "DRR_APPS: view path missing on disk: %s "
+                "(customer=%s device=%s milestone=%s)",
+                abs_path, customer_id, device_id, milestone_id,
+            )
+            return None
+        data = abs_path.read_bytes()
+        _log.warning(
+            "DRR_APPS: loaded filename=%r size=%d saved_at=%s "
+            "from %d candidate xlsx (customer=%s device=%s milestone=%s)",
+            latest.filename, len(data), latest.last_saved_at,
+            len(xlsx_files), customer_id, device_id, milestone_id,
+        )
+        return data
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "DRR_APPS: fetch failed customer=%s device=%s milestone=%s: "
+            "%s: %s -- Applications tab will show placeholder",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return None
+
+
+def read_apps_tg_xlsx_bytes_sync(
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> bytes | None:
+    """Sync bridge to read_apps_tg_xlsx_bytes for celery-task callers
+    (tpm_notification._send_notification is sync per Celery worker model).
+    Mirrors the asyncio-loop lifecycle pattern used by
+    tpm_notification._send_via_email_sender."""
+    import asyncio
+    coro = read_apps_tg_xlsx_bytes(customer_id, device_id, milestone_id)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
 
 
 def build_drr_v2_context(

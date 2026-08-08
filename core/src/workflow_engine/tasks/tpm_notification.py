@@ -560,8 +560,17 @@ def _send_notification(
     # SP reads. When section_grouping is None (customer not migrated
     # yet), builder falls back to legacy 4-column flat sheet.
     from core.src.email_service.outbound.drr_report_excel import build_drr_report_excel
+    from core.src.email_service.outbound.drr_v2_context import (
+        read_apps_tg_xlsx_bytes_sync,
+    )
     drr_ctx = _build_drr_v2_context(deps, customer_id, device_id, milestone_id)
-    xlsx_bytes = build_drr_report_excel(items=items, **drr_ctx)
+    # DRR-V2-8g (2026-08-07): beat-tick path must also fetch the APPS TG
+    # xlsx so Applications tab renders with real data, not the empty
+    # placeholder. Same source as dashboard's Download route.
+    apps_bytes = read_apps_tg_xlsx_bytes_sync(customer_id, device_id, milestone_id)
+    xlsx_bytes = build_drr_report_excel(
+        items=items, applications_sheet_bytes=apps_bytes, **drr_ctx,
+    )
     xlsx_filename = f"DRR_{customer_id}_{device_id}_{milestone_id}_final.xlsx"
 
     subject = _build_subject(customer_id, device_id, milestone_id)
