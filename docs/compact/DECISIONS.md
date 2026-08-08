@@ -4435,3 +4435,127 @@ Filtering at the intake path with safety-first fallthroughs preserves onboarding
 - (d) Future adjacent filters (owner whitelist, milestone_id whitelist) could follow this pattern using additional template_lookup helpers. Establishes template.yaml as the authoritative source for "what alerts are we willing to accept for this customer."
 - (e) 5 new tests in `test_email_polling_device_filter.py`; 11/11 green.
 
+## D-164: Pattern A doctrine — SP-authoritative state-mirror + atomic multi-field write per HILDA→SP action
+
+**Date**: 2026-08-08
+
+**Context**: HILDA writes multiple related SP fields for one logical action (e.g., PM approval sets `pm_approval_at` + `pm_approval_pm_id` in the same Deliverables row edit; delivery_state on a separate hop). SP has no transaction primitive — each field is technically a separate REST call in the general case. First-generation implementations tried per-field writes with per-field retry, which produced partial-state bugs: `pm_approval_at` set but `pm_approval_pm_id` missing after a mid-sequence transport error; re-fire recomputed the timestamp (wrong value) or skipped writes it should have redone.
+
+**Decision**: for any HILDA-initiated SP write that logically groups N fields, use ONE SP request that sends all N fields together (SP REST accepts the `canonical_fields` dict form via `SpCrudWriter.update_item`). Downstream consumers TRUST that the group either fully landed or fully didn't:
+
+- Consumers reading the group treat it as atomic ("if `pm_approval_at` is set, `pm_approval_pm_id` is also set").
+- No per-field retry — the whole action re-fires on failure (idempotent by construction).
+- Guards checking "did this action fire?" trust the `trigger_source` string (`trigger_source="submit_to_carrier_task"` means the task already ran — Guard 4 doesn't re-verify SP state).
+
+**Applies today** to: `apply_pm_approval_task` (Postgres `mirror_fields` dict is the canonical atomic-group example; SP-side write is 2-field per 2026-07-15 serialization amendment — see below), `submit_to_carrier_task` (Guard 4 `trigger_source` trust), `apply_tpm_sp_close_*` cascades, `apply_milestone_delete_task`, `owner_reply._write_note_only`. All future HILDA → SP writes must follow.
+
+**Serialization amendment (2026-07-15)**: legacy Pattern A [D-068] was a 3-field SP atomic write (`pm_approval_at + pm_approval_pm_id + delivery_state`). SP UI Approve button now writes only 2 fields (`pm_approval_at + pm_approval_pm_id`); HILDA drives the delivery_state transition separately via `tracker.transitions.update_delivery_state` (which itself uses the atomic-group pattern for its own SP writeback). The atomic-multi-field doctrine still applies — just to smaller groups at more discrete write sites.
+
+**Alternatives**:
+
+- **Per-field write with per-field retry**: rejected — produces partial state on mid-sequence transport failure; retry logic explodes in complexity; recovery requires reading SP back before every re-fire.
+- **Single-field writes + rollback on failure**: rejected — SP has no rollback primitive.
+- **Optimistic single-field + eventual-consistency reconciler catches drift**: rejected as the PRIMARY mechanism — reconciler is the backstop (see [D-166]), not the driver.
+
+**Consequences**:
+
+- (a) All HILDA → SP writes that logically group must use the `canonical_fields` dict form. Single-field writes for grouped actions are a code smell; per-field retry loops are a red flag.
+- (b) Retry granularity is the whole action, not the field. Failure mode: entire action re-fires; must be idempotent by construction (all consumers already are — reconciler was designed with this in mind).
+- (c) The 5/6-sync reconciler [D-166] still catches drift from SP-side edits not originating from HILDA, or from SP-side race conditions that partial-wrote. Pattern A + reconciler together = the reliability model.
+- (d) Reviewers approaching HILDA code will ask "why not per-field retry?" — this ADR is the standing answer.
+- (e) The serialization amendment (2-field SP + separate delivery_state hop) means the doctrine is now applied at more discrete write sites rather than one 3-field atomic. Same doctrine, finer grain.
+
+## D-165: template.yaml authoritative at import; null-guarded merge for TPM SP edits post-import
+
+**Date**: 2026-08-08
+
+**Context**: at Deliverables-ADDED alert time, HILDA fills structural fields on the new DeliveryItem (`item_type`, `tg_name`, `force_tracking_enabled`, `no_customer_upload`, `review_required`, `milestone_gating`, form-factor flags, etc.). Two sources exist:
+
+- (a) SP alert `body_kvs` — reflects the SP row's current state, but SP alerts historically drop entire fields (null-glitch) for some Boolean/nullable columns.
+- (b) `template.yaml` — hand-authored per-customer, reflects intended values.
+
+**Decision**: at import, template.yaml wins over SP `body_kvs` for structural fields. `_tmpl_bool(tmpl, key, body_kvs, default)` precedence: template value if key present (even `False`), body_kvs fallback, model default last. For Deliverables-CHANGED alerts (TPM edited SP), a null-guarded merge task (`SYNC_DELIVERABLE_FIELDS`, `sync_deliverable_fields_task`) writes SP → Postgres for fields where SP has non-null AND Postgres would change.
+
+Sites in code: [sp_alert_imports.py:223-263](core/src/workflow_engine/tasks/sp_alert_imports.py:223) (10+ `_tmpl_bool` calls at import); [sync_deliverable_fields.py:70+](core/src/workflow_engine/tasks/sync_deliverable_fields.py:70) (per-type null-guard branches for str/int/bool).
+
+**Alternatives**:
+
+- **SP-first with template as fallback**: rejected — SP null-glitches would silently omit required fields at import, blocking downstream tasks that assume completeness.
+- **Template-only, ignore SP body**: rejected — TPM edits to SP would never propagate to Postgres.
+- **Merge policy per-field configurable**: rejected — complexity for zero real-world benefit at Ph-1 scale.
+
+**Consequences**:
+
+- (a) Template.yaml is a per-customer contract; getting it wrong silently overrides SP truth. SM-S671U1 (2026-08-03) was the smoking gun: template had `force_tracking_enabled=false` + `no_customer_upload=false` for 84/86 items; SP had correct Yes/False; import used template; kickoff outreach fired only for item#86. Silent-override tension is real and documented (see D-141 impl-note addendum).
+- (b) Reviewing template.yaml is a load-bearing customer-onboarding step. Consider a `template validate --against-sp` CLI in Ph-2.
+- (c) The template-first-then-body_kvs precedence direction can be flipped when SP alerts prove reliable enough to trust. Candidate revisit trigger: Ph-2 after 30 consecutive days of clean alert intake.
+- (d) `SYNC_DELIVERABLE_FIELDS` task closes the "TPM edit never reaches Postgres" gap for post-import lifetime.
+
+Cross-refs: [D-141] impl-note addendum (silent-override tension flagged first); NAME-1 fix (item_name uses same template-first precedence to defeat SP-alert truncation).
+
+## D-166: SP alert lossiness — email fast-path + N-sync reconciler backstop is the reliability model
+
+**Date**: 2026-08-08
+
+**Context**: In-production observation across the 51-commit window (early-July) documented that SP alerts are **lossy**. Observed loss modes:
+
+- ADDED alerts for new Deliverables rows dropped entirely (never fired).
+- CHANGED alerts fired for some field deltas but omitted others in the same edit.
+- Fields present in the SP row silently absent from the alert body (null-glitch — same class of bug as [D-165]).
+- Alerts can fire twice for the same edit; or fire minutes late.
+
+HILDA cannot treat SP alerts as truth. Two backup channels were built into the design and are now formalized as an explicit stance.
+
+**Decision**: three-layer reliability model per event class:
+
+- **Layer 1 (fast path)**: SP alert → HILDA parser → dispatcher → Celery task. Latency ~seconds. Reliability ~95% observed.
+- **Layer 2 (redundant fast path)**: email intake via EWS (owner reply, JIRA notifications, etc.) → parser → same dispatcher. Independent of SP alert reliability. Not applicable to all event classes (e.g., TPM SP edits have no email equivalent).
+- **Layer 3 (authoritative backstop)**: N-sync reconciler runs every N minutes, compares SP → Postgres, materializes missed transitions. Slower but eventually consistent.
+
+Current reconciler is **6 sync passes** (was 5 originally; sync-6 stuck-CloseInProgress sweep added by CIP-4 2026-07-28). Named sync-1..sync-6 in [reconcile.py:9-14](core/src/workflow_engine/tasks/reconcile.py:9): `delivery_item_count backfill`, `milestone-start-collection retry`, `deliverable-approved per-item mirror`, `milestone-submit-to-carrier retry`, `milestone-close-all-items retry`, `stuck-CloseInProgress sweep`. Every SP-alert-triggered code path has a matching sync-pass.
+
+**Design invariant**: no HILDA code path is single-channel for state HILDA cares about.
+
+**Alternatives**:
+
+- **Trust SP alerts as truth, no backstop**: rejected — 3 real incidents in the 51-commit window would have caused stuck items with no auto-recovery.
+- **Poll SP every N minutes as PRIMARY, no alerts**: rejected — 30+ items × 6 milestones × N customers = SP load + latency don't fit Ph-1 real-time expectations.
+- **Rebuild HILDA data model on HILDA-native storage (Path B)**: rejected for Ph-1 — carrier + PM stakeholders standardized on SP; migration is a Ph-2+ decision post-real-usage-data.
+
+**Consequences**:
+
+- (a) Every SP-driven HILDA task has a matching reconciler sync-pass. Reconciler is not optional; it is the authoritative source of truth for HILDA-driven state.
+- (b) Alerts + email + reconciler together = the reliability model. Turning off ANY one leaves gaps.
+- (c) Every future HILDA reader that consumes SP-alert data must ask: "what does the reconciler do if this alert is lost?" If no answer exists, one must be added.
+- (d) Ops-alerts channel escalates reconciler failures (retry limit exhausted per item) so a human can look at genuine SP-side breakage. Retry-cap + escalation policy is still open (see STATUS Flag: 5-sync policy — the "5" in the flag name is historical, semantics apply to all N sync passes).
+- (e) Sync-count grew from 5 to 6; expect it to keep growing as new HILDA-driven state classes land (each requires a matching sync-pass).
+- (f) Path B (HILDA-native TPM UI, deferred post-Ph-1) would collapse this to layer 3 only for HILDA-owned state; layers 1+2 remain for external channels (owner reply, carrier submit ack).
+
+Cross-refs: [D-117] alert-lossiness first documented; [D-142]/[D-143] meta-reconciler design; CIP-4 (sync-6 stuck-CloseInProgress sweep 2026-07-28); RECON-1 (sync-1 count-first optimization + sync-2 NS→Open transition + sync-6 already-CLOSED no-op).
+
+## D-167: `ph1_minimal` boolean gates Ph-1/Ph-2 UI-scope boundary in a single template
+
+**Date**: 2026-08-08
+
+**Context**: Dashboard doc-section template initially rendered 8 columns matching FR-60/61/87 (Doc Slug, Rev, Path Type, Review, Download, etc.). TPM early-access feedback: only 3 columns matter for the Ph-1 workflow (#, Filename, Doc Type — humanized). Ph-2 features (FR-60 LLM findings, FR-61 review status, FR-87 TPM resolve buttons) are still valid but not needed early. TPMs also asked for a per-doc Download button which turned out to be Ph-1 relevant (D6 amendment).
+
+**Decision**: single `ph1_minimal: bool = True` boolean on `DashboardConfig` (with env override `HILDA_DASHBOARD_PH1_MINIMAL`) gates the Ph-2 template blocks. Passed into the Jinja context as the bare `ph1_minimal` variable; template uses `{% if ph1_minimal %}` / `{% if not ph1_minimal %}` conditionals. Ph-1 branch renders 3 columns + Download; Ph-2 branch renders the full 8-column view when the flag flips. One template, one flag, zero code duplication.
+
+Sites in code: [config.py:58](core/src/dashboard/config.py:58) (`ph1_minimal: bool = True`); [doc_section.html:7,44,62](core/src/dashboard/templates/doc_section.html:7) (three `{% if ph1_minimal %}` guards across summary + headers + row rendering).
+
+**Alternatives**:
+
+- **Fork template into `ph1_docs.html` + `ph2_docs.html`**: rejected — two files to keep in sync; every Ph-1 tweak requires deciding "does this also apply to Ph-2?"; drift risk.
+- **Drop Ph-2 blocks + re-add for Ph-2**: rejected — Ph-2 code was already reviewed + wired; ripping it out risks losing FR-60/61/87 semantics; re-adding means re-review + re-verification.
+- **Per-user role-based rendering**: rejected as Ph-1-appropriate — Ph-1 has a single TPM role; role-based rendering is a Ph-2+ concern.
+
+**Consequences**:
+
+- (a) Adding Ph-1 columns is a one-line Jinja edit; adding Ph-2 columns is the same. No file split, no code duplication.
+- (b) `ph1_minimal` defaults to `True` in `DashboardConfig` — Ph-2 code paths ship dark until explicitly enabled. Env-var flip (`HILDA_DASHBOARD_PH1_MINIMAL=false`) enables Ph-2 view without a code deploy.
+- (c) Same pattern extensible: `ph2_minimal`, `ph3_minimal` can layer in as future scopes narrow. Convention: highest-Nth-minimal wins.
+- (d) Ph-2 template blocks stay covered via matching test fixtures in `test_dashboard.py` (`cfg_mock` / `cfg_prod` with `ph1_minimal=False`) — no drift risk between what's shipped-live and what's tested.
+- (e) When Ph-2 launches, either flip `ph1_minimal=False` in `DashboardConfig` OR set the env var per customer at runtime. The flag stays as a historical seam.
+
+Cross-refs: D5 (Ph-1 template with 3 columns + gated Ph-2 blocks); D6 amendment (Download column landed inside the Ph-1 branch).
+
