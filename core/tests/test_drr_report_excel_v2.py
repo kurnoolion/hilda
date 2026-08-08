@@ -517,22 +517,139 @@ class TestV2FourTabWorkbook:
         assert "No Applications data received yet" in (apps.cell(row=1, column=1).value or "")
 
     def test_applications_populated_from_source_bytes(self):
-        # Build a tiny source workbook with an "Applications" sheet
+        # DRR-V2-8c: source is same Verizon template shape; data lives
+        # in rows 12+ (rows 1-11 are Verizon template header). We render
+        # our own header + red-fill column headers, then copy data rows
+        # 12+ from source preserving row numbers.
         from openpyxl import Workbook
         src = Workbook()
         src.active.title = "Applications"
-        src["Applications"]["A1"] = "App"
-        src["Applications"]["B1"] = "Version"
-        src["Applications"]["A2"] = "VZ Family"
-        src["Applications"]["B2"] = "1.2.3"
+        # First data row: app #1 Android Pay (supported=No, no version)
+        src["Applications"].cell(row=12, column=1, value=1)
+        src["Applications"].cell(row=12, column=2, value="Android Pay")
+        src["Applications"].cell(row=12, column=3, value="No")
+        # Second data row: app #4 Digital Secure (supported=Yes)
+        src["Applications"].cell(row=13, column=1, value=4)
+        src["Applications"].cell(row=13, column=2, value="Digital Secure/ Verizon Protect")
+        src["Applications"].cell(row=13, column=3, value="Yes")
+        src["Applications"].cell(row=13, column=4, value="8.3.0-16")
+        src["Applications"].cell(row=13, column=7, value="Tested")
         buf = io.BytesIO()
         src.save(buf)
 
         wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
         apps = wb["Applications"]
-        assert apps.cell(row=1, column=1).value == "App"
-        assert apps.cell(row=2, column=1).value == "VZ Family"
-        assert apps.cell(row=2, column=2).value == "1.2.3"
+
+        # Data preserved at source row numbers
+        assert apps.cell(row=12, column=1).value == 1
+        assert apps.cell(row=12, column=2).value == "Android Pay"
+        assert apps.cell(row=12, column=3).value == "No"
+        assert apps.cell(row=13, column=1).value == 4
+        assert apps.cell(row=13, column=2).value == "Digital Secure/ Verizon Protect"
+        assert apps.cell(row=13, column=3).value == "Yes"
+        assert apps.cell(row=13, column=4).value == "8.3.0-16"
+        assert apps.cell(row=13, column=7).value == "Tested"
+
+    def test_applications_header_block_rendered(self):
+        # DRR-V2-8c: our own header block (rows 1-8) is rendered
+        # regardless of source; row 1 = OEM Model, row 2 = subtitle,
+        # rows 6-8 = label/value pairs.
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        src["Applications"].cell(row=12, column=2, value="Dummy App")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(
+            applications_sheet_bytes=buf.getvalue(),
+            milestone_headers={"fld_lockdown_date": "2026-05-12",
+                                "req_version": "Feb 2026",
+                                "target_date": "2026-07-01"},
+            project_headers={"FFW": "2026-07-15", "LE": None},
+        ))
+        apps = wb["Applications"]
+        # Row 1 title
+        assert apps.cell(row=1, column=1).value == "OEM Model"
+        # Row 2 subtitle at col C (col A/B reserved for logo)
+        assert apps.cell(row=2, column=3).value == "Device Readiness Review"
+        # Row 6 Model Number: | SM-F976U | ... DRR Date: | value
+        assert apps.cell(row=6, column=2).value == "Model Number:"
+        assert apps.cell(row=6, column=3).value == "SM-F976U"
+        assert apps.cell(row=6, column=7).value == "DRR Date:"
+        # Row 7 Compliance Matrix Lockdown On + Phase 1 Date
+        assert apps.cell(row=7, column=2).value == "Compliance Matrix Lockdown On:"
+        assert apps.cell(row=7, column=7).value == "Phase 1 Date:"
+        # Row 8 VZW Requirements Version (no right-hand pair)
+        assert apps.cell(row=8, column=2).value == "VZW Requirements Version:"
+        assert apps.cell(row=8, column=7).value is None
+
+    def test_applications_red_fill_column_headers(self):
+        # DRR-V2-8c: row 10 red-fill top-level headers + row 11
+        # Beta/Final Cert sub-headers under merged E10:F10.
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        src["Applications"].cell(row=12, column=2, value="Dummy")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
+        apps = wb["Applications"]
+        # Row 10 top-level headers
+        assert apps.cell(row=10, column=1).value == "#"
+        assert apps.cell(row=10, column=2).value == "Application Name"
+        assert "Is Application Supported" in (apps.cell(row=10, column=3).value or "")
+        assert "Application Version Supported" in (apps.cell(row=10, column=4).value or "")
+        assert "App Status" in (apps.cell(row=10, column=5).value or "")
+        assert "Application Test Status" in (apps.cell(row=10, column=7).value or "")
+        assert apps.cell(row=10, column=8).value == "Comments"
+        # Row 11 Beta / Final Cert sub-headers
+        assert apps.cell(row=11, column=5).value == "Beta"
+        assert apps.cell(row=11, column=6).value == "Final Cert"
+        # Red fill on row-10 headers (color C00000)
+        fill = apps.cell(row=10, column=1).fill
+        assert fill.fgColor.rgb in ("00C00000", "FFC00000", "C00000")
+        # Row 11 sub-headers also red-filled
+        fill = apps.cell(row=11, column=5).fill
+        assert fill.fgColor.rgb in ("00C00000", "FFC00000", "C00000")
+
+    def test_applications_gray_fill_when_supported_is_no(self):
+        # DRR-V2-8c: rows whose col C = "No" (case-insensitive) get
+        # gray fill across cols A..H; "Yes" rows stay white.
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        # Row 12 unsupported
+        src["Applications"].cell(row=12, column=1, value=1)
+        src["Applications"].cell(row=12, column=2, value="Android Pay")
+        src["Applications"].cell(row=12, column=3, value="No")
+        # Row 13 supported
+        src["Applications"].cell(row=13, column=1, value=2)
+        src["Applications"].cell(row=13, column=2, value="Digital Secure")
+        src["Applications"].cell(row=13, column=3, value="Yes")
+        # Row 14 unsupported with mixed-case "no"
+        src["Applications"].cell(row=14, column=1, value=3)
+        src["Applications"].cell(row=14, column=2, value="Caller Name Filter")
+        src["Applications"].cell(row=14, column=3, value="no")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
+        apps = wb["Applications"]
+
+        # Row 12 (No) gray across A..H
+        for col in range(1, 9):
+            fill = apps.cell(row=12, column=col).fill
+            assert fill.fgColor.rgb in ("00D9D9D9", "FFD9D9D9", "D9D9D9"), (
+                f"row 12 col {col} should be gray-filled")
+        # Row 13 (Yes) not gray-filled
+        # (openpyxl default is empty PatternFill -> fgColor.rgb is '00000000' or 0)
+        fill = apps.cell(row=13, column=1).fill
+        assert fill.fgColor.rgb not in ("00D9D9D9", "FFD9D9D9", "D9D9D9")
+        # Row 14 (mixed-case "no") gray-filled too
+        fill = apps.cell(row=14, column=2).fill
+        assert fill.fgColor.rgb in ("00D9D9D9", "FFD9D9D9", "D9D9D9")
 
     def test_applications_error_note_on_missing_sheet_in_source(self):
         # Source .xlsx exists but has no "Applications" sheet

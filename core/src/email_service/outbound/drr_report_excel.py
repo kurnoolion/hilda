@@ -151,7 +151,14 @@ def build_drr_report_excel(
     _apply_column_widths(checklist_ws)
 
     # Tab 3 — Applications (from APPS TG reply attachment, else placeholder)
-    _write_applications_sheet(wb, applications_sheet_bytes)
+    _write_applications_sheet(
+        wb,
+        applications_sheet_bytes,
+        device_id=device_id or "",
+        milestone_headers=milestone_headers or {},
+        project_headers=project_headers or {},
+        logo_path=logo_path,
+    )
 
     # Tab 4 — Waivers (empty template header row)
     _write_waivers_sheet(wb, device_id=device_id or "")
@@ -225,16 +232,47 @@ def _write_version_history_sheet(wb: Any) -> None:
     ws.column_dimensions["D"].width = 70
 
 
-def _write_applications_sheet(wb: Any, applications_sheet_bytes: bytes | None) -> None:
+# Applications-tab layout constants (DRR-V2-8c). Distinct from Checklist
+# tab constants (_HEADER_ROW_*) because Applications tab is more compact:
+# no DRR Version row, no yellow banner, no Target TA Date row; header
+# label/value pairs sit side-by-side (left pair cols B-C + right pair
+# cols G-H) instead of stacked; logo and subtitle share row 2.
+_APPS_HEADER_ROW_TITLE        = 1   # "OEM Model" (merged A..H)
+_APPS_HEADER_ROW_LOGO_AND_SUB = 2   # verizon logo A:B + "Device Readiness Review" C..H merged
+_APPS_HEADER_ROW_MODEL        = 6   # Model Number: B|C  |  DRR Date: G|H
+_APPS_HEADER_ROW_LOCKDOWN     = 7   # Compliance Matrix Lockdown On: B|C  |  Phase 1 Date: G|H
+_APPS_HEADER_ROW_REQ_VERSION  = 8   # VZW Requirements Version: B|C
+_APPS_COLUMN_HEADERS_ROW      = 10  # red-fill top-level headers
+_APPS_COLUMN_HEADERS_SUBROW   = 11  # red-fill Beta/Final Cert sub-headers under E-F merge
+_APPS_DATA_START_ROW          = 12  # first row of app data (source-preserved row numbers)
+_APPS_COL_COUNT               = 8   # A..H
+
+
+def _write_applications_sheet(
+    wb: Any,
+    applications_sheet_bytes: bytes | None,
+    *,
+    device_id: str = "",
+    milestone_headers: dict[str, Any] | None = None,
+    project_headers: dict[str, Any] | None = None,
+    logo_path: str | Path | None = None,
+) -> None:
     """Tab 3 — Applications data from APPS TG owner's reply attachment.
 
-    When `applications_sheet_bytes` is provided (raw .xlsx bytes of the
-    reply), open with openpyxl and copy the "Applications" worksheet
-    cell-by-cell into our Applications tab. Column widths are also
-    copied so the layout looks like the source.
+    Renders the Verizon Applications-tab template shell (header block +
+    red-fill column headers + Beta/Final Cert sub-headers) then copies
+    the data rows (12+) from the source's "Applications" worksheet into
+    the same row positions in ours. Source row numbers are preserved so
+    the "List all additional pre-loaded applications below" separator
+    row at source row 37 lands at dest row 37 naturally.
 
-    When None or empty, render a placeholder note so TPM sees the gap.
-    Chunk 2 (2026-08-07) wires the actual APPS-reply retrieval path.
+    Rows whose col C ("Is Application Supported on the device") value
+    is "No" (case-insensitive) get a gray fill across cols A..H — per
+    the Verizon convention where unsupported apps are visually greyed.
+
+    When `applications_sheet_bytes` is None/empty, renders the
+    placeholder note only (no template shell) — matches DRR-V2-8b
+    empty-state behavior.
     """
     from openpyxl.styles import Alignment, Font
 
@@ -287,16 +325,161 @@ def _write_applications_sheet(wb: Any, applications_sheet_bytes: bytes | None) -
         c.font = Font(italic=True, color="C00000")
         return
 
-    # Copy cell values (openpyxl cell-copy also lets us pull styles but for
-    # Ph-1 we just want the data; a plain value-copy renders readably).
-    for row_idx, row in enumerate(src.iter_rows(values_only=True), start=1):
-        for col_idx, val in enumerate(row, start=1):
-            ws.cell(row=row_idx, column=col_idx, value=val)
+    _write_applications_header_block(
+        ws=ws,
+        device_id=device_id,
+        milestone_headers=milestone_headers or {},
+        project_headers=project_headers or {},
+        logo_path=logo_path,
+    )
+    _write_applications_column_headers(ws)
+    _copy_applications_data_rows(ws, src)
 
-    # Copy column widths so wide-text columns don't render truncated.
-    for col_letter, col_dim in src.column_dimensions.items():
-        if col_dim.width:
-            ws.column_dimensions[col_letter].width = col_dim.width
+
+def _write_applications_header_block(
+    *,
+    ws: Any,
+    device_id: str,
+    milestone_headers: dict[str, Any],
+    project_headers: dict[str, Any],
+    logo_path: str | Path | None,
+) -> None:
+    """Applications-tab header rows 1-8. Distinct layout from Checklist:
+    row 1 title spans all data cols (A..H); row 2 has logo + subtitle
+    side-by-side; header pairs sit side-by-side (left B-C, right G-H)
+    instead of stacked."""
+    from openpyxl.styles import Alignment, Font
+
+    center = Alignment(horizontal="center", vertical="center")
+    right = Alignment(horizontal="right", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    # Row 1: "OEM Model" title merged across all data cols
+    ws.merge_cells(start_row=_APPS_HEADER_ROW_TITLE, start_column=1,
+                   end_row=_APPS_HEADER_ROW_TITLE, end_column=_APPS_COL_COUNT)
+    c = ws.cell(row=_APPS_HEADER_ROW_TITLE, column=1, value="OEM Model")
+    c.font = Font(bold=True, size=16)
+    c.alignment = center
+    ws.row_dimensions[_APPS_HEADER_ROW_TITLE].height = 24
+
+    # Row 2: verizon logo (anchored to A2 via existing helper) + subtitle
+    # merged from col C through end (leaves cols A-B for logo).
+    ws.row_dimensions[_APPS_HEADER_ROW_LOGO_AND_SUB].height = 40
+    _embed_logo(ws, logo_path)
+    ws.merge_cells(start_row=_APPS_HEADER_ROW_LOGO_AND_SUB, start_column=3,
+                   end_row=_APPS_HEADER_ROW_LOGO_AND_SUB, end_column=_APPS_COL_COUNT)
+    c = ws.cell(row=_APPS_HEADER_ROW_LOGO_AND_SUB, column=3, value="Device Readiness Review")
+    c.font = Font(bold=True, size=18)
+    c.alignment = center
+
+    # Header label/value pairs. Left pair at cols B (label) + C (value);
+    # right pair at cols G (label) + H (value). Row 8 has no right pair.
+    left_pairs: list[tuple[int, str, Any]] = [
+        (_APPS_HEADER_ROW_MODEL,       "Model Number:",                  device_id),
+        (_APPS_HEADER_ROW_LOCKDOWN,    "Compliance Matrix Lockdown On:", milestone_headers.get("fld_lockdown_date")),
+        (_APPS_HEADER_ROW_REQ_VERSION, "VZW Requirements Version:",      milestone_headers.get("req_version")),
+    ]
+    right_pairs: list[tuple[int, str, Any]] = [
+        (_APPS_HEADER_ROW_MODEL,    "DRR Date:",     milestone_headers.get("target_date")),
+        (_APPS_HEADER_ROW_LOCKDOWN, "Phase 1 Date:", project_headers.get("FFW")),
+    ]
+    for row, label, raw in left_pairs:
+        lc = ws.cell(row=row, column=2, value=label)
+        lc.font = Font(bold=True)
+        lc.alignment = right
+        _write_value_cell(ws, row=row, column=3, raw=raw, alignment=left)
+    for row, label, raw in right_pairs:
+        lc = ws.cell(row=row, column=7, value=label)
+        lc.font = Font(bold=True)
+        lc.alignment = right
+        _write_value_cell(ws, row=row, column=8, raw=raw, alignment=left)
+
+
+def _write_applications_column_headers(ws: Any) -> None:
+    """Row 10 red-fill top-level headers + row 11 Beta/Final Cert
+    sub-headers under the merged E-F "App Status" cell. Single-column
+    headers (A/B/C/D/G/H) are vertically merged across rows 10-11 so
+    the header band visually spans 2 rows uniformly."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    red_fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
+    white_bold = Font(bold=True, color="FFFFFF")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Row 10 top-level labels. Col 6 (F) is intentionally skipped -- E10:F10 merge
+    # below claims that cell for the "App Status" header.
+    row10_labels: list[tuple[int, str]] = [
+        (1, "#"),
+        (2, "Application Name"),
+        (3, "Is Application Supported on the device (Yes or No)"),
+        (4, ("Application Version Supported on the device "
+             "(OEMs shall specify the application version if it is "
+             "preloaded on the device)")),
+        (5, ("App Status (OEMs shall specify the application type "
+             "they have tested on the device)")),
+        (7, ("Application Test Status (OEMs shall specify the status "
+             "of the application testing, Specify \"Tested\", or "
+             "\"Not Tested\")")),
+        (8, "Comments"),
+    ]
+    for col_idx, label in row10_labels:
+        c = ws.cell(row=_APPS_COLUMN_HEADERS_ROW, column=col_idx, value=label)
+        c.font = white_bold
+        c.fill = red_fill
+        c.alignment = center
+
+    # Horizontal merge E10:F10 for the "App Status" header (spans the two
+    # sub-cols Beta + Final Cert on row 11)
+    ws.merge_cells(start_row=_APPS_COLUMN_HEADERS_ROW, start_column=5,
+                   end_row=_APPS_COLUMN_HEADERS_ROW, end_column=6)
+
+    # Vertical merge across rows 10-11 for single-column headers so the
+    # header band is a uniform 2-row-tall block visually.
+    for col_idx in (1, 2, 3, 4, 7, 8):
+        ws.merge_cells(start_row=_APPS_COLUMN_HEADERS_ROW, start_column=col_idx,
+                       end_row=_APPS_COLUMN_HEADERS_SUBROW, end_column=col_idx)
+
+    # Row 11 sub-headers under App Status merge
+    for col_idx, label in ((5, "Beta"), (6, "Final Cert")):
+        c = ws.cell(row=_APPS_COLUMN_HEADERS_SUBROW, column=col_idx, value=label)
+        c.font = white_bold
+        c.fill = red_fill
+        c.alignment = center
+
+    # Row heights so wrapped text is readable
+    ws.row_dimensions[_APPS_COLUMN_HEADERS_ROW].height = 60
+    ws.row_dimensions[_APPS_COLUMN_HEADERS_SUBROW].height = 20
+
+    # Column widths tuned to screenshot proportions
+    ws.column_dimensions["A"].width = 6      # #
+    ws.column_dimensions["B"].width = 32     # Application Name
+    ws.column_dimensions["C"].width = 18     # Is Supported
+    ws.column_dimensions["D"].width = 32     # Version Supported
+    ws.column_dimensions["E"].width = 10     # Beta
+    ws.column_dimensions["F"].width = 12     # Final Cert
+    ws.column_dimensions["G"].width = 22     # Test Status
+    ws.column_dimensions["H"].width = 28     # Comments
+
+
+def _copy_applications_data_rows(ws: Any, src: Any) -> None:
+    """Copy source rows 12+ into dest rows 12+ preserving row numbers.
+    Apply gray fill across cols A..H whenever col C value is "No"
+    (case-insensitive) -- Verizon's convention for unsupported apps."""
+    from openpyxl.styles import PatternFill
+
+    gray_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+
+    src_max = src.max_row if src.max_row else 0
+    for r in range(_APPS_DATA_START_ROW, src_max + 1):
+        supported: Any = None
+        for col_idx in range(1, _APPS_COL_COUNT + 1):
+            v = src.cell(row=r, column=col_idx).value
+            ws.cell(row=r, column=col_idx, value=v)
+            if col_idx == 3:
+                supported = v
+        if isinstance(supported, str) and supported.strip().lower() == "no":
+            for col_idx in range(1, _APPS_COL_COUNT + 1):
+                ws.cell(row=r, column=col_idx).fill = gray_fill
 
 
 def _write_waivers_sheet(wb: Any, *, device_id: str) -> None:
