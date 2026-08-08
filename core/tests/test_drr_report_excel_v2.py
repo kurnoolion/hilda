@@ -641,15 +641,49 @@ class TestV2FourTabWorkbook:
         # Row 12 (No) gray across A..H
         for col in range(1, 9):
             fill = apps.cell(row=12, column=col).fill
-            assert fill.fgColor.rgb in ("00D9D9D9", "FFD9D9D9", "D9D9D9"), (
+            assert fill.fgColor.rgb in ("00A6A6A6", "FFA6A6A6", "A6A6A6"), (
                 f"row 12 col {col} should be gray-filled")
         # Row 13 (Yes) not gray-filled
         # (openpyxl default is empty PatternFill -> fgColor.rgb is '00000000' or 0)
         fill = apps.cell(row=13, column=1).fill
-        assert fill.fgColor.rgb not in ("00D9D9D9", "FFD9D9D9", "D9D9D9")
+        assert fill.fgColor.rgb not in ("00A6A6A6", "FFA6A6A6", "A6A6A6")
         # Row 14 (mixed-case "no") gray-filled too
         fill = apps.cell(row=14, column=2).fill
-        assert fill.fgColor.rgb in ("00D9D9D9", "FFD9D9D9", "D9D9D9")
+        assert fill.fgColor.rgb in ("00A6A6A6", "FFA6A6A6", "A6A6A6")
+
+    def test_applications_separator_row_merged_center_bold(self):
+        # DRR-V2-8e: "List all additional pre-loaded applications below"
+        # separator row (typically source row 37) is detected by
+        # substring match and rendered as merged A..G + center + bold.
+        from openpyxl import Workbook
+        src = Workbook()
+        src.active.title = "Applications"
+        # Some data rows, then a separator row at 37, then more data
+        src["Applications"].cell(row=12, column=2, value="Android Pay")
+        src["Applications"].cell(row=12, column=3, value="No")
+        src["Applications"].cell(row=37, column=2,
+                                  value="List all additional pre-loaded applications below")
+        src["Applications"].cell(row=38, column=1, value=1)
+        src["Applications"].cell(row=38, column=2, value="App Directed SMS")
+        src["Applications"].cell(row=38, column=3, value="Yes")
+        buf = io.BytesIO()
+        src.save(buf)
+
+        wb = self._open_wb(self._v2_call(applications_sheet_bytes=buf.getvalue()))
+        apps = wb["Applications"]
+
+        # Separator text lives at row 37 col 1 (anchor of merge)
+        assert apps.cell(row=37, column=1).value == (
+            "List all additional pre-loaded applications below"
+        )
+        # Style: bold + horizontal-center
+        assert apps.cell(row=37, column=1).font.bold is True
+        assert apps.cell(row=37, column=1).alignment.horizontal == "center"
+        # Merge exists over A37:G37 (7 cols)
+        merged_ranges = {str(r) for r in apps.merged_cells.ranges}
+        assert "A37:G37" in merged_ranges
+        # Additional-section row after separator still copies normally
+        assert apps.cell(row=38, column=2).value == "App Directed SMS"
 
     def test_applications_header_values_prefer_source_over_hilda(self):
         # DRR-V2-8d: source APPS xlsx has its own header block with

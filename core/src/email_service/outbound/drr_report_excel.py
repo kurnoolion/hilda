@@ -518,16 +518,46 @@ def _write_applications_column_headers(ws: Any) -> None:
     ws.column_dimensions["H"].width = 28     # Comments
 
 
+_APPS_SEPARATOR_TEXT_NEEDLE = "list all additional pre-loaded applications"
+_APPS_SEPARATOR_MERGE_END_COL = 7   # merge A..G
+
+
 def _copy_applications_data_rows(ws: Any, src: Any) -> None:
     """Copy source rows 12+ into dest rows 12+ preserving row numbers.
-    Apply gray fill across cols A..H whenever col C value is "No"
-    (case-insensitive) -- Verizon's convention for unsupported apps."""
-    from openpyxl.styles import PatternFill
+    Two per-row treatments:
+      (a) Rows whose col C ("Is Application Supported") is "No" get
+          A6A6A6 gray fill across cols A..H -- Verizon convention for
+          visually greying unsupported apps.
+      (b) The "List all additional pre-loaded applications below"
+          separator row (typically source row 37) gets special
+          treatment: cols A..G merged, text centered + bold. Detected
+          by substring scan on any cell in the source row so we don't
+          hardcode row 37 -- resilient if the source template shifts."""
+    from openpyxl.styles import Alignment, Font, PatternFill
 
-    gray_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+    gray_fill = PatternFill(start_color="A6A6A6", end_color="A6A6A6", fill_type="solid")
 
     src_max = src.max_row if src.max_row else 0
     for r in range(_APPS_DATA_START_ROW, src_max + 1):
+        # Pass 1: detect separator (scan all cols before writing anything
+        # so we don't half-copy a row that gets the merge treatment).
+        separator_text: str | None = None
+        for col_idx in range(1, _APPS_COL_COUNT + 1):
+            v = src.cell(row=r, column=col_idx).value
+            if isinstance(v, str) and _APPS_SEPARATOR_TEXT_NEEDLE in v.strip().lower():
+                separator_text = v.strip()
+                break
+
+        if separator_text is not None:
+            # Separator row: merge A..G, center + bold, skip col-by-col copy.
+            ws.merge_cells(start_row=r, start_column=1,
+                           end_row=r, end_column=_APPS_SEPARATOR_MERGE_END_COL)
+            c = ws.cell(row=r, column=1, value=separator_text)
+            c.font = Font(bold=True)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            continue
+
+        # Normal data row: copy A..H, apply conditional gray fill.
         supported: Any = None
         for col_idx in range(1, _APPS_COL_COUNT + 1):
             v = src.cell(row=r, column=col_idx).value
