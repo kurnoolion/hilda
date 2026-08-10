@@ -17,6 +17,7 @@ content; only task name + queue + latency bucket + error code.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from celery import Celery
@@ -128,6 +129,21 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "task":     "core.src.workflow_engine.tasks.ops_digest.ops_unrouted_digest_tick",
             "schedule": 604800.0,
             "options":  {"queue": "default", "expires": 3600},
+        },
+        # NSD2-5 (2026-08-08) -- periodic poll of the NSD2 SMB share
+        # for tg_name='HW PL' delivery items. Default interval 900s (15 min);
+        # tune via HILDA_NSD2_POLL_INTERVAL_SEC env-var. Task naturally
+        # no-ops per tick when HILDA_NSD2_ROOTS is unset OR the current
+        # scope has no HW PL items rooted under a configured NSD2 root,
+        # so leaving the beat entry ON with roots-unset is cheap. Ships
+        # OFF-by-default (no roots configured) so no behavior change on
+        # existing deploys until an operator sets HILDA_NSD2_ROOTS.
+        # expires just under the interval to avoid backlog if a tick
+        # runs long on a big tree.
+        "nsd2_poll_15min": {
+            "task":     "core.src.workflow_engine.tasks.nsd2_poll.tick",
+            "schedule": float(os.environ.get("HILDA_NSD2_POLL_INTERVAL_SEC") or 900.0),
+            "options":  {"queue": "default", "expires": 850},
         },
     }
     return app
