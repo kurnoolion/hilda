@@ -246,6 +246,7 @@ async def _process_regular_attachment(
     candidate_items: list[dict],
     batch_id: str,
     correlation_id: str,
+    ingest_source: str | None = None,
 ) -> dict[str, Any]:
     """Route + persist + view-tree one non-archive attachment.
 
@@ -336,6 +337,7 @@ async def _process_regular_attachment(
         candidate_items=candidate_items,
         batch_id=batch_id,
         correlation_id=correlation_id,
+        ingest_source=ingest_source,
     )
     if counts["match_count"] > 0:
         stats["routed_with_match"] = 1
@@ -965,6 +967,7 @@ async def _persist_routed_attachment(
     candidate_items: list[dict],
     batch_id: str,
     correlation_id: str,
+    ingest_source: str | None = None,
 ) -> dict[str, Any]:
     """Steps E-H: write NSD bytes, insert DocumentIndexRow, insert N
     DocumentItemAssociation rows (FR-79 multi-item), increment doc_count_received
@@ -975,6 +978,10 @@ async def _persist_routed_attachment(
         DocumentIndexRow, DocumentItemAssociation, NSDPathType,
     )
     from core.src.template_schema.enums import IngestSource, DocType
+
+    # NSD2-4 (2026-08-08): default ingest_source to EMAIL to preserve pre-NSD2
+    # callers' behavior. NSD2 poller passes IngestSource.NETWORK_SHARED_DRIVE.
+    effective_ingest_source = ingest_source or IngestSource.EMAIL.value
 
     # Resolve NSD path. When is_duplicate=True the file bytes are already on
     # disk from a prior arrival; reuse that ORIGINAL path so new associations
@@ -1085,7 +1092,7 @@ async def _persist_routed_attachment(
                 doc_type=routed.doc_type,
                 doc_id_slug=routed.doc_id_slug,
                 rev_number=routed.rev_number,
-                ingest_source=IngestSource.EMAIL.value,
+                ingest_source=effective_ingest_source,
                 original_filename=getattr(attachment, "filename", ""),
                 first_page_excerpt="",
                 is_final=True,                            # Ph-1: all docs final by default

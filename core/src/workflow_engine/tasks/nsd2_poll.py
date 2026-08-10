@@ -350,21 +350,107 @@ def _ingest_new_nsd2_file(
     file_hash: str,
     correlation_id: str,
 ) -> None:
-    """NSD2-3 stub for the router-integration seam. NSD2-4 replaces this
-    body with a call into the existing Fr52AttachmentRouter pipeline
-    (or process_inbound_attachments) that:
-      * Builds a synthetic attachment shape (filename preserves subfolder
-        path per ZIP-1 pattern; ingest_source=NETWORK_SHARED_DRIVE).
-      * Feeds it to the router scoped to tg_name='HW PL' candidate items
-        for (customer_id, device_id, milestone_id).
-      * Router handles doc_type classification, item association,
-        document_index write, view-tree copy.
+    """NSD2-4 (2026-08-08): feed a newly-discovered NSD2 file through the
+    existing Fr52AttachmentRouter pipeline. Reuses inbound_attachment's
+    proven router-build + widen-candidates + _process_regular_attachment
+    machinery -- no NSD2-specific routing/persistence code path.
 
-    For now: just log so the poller shape is proven independently."""
+    Steps:
+      1. Build a synthetic InboundAttachment (filename preserves subfolder
+         structure per ZIP-1 convention; content_type is a benign default
+         since the router doesn't gate on it).
+      2. Widen the single HW PL delivery_item into the router's expected
+         candidate_items dict shape (owner identity + item_description +
+         SP JIT back-fill of missing tg_path_id / item_path_id).
+      3. Construct the Ph-1 router (substring-first-pass mode; matches
+         email attachment behavior).
+      4. Call _process_regular_attachment with
+         ingest_source=IngestSource.NETWORK_SHARED_DRIVE so
+         document_index rows are tagged correctly. Same async->sync
+         bridge (asyncio.run) as process_inbound_attachments_task uses.
+
+    batch_id: synthesized as `NSD2-<file_hash[:12]>` -- used only for
+    audit + log correlation, never for lookup (NSD2 has no batch concept).
+    """
+    import asyncio
+
+    from core.src.email_service.protocol import InboundAttachment
+    from core.src.template_schema.enums import IngestSource
+    from core.src.workflow_engine.tasks.inbound_attachment import (
+        _build_ph1_router,
+        _process_regular_attachment,
+        _widen_candidates_for_router,
+    )
+
     delivery_item_id = getattr(item, "delivery_item_id", "?")
+    batch_id = f"NSD2-{file_hash[:12]}"
+
+    attachment = InboundAttachment(
+        filename=filename,
+        content=content,
+        content_type="application/octet-stream",
+        file_hash=file_hash,
+    )
+
+    async def _run() -> dict[str, Any]:
+        # Build candidate list: single-item list, widened by the
+        # existing helper (fetches DeliveryItem + SP JIT back-fill).
+        candidate_items = _widen_candidates_for_router(
+            deps, [{"delivery_item_id": delivery_item_id}],
+        )
+        if not candidate_items:
+            _log.warning(
+                "NSD2_POLL_INGEST: candidate widen returned empty for item=%s "
+                "-- widen helper couldn't fetch DeliveryItem; skipping file",
+                delivery_item_id,
+            )
+            return {"processed": 0}
+
+        router = _build_ph1_router(deps, customer_id=customer_id)
+        if router is None:
+            _log.warning(
+                "NSD2_POLL_INGEST: router unavailable customer=%s item=%s "
+                "-- skipping file",
+                customer_id, delivery_item_id,
+            )
+            return {"processed": 0}
+
+        return await _process_regular_attachment(
+            deps=deps,
+            router=router,
+            attachment=attachment,
+            candidate_items=candidate_items,
+            batch_id=batch_id,
+            correlation_id=correlation_id,
+            ingest_source=IngestSource.NETWORK_SHARED_DRIVE.value,
+        )
+
+    # Sync bridge to the async router pipeline. Same asyncio-loop-lifecycle
+    # pattern as tpm_notification._send_via_email_sender (with RUNTIMEERR-1
+    # narrow-catch so coro-raised RuntimeErrors bubble up).
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            new_loop = asyncio.new_event_loop()
+            try:
+                result = new_loop.run_until_complete(_run())
+            finally:
+                new_loop.close()
+        else:
+            result = loop.run_until_complete(_run())
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "no current event loop" not in msg and "event loop is closed" not in msg:
+            raise
+        new_loop = asyncio.new_event_loop()
+        try:
+            result = new_loop.run_until_complete(_run())
+        finally:
+            new_loop.close()
+
     _log.warning(
-        "NSD2_POLL_INGEST_STUB: item=%s customer=%s milestone=%s filename=%r "
-        "size=%d file_hash=%s correlation=%s -- NSD2-4 wires the real router",
-        delivery_item_id, customer_id, milestone_id, filename,
-        len(content), file_hash[:16], correlation_id,
+        "NSD2_POLL_INGEST: item=%s filename=%r file_hash=%s result=%s",
+        delivery_item_id, filename, file_hash[:16],
+        {k: (list(v) if isinstance(v, set) else v)
+         for k, v in (result or {}).items()},
     )
