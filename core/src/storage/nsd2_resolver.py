@@ -25,15 +25,21 @@ misconfigurations.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 __all__ = [
     "resolve_nsd2_device_folder",
     "strip_sm_prefix",
+    "walk_nsd2_directory",
+    "is_excluded_folder_name",
     "DEVICE_TYPE_FOLDER_MAP",
     "PHONE_MODEL_TYPE_FOLDER_MAP",
+    "MMK_EXCLUDED_FOLDER_SUBSTRINGS",
+    "EXCLUSION_CARRIERS",
+    "NSD2_DEFAULT_MAX_FILE_BYTES",
 ]
 
 _log = logging.getLogger(__name__)
@@ -236,3 +242,154 @@ def resolve_nsd2_device_folder(item: Any, nsd2_root: Path) -> Path | None:
         delivery_item_id, device_id, leaf,
     )
     return leaf
+
+
+# ---------------------------------------------------------------------------
+# NSD2-2 (2026-08-08): recursive walker + carrier-scoped exclusion filter
+# ---------------------------------------------------------------------------
+
+
+# Carrier-specific excluded subfolder substrings. Applied when the poller's
+# customer_id is in EXCLUSION_CARRIERS. Substring match on the folder NAME
+# (not full path); case-insensitive; matches at ANY depth in the tree.
+# Motivating rule (architect 2026-08-08): under MMK (Verizon), NSD2 tree
+# also holds folders for other carriers/customers that HILDA must not
+# ingest. Names carry the tell-tale carrier codes.
+MMK_EXCLUDED_FOLDER_SUBSTRINGS: tuple[str, ...] = (
+    "CCT", "CHA", "DISH", "DSH", "TFN", "STG",
+    "Comcast", "Charter", "Tracfone", "VZW SE", "Strategic",
+)
+
+EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
+
+# Per-file size cap. Files larger than this are skipped + WARN-logged
+# rather than pulled into memory. 500 MB matches the archive-extractor
+# total-decompressed cap; individual owner-uploaded documents this large
+# are pathological and worth blocking regardless. Configurable via the
+# `max_file_bytes` kwarg on walk_nsd2_directory (NSD2-5 wires the config
+# knob).
+NSD2_DEFAULT_MAX_FILE_BYTES: int = 500 * 1024 * 1024   # 500 MB
+
+
+def is_excluded_folder_name(folder_name: str, customer_id: str) -> bool:
+    """Return True when this folder should be skipped for the given
+    customer_id. Only carriers in EXCLUSION_CARRIERS get filtered;
+    everyone else passes through. Case-insensitive substring match.
+    """
+    if customer_id not in EXCLUSION_CARRIERS:
+        return False
+    lowered = folder_name.lower()
+    return any(needle.lower() in lowered for needle in MMK_EXCLUDED_FOLDER_SUBSTRINGS)
+
+
+def walk_nsd2_directory(
+    root: Path,
+    customer_id: str,
+    *,
+    max_file_bytes: int = NSD2_DEFAULT_MAX_FILE_BYTES,
+) -> Iterator[tuple[str, bytes, str]]:
+    """Recursively walk `root`, yielding every file that survives filtering.
+
+    Filters:
+      * Excluded subfolders (per `is_excluded_folder_name`) are PRUNED
+        entirely -- their contents never surface.
+      * Files larger than `max_file_bytes` skipped + WARN-logged.
+      * Unreadable files (permission, transient SMB error) skipped +
+        WARN-logged; the walk continues.
+
+    Yields (relative_path_str, file_bytes, sha256_hex) for each file,
+    where relative_path is expressed with forward-slash separators
+    relative to `root` (matches the ZIP-1 / NEST-1 pattern of
+    'subdir1/subdir2/leaf.pdf' filename convention so the attachment
+    router treats the file as if it were an extracted inner-archive
+    entry).
+
+    Never raises. If `root` doesn't exist or is not a directory, yields
+    nothing (WARN once).
+    """
+    if not root.is_dir():
+        _log.warning(
+            "NSD2_WALK: root does not exist or is not a directory: %s "
+            "(customer=%s)",
+            root, customer_id,
+        )
+        return
+
+    yielded = 0
+    skipped_excluded = 0
+    skipped_oversized = 0
+    skipped_unreadable = 0
+    # Use os.walk-style traversal via manual recursion so we can PRUNE
+    # excluded subtrees before recursing into them (rglob doesn't prune).
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            children = list(current.iterdir())
+        except (OSError, PermissionError) as exc:
+            _log.warning(
+                "NSD2_WALK: cannot list %s: %s: %s -- skipping subtree",
+                current, type(exc).__name__, str(exc)[:120],
+            )
+            continue
+        for child in children:
+            try:
+                if child.is_dir():
+                    if is_excluded_folder_name(child.name, customer_id):
+                        # Prune whole subtree
+                        skipped_excluded += 1
+                        _log.info(
+                            "NSD2_WALK: pruned excluded subfolder %s "
+                            "(customer=%s)",
+                            child, customer_id,
+                        )
+                        continue
+                    stack.append(child)
+                    continue
+                if not child.is_file():
+                    continue  # symlink, socket, etc.
+                # File — size check first (avoid reading giant files)
+                try:
+                    size = child.stat().st_size
+                except (OSError, PermissionError) as exc:
+                    _log.warning(
+                        "NSD2_WALK: cannot stat %s: %s: %s",
+                        child, type(exc).__name__, str(exc)[:120],
+                    )
+                    skipped_unreadable += 1
+                    continue
+                if size > max_file_bytes:
+                    _log.warning(
+                        "NSD2_WALK: skipped oversized file %s "
+                        "(%d bytes > cap %d)",
+                        child, size, max_file_bytes,
+                    )
+                    skipped_oversized += 1
+                    continue
+                # Read + hash
+                try:
+                    data = child.read_bytes()
+                except (OSError, PermissionError) as exc:
+                    _log.warning(
+                        "NSD2_WALK: cannot read %s: %s: %s",
+                        child, type(exc).__name__, str(exc)[:120],
+                    )
+                    skipped_unreadable += 1
+                    continue
+                sha = hashlib.sha256(data).hexdigest()
+                rel = child.relative_to(root).as_posix()
+                yielded += 1
+                yield (rel, data, sha)
+            except Exception as exc:  # noqa: BLE001 -- last-resort defense
+                _log.warning(
+                    "NSD2_WALK: unexpected error processing %s: %s: %s",
+                    child, type(exc).__name__, str(exc)[:120],
+                )
+                continue
+
+    _log.warning(
+        "NSD2_WALK: root=%s customer=%s summary yielded=%d "
+        "skipped_excluded=%d skipped_oversized=%d skipped_unreadable=%d",
+        root, customer_id, yielded,
+        skipped_excluded, skipped_oversized, skipped_unreadable,
+    )
