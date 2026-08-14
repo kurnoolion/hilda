@@ -234,7 +234,14 @@ def _poll_one_item(
 ) -> None:
     """Resolve device folder for this item, walk it, dedup by hash,
     ingest new files. All failures WARN-log + continue."""
-    delivery_item_id = getattr(item, "delivery_item_id", "?")
+    # DeliveryItemBase Pydantic model exposes the ID as `item_id`; the underlying
+    # SQLAlchemy column is `delivery_item_id`. Try both so we're resilient
+    # whether the caller hands us a Pydantic row or a raw SA model.
+    delivery_item_id = (
+        getattr(item, "item_id", None)
+        or getattr(item, "delivery_item_id", None)
+        or "?"
+    )
     device_id = getattr(item, "device_id", "") or ""
     ingress_folder = getattr(item, "ingress_folder", "") or ""
 
@@ -382,7 +389,14 @@ def _ingest_new_nsd2_file(
         _widen_candidates_for_router,
     )
 
-    delivery_item_id = getattr(item, "delivery_item_id", "?")
+    # DeliveryItemBase Pydantic model exposes the ID as `item_id`; the underlying
+    # SQLAlchemy column is `delivery_item_id`. Try both so we're resilient
+    # whether the caller hands us a Pydantic row or a raw SA model.
+    delivery_item_id = (
+        getattr(item, "item_id", None)
+        or getattr(item, "delivery_item_id", None)
+        or "?"
+    )
     batch_id = f"NSD2-{file_hash[:12]}"
 
     attachment = InboundAttachment(

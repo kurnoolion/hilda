@@ -48,7 +48,13 @@ __all__ = ["sync_deliverable_fields_task"]
 _log = logging.getLogger(__name__)
 
 
-_STR_FIELDS = ("target_folder", "tg_path_id", "item_path_id", "item_type", "path_id")
+_STR_FIELDS = ("target_folder", "tg_path_id", "item_path_id", "item_type", "path_id",
+               # NSD2-7 (2026-08-13): ingress_folder is SP-authoritative per FR-77
+               # (per-deployment path, template.yaml intentionally can't seed it).
+               # Prior to this addition, post-import TPM edits to ingress_folder
+               # silently didn't propagate to Postgres, blocking NSD2 polling for
+               # HW PL items whose ingress_folder was set post-import.
+               "ingress_folder")
 _BOOL_FIELDS = (
     "no_customer_upload",
     "force_tracking_enabled",
