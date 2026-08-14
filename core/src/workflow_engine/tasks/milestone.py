@@ -305,6 +305,27 @@ def apply_milestone_delete_task(
             str(exc)[:120],
         )
 
+    # PLM-6 (2026-08-14) -- close open PLM tickets referenced by items in
+    # this scope BEFORE the Postgres cascade wipes the plm_id values. Best-
+    # effort: any failure WARN-logs + continues (milestone delete must not
+    # be blocked by an unreachable PLM API). Counters returned in `combined`
+    # for the post-audit trail.
+    plm_close_summary: dict[str, Any] = {
+        "plm_ids_found": 0, "plm_ids_closed": 0, "plm_ids_close_failed": 0,
+    }
+    try:
+        from core.src.workflow_engine.tasks.plm_poll import (
+            close_plm_defects_for_milestone,
+        )
+        plm_close_summary = close_plm_defects_for_milestone(
+            deps, customer_id, device_id, milestone_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "apply_milestone_delete: PLM close hook raised (continuing): %s: %s",
+            type(exc).__name__, str(exc)[:200],
+        )
+
     # Step 2: Postgres cascade.
     storage_summary: dict[str, Any]
     try:
@@ -338,6 +359,7 @@ def apply_milestone_delete_task(
     combined = {
         **storage_summary,
         **fs_summary,
+        **plm_close_summary,   # PLM-6: plm_ids_found / _closed / _close_failed
     }
 
     # Step 4: Post-audit with counts. Cannot include delivery_item_id since

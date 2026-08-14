@@ -454,3 +454,103 @@ class TestDownloadAndIngest:
         candidates = ingest_recorder[0]["items"]
         assert len(candidates) == 2
         assert {getattr(c, "delivery_item_id", None) for c in candidates} == {"X-1", "X-2"}
+
+
+# ---------------------------------------------------------------------------
+# PLM-6: milestone-close hook (close_plm_defects_for_milestone)
+# ---------------------------------------------------------------------------
+
+
+class TestClosePlmDefectsForMilestone:
+
+    @pytest.fixture
+    def mock_close(self, monkeypatch):
+        """Monkey-patch on_prem_client.close_plm_defect at source module."""
+        close_mock = MagicMock(return_value=0)
+        monkeypatch.setattr(
+            "core.src.issue_tracker.corp_plm.on_prem_client.close_plm_defect",
+            close_mock,
+        )
+        return close_mock
+
+    def test_no_items_returns_zeros(self, mock_close):
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        deps = SimpleNamespace(storage=_StubStorage(items=[]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 0, "plm_ids_closed": 0, "plm_ids_close_failed": 0}
+        mock_close.assert_not_called()
+
+    def test_items_without_plm_id_return_zeros(self, mock_close):
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(plm_id=""),
+            _make_item(delivery_item_id="X-2", plm_id=None),
+        ]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r["plm_ids_found"] == 0
+        mock_close.assert_not_called()
+
+    def test_dedup_plm_ids_across_items(self, mock_close):
+        """3 items share 2 unique plm_ids -> close_plm_defect called 2x."""
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(delivery_item_id="X-1", plm_id="P111"),
+            _make_item(delivery_item_id="X-2", plm_id="P111"),  # dup
+            _make_item(delivery_item_id="X-3", plm_id="P222"),
+        ]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 2, "plm_ids_closed": 2, "plm_ids_close_failed": 0}
+        assert mock_close.call_count == 2
+        called_with = {c.args[0] for c in mock_close.call_args_list}
+        assert called_with == {"P111", "P222"}
+
+    def test_device_filter_excludes_other_devices_plm_ids(self, mock_close):
+        """list_items_for_milestone returns items for ALL devices in milestone;
+        function must filter to the requested device_id so we only close
+        tickets that belong to it."""
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(delivery_item_id="X-1", device_id="SM-A015V", plm_id="P-A"),
+            _make_item(delivery_item_id="X-2", device_id="SM-S671U1", plm_id="P-B"),  # other device
+        ]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r["plm_ids_found"] == 1
+        mock_close.assert_called_once_with("P-A")
+
+    def test_close_failure_counted(self, mock_close):
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        mock_close.side_effect = [0, -1]  # first succeeds, second fails
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(delivery_item_id="X-1", plm_id="P111"),
+            _make_item(delivery_item_id="X-2", plm_id="P222"),
+        ]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 2, "plm_ids_closed": 1, "plm_ids_close_failed": 1}
+
+    def test_close_raises_still_counted(self, mock_close):
+        """A raised exception in close_plm_defect (should be rare -- client
+        already suppresses subprocess errors) is caught + counted as failed."""
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        mock_close.side_effect = RuntimeError("api down")
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(delivery_item_id="X-1", plm_id="P111"),
+        ]))
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 1, "plm_ids_closed": 0, "plm_ids_close_failed": 1}
+
+    def test_no_deps_short_circuits(self, mock_close):
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+        r = close_plm_defects_for_milestone(None, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 0, "plm_ids_closed": 0, "plm_ids_close_failed": 0}
+        mock_close.assert_not_called()
+
+    def test_storage_error_returns_zeros(self, mock_close):
+        from core.src.workflow_engine.tasks.plm_poll import close_plm_defects_for_milestone
+
+        class _FailingStorage:
+            def list_items_for_milestone(self, m, s): raise RuntimeError("db down")
+
+        deps = SimpleNamespace(storage=_FailingStorage())
+        r = close_plm_defects_for_milestone(deps, "MMK", "SM-A015V", "P1")
+        assert r == {"plm_ids_found": 0, "plm_ids_closed": 0, "plm_ids_close_failed": 0}
+        mock_close.assert_not_called()

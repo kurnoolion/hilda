@@ -28,7 +28,11 @@ from typing import Any
 from core.src.workflow_engine.celery_app import hilda_celery_app
 from core.src.workflow_engine.task_deps import get_task_deps
 
-__all__ = ["plm_poll_task", "poll_plm_once"]
+__all__ = [
+    "plm_poll_task",
+    "poll_plm_once",
+    "close_plm_defects_for_milestone",   # PLM-6 milestone-close hook
+]
 
 _log = logging.getLogger(__name__)
 
@@ -600,3 +604,109 @@ def _item_id(it: Any) -> str:
         or getattr(it, "delivery_item_id", None)
         or ""
     )
+
+
+# ---------------------------------------------------------------------------
+# PLM-6 (2026-08-14) -- milestone-close hook
+# ---------------------------------------------------------------------------
+#
+# When the P1 milestone is deleted / closed by the TPM, HILDA must close the
+# PLM tickets it created during that milestone's lifetime so PLM doesn't
+# accumulate orphan open tickets. Called from apply_milestone_delete_task
+# BEFORE the Postgres cascade wipes delivery_items (we need to read their
+# plm_id values first).
+#
+# Semantic: "milestone closure" here == "SP Milestones-list row deleted".
+# There's no separate `milestone_state=Closed` transition in this codebase
+# today; the TPM signals milestone-end via delete. If a stronger "milestone
+# finalized but preserved" state ever exists (Ph-2), add a second call site.
+#
+# Design: read all plm_ids for the scope, dedup, call close_plm_defect for
+# each unique one. Errors are WARN-logged + counted; deletion cascade
+# continues regardless (PLM ticket cleanup is best-effort -- if PLM is
+# unreachable, the milestone-delete still needs to complete).
+
+
+def close_plm_defects_for_milestone(
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+) -> dict[str, Any]:
+    """Close all PLM tickets referenced by delivery_items in the given
+    (customer, device, milestone) scope. Idempotent per-plm_id (repeated
+    calls to close_plm_defect on an already-closed ticket return -1 which
+    we count but don't raise on).
+
+    Returns per-scope counters:
+      plm_ids_found         -- distinct non-empty plm_ids in scope
+      plm_ids_closed        -- close_plm_defect returned 0
+      plm_ids_close_failed  -- close_plm_defect returned non-zero (WARN logged)
+
+    MUST be called BEFORE storage.delete_milestone_cascade() -- once items
+    are deleted, plm_ids are gone and we can't reach the tickets.
+
+    Safe to invoke unconditionally: returns zeros when no items or no
+    plm_ids exist for the scope.
+    """
+    from core.src.issue_tracker.corp_plm import on_prem_client
+
+    result = {
+        "plm_ids_found":        0,
+        "plm_ids_closed":       0,
+        "plm_ids_close_failed": 0,
+    }
+
+    if deps is None or getattr(deps, "storage", None) is None:
+        _log.warning("PLM_CLOSE: no deps/storage; skipping scope=%s/%s/%s",
+                     customer_id, device_id, milestone_id)
+        return result
+
+    try:
+        items = deps.storage.list_items_for_milestone(milestone_id, None) or []
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "PLM_CLOSE: list_items_for_milestone failed %s/%s/%s: %s: %s "
+            "-- skipping close",
+            customer_id, device_id, milestone_id,
+            type(exc).__name__, str(exc)[:120],
+        )
+        return result
+
+    # Collect UNIQUE plm_ids scoped to this device (list_items_for_milestone
+    # returns all devices' items in the milestone; filter by device_id here
+    # to avoid closing tickets owned by other devices in the same milestone).
+    plm_ids: set[str] = set()
+    for it in items:
+        it_device = (getattr(it, "device_id", None) or "").strip()
+        if it_device != device_id.strip():
+            continue
+        raw = getattr(it, "plm_id", None) or ""
+        pid = raw.strip()
+        if pid:
+            plm_ids.add(pid)
+
+    result["plm_ids_found"] = len(plm_ids)
+    if not plm_ids:
+        return result
+
+    _log.warning(
+        "PLM_CLOSE: milestone-close hook %s/%s/%s -- %d unique plm_id(s) to close",
+        customer_id, device_id, milestone_id, len(plm_ids),
+    )
+    for pid in sorted(plm_ids):
+        try:
+            rc = on_prem_client.close_plm_defect(pid)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "PLM_CLOSE: close_plm_defect raised plm_id=%s: %s: %s",
+                pid, type(exc).__name__, str(exc)[:200],
+            )
+            result["plm_ids_close_failed"] += 1
+            continue
+        if rc == 0:
+            result["plm_ids_closed"] += 1
+        else:
+            _log.warning("PLM_CLOSE: close_plm_defect returned %d for plm_id=%s", rc, pid)
+            result["plm_ids_close_failed"] += 1
+    return result
