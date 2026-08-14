@@ -54,7 +54,14 @@ _STR_FIELDS = ("target_folder", "tg_path_id", "item_path_id", "item_type", "path
                # Prior to this addition, post-import TPM edits to ingress_folder
                # silently didn't propagate to Postgres, blocking NSD2 polling for
                # HW PL items whose ingress_folder was set post-import.
-               "ingress_folder")
+               "ingress_folder",
+               # PLM-2 (2026-08-14): plm_id + actual_item_info are HILDA-written
+               # after the beat-fired PLM poll creates a ticket (via
+               # on_prem_client.create_plm_ticket + get_actual_item_info). SP is
+               # authoritative once written. Adding to sync allowlist so any TPM
+               # SP edit (e.g. manual case-id correction, URL override) round-
+               # trips back to Postgres via the Deliverables-CHANGED alert path.
+               "plm_id", "actual_item_info")
 _BOOL_FIELDS = (
     "no_customer_upload",
     "force_tracking_enabled",
