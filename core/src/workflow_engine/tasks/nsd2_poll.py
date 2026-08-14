@@ -84,15 +84,15 @@ def poll_nsd2_once(deps: Any) -> dict[str, Any]:
 
     correlation_id = f"nsd2poll-{uuid.uuid4().hex[:12]}"
     stats: dict[str, Any] = {
-        "correlation_id":      correlation_id,
-        "scopes_scanned":      0,
-        "hw_pl_items_scanned": 0,
-        "items_folder_missing":  0,     # resolver returned None
-        "items_walked":        0,
-        "files_yielded":       0,
-        "files_dedup_skipped": 0,
-        "files_ingested":      0,
-        "files_ingest_failed": 0,
+        "correlation_id":         correlation_id,
+        "scopes_scanned":         0,
+        "hw_pl_items_scanned":    0,     # total eligible items across all scopes (unchanged semantic)
+        "devices_folder_missing": 0,     # NSD2-11: resolver returned None per (customer, device)
+        "devices_walked":         0,     # NSD2-11: one walk per (customer, device), not per item
+        "files_yielded":          0,
+        "files_dedup_skipped":    0,
+        "files_ingested":         0,
+        "files_ingest_failed":    0,
     }
 
     if deps is None or getattr(deps, "storage", None) is None:
@@ -155,10 +155,17 @@ def _poll_one_scope(
     resolve_fn: Any,
     walk_fn: Any,
 ) -> None:
-    """Load HW PL items for this (customer, device, milestone), skipping
-    items whose ingress_folder doesn't sit under any configured NSD2 root.
-    For each remaining item: resolve device folder -> walk -> dedup +
-    hand off new files."""
+    """NSD2-11 (2026-08-14) -- per-device single walk, not per-item.
+
+    Load HW PL items for this (customer, device, milestone), keep those
+    whose ingress_folder sits under a configured NSD2 root. Pick the FIRST
+    such item's ingress_folder as the walk base (all HW PL items for the
+    same device+P1 milestone are expected to share the same ingress_folder
+    value; first-wins is a safe default if not). Walk ONCE; feed each
+    yielded file through the router with ALL eligible items as candidates
+    (router picks best match by filename substring). Replaces the earlier
+    per-item loop that redundantly resolved + walked the same folder N
+    times."""
     try:
         all_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
     except Exception as exc:  # noqa: BLE001
@@ -175,17 +182,17 @@ def _poll_one_scope(
         return
 
     stats["hw_pl_items_scanned"] += len(hw_pl_items)
-    for item in hw_pl_items:
-        _poll_one_item(
-            deps=deps,
-            stats=stats,
-            correlation_id=correlation_id,
-            item=item,
-            customer_id=customer_id,
-            milestone_id=milestone_id,
-            resolve_fn=resolve_fn,
-            walk_fn=walk_fn,
-        )
+    _poll_one_device(
+        deps=deps,
+        stats=stats,
+        correlation_id=correlation_id,
+        items=hw_pl_items,
+        customer_id=customer_id,
+        device_id=device_id,
+        milestone_id=milestone_id,
+        resolve_fn=resolve_fn,
+        walk_fn=walk_fn,
+    )
 
 
 def _filter_hw_pl_nsd2_items(
@@ -221,49 +228,44 @@ def _normalize_path_for_prefix(p: str) -> str:
     return (p or "").replace("\\", "/").rstrip("/").lower()
 
 
-def _poll_one_item(
+def _poll_one_device(
     *,
     deps: Any,
     stats: dict[str, Any],
     correlation_id: str,
-    item: Any,
+    items: list[Any],
     customer_id: str,
+    device_id: str,
     milestone_id: str,
     resolve_fn: Any,
     walk_fn: Any,
 ) -> None:
-    """Resolve device folder for this item, walk it, dedup by hash,
-    ingest new files. All failures WARN-log + continue."""
-    # DeliveryItemBase Pydantic model exposes the ID as `item_id`; the underlying
-    # SQLAlchemy column is `delivery_item_id`. Try both so we're resilient
-    # whether the caller hands us a Pydantic row or a raw SA model.
-    delivery_item_id = (
-        getattr(item, "item_id", None)
-        or getattr(item, "delivery_item_id", None)
-        or "?"
-    )
-    device_id = getattr(item, "device_id", "") or ""
-    ingress_folder = getattr(item, "ingress_folder", "") or ""
+    """NSD2-11 (2026-08-14) -- resolve device folder ONCE per (customer, device,
+    milestone) scope, walk ONCE, feed each yielded file through the router
+    with ALL eligible items as candidates. `items` is guaranteed non-empty by
+    caller (_poll_one_scope short-circuits when the filter empties)."""
+    first_item = items[0]
+    ingress_folder = getattr(first_item, "ingress_folder", "") or ""
 
-    # Resolve device folder. The item's ingress_folder value IS the
-    # NSD2 root the resolver should use as the base.
+    # Resolve device folder from first item's ingress_folder (all items share
+    # the same value in practice; if not, first-wins is a safe default).
     try:
-        device_folder = resolve_fn(item, Path(ingress_folder))
+        device_folder = resolve_fn(first_item, Path(ingress_folder))
     except Exception as exc:  # noqa: BLE001
         _log.warning(
-            "NSD2_POLL: resolve raised (should not happen) item=%s: %s: %s",
-            delivery_item_id, type(exc).__name__, str(exc)[:120],
+            "NSD2_POLL: resolve raised (should not happen) device=%s: %s: %s",
+            device_id, type(exc).__name__, str(exc)[:120],
         )
-        stats["items_folder_missing"] += 1
+        stats["devices_folder_missing"] += 1
         return
     if device_folder is None:
-        stats["items_folder_missing"] += 1
+        stats["devices_folder_missing"] += 1
         return
 
-    stats["items_walked"] += 1
+    stats["devices_walked"] += 1
     _log.warning(
-        "NSD2_POLL: item=%s device=%s milestone=%s walking %s",
-        delivery_item_id, device_id, milestone_id, device_folder,
+        "NSD2_POLL: device=%s milestone=%s walking %s (candidates=%d items)",
+        device_id, milestone_id, device_folder, len(items),
     )
 
     for rel_path, file_bytes, file_hash in walk_fn(device_folder, customer_id):
@@ -275,9 +277,9 @@ def _poll_one_item(
             existing = deps.storage.get_document_index_row_by_hash(file_hash)
         except Exception as exc:  # noqa: BLE001
             _log.warning(
-                "NSD2_POLL: dedup lookup failed file_hash=%s item=%s: %s: %s "
+                "NSD2_POLL: dedup lookup failed file_hash=%s device=%s: %s: %s "
                 "-- treating as new (safe: router de-dups again downstream)",
-                file_hash[:16], delivery_item_id,
+                file_hash[:16], device_id,
                 type(exc).__name__, str(exc)[:120],
             )
             existing = None
@@ -285,13 +287,12 @@ def _poll_one_item(
             stats["files_dedup_skipped"] += 1
             continue
 
-        # Hand off new file to router integration seam. NSD2-4 wires
-        # the real router call; NSD2-3 leaves a stub that just logs +
-        # counts so the poller shape is testable in isolation.
+        # Hand off new file to router with ALL scope's HW PL items as
+        # candidates. Router picks best match by filename substring.
         try:
             _ingest_new_nsd2_file(
                 deps=deps,
-                item=item,
+                items=items,
                 customer_id=customer_id,
                 milestone_id=milestone_id,
                 filename=rel_path,
@@ -302,8 +303,8 @@ def _poll_one_item(
             stats["files_ingested"] += 1
         except Exception as exc:  # noqa: BLE001
             _log.warning(
-                "NSD2_POLL: ingest failed item=%s filename=%s file_hash=%s: %s: %s",
-                delivery_item_id, rel_path, file_hash[:16],
+                "NSD2_POLL: ingest failed device=%s filename=%s file_hash=%s: %s: %s",
+                device_id, rel_path, file_hash[:16],
                 type(exc).__name__, str(exc)[:200],
             )
             stats["files_ingest_failed"] += 1
@@ -333,23 +334,34 @@ def _configured_nsd2_roots(deps: Any) -> list[Path]:
     return []
 
 
+# NSD2-11 (2026-08-14): only P1 milestone participates in NSD2 polling.
+# Owners deposit HW PL documents on the network share during Phase 1 only;
+# later milestones don't have an ingress_folder convention on NSD2. Filter
+# at scope-iteration time so we emit one (customer, device, 'P1') tuple per
+# device, skipping devices whose template has no P1 milestone defined.
+_NSD2_MILESTONE_ID = "P1"
+
+
 def _iter_active_scopes(deps: Any):
-    """Yield (customer_id, device_id, milestone_id) tuples over active
-    (customer, device, milestone) combinations. Mirrors reconcile.py's
-    _iter_tuples pattern -- source is template_lookup._CACHE."""
+    """Yield (customer_id, device_id, milestone_id) tuples restricted to
+    the P1 milestone per NSD2-11. Effective shape: one tuple per (customer,
+    device) when the customer's template.yaml defines a P1 milestone entry;
+    zero tuples otherwise. Mirrors reconcile.py's _iter_tuples pattern --
+    source is template_lookup._CACHE."""
     from core.src.template_schema import template_lookup
     for customer_id, template in template_lookup._CACHE.items():  # noqa: SLF001
         devices = template.get("devices") or {}
         milestones = template.get("milestones") or {}
+        if _NSD2_MILESTONE_ID not in milestones:
+            continue
         for device_id in devices:
-            for milestone_id in milestones:
-                yield (customer_id, device_id, milestone_id)
+            yield (customer_id, device_id, _NSD2_MILESTONE_ID)
 
 
 def _ingest_new_nsd2_file(
     *,
     deps: Any,
-    item: Any,
+    items: list[Any],
     customer_id: str,
     milestone_id: str,
     filename: str,
@@ -357,27 +369,22 @@ def _ingest_new_nsd2_file(
     file_hash: str,
     correlation_id: str,
 ) -> None:
-    """NSD2-4 (2026-08-08): feed a newly-discovered NSD2 file through the
-    existing Fr52AttachmentRouter pipeline. Reuses inbound_attachment's
-    proven router-build + widen-candidates + _process_regular_attachment
-    machinery -- no NSD2-specific routing/persistence code path.
+    """NSD2-4 (2026-08-08) + NSD2-11 (2026-08-14): feed a newly-discovered
+    NSD2 file through the existing Fr52AttachmentRouter pipeline with MULTIPLE
+    HW PL items as router candidates (per-device walk, not per-item). Router
+    picks the best filename-substring match among them.
 
     Steps:
       1. Build a synthetic InboundAttachment (filename preserves subfolder
-         structure per ZIP-1 convention; content_type is a benign default
-         since the router doesn't gate on it).
-      2. Widen the single HW PL delivery_item into the router's expected
-         candidate_items dict shape (owner identity + item_description +
-         SP JIT back-fill of missing tg_path_id / item_path_id).
-      3. Construct the Ph-1 router (substring-first-pass mode; matches
-         email attachment behavior).
+         structure per ZIP-1 convention).
+      2. Widen ALL HW PL delivery_items in the (customer, device, P1) scope
+         into the router's expected candidate_items shape.
+      3. Construct the Ph-1 router (substring-first-pass mode).
       4. Call _process_regular_attachment with
-         ingest_source=IngestSource.NETWORK_SHARED_DRIVE so
-         document_index rows are tagged correctly. Same async->sync
-         bridge (asyncio.run) as process_inbound_attachments_task uses.
+         ingest_source=IngestSource.NETWORK_SHARED_DRIVE.
 
-    batch_id: synthesized as `NSD2-<file_hash[:12]>` -- used only for
-    audit + log correlation, never for lookup (NSD2 has no batch concept).
+    batch_id: synthesized as `NSD2-<file_hash[:12]>` -- audit/log correlation
+    only, never for lookup (NSD2 has no batch concept).
     """
     import asyncio
 
@@ -391,12 +398,14 @@ def _ingest_new_nsd2_file(
 
     # DeliveryItemBase Pydantic model exposes the ID as `item_id`; the underlying
     # SQLAlchemy column is `delivery_item_id`. Try both so we're resilient
-    # whether the caller hands us a Pydantic row or a raw SA model.
-    delivery_item_id = (
-        getattr(item, "item_id", None)
-        or getattr(item, "delivery_item_id", None)
-        or "?"
-    )
+    # whether the caller hands us Pydantic rows or raw SA models.
+    def _item_id(it: Any) -> str:
+        return (
+            getattr(it, "item_id", None)
+            or getattr(it, "delivery_item_id", None)
+            or ""
+        )
+    delivery_item_ids = [i for i in (_item_id(it) for it in items) if i]
     batch_id = f"NSD2-{file_hash[:12]}"
 
     attachment = InboundAttachment(
@@ -407,25 +416,26 @@ def _ingest_new_nsd2_file(
     )
 
     async def _run() -> dict[str, Any]:
-        # Build candidate list: single-item list, widened by the
-        # existing helper (fetches DeliveryItem + SP JIT back-fill).
+        # Widen ALL items in the scope so the router can pick the best
+        # filename-substring match.
         candidate_items = _widen_candidates_for_router(
-            deps, [{"delivery_item_id": delivery_item_id}],
+            deps,
+            [{"delivery_item_id": iid} for iid in delivery_item_ids],
         )
         if not candidate_items:
             _log.warning(
-                "NSD2_POLL_INGEST: candidate widen returned empty for item=%s "
-                "-- widen helper couldn't fetch DeliveryItem; skipping file",
-                delivery_item_id,
+                "NSD2_POLL_INGEST: candidate widen returned empty for items=%s "
+                "-- widen helper couldn't fetch DeliveryItems; skipping file",
+                delivery_item_ids[:3],
             )
             return {"processed": 0}
 
         router = _build_ph1_router(deps, customer_id=customer_id)
         if router is None:
             _log.warning(
-                "NSD2_POLL_INGEST: router unavailable customer=%s item=%s "
+                "NSD2_POLL_INGEST: router unavailable customer=%s items=%s "
                 "-- skipping file",
-                customer_id, delivery_item_id,
+                customer_id, delivery_item_ids[:3],
             )
             return {"processed": 0}
 

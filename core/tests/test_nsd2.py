@@ -327,7 +327,7 @@ class TestPollNsd2OnceEndToEnd:
         assert stats["outcome"] == "fired"
         assert stats["scopes_scanned"] == 1
         assert stats["hw_pl_items_scanned"] == 1
-        assert stats["items_walked"] == 1
+        assert stats["devices_walked"] == 1
         assert stats["files_yielded"] == 2
         assert stats["files_dedup_skipped"] == 0
         assert stats["files_ingested"] == 2
@@ -441,8 +441,9 @@ class TestPollNsd2OnceEndToEnd:
         assert stats["files_ingested"] == 1
 
     def test_resolver_miss_skips_item_gracefully(self, tmp_path, monkeypatch):
-        """When resolver returns None (folder missing on disk), item is
-        counted as items_folder_missing + no walk / no ingest."""
+        """When resolver returns None (folder missing on disk), the device is
+        counted as devices_folder_missing + no walk / no ingest.
+        NSD2-11: per-device counter renamed from items_folder_missing."""
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         # Do NOT create the device folder tree -> resolver returns None
@@ -454,6 +455,90 @@ class TestPollNsd2OnceEndToEnd:
         )
         stats = poll_nsd2_once(deps)
         assert stats["hw_pl_items_scanned"] == 1
-        assert stats["items_folder_missing"] == 1
-        assert stats["items_walked"] == 0
+        assert stats["devices_folder_missing"] == 1
+        assert stats["devices_walked"] == 0
         assert stats["files_ingested"] == 0
+
+    def test_only_p1_milestone_scanned(self, tmp_path, monkeypatch):
+        """NSD2-11: `_iter_active_scopes` restricts to milestone_id='P1'.
+        Templates with DRR + P1 milestones defined should scan ONLY P1,
+        never DRR (or any other milestone name)."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
+        device_folder.mkdir(parents=True)
+        (device_folder / "p1_report.pdf").write_bytes(b"content-P1")
+
+        # Template exposes BOTH milestones; poller must pick P1 only.
+        _seed_template_cache({
+            "MMK": {
+                "devices":    {"SM-A015V": {}},
+                "milestones": {"DRR": {}, "P1": {}},
+            }
+        })
+        calls = _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_build_hw_pl_item(str(tmp_path))]),
+            nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        # scopes_scanned counts (customer, device) tuples emitted by
+        # _iter_active_scopes. With P1-only filter, 1 device × 1 (P1) = 1 scope
+        # (not 2 — DRR must be filtered out).
+        assert stats["scopes_scanned"] == 1
+        assert stats["hw_pl_items_scanned"] == 1
+        assert stats["devices_walked"] == 1
+        assert stats["files_ingested"] == 1
+
+    def test_no_p1_in_template_yields_zero_scopes(self, tmp_path, monkeypatch):
+        """NSD2-11 edge case: a customer template with NO 'P1' milestone
+        entry yields zero scopes for that customer (never scanned). Prior
+        behavior would have iterated whatever milestones existed."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        _seed_template_cache({
+            "MMK": {
+                "devices":    {"SM-A015V": {}},
+                "milestones": {"DRR": {}, "PA1": {}},   # no P1
+            }
+        })
+        calls = _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_build_hw_pl_item(str(tmp_path))]),
+            nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        assert stats["scopes_scanned"] == 0
+        assert stats["hw_pl_items_scanned"] == 0
+        assert stats["devices_walked"] == 0
+        assert stats["files_ingested"] == 0
+
+    def test_per_device_single_walk_multi_items(self, tmp_path, monkeypatch):
+        """NSD2-11: two HW PL items for the same (customer, device, P1) scope
+        must trigger ONE walk (not one per item). Each yielded file is passed
+        to _ingest_new_nsd2_file exactly once with BOTH items as candidates."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
+        device_folder.mkdir(parents=True)
+        (device_folder / "shared.pdf").write_bytes(b"content-shared")
+
+        item1 = _build_hw_pl_item(str(tmp_path), delivery_item_id="MMK-SM-A015V-P1-1")
+        item2 = _build_hw_pl_item(str(tmp_path), delivery_item_id="MMK-SM-A015V-P1-2")
+        _seed_template_cache()
+        calls = _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[item1, item2]),
+            nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        assert stats["hw_pl_items_scanned"] == 2       # both items count as eligible
+        assert stats["devices_walked"] == 1            # one walk (per-device, not per-item)
+        assert stats["files_yielded"] == 1             # one file on disk
+        assert stats["files_ingested"] == 1            # ingest called once, not twice
+        assert len(calls) == 1
+        # Router receives BOTH items as candidates -- lets router match by filename.
+        candidate_items = calls[0]["items"]
+        assert len(candidate_items) == 2
+        candidate_ids = {getattr(it, "delivery_item_id", None) for it in candidate_items}
+        assert candidate_ids == {"MMK-SM-A015V-P1-1", "MMK-SM-A015V-P1-2"}
