@@ -36,6 +36,7 @@ from . import (  # noqa: F401
     setup_complete_notification,  # SETUP-1 added 2026-07-28: TPM email when all items in a scope are past Not Started
     ops_digest,   # UR-8 added 2026-08-01: weekly ops digest of unrouted files
     nsd2_poll,   # NSD2-3 added 2026-08-08: periodic NSD2 SMB share poller for tg_name='HW PL' documents
+    plm_poll,    # PLM-3 added 2026-08-14: periodic PLM ticket create + download + ingest for MQL-FIT/MNO-SOLUTION items
 )
 
 __all__ = [
@@ -57,4 +58,5 @@ __all__ = [
     "tpm_sp_close",
     "setup_complete_notification",
     "ops_digest",
+    "plm_poll",
 ]

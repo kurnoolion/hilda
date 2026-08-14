@@ -145,6 +145,18 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "schedule": float(os.environ.get("HILDA_NSD2_POLL_INTERVAL_SEC") or 900.0),
             "options":  {"queue": "default", "expires": 850},
         },
+        # PLM-3/4 (2026-08-14) -- periodic PLM ticket creator + downloader for
+        # MQL-FIT / MNO-SOLUTION items in P1 milestone. Default interval 900s
+        # (15 min); tune via HILDA_PLM_POLL_INTERVAL_SEC env-var. Task
+        # naturally no-ops per tick when no scopes have eligible items,
+        # and per-owner-group when create_plm_ticket fails or when
+        # /opt/plm_scripts scripts are unwired (missing scripts return
+        # sentinel failure). expires just under the interval.
+        "plm_poll_15min": {
+            "task":     "core.src.workflow_engine.tasks.plm_poll.tick",
+            "schedule": float(os.environ.get("HILDA_PLM_POLL_INTERVAL_SEC") or 900.0),
+            "options":  {"queue": "default", "expires": 850},
+        },
     }
     return app
 
