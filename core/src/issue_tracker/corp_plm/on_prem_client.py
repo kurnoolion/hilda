@@ -4,23 +4,31 @@ Protocol (adapter.py + poller.py) which was a Ph-2 speculative shape for
 deadline-tiered polling; this client is the Ph-1 concrete integration used
 by the beat-fired PLM poll task (PLM-3).
 
-Four callable operations, each shelling out to a Python script under
+Three callable operations, each shelling out to a Python script under
 `HILDA_PLM_SCRIPTS_DIR` (default `/opt/plm_scripts`):
 
-  * create_plm_ticket(device_id, items)  -> case_id string ("" on failure)
-  * list_and_download_all(case_id, dir)  -> int 0 on success, -1 on failure
-  * close_plm_defect(case_id)            -> int 0 on success, -1 on failure
-  * get_actual_item_info(case_id)        -> URL string ("" on failure)
+  * create_plm_ticket(device_id, items) -> (case_id, url) tuple
+      ("", "") on failure; on success, case_id like "P20260810-03454"
+      and url like "https://splm.sec.corp/.../K3483945xxxx".
+  * list_and_download_all(case_id, dir) -> int 0 on success, -1 on failure
+  * close_plm_defect(case_id)           -> int 0 on success, -1 on failure
+
+(No separate get_actual_item_info wrapper: PLM-1b 2026-08-14 consolidation
+per PLM-engineer confirmation -- createPlmTicket now returns both the case
+code AND the web URL from a single API call, so HILDA never needs a
+second round-trip.)
 
 Contract each on-prem script must honor (so the wrapper can parse stdout +
 returncode reliably):
 
   1. `main()` block with `argparse`.
   2. On success: `print(<result>)` to stdout, then `sys.exit(0)`.
-     - create_plm_ticket: print case_id (e.g. "P334434-73839")
+     - create_plm_ticket: print a SINGLE JSON object with EXACTLY the keys
+                          `case_id` (str) and `url` (str), e.g.
+                          `{"case_id": "P20260810-03454", "url": "https://..."}`.
+                          Any extra keys are ignored by the wrapper.
      - list_and_download_all: print nothing (or file count for info)
      - close_plm_defect: print nothing
-     - get_actual_item_info: print URL (e.g. "https://plm.corp/.../GMKJ6NOt")
   3. On failure: exit with non-zero code (stderr optional but recommended).
   4. Never prompt for interactive input; never open a GUI.
 
@@ -42,7 +50,6 @@ tests):
   HILDA_PLM_TIMEOUT_CREATE   subprocess timeout in seconds for create (default 60)
   HILDA_PLM_TIMEOUT_DOWNLOAD subprocess timeout for download (default 300)
   HILDA_PLM_TIMEOUT_CLOSE    subprocess timeout for close (default 30)
-  HILDA_PLM_TIMEOUT_INFO     subprocess timeout for get_info (default 30)
 
 Script file names are module-level constants below; tests can monkey-patch
 them or point HILDA_PLM_SCRIPTS_DIR at a fixture directory.
@@ -60,7 +67,6 @@ __all__ = [
     "create_plm_ticket",
     "list_and_download_all",
     "close_plm_defect",
-    "get_actual_item_info",
 ]
 
 _log = logging.getLogger(__name__)
@@ -74,15 +80,10 @@ _log = logging.getLogger(__name__)
 _DEFAULT_SCRIPTS_DIR = "/opt/plm_scripts"
 _DEFAULT_PYTHON = "python3"
 
-# Script file names -- module-level so tests can monkey-patch. Default names
-# match user's on-prem naming (create_plm_ticket.py, plm_file_download.py,
-# close_plm_defect.py). get_actual_item_info is either a separate script
-# OR a mode of create_plm_ticket.py; the default assumes separate file,
-# but the env var HILDA_PLM_SCRIPT_GET_INFO can point at the same file.
+# Script file names -- module-level so tests can monkey-patch.
 SCRIPT_CREATE   = "create_plm_ticket.py"
 SCRIPT_DOWNLOAD = "plm_file_download.py"
 SCRIPT_CLOSE    = "close_plm_defect.py"
-SCRIPT_GET_INFO = "get_actual_item_info.py"
 
 
 def _scripts_dir() -> Path:
@@ -165,14 +166,22 @@ def _run_script(
 def create_plm_ticket(
     device_id: str,
     items: Iterable[tuple[int, str]],
-) -> str:
+) -> tuple[str, str]:
     """Create a PLM ticket for `device_id` with a list of (item_no, item_title)
-    tuples to include in the ticket body. Returns the case_id string
-    (e.g. "P334434-73839") on success; returns "" on any failure.
+    tuples to include in the ticket body. Returns a `(case_id, url)` tuple:
+
+      case_id -- e.g. "P20260810-03454" (the plm_id we persist)
+      url     -- e.g. "https://splm.sec.corp/.../K3483945xxxx"
+                 (the actual_item_info clickable URL for TPMs)
+
+    Returns `("", "")` on any failure. Both are always populated together on
+    success -- if the on-prem script returns JSON with one field missing or
+    empty, the wrapper treats it as a partial failure and returns `("", "")`
+    (we don't want to persist a plm_id without a clickable URL, or vice versa).
 
     On-prem script contract:
       python3 create_plm_ticket.py --device-id <device_id> --items-json <json>
-      -> stdout: case_id
+      -> stdout: JSON object with keys `case_id` and `url` (both str)
       -> stderr: optional diagnostic
       -> exit  : 0 on success, non-zero on failure
     """
@@ -188,15 +197,35 @@ def create_plm_ticket(
             "PLM_CLIENT: create_plm_ticket device=%s exit=%s stderr=%s",
             device_id, rc, err[:200],
         )
-        return ""
+        return ("", "")
     if not out:
         _log.warning(
             "PLM_CLIENT: create_plm_ticket device=%s exit=0 but stdout empty",
             device_id,
         )
-        return ""
-    _log.info("PLM_CLIENT: create_plm_ticket device=%s case_id=%s", device_id, out)
-    return out
+        return ("", "")
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "PLM_CLIENT: create_plm_ticket device=%s stdout not JSON: %s -- raw=%r",
+            device_id, exc, out[:200],
+        )
+        return ("", "")
+    case_id = str(payload.get("case_id") or "").strip()
+    url     = str(payload.get("url") or "").strip()
+    if not case_id or not url:
+        _log.warning(
+            "PLM_CLIENT: create_plm_ticket device=%s incomplete payload "
+            "case_id=%r url=%r -- treating as failure",
+            device_id, case_id, url,
+        )
+        return ("", "")
+    _log.info(
+        "PLM_CLIENT: create_plm_ticket device=%s case_id=%s url=%s",
+        device_id, case_id, url,
+    )
+    return (case_id, url)
 
 
 def list_and_download_all(case_id: str, download_dir: Path) -> int:
@@ -260,31 +289,9 @@ def close_plm_defect(case_id: str) -> int:
     return 0
 
 
-def get_actual_item_info(case_id: str) -> str:
-    """Return the direct PLM web-URL for `case_id` (e.g.
-    "https://plm.corp/.../GMKJ6NOt"). Empty string on failure.
-
-    On-prem script contract:
-      python3 get_actual_item_info.py --case-id <case_id>
-      -> stdout: URL string
-      -> exit  : 0 on success, non-zero on failure
-    """
-    rc, out, err = _run_script(
-        SCRIPT_GET_INFO,
-        ["--case-id", case_id],
-        timeout_sec=_timeout("HILDA_PLM_TIMEOUT_INFO", 30),
-        op_label="get_actual_item_info",
-    )
-    if rc != 0:
-        _log.warning(
-            "PLM_CLIENT: get_actual_item_info case_id=%s exit=%s stderr=%s",
-            case_id, rc, err[:200],
-        )
-        return ""
-    if not out:
-        _log.warning(
-            "PLM_CLIENT: get_actual_item_info case_id=%s exit=0 but stdout empty",
-            case_id,
-        )
-        return ""
-    return out
+# Note: get_actual_item_info() was intentionally removed 2026-08-14 per
+# PLM-1b: create_plm_ticket() now returns both case_id AND url in one
+# call, so no second script round-trip is needed. If the PLM system ever
+# needs an out-of-band URL lookup (e.g. for backfilling historic rows
+# whose url wasn't captured at create time), add a new wrapper -- do
+# not repurpose create_plm_ticket for read-only lookups.

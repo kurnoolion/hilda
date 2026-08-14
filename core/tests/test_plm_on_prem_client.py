@@ -50,8 +50,8 @@ def scripts_env(tmp_path: Path, monkeypatch):
 
 class TestCreatePlmTicket:
 
-    def test_success_returns_case_id(self, scripts_env):
-        # Fake script: reads --device-id + --items-json, prints canned case_id
+    def test_success_returns_case_id_and_url(self, scripts_env):
+        # Fake script: reads args, prints JSON with case_id + url
         _write_script(scripts_env, "create_plm_ticket.py", """
             import argparse, sys, json
             p = argparse.ArgumentParser()
@@ -59,53 +59,94 @@ class TestCreatePlmTicket:
             p.add_argument("--items-json", required=True)
             args = p.parse_args()
             items = json.loads(args.items_json)
-            # Sanity: assert we got what we expected
             assert args.device_id == "SM-S671U1"
             assert items == [[10, "HW PL Test A"], [11, "HW PL Test B"]]
-            print("P334434-73839")
+            print(json.dumps({
+                "case_id": "P20260810-03454",
+                "url": "https://splm.sec.corp/detail/K3483945abcd",
+            }))
             sys.exit(0)
         """)
-        result = on_prem_client.create_plm_ticket(
+        case_id, url = on_prem_client.create_plm_ticket(
             "SM-S671U1", [(10, "HW PL Test A"), (11, "HW PL Test B")],
         )
-        assert result == "P334434-73839"
+        assert case_id == "P20260810-03454"
+        assert url == "https://splm.sec.corp/detail/K3483945abcd"
 
-    def test_script_exit_nonzero_returns_empty(self, scripts_env):
+    def test_script_exit_nonzero_returns_empty_tuple(self, scripts_env):
         _write_script(scripts_env, "create_plm_ticket.py", """
             import sys
             print("some diagnostic", file=sys.stderr)
             sys.exit(1)
         """)
-        result = on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")])
-        assert result == ""
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
 
-    def test_script_success_but_empty_stdout_returns_empty(self, scripts_env):
+    def test_script_success_but_empty_stdout_returns_empty_tuple(self, scripts_env):
         _write_script(scripts_env, "create_plm_ticket.py", """
             import sys
             sys.exit(0)
         """)
-        result = on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")])
-        assert result == ""
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
 
-    def test_script_missing_returns_empty(self, scripts_env):
+    def test_script_missing_returns_empty_tuple(self, scripts_env):
         # No script written
-        result = on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")])
-        assert result == ""
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
 
-    def test_timeout_returns_empty(self, scripts_env, monkeypatch):
+    def test_timeout_returns_empty_tuple(self, scripts_env, monkeypatch):
         _write_script(scripts_env, "create_plm_ticket.py", """
-            import time, sys
+            import time, sys, json
             time.sleep(30)
-            print("P123-456")
+            print(json.dumps({"case_id": "P123", "url": "https://x"}))
             sys.exit(0)
         """)
         monkeypatch.setenv("HILDA_PLM_TIMEOUT_CREATE", "1")
-        result = on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")])
-        assert result == ""
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+
+    def test_stdout_not_json_returns_empty_tuple(self, scripts_env):
+        """Prior contract emitted a bare case_id; new contract expects JSON.
+        A non-JSON stdout is treated as a wrapper-parsing failure."""
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import sys
+            print("P20260810-03454")   # missing url + not JSON
+            sys.exit(0)
+        """)
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+
+    def test_json_missing_case_id_returns_empty_tuple(self, scripts_env):
+        """Partial payload (url only) must not be persisted -- treated as failure."""
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import sys, json
+            print(json.dumps({"url": "https://x"}))
+            sys.exit(0)
+        """)
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+
+    def test_json_missing_url_returns_empty_tuple(self, scripts_env):
+        """Partial payload (case_id only) must not be persisted -- treated as failure."""
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import sys, json
+            print(json.dumps({"case_id": "P123"}))
+            sys.exit(0)
+        """)
+        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+
+    def test_json_extra_keys_ignored(self, scripts_env):
+        """Wrapper tolerates additional keys in the payload (forward-compat)."""
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import sys, json
+            print(json.dumps({
+                "case_id": "P1",
+                "url": "https://x",
+                "extra_field": "harmless",
+                "trace_id": "abc-123",
+            }))
+            sys.exit(0)
+        """)
+        case_id, url = on_prem_client.create_plm_ticket("dev", [(1, "x")])
+        assert (case_id, url) == ("P1", "https://x")
 
     def test_items_serialized_as_json_pairs(self, scripts_env):
-        """Verify the wrapper serializes items as JSON list-of-2-tuples,
-        preserves item_no as int + title as str."""
+        """Verify wrapper coerces item_no to int + title to str at boundary."""
         _write_script(scripts_env, "create_plm_ticket.py", """
             import argparse, sys, json
             p = argparse.ArgumentParser()
@@ -113,14 +154,14 @@ class TestCreatePlmTicket:
             p.add_argument("--items-json", required=True)
             args = p.parse_args()
             items = json.loads(args.items_json)
-            # Echo whether type is preserved
             all_ok = all(isinstance(x[0], int) and isinstance(x[1], str) for x in items)
-            print("PASS" if all_ok and items == [[7, "A"], [42, "B"]] else "FAIL")
+            case_id = "PASS" if all_ok and items == [[7, "A"], [42, "B"]] else "FAIL"
+            print(json.dumps({"case_id": case_id, "url": "https://x"}))
             sys.exit(0)
         """)
         # Pass strings/ints mixed to confirm coercion at wrapper boundary
-        result = on_prem_client.create_plm_ticket("dev", [("7", "A"), (42, "B")])
-        assert result == "PASS"
+        case_id, _ = on_prem_client.create_plm_ticket("dev", [("7", "A"), (42, "B")])
+        assert case_id == "PASS"
 
 
 # ---------------------------------------------------------------------------
@@ -201,39 +242,6 @@ class TestClosePlmDefect:
 
     def test_missing_script_returns_minus_1(self, scripts_env):
         assert on_prem_client.close_plm_defect("P123") == -1
-
-
-# ---------------------------------------------------------------------------
-# get_actual_item_info
-# ---------------------------------------------------------------------------
-
-
-class TestGetActualItemInfo:
-
-    def test_success_returns_url(self, scripts_env):
-        _write_script(scripts_env, "get_actual_item_info.py", """
-            import argparse, sys
-            p = argparse.ArgumentParser()
-            p.add_argument("--case-id", required=True)
-            args = p.parse_args()
-            assert args.case_id == "P260811-04409"
-            print("https://plm.corp.example/tickets/GMKJ6NOt")
-            sys.exit(0)
-        """)
-        url = on_prem_client.get_actual_item_info("P260811-04409")
-        assert url == "https://plm.corp.example/tickets/GMKJ6NOt"
-
-    def test_failure_returns_empty(self, scripts_env):
-        _write_script(scripts_env, "get_actual_item_info.py", """
-            import sys; sys.exit(1)
-        """)
-        assert on_prem_client.get_actual_item_info("P999") == ""
-
-    def test_empty_stdout_returns_empty(self, scripts_env):
-        _write_script(scripts_env, "get_actual_item_info.py", """
-            import sys; sys.exit(0)
-        """)
-        assert on_prem_client.get_actual_item_info("P123") == ""
 
 
 # ---------------------------------------------------------------------------
