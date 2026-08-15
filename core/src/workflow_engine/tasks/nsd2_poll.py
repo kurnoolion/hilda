@@ -190,6 +190,7 @@ def _poll_one_scope(
         customer_id=customer_id,
         device_id=device_id,
         milestone_id=milestone_id,
+        nsd2_roots=nsd2_roots,
         resolve_fn=resolve_fn,
         walk_fn=walk_fn,
     )
@@ -198,34 +199,43 @@ def _poll_one_scope(
 def _filter_hw_pl_nsd2_items(
     all_items: list[Any],
     device_id: str,
-    nsd2_roots: list[Path],
+    nsd2_roots: list[Path],   # kept for signature stability; not read since NSD2-12
 ) -> list[Any]:
-    """Return items with tg_name='HW PL' AND matching device_id AND
-    ingress_folder starting with (or equal to) one of the configured
-    NSD2 roots. Ingress_folder match is done by case-insensitive
-    normalized-string prefix -- SMB paths on Windows have mixed
-    separator + case behavior; keep the check loose enough to survive
-    round-trips through SP UI."""
+    """NSD2-12 (2026-08-14) -- gate on tracking_modality, not ingress_folder.
+
+    Return items with:
+      tg_name == 'HW PL'
+      device_id matches scope
+      'NetworkSharedDrive' in tracking_modality  (list membership; case-sensitive
+                                                   per TrackingModality enum value)
+
+    Previous NSD2-11 gate was ingress_folder starts-with /mnt/nsd2. That
+    forced TPMs to type a container-mount path (HILDA-internal detail) into
+    a SP field -- bad UX seam. TPMs now use the SP Choice column
+    "tracking_modality" which is user-facing + validated at SP UI level.
+
+    ingress_folder is deprecated for HW PL items (still exists in schema
+    for other TG types per FR-77). The NSD2 walk root now comes exclusively
+    from HILDA_NSD2_ROOTS env var (deployment-level config, not per-item)."""
     out: list[Any] = []
-    normalized_roots = [_normalize_path_for_prefix(str(r)) for r in nsd2_roots]
     for it in all_items:
         if (getattr(it, "tg_name", None) or "").strip() != "HW PL":
             continue
         if (getattr(it, "device_id", None) or "").strip() != device_id.strip():
             continue
-        raw_ingress = getattr(it, "ingress_folder", None) or ""
-        if not raw_ingress.strip():
+        modality = getattr(it, "tracking_modality", None) or []
+        if _NSD2_MODALITY_VALUE not in modality:
             continue
-        norm = _normalize_path_for_prefix(raw_ingress)
-        if any(norm.startswith(root) for root in normalized_roots):
-            out.append(it)
+        out.append(it)
     return out
 
 
-def _normalize_path_for_prefix(p: str) -> str:
-    """Lower-case + backslash-to-forward-slash for tolerant SMB path
-    prefix compare. Strips trailing slashes so 'X/' and 'X' match."""
-    return (p or "").replace("\\", "/").rstrip("/").lower()
+# TrackingModality enum value that opts a HW PL item into NSD2 polling.
+# Mirrors TrackingModality.NETWORK_SHARED_DRIVE.value at
+# core/src/template_schema/enums.py -- kept as a module-level constant
+# (rather than importing the enum) to avoid a template_schema dependency
+# at NSD2 module load time.
+_NSD2_MODALITY_VALUE = "NetworkSharedDrive"
 
 
 def _poll_one_device(
@@ -237,20 +247,27 @@ def _poll_one_device(
     customer_id: str,
     device_id: str,
     milestone_id: str,
+    nsd2_roots: list[Path],
     resolve_fn: Any,
     walk_fn: Any,
 ) -> None:
-    """NSD2-11 (2026-08-14) -- resolve device folder ONCE per (customer, device,
-    milestone) scope, walk ONCE, feed each yielded file through the router
-    with ALL eligible items as candidates. `items` is guaranteed non-empty by
-    caller (_poll_one_scope short-circuits when the filter empties)."""
-    first_item = items[0]
-    ingress_folder = getattr(first_item, "ingress_folder", "") or ""
+    """NSD2-11/12 (2026-08-14) -- resolve device folder ONCE per (customer,
+    device, milestone) scope, walk ONCE, feed each yielded file through the
+    router with ALL eligible items as candidates. `items` is guaranteed
+    non-empty by caller (_poll_one_scope short-circuits when the filter
+    empties).
 
-    # Resolve device folder from first item's ingress_folder (all items share
-    # the same value in practice; if not, first-wins is a safe default).
+    Walk base comes from nsd2_roots[0] (HILDA_NSD2_ROOTS env var), not from
+    any per-item field, per NSD2-12 (tracking_modality gate replaced
+    ingress_folder path)."""
+    first_item = items[0]
+    base_path = nsd2_roots[0]  # env-var driven; no per-item path lookup
+
+    # Resolve device folder from env-var-configured NSD2 root. Resolver still
+    # takes the item to derive the model-type sub-folder (e.g. Deliverables -
+    # Phone/A/A015V) from device_id + form-factor flags.
     try:
-        device_folder = resolve_fn(first_item, Path(ingress_folder))
+        device_folder = resolve_fn(first_item, base_path)
     except Exception as exc:  # noqa: BLE001
         _log.warning(
             "NSD2_POLL: resolve raised (should not happen) device=%s: %s: %s",

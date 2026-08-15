@@ -51,6 +51,12 @@ _PLM_ELIGIBLE_TG_NAMES = frozenset({"MQL-FIT", "MNO-SOLUTION"})
 # delivery_state values that DISQUALIFY an item from PLM eligibility.
 _PLM_TERMINAL_STATES = frozenset({"Closed", "Cancelled", "CloseInProgress"})
 
+# PLM-7 (2026-08-14): TrackingModality enum value that opts an item into
+# PLM polling. Mirrors TrackingModality.CORPORATE_PLM.value at
+# core/src/template_schema/enums.py. Kept as module-level constant to
+# avoid template_schema import at PLM module load time.
+_PLM_MODALITY_VALUE = "CorporatePLM"
+
 
 # ---------------------------------------------------------------------------
 # Celery entry
@@ -192,7 +198,18 @@ def _poll_one_scope(
 
 
 def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
-    """MQL-FIT / MNO-SOLUTION + matching device + not in terminal state."""
+    """PLM-7 (2026-08-14): gate on tracking_modality in addition to tg_name.
+
+    Eligible when ALL apply:
+      tg_name in ('MQL-FIT', 'MNO-SOLUTION')
+      device_id matches scope
+      'CorporatePLM' in tracking_modality  (list membership)
+      delivery_state NOT in terminal states (Closed, Cancelled, CloseInProgress)
+
+    Strict gate -- no fallback to tg-name-only. Items with missing
+    tracking_modality are opted out (TPM must explicitly enable via the
+    SP Choice column). P1 milestone is not TPM-live yet so no backward-
+    compat concern (per architect 2026-08-14)."""
     out: list[Any] = []
     for it in all_items:
         tg = (getattr(it, "tg_name", None) or "").strip()
@@ -202,6 +219,9 @@ def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
             continue
         state = (getattr(it, "delivery_state", None) or "").strip()
         if state in _PLM_TERMINAL_STATES:
+            continue
+        modality = getattr(it, "tracking_modality", None) or []
+        if _PLM_MODALITY_VALUE not in modality:
             continue
         out.append(it)
     return out

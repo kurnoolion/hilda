@@ -54,6 +54,8 @@ def _make_item(**overrides):
         owner_corp_email="alice@corp.example",
         plm_id="",
         actual_item_info="",
+        # PLM-7: tracking_modality gate -- defaults to opted-in for tests
+        tracking_modality=["CorporatePLM"],
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -179,6 +181,44 @@ class TestFilterAndGroup:
                 _make_item(delivery_state="Cancelled", delivery_item_id="X-2"),
                 _make_item(delivery_state="Open", delivery_item_id="X-3"),  # only this one kept
             ]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 1
+
+    def test_tracking_modality_missing_corporate_plm_dropped(self, mock_client, ingest_recorder):
+        """PLM-7: TPM opts an item into PLM polling by adding 'CorporatePLM'
+        to tracking_modality. Items without it are dropped even when
+        tg_name matches."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(tracking_modality=["Email"])]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 0
+
+    def test_tracking_modality_empty_dropped(self, mock_client, ingest_recorder):
+        """PLM-7 strict gate: empty tracking_modality is NOT opted in
+        (per architect 2026-08-14; P1 not TPM-live yet, no backward compat)."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(tracking_modality=[])]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 0
+
+    def test_tracking_modality_multi_value_includes_plm(self, mock_client, ingest_recorder):
+        """PLM-7: multi-value modality per D-037 -- must include CorporatePLM."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(
+                tracking_modality=["Email", "CorporatePLM", "NetworkSharedDrive"],
+            )]),
             sp_writer=None,
         )
         stats = poll_plm_once(deps)

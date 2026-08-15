@@ -294,12 +294,18 @@ def _make_ingest_recorder(monkeypatch):
     return calls
 
 
-def _build_hw_pl_item(ingress_folder: str, delivery_item_id="MMK-SM-A015V-P1-1"):
+def _build_hw_pl_item(
+    ingress_folder: str = "",   # ignored since NSD2-12; kept for existing test call-sites
+    delivery_item_id="MMK-SM-A015V-P1-1",
+    tracking_modality=None,     # NSD2-12: opt-in signal replaces ingress_folder
+):
     return SimpleNamespace(
         delivery_item_id=delivery_item_id,
         tg_name="HW PL",
         device_id="SM-A015V",
         ingress_folder=ingress_folder,
+        tracking_modality=(tracking_modality if tracking_modality is not None
+                           else ["NetworkSharedDrive"]),
         handset=True, tablet=False, wearable=False,
         item_no=1, milestone_id="P1",
     )
@@ -400,41 +406,85 @@ class TestPollNsd2OnceEndToEnd:
         assert stats["hw_pl_items_scanned"] == 1   # only 1 of 3 kept
         assert stats["files_ingested"] == 1
 
-    def test_ingress_folder_not_under_nsd2_root_filtered_out(self, tmp_path, monkeypatch):
-        """Item's ingress_folder must start with a configured NSD2 root."""
+    def test_tracking_modality_missing_networksharedrive_filtered_out(self, tmp_path, monkeypatch):
+        """NSD2-12: TPM opts a HW PL item into NSD2 polling by adding
+        'NetworkSharedDrive' to tracking_modality. Items without it are
+        filtered out even when tg_name='HW PL' and device matches."""
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         (tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)").mkdir(parents=True)
 
-        # Item points at a DIFFERENT root path (NSD1) -- should be filtered
-        wrong_root_item = _build_hw_pl_item("/some/other/nsd1/root")
+        # Item with tg_name=HW PL + matching device but only 'Email' modality
+        item = _build_hw_pl_item(tracking_modality=["Email"])
         _seed_template_cache()
-        calls = _make_ingest_recorder(monkeypatch)
+        _make_ingest_recorder(monkeypatch)
         deps = SimpleNamespace(
-            storage=_StubStorage(items=[wrong_root_item]),
+            storage=_StubStorage(items=[item]),
             nsd2_roots=[tmp_path],
         )
         stats = poll_nsd2_once(deps)
         assert stats["hw_pl_items_scanned"] == 0
         assert stats["files_yielded"] == 0
 
-    def test_windows_backslash_ingress_folder_matches(self, tmp_path, monkeypatch):
-        """Ingress folder value from SP may carry backslash separators;
-        prefix match must be tolerant of separator + case round-trips."""
+    def test_tracking_modality_empty_filtered_out(self, tmp_path, monkeypatch):
+        """NSD2-12 strict gate: empty tracking_modality is NOT opted in
+        (per architect 2026-08-14; P1 not TPM-live yet, no backward compat)."""
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         (tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)").mkdir(parents=True)
-        (tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)" / "x.pdf").write_bytes(b"x")
 
-        # Item ingress_folder uses backslashes (Windows SP-native shape).
-        # We fake a mixed-case backslash-heavy variant of the real root.
-        windows_shaped = str(tmp_path).upper().replace("/", "\\")
-        item = _build_hw_pl_item(windows_shaped)
+        item = _build_hw_pl_item(tracking_modality=[])
         _seed_template_cache()
-        calls = _make_ingest_recorder(monkeypatch)
+        _make_ingest_recorder(monkeypatch)
         deps = SimpleNamespace(
             storage=_StubStorage(items=[item]),
             nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        assert stats["hw_pl_items_scanned"] == 0
+
+    def test_tracking_modality_multi_value_includes_nsd(self, tmp_path, monkeypatch):
+        """NSD2-12: multi-value tracking_modality (per D-037) works so long
+        as 'NetworkSharedDrive' is one of the values."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
+        device_folder.mkdir(parents=True)
+        (device_folder / "x.pdf").write_bytes(b"x")
+
+        item = _build_hw_pl_item(
+            tracking_modality=["Email", "NetworkSharedDrive", "CorporatePLM"],
+        )
+        _seed_template_cache()
+        _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[item]),
+            nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        assert stats["hw_pl_items_scanned"] == 1
+        assert stats["files_ingested"] == 1
+
+    def test_ingress_folder_ignored_since_nsd2_12(self, tmp_path, monkeypatch):
+        """Regression: item with a bogus ingress_folder is NOT rejected by
+        the filter (NSD2-12 dropped ingress_folder from the HW PL gate).
+        Walk base comes from env var / nsd2_roots, not the item."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
+        device_folder.mkdir(parents=True)
+        (device_folder / "x.pdf").write_bytes(b"x")
+
+        # Bogus / empty ingress_folder should NOT matter -- gate is on modality now
+        item = _build_hw_pl_item(
+            ingress_folder="/wrong/nonsense/path",
+            tracking_modality=["NetworkSharedDrive"],
+        )
+        _seed_template_cache()
+        _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[item]),
+            nsd2_roots=[tmp_path],   # <-- walk base is HERE, not from item
         )
         stats = poll_nsd2_once(deps)
         assert stats["hw_pl_items_scanned"] == 1
