@@ -4559,3 +4559,130 @@ Sites in code: [config.py:58](core/src/dashboard/config.py:58) (`ph1_minimal: bo
 
 Cross-refs: D5 (Ph-1 template with 3 columns + gated Ph-2 blocks); D6 amendment (Download column landed inside the Ph-1 branch).
 
+## D-168: NSD2 poll — per-device walk, P1-only milestone filter, HW PL scope (per-item ingress_folder path rejected)
+
+**Status**: Active · **Date**: 2026-08-14
+
+**Context**: HILDA needs to periodically pull HW PL documents that owners deposit on the NSD2 SMB share (`\\105.52.100.215\Share Folder2`, mounted at `/mnt/nsd2` inside hilda-worker) for the P1 milestone. NSD2-3 initial design walked once per delivery_item; NSD2-11 refactor consolidated to once per (customer, device) because items in the same device+milestone scope share the same source folder — walking N times was redundant. P1-only filter matches operational convention (owners only use NSD2 for P1 documents; DRR / later milestones use different channels).
+
+**Decision**: Beat-fired periodic task (`nsd2_poll_15min`, 15-min interval via `HILDA_NSD2_POLL_INTERVAL_SEC`) with these gates:
+- **Scope iteration**: (customer, device, milestone='P1') tuples enumerated from `template_lookup._CACHE`; skip customers whose template lacks a P1 milestone entry.
+- **Walk unit**: per-(customer, device), not per-item. `_poll_one_device` resolves the device folder ONCE via `nsd2_resolver.resolve_nsd2_device_folder`, walks recursively ONCE via `walk_nsd2_directory`, passes ALL eligible items in the scope to the router as candidates.
+- **File filter**: `tg_name == 'HW PL'` AND matching device_id AND opt-in via `tracking_modality` (per D-170).
+- **Walk base**: `HILDA_NSD2_ROOTS` env var (deployment-level; no per-item path lookup).
+- **Dedup**: SHA-256 file_hash against `document_index` at yield time (global dedup — email path + prior tick both preempt).
+- **Router**: reuses existing Fr52 pipeline via `_widen_candidates_for_router` + `_build_ph1_router` + `_process_regular_attachment` with `ingest_source=NETWORK_SHARED_DRIVE`; asyncio-loop-lifecycle sync bridge.
+- **Failure semantics**: task never raises; each layer WARNs + moves on so one bad item / one bad file / one bad SMB read doesn't abort the tick.
+
+**Why**:
+- **Per-device (not per-item)**: items in the same (customer, device, P1) scope share ingress_folder in practice; walking N times for N items redundantly re-resolves the same folder tree. Router already accepts multiple candidates + picks best filename match, so per-device walk with all-items-as-candidates is functionally equivalent + O(1) resolve × O(files) router-check vs O(items) × O(files).
+- **P1-only**: matches operational reality — NSD2 is P1-only per business convention; other milestones (DRR, PA1, etc.) use email / PLM / SP UI channels. Filtering at scope-iteration avoids per-item state checks per tick.
+- **HW PL tg_name scope**: only tg_name that maps to NSD2 today; other TGs may adopt NSD2 later via `tracking_modality` opt-in (D-170) without code change.
+- **Router reuse (not new persistence path)**: keeps dedup + view-tree write + `document_version` semantics identical to email path; single pipeline reduces bug surface.
+- **`_iter_active_scopes` uses template_lookup._CACHE (not Postgres)**: matches `reconcile.py:_iter_tuples` pattern; template.yaml is the source of truth for "what scopes exist"; avoids Postgres query per tick.
+
+**Consequences**:
+- Cannot support per-item ingress_folder overrides in HW PL (deferred; if needed later, add per-item field back and check when tracking_modality NetworkSharedDrive present).
+- If two HW PL items in the same device+P1 scope somehow have divergent walk-base fields (shouldn't happen given single-scope opt-in), first-wins.
+- Router's filename-substring match determines which item a downloaded file attributes to; ambiguous filenames may collapse to Default WI per CROSS-1 (D-153) semantics.
+- Downloaded files retain NASCA encryption (see D-171); TPMs use Ph-1 download-only view (D-152) until upstream decryption resolved.
+- Adding NSD1 support later: symmetric task via `HILDA_NSD1_ROOTS` env var; tg_name filter differentiates target folder tree; no shared code churn.
+
+**Anchors**: `[D-047]` (SP alert channel; different intake path), `[D-141]` (template-authoritative merge); commits `e87ada7` (NSD2-1 resolver) → `d3ed4a9` (NSD2-6 tests) → `ee9dd29` (NSD2-7/8 live-smoke fixes) → `656551e` (NSD2-11 per-device shape) → `aa316ef` (NSD2-12 tracking_modality gate per D-170).
+
+## D-169: PLM cascade — owner-grouped ticket creation, per-tick download, close-on-milestone-close
+
+**Status**: Active · **Date**: 2026-08-14
+
+**Context**: For MQL-FIT + MNO-SOLUTION items in P1 milestone, HILDA orchestrates PLM tickets on behalf of owners. On-prem Python scripts at `/opt/plm_scripts/` (corp-deployed with SP client + credentials + corp cert) talk to the corp PLM API. HILDA needs to: create tickets per-owner (not per-item — reduces PLM ticket proliferation), download files each tick (owners iteratively add files), write plm_id + actual_item_info (clickable web URL) back to SP so TPMs see them in the SP UI, and close tickets on milestone deletion.
+
+**Decision**: Beat-fired periodic task (`plm_poll_15min`, 15-min interval via `HILDA_PLM_POLL_INTERVAL_SEC`) with:
+- **Scope iteration**: same P1-only iteration as NSD2 (per D-168) — (customer, device, milestone='P1') tuples from `template_lookup._CACHE`.
+- **Item filter**: `tg_name in {MQL-FIT, MNO-SOLUTION}` + device match + `delivery_state NOT in {Closed, Cancelled, CloseInProgress}` + `'CorporatePLM' in tracking_modality` (per D-170).
+- **Owner grouping**: by `owner_corp_email` (case-insensitive after strip). Items with empty owner_corp_email dropped with WARN (nowhere to attribute). ONE PLM ticket per (customer, device, P1, owner) grouping, not per-item.
+- **plm_id resolution**: Postgres-first (any item in group with populated plm_id → reuse), else SP-fallback (fresh `sp_writer.get_items()` — catches the CHANGED-alert-in-flight window where SP has plm_id but Postgres hasn't caught up), else create new via `on_prem_client.create_plm_ticket(device_id, [(item_no, item_title)...])`.
+- **Wrapper contract**: subprocess (not direct import). `create_plm_ticket` returns `(case_id, url)` tuple parsed from JSON stdout `{case_id: str, url: str}`; empty tuple on any failure. `list_and_download_all(case_id, download_dir)` runs script with `cwd=download_dir`, script writes to `cwd/downloads/`. `close_plm_defect(case_id)` returns 0/-1.
+- **SP writeback**: per D-164 Pattern A — atomic per-item `sp_writer.update_item(entity, scope, item_id, canonical_fields={plm_id, actual_item_info})` for all items in group. Best-effort (per-item try/except); failures WARN + count but don't roll back downloads.
+- **Per-tick download**: reuse case_id across ticks (owners may add new files); `tempfile.mkdtemp(prefix=f"plm-{plm_id}-")` isolates work dir; walk `work_dir/downloads/` recursively + SHA-256 + feed through Fr52 router with owner-items as candidates + `ingest_source=CORPORATE_PLM`; `shutil.rmtree` cleanup in `finally`.
+- **Close-on-milestone-close hook**: `close_plm_defects_for_milestone(deps, customer_id, device_id, milestone_id)` fired from `apply_milestone_delete_task` BEFORE Postgres cascade wipes plm_ids. Reads all items, dedups plm_ids, calls `close_plm_defect(pid)` per unique. Best-effort; PLM API unreachable never blocks milestone deletion cascade.
+
+**Why**:
+- **Owner grouping (not per-item ticket)**: one owner may own 5 items → 1 ticket, not 5. Matches how owners think about their work (one PLM to track); reduces PLM ticket proliferation + audit noise.
+- **Subprocess (not direct import)**: on-prem scripts have SP client + corp cert + credentials the hilda-worker container doesn't ship. Subprocess isolates the dep chain; scripts run in their own Python venv. Trade-off: 20% more code vs direct import, but way better isolation + easier testing (fake scripts in tmp_path).
+- **Per-tick download (not one-shot after create)**: owners iteratively add files to their PLM ticket over the milestone lifecycle. One-shot download would miss late-arrivers. File-hash dedup makes it cheap (already-seen files → skip ingest, no router work).
+- **SP-first-with-Postgres-fallback plm_id resolution**: Postgres check is the fast path (99% of ticks); SP fallback catches the ~seconds window after HILDA writes plm_id but before CHANGED alert propagates back to Postgres. Prevents duplicate ticket creation during that window (which would create wasted PLM tickets AND cause SP write conflicts).
+- **Close-on-milestone-close (not per-item-close)**: milestones drive PLM ticket lifecycle; individual items closing don't imply ticket closure since siblings may still be open. Milestone-delete is the definitive end-of-milestone signal.
+- **Consolidated `create_plm_ticket` returning `(case_id, url)` tuple**: PLM-1b consolidation — per PLM-engineer confirmation, one API call returns both. Prior draft had a separate `get_actual_item_info(case_id)` wrapper; removed to avoid a second round-trip + a second failure mode.
+
+**Consequences**:
+- If `owner_corp_email` changes mid-milestone (unlikely), old plm_id stays on old-owner items; new owner triggers new ticket. Prior work stays under old ticket (acceptable — audit trail preserved).
+- No mechanism to update PLM ticket body when items change post-creation (Ph-2 if needed).
+- `close_plm_defect` only fires on milestone-delete (SP Milestones-list row deletion); if a stronger "milestone finalized but preserved" state emerges (Ph-2), need a second call site.
+- Best-effort SP writeback of plm_id: if 1-of-N per-item writes fail, subsequent tick's SP-fallback + Postgres-first checks handle recovery; but write-failed items may show empty plm_id in SP UI until next successful sync.
+- Owner-scoped router candidates (only owner's items in group, not all P1 items): if a downloaded file's filename best-matches another owner's item, router won't see it — file attributes to a poorer match within owner's items or routes to owner's Default. Acceptable per PLM-per-owner semantics.
+- On-prem script contract lock: `create_plm_ticket.py` must print JSON stdout `{case_id, url}` on success + `sys.exit(0)`; non-conforming scripts either yield empty stdout (wrapper returns failure sentinel) or hang past subprocess timeout. Contract documented at top of `on_prem_client.py`.
+
+**Anchors**: `[D-120]` (Ph-2 CorpPlm speculative Protocol; distinct from PLM-1 Ph-1 concrete integration), `[D-164]` (Pattern A doctrine — SP-authoritative state-mirror + atomic multi-field write); commits `f8d2ed3` (PLM-1 client) → `19f917b` (PLM-2 sync fields) → `e63bc58` (PLM-1b consolidation) → `465c593` (PLM-3/4/5 poll task + beat + tests) → `69ce14b` (PLM-6 close-on-milestone-close) → `aa316ef` (PLM-7 tracking_modality gate per D-170).
+
+## D-170: `tracking_modality` is the polling opt-in seam (not per-item paths)
+
+**Status**: Active · **Date**: 2026-08-14
+
+**Context**: NSD2-3..11 initially opted items into NSD2 polling via `ingress_folder starts with /mnt/nsd2` — requiring TPMs to type container mount paths (HILDA-internal detail) into an SP text field. Bad seam: leaky abstraction (TPMs shouldn't know deployment topology), brittle to path renames, no SP-side validation, easy to typo. `tracking_modality` (SP Choice column, already TPM-facing per `[D-037]`, multi-value list, template-seedable, sync-wired via `_merge_list`) is the right gate.
+
+**Decision**: Both NSD2 and PLM polling opt-in gates use `tracking_modality` list membership:
+- **NSD2** gate: `tg_name == 'HW PL'` + `device_id` match + `'NetworkSharedDrive' in tracking_modality`.
+- **PLM** gate: `tg_name in {MQL-FIT, MNO-SOLUTION}` + `device_id` match + `'CorporatePLM' in tracking_modality`.
+- **Walk / poll paths**: exclusively from env vars (`HILDA_NSD2_ROOTS` = `/mnt/nsd2`; `HILDA_PLM_SCRIPTS_DIR` = `/opt/plm_scripts`). Single deployment-level "modality → path" mapping. No per-item paths.
+- **Strict gate**: empty `tracking_modality` → skip. No soft default (per architect 2026-08-14 — P1 milestone not TPM-live yet, no backward compat concern).
+- **`ingress_folder` deprecated for HW PL items** — kept in schema per FR-77 for other TG types that may adopt it, but NSD2 poll no longer reads it. Sync path still wires it (NSD2-7 added it to `_STR_FIELDS`) so any TG using it stays SP-authoritative.
+- **No new `TrackingModality` enum values needed**: existing `NETWORK_SHARED_DRIVE = "NetworkSharedDrive"` covers both NSD1 and NSD2 — `tg_name` distinguishes (`HW PL` → NSD2 today; other TGs + `NetworkSharedDrive` → NSD1 future). Avoids SP UI Choice column churn.
+
+**Why**:
+- **TPM-facing seam**: `tracking_modality` is an SP Choice column (SP-side validated at pick time) — TPMs pick from Email / CorporatePLM / NetworkSharedDrive / CustomerJIRA / etc.; no free-form string that could hold a wrong path. Multi-value per `[D-037]` allows an item to opt into multiple modalities cleanly.
+- **HILDA-internal path stays HILDA-internal**: `/mnt/nsd2` is deployment topology; env var is the right place. NSD1 support later needs only `HILDA_NSD1_ROOTS=/mnt/nsd` — no per-customer / per-item config surface change.
+- **No new SP column needed**: `tracking_modality` already exists in schema, template-authoritative at import (`_tmpl_list` merge), syncs via `_merge_list` in `sync_deliverable_fields.py` — all wiring free. Zero SP UI engineer coordination cost.
+- **Strict gate (no fallback)**: enforces explicit opt-in; ensures deployment surprises don't accidentally trigger polling on unintended items. Correct choice because P1 not TPM-live yet.
+- **No new enum values**: adding `NETWORK_SHARED_DRIVE_1` + `NETWORK_SHARED_DRIVE_2` would ripple through SP UI Choice column, template.yaml docs, dispatcher, sync fields, tests — all for zero information gain vs `tg_name`-based distinction. YAGNI.
+
+**Consequences**:
+- **Backward-incompatible with any existing HW PL / MQL-FIT / MNO-SOLUTION items** whose `tracking_modality` doesn't include the expected value. Acceptable per architect — P1 not TPM-live yet.
+- **template.yaml migration** (per-customer): MMK P1 milestone template should seed `tracking_modality: [NetworkSharedDrive]` on HW PL items and `tracking_modality: [CorporatePLM]` on MQL-FIT / MNO-SOLUTION items so imports get opt-in without per-item TPM edits.
+- **TPMs adding items via SP UI or Excel-bulk-import** must explicitly check the `tracking_modality` Choice column per item — unavoidable since SP UI is the surface at that point. Template seeding covers the import path; ad-hoc addition still needs manual check.
+- **Future poll modalities** (NSD1, CorporateMessenger-inbound, CustomerJIRA polling) can follow the same pattern: add `HILDA_<X>_ROOTS`/similar env var + module constant `_<X>_MODALITY_VALUE`. Extensible without schema change.
+- **Removed stale tests** for `ingress_folder`-based filtering (windows-backslash-matches, wrong-root-filtered-out) — preconditions no longer apply.
+- **Regression test** locks the change: `test_ingress_folder_ignored_since_nsd2_12` verifies a bogus per-item `ingress_folder` is IGNORED as long as `tracking_modality` opts in and env-var walk base is valid.
+
+**Anchors**: `[D-037]` (multi-value `TrackingModality` per DeliveryItem), `[D-077]` (FR-77 routing — `ingress_folder` per-item field kept in schema for other TGs); commits `aa316ef` (NSD2-12 + PLM-7 pivot). Supersedes NSD2-11's ingress_folder-prefix gate.
+
+## D-171: NASCA anti-tampering — batch decryption requires sanctioned CLI, not wrapper (investigation outcome)
+
+**Status**: Active · **Date**: 2026-08-14
+
+**Context**: NSD2 downloads land NASCA-encrypted (Samsung SDS enterprise DRM: outer marker `<## `). TPMs currently right-click → Show more options → NASCA +SD → Convert to decrypted document per file — untenable at NSD2 volume (~143 files per first-tick smoke on SM-S671U1 alone). Investigated wrapping `drmendec.exe` (found via Task Manager under `C:\Windows\pcdrm\`) as batch subprocess so HILDA could decrypt at ingest time.
+
+Discovered 2026-08-14 via ProcMon capture:
+- **Sanctioned flow**: `drmmenu64.dll` (shell extension COM DLL loaded by explorer.exe) copies file to `C:\Windows\pcdrm\drmtmp\ex_<num>.tmp`; invokes `drmendec.exe /d <tmp-path>`; drmendec decrypts in place; DLL copies back to source location; DLL deletes temp. `EFC_<parent_pid>=1` env var set by parent (likely metadata; not the security gate).
+- **Attempted bypass**: `& "C:\Windows\pcdrm\drmendec.exe" /d "C:\temp\test.tmp"` (a fresh copy) — drmendec exited SUCCESS (`$LASTEXITCODE=0`), **but the file was destroyed** (FileNotFoundException on subsequent ReadAllBytes). ProcMon stack trace shorter than the sanctioned flow — drmendec bailed early after a security check failed.
+- **Root cause inference**: `C:\Windows\pcdrm\` includes multiple binaries + DLLs suggesting a kernel-mode filter driver (`nschim.exe` / `nschill.exe` daemons visible in Task Manager). Working hypothesis: the driver intercepts NASCA file I/O; `drmmenu64.dll` registers spawned drmendec's PID with the driver via IOCTL before invocation; standalone spawn skips the registration → driver treats read as unauthorized decrypt attempt → responds with tamper-destroy (deliberate DLP behavior, not a bug).
+
+**Decision**: **Do NOT attempt further programmatic bypass of `drmendec.exe`.** Ph-2 paths for batch decryption, in preference order:
+1. **Sanctioned batch CLI from Samsung SDS** (preferred). HILDA is inside Samsung; NASCA is Samsung SDS's product. Request a service-account PID pre-registered in the driver's allow-list, or a documented batch decrypt tool. Legitimate ask given HILDA is not a threat actor; IT can provision it.
+2. **UI Automation** (backup). AutoHotkey / PowerShell UIA simulating the right-click → cascade menu → click flow. Brittle (breaks on Windows updates, HiDPI scaling, menu reordering); requires interactive Windows session (no headless); generates DLP audit noise but is legally clean (impersonating authorized user action). Estimated ~3-10 seconds per file.
+3. **Org-level workflow shift** (alternative). Plaintext source share upstream of the DLP wrap so HILDA reads unencrypted originals. Requires cross-team process change; not solely a HILDA problem to solve.
+
+**Why**:
+- **Enterprise DRM is intentionally hard to bypass**: kernel filter driver + signed shell extension + IPC handshake is a mature defense-in-depth pattern. Every layer needs cooperation; ad-hoc wrappers hit walls by design.
+- **Tamper-destroy is not a bug**: NASCA is designed to destroy rather than leak plaintext to unauthorized readers. Continuing to poke at it risks real data loss (already lost `C:\temp\test.tmp` in the discovery run — a copy, thankfully).
+- **Legitimate ask path exists**: corp-internal Samsung tool at Samsung company — sanctioned batch path is a legitimate business ask. Adversarial bypass of internal DRM would be inappropriate; sanctioned CLI request is the right posture.
+- **Documented to prevent rediscovery**: without this ADR + companion STATUS flag, someone else could waste a day re-discovering the destroy behavior. The ~5-minute ProcMon capture that revealed it is easy to redo but destructive if repeated on production files.
+
+**Consequences**:
+- **Ph-1 today**: NSD2 poll ingests files but they stay NASCA-encrypted in `document_index`. Router filename-substring matching still works (filenames aren't encrypted); dedup by hash still works (hashes of encrypted bytes are stable per source file); view-tree writes encrypted bytes. TPMs use Ph-1 download-only view (`[D-152]`) — they download from HILDA, open locally, NASCA context on their Windows machine decrypts.
+- **DRM badge on browse UI** per `[D-152]` marks NASCA files clearly so TPMs know they're download-only.
+- **Deferred Ph-2 work**: sanctioned CLI integration ~50 LOC + IT engagement estimated once CLI available. UI automation backup ~200 LOC + separate Windows-box deployment concern.
+- **Never re-attempt standalone `drmendec` invocation on production files**: this ADR + STATUS flag are the guard-rails.
+- **`is_drm_wrapped` NASCA-detection at ingest** (per `[D-152]`) remains the correct pre-existing check; NSD2 files land with this flag set, gating the Ph-1 download-only UI correctly.
+
+**Anchors**: `[D-152]` (NASCA IRM detection + docs-view download-only Ph-1); STATUS flag `[NEW 2026-08-14] NSD2 downloads land NASCA-encrypted; batch decryption blocked upstream`; ProcMon capture 2026-08-14 (command line: `C:\windows\pcdrm\drmendec.exe /d C:\windows\pcdrm\drmtmp\ex_<num>.tmp` from parent PID drmmenu64.dll via explorer.exe).
+
