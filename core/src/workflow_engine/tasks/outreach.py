@@ -66,27 +66,48 @@ def _record_reminder_attempt(deps, delivery_item_id: str | None) -> int | None:
 
 
 def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, Any]) -> str | None:
-    """Resolve outreach recipient per [D-080] preference chain.
+    """DEPRECATED (OWNER-3, 2026-08-14): kept for pre-existing callers /
+    tests. Delegates to _resolve_recipients() and returns first entry or
+    None. All new code should use _resolve_recipients() to get the full
+    multi-owner list."""
+    recipients = _resolve_recipients(deps, event_context, params)
+    return recipients[0] if recipients else None
 
-    Path A precedence (architect 2026-06-27: SP is source of truth):
-      1. Explicit params.recipient                 (rule YAML can pin)
-      2. **SP-side owner_corp_usa_email**          (live; via sp_writer)
-      3. **SP-side owner_corp_email**              (live fallback)
-      4. Storage DeliveryItem.owner_corp_usa_email (offline fallback if SP
-         unreachable -- typically None today since HILDA doesn't replicate
-         SP fields; kept for testability + transitional state)
-      5. Storage DeliveryItem.owner_corp_email     (offline fallback)
-      6. event_context.owner_corp_usa_email        (legacy callers / fixtures)
-      7. None -> caller writes audit-only row, skips send
+
+def _resolve_recipients(
+    deps, event_context: dict[str, Any], params: dict[str, Any],
+) -> list[str]:
+    """OWNER-3 (2026-08-14): resolve outreach recipient LIST per multi-owner
+    semantics. Returns [] if no owner is resolvable (caller writes audit-only
+    row + skips send).
+
+    Path A precedence (architect 2026-06-27, extended for lists 2026-08-14):
+      1. Explicit params.recipient                          (rule YAML can pin -- always single)
+      2. **SP-side owner_corp_usa_email** parsed as list    (live; via sp_writer; preferred per [D-080])
+      3. **SP-side owner_corp_email** parsed as list        (live fallback)
+      4. Storage DeliveryItem.owner_corp_usa_email_list     (offline fallback, populated by OWNER-2 dual-write)
+      5. Storage DeliveryItem.owner_corp_email_list         (offline fallback)
+      6. Storage singular owner_corp_usa_email / owner_corp_email
+         wrapped as single-element list                     (pre-OWNER-2 rows)
+      7. event_context.owner_corp_usa_email (legacy callers / fixtures) as single-element list
+      8. []  -> caller writes audit-only row, skips send
 
     Reading SP at fire-time means TPM mid-flight owner edits in SP are
     automatically honored without HILDA-side persistence. Failure modes
     (network, SP outage, schema mismatch) fall through silently to the
     storage/event_context fallbacks rather than blocking the email.
+
+    Multi-owner semantics per architect 2026-08-14: TPMs may type
+    'alice@corp; bob@corp' in the SP text column; both go in TO of ONE
+    outreach email; any owner can reply and it's attributed correctly
+    (OWNER-4). SP text column parsing uses _split_owner_list which
+    accepts both ';' (SP convention) and ',' (TPM tolerance).
     """
+    from core.src.workflow_engine.tasks.sp_alert_imports import _split_owner_list
+
     explicit = params.get("recipient")
     if explicit:
-        return explicit
+        return [explicit]
 
     delivery_item_id = event_context.get("delivery_item_id")
     item = None
@@ -96,30 +117,56 @@ def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, An
         except Exception:  # noqa: BLE001 -- storage miss is non-fatal
             item = None
 
-    # Path A: SP read at fire-time
+    # Path A: SP read at fire-time (returns list already-parsed)
     if item is not None and deps.sp_writer is not None:
-        sp_owner = _read_owner_from_sp(deps, item)
-        if sp_owner:
-            return sp_owner
+        sp_owners = _read_owner_list_from_sp(deps, item)
+        if sp_owners:
+            return sp_owners
 
-    # Fallback 1: storage-cached owner identity (typically NULL in current
-    # Ph-1 since HILDA doesn't replicate SP fields).
+    # Fallback 1a: storage-cached owner LIST (new post-OWNER-2 field).
     if item is not None:
-        from_storage = (
+        list_field = (
+            getattr(item, "owner_corp_usa_email_list", None)
+            or getattr(item, "owner_corp_email_list", None)
+        )
+        if list_field:
+            return list(list_field)
+
+    # Fallback 1b: storage-cached SINGULAR (pre-OWNER-2 rows -- backward compat).
+    if item is not None:
+        singular = (
             getattr(item, "owner_corp_usa_email", None)
             or getattr(item, "owner_corp_email", None)
         )
-        if from_storage:
-            return from_storage
+        if singular:
+            # Support the case where TPM has typed a semicolon-separated string
+            # into the singular column pre-OWNER-2 sync -- parse for safety.
+            return _split_owner_list(singular)
 
-    # Fallback 2: event_context (legacy callers + tests that pre-populate)
-    return event_context.get("owner_corp_usa_email")
+    # Fallback 2: event_context (legacy callers + tests that pre-populate).
+    from_event = event_context.get("owner_corp_usa_email")
+    if from_event:
+        return [from_event]
+
+    return []
 
 
 def _read_owner_from_sp(deps, item: Any) -> str | None:
-    """Read live owner identity from SP via sp_writer.get_items.
+    """DEPRECATED (OWNER-3, 2026-08-14): use _read_owner_list_from_sp() for
+    multi-owner support. This wrapper returns first entry or None."""
+    owners = _read_owner_list_from_sp(deps, item)
+    return owners[0] if owners else None
 
-    Best-effort: returns None on any failure (network, no match, schema
+
+def _read_owner_list_from_sp(deps, item: Any) -> list[str]:
+    """OWNER-3 (2026-08-14): read live owner identity LIST from SP.
+
+    SP text column may contain a semicolon-separated string like
+    'alice@corp; bob@corp' when multiple owners share the item. Returns
+    parsed list via _split_owner_list; falls back to owner_corp_email if
+    owner_corp_usa_email is empty (per [D-080] preference).
+
+    Best-effort: returns [] on any failure (network, no match, schema
     mismatch). Caller falls back to storage / event_context.
 
     Natural key per architect 2026-06-27 Step 4 probe + field-map table:
@@ -137,12 +184,13 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
     customer's Deliverables list spans multiple projects / milestones.
     """
     from core.src.sharepoint_integration.config import ListScope
+    from core.src.workflow_engine.tasks.sp_alert_imports import _split_owner_list
     customer_id = getattr(item, "customer_id", None)
     milestone_id = getattr(item, "milestone_id", None)
     device_id = getattr(item, "device_id", None)
     item_no = getattr(item, "item_no", None)
     if not customer_id or item_no is None:
-        return None
+        return []
     filters: dict[str, Any] = {"item_no": item_no}
     if milestone_id:
         filters["milestone_id"] = milestone_id
@@ -157,28 +205,35 @@ def _read_owner_from_sp(deps, item: Any) -> str | None:
         )
     except Exception as exc:  # noqa: BLE001 -- SP read is best-effort
         _log.warning(
-            "_resolve_recipient: SP read failed for customer_id=%s milestone_id=%s "
+            "_resolve_recipients: SP read failed for customer_id=%s milestone_id=%s "
             "project_model=%s item_no=%s: %s",
             customer_id, milestone_id, device_id, item_no, type(exc).__name__,
         )
-        return None
+        return []
     if not rows:
         _log.info(
-            "_resolve_recipient: SP returned no rows for customer_id=%s milestone_id=%s "
+            "_resolve_recipients: SP returned no rows for customer_id=%s milestone_id=%s "
             "project_model=%s item_no=%s",
             customer_id, milestone_id, device_id, item_no,
         )
-        return None
+        return []
     if len(rows) > 1:
         _log.warning(
-            "_resolve_recipient: SP returned %d rows for customer_id=%s milestone_id=%s "
+            "_resolve_recipients: SP returned %d rows for customer_id=%s milestone_id=%s "
             "project_model=%s item_no=%s; using first. Natural key "
             "(customer, milestone, project_model) + item_no should be unique -- "
             "check MMK column-map or schema for duplicates.",
             len(rows), customer_id, milestone_id, device_id, item_no,
         )
     row = rows[0]
-    return row.get("owner_corp_usa_email") or row.get("owner_corp_email")
+    # OWNER-3: parse both singular columns (SP text with ';' delimiter for
+    # multi-owner) and return the first non-empty list. _split_owner_list
+    # tolerates single-value strings ('alice@corp' -> ['alice@corp']) as
+    # well as multi-value strings ('alice@corp; bob@corp' -> [both]).
+    usa_owners = _split_owner_list(row.get("owner_corp_usa_email"))
+    if usa_owners:
+        return usa_owners
+    return _split_owner_list(row.get("owner_corp_email"))
 
 
 @hilda_celery_app.task(
@@ -210,7 +265,11 @@ def send_initial_outreach_task(
     template = params.get("template", "outreach_table")
     channel = params.get("channel", "email")
     delivery_item_id = event_context.get("delivery_item_id")
-    recipient = _resolve_recipient(deps, event_context, params)
+    # OWNER-3 (2026-08-14): resolve full owner LIST; ONE email goes to ALL
+    # of them per architect direction. `recipient` (singular) kept as
+    # first-of-list for legacy audit/log paths + template BC.
+    recipients = _resolve_recipients(deps, event_context, params)
+    recipient = recipients[0] if recipients else None
 
     # Generate BATCH-id deterministically from correlation_id so the inbound
     # reply parser can correlate the reply back to delivery_item_id via the
@@ -228,7 +287,7 @@ def send_initial_outreach_task(
     )
 
     message_id = None
-    if channel == "email" and deps.email_sender is not None and recipient:
+    if channel == "email" and deps.email_sender is not None and recipients:
         try:
             body_html = _render_outreach_table(
                 owner_identity=owner_identity,
@@ -253,7 +312,7 @@ def send_initial_outreach_task(
             _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
             message_id = _send_email(
                 deps,
-                to=recipient,
+                to=recipients,
                 subject=f"{_subject_prefix} -- Status request -- {batch_id}",
                 body_marker=body_html,
             )
@@ -355,6 +414,11 @@ def _fetch_template_inputs(
         "owner_corp_email":     None,
         "owner_corp_id":        None,
         "owner_name":           None,
+        # OWNER-3 (2026-08-14): multi-owner display list -- Jinja template
+        # renders greeting as "Hi Alice, Bob, Carol,". Populated from SP
+        # owner_name via _split_owner_list below; empty [] on lookup failure
+        # falls back to singular "owner_name" via `or "Owner"` in template.
+        "owner_names":          [],
     }
     item_for_template: dict[str, Any] | None = None
     if not delivery_item_id or deps.storage is None:
@@ -391,12 +455,15 @@ def _fetch_template_inputs(
                     entity="delivery_items", scope=scope, canonical_filters=filters,
                 )
                 if rows:
+                    from core.src.workflow_engine.tasks.sp_alert_imports import _split_owner_list
                     r = rows[0]
                     owner_identity["owner_name"] = r.get("owner_name") or None
                     owner_identity["owner_corp_id"] = r.get("owner_corp_id") or None
                     owner_identity["owner_corp_email"] = (
                         r.get("owner_corp_email") or owner_identity["owner_corp_email"]
                     )
+                    # OWNER-3: multi-owner name list for greeting rendering.
+                    owner_identity["owner_names"] = _split_owner_list(r.get("owner_name"))
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "_fetch_template_inputs: SP owner lookup failed for item=%s: %s",
@@ -412,7 +479,7 @@ def _send_batch_outreach_email(
     owner_identity: dict[str, Any],
     items: list[dict[str, Any]],
     batch_id: str,
-    recipient: str,
+    recipient: str | list[str],
 ) -> str | None:
     """Render outreach_table.j2 with N item rows and send ONE email to the
     owner. Returns the EWS Message-ID on success, None on send failure.
@@ -503,7 +570,9 @@ def send_reminder_task(
     template = params.get("template", "standard_owner_reminder")
     channel = params.get("channel", "email")
     delivery_item_id = event_context.get("delivery_item_id")
-    recipient = _resolve_recipient(deps, event_context, params)
+    # OWNER-3 (2026-08-14): multi-owner reminder -- ONE email to all owners.
+    recipients = _resolve_recipients(deps, event_context, params)
+    recipient = recipients[0] if recipients else None
 
     # Advance FR-10 cadence counter BEFORE send so audit log + email subject
     # reflect the actual cadence number (1st reminder -> count=1, 2nd -> 2).
@@ -513,11 +582,11 @@ def send_reminder_task(
     reminder_count = new_count if new_count is not None else params.get("reminder_count", 1)
 
     message_id = None
-    if channel == "email" and deps.email_sender is not None and recipient:
+    if channel == "email" and deps.email_sender is not None and recipients:
         try:
             message_id = _send_email(
                 deps,
-                to=recipient,
+                to=recipients,
                 subject=f"[HILDA] Reminder #{reminder_count} -- BATCH-{event_context.get('correlation_id', '')[:8]}",
                 body_marker=f"send_reminder: template={template} count={reminder_count}",
             )
@@ -631,14 +700,16 @@ def notify_new_owner_task(
             "outcome":    "deferred_collection_not_started",
         }
 
-    recipient = _resolve_recipient(deps, event_context, params)
+    # OWNER-3 (2026-08-14): multi-owner reassignment notice -- ONE email to all.
+    recipients = _resolve_recipients(deps, event_context, params)
+    recipient = recipients[0] if recipients else None
 
     message_id = None
-    if channel == "email" and deps.email_sender is not None and recipient:
+    if channel == "email" and deps.email_sender is not None and recipients:
         try:
             message_id = _send_email(
                 deps,
-                to=recipient,
+                to=recipients,
                 subject=f"[HILDA] You've been assigned a deliverable -- {event_context.get('item_title', '')}",
                 body_marker=f"notify_new_owner: template={template}",
             )
@@ -677,8 +748,13 @@ def notify_new_owner_task(
 # ---------------------------------------------------------------------------
 
 
-def _send_email(deps: Any, *, to: str, subject: str, body_marker: str) -> str:
+def _send_email(deps: Any, *, to: list[str] | str, subject: str, body_marker: str) -> str:
     """Sync-bridge to deps.email_sender.send(...). Returns Message-ID.
+
+    OWNER-3 (2026-08-14): `to` accepts either a single string (backward compat
+    for pre-migration callers) OR a list of strings (multi-owner outreach --
+    all recipients in TO of ONE email; any owner can reply per architect
+    direction). Single string is wrapped in a single-element list.
 
     Body composition Ph-1: minimal marker string. Real composer (Jinja2 templates
     + per-customer variables) lands when worker boot wires the full compose_*
@@ -686,8 +762,9 @@ def _send_email(deps: Any, *, to: str, subject: str, body_marker: str) -> str:
     """
     import asyncio
 
+    to_list = [to] if isinstance(to, str) else list(to)
     coro = deps.email_sender.send(
-        to=[to],
+        to=to_list,
         cc=[],
         subject=subject,
         body=body_marker,

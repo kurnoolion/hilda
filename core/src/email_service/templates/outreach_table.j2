@@ -9,7 +9,7 @@
 <html>
 <body style="font-family: Arial, sans-serif; font-size: 14px;">
 
-<p>Hello {{ owner.owner_name or "Owner" }},</p>
+<p>Hello {{ (owner.owner_names | join(", ")) if owner.owner_names else (owner.owner_name or "Owner") }},</p>
 
 <p>Please update the status of work items assigned to you.</p>
 
