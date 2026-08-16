@@ -236,6 +236,16 @@ class DeliveryItemTable(Base):
     owner_corp_email: Mapped[str | None] = mapped_column(String(256), nullable=True)
     owner_corp_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     owner_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # OWNER-1 (2026-08-14): multi-owner list columns per architect direction --
+    # co-owners / backup contacts on a single delivery item. Alembic 0003
+    # backfills these from the singular columns above (singular -> [singular]
+    # or [] on NULL/empty). During OWNER-2..6 both singular and list are
+    # dual-written by ingest; readers migrate one-by-one to the list form;
+    # OWNER-7 drops singulars + renames these back to unsuffixed names.
+    owner_name_list:            Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    owner_corp_email_list:      Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    owner_corp_usa_email_list:  Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    owner_corp_id_list:         Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
     # Tracking gates per FR-78 / FR-81
     tracking_modality: Mapped[list] = mapped_column(JSON, default=list)  # multi-value per [D-037]

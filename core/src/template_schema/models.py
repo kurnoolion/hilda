@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.src.diagnostics import PipelineError, get_code
 from core.src.template_schema.enums import (
@@ -258,11 +258,24 @@ class DeliveryItemBase(_Base):
     expected_completion_date:        date | None = None
     actual_completion_date:          date | None = None
     item_type:                       str
-    # 4-field owner identity per FR-88 + [D-080] + [D-086] (free-form, no AD validation):
-    owner_corp_usa_email:            str | None = None   # preferred outreach recipient per [D-080]
-    owner_corp_email:                str | None = None   # fallback outreach recipient
-    owner_corp_id:                   str | None = None   # corp directory ID; PLM grouping key per FR-5 + [D-035]
-    owner_name:                      str | None = None
+    # 4-field owner identity per FR-88 + [D-080] + [D-086] (free-form, no AD validation).
+    # OWNER-1 (2026-08-14): singular fields DEPRECATED in favor of the *_list
+    # fields below; kept live for backward compat during OWNER-2..6 reader
+    # migration. Ingest dual-writes: singular = first entry from list.
+    # OWNER-7 drops these + renames the _list fields back to unsuffixed names.
+    owner_corp_usa_email:            str | None = None   # DEPRECATED (OWNER-1); use owner_corp_usa_email_list. Preferred outreach recipient per [D-080].
+    owner_corp_email:                str | None = None   # DEPRECATED (OWNER-1); use owner_corp_email_list. Fallback outreach recipient.
+    owner_corp_id:                   str | None = None   # DEPRECATED (OWNER-1); use owner_corp_id_list. Corp directory ID; PLM grouping key per FR-5 + [D-035].
+    owner_name:                      str | None = None   # DEPRECATED (OWNER-1); use owner_name_list.
+    # OWNER-1 (2026-08-14): multi-value owner identity lists (co-owners /
+    # backup contacts). Populated by ingest via _split_owner_list on the
+    # semicolon-separated SP text field ("alice@corp; bob@corp;"). All 4
+    # lists are index-aligned per person -- empty string in a slot for
+    # unknown attributes. Readers migrate from singular -> list in OWNER-2..6.
+    owner_name_list:                 list[str] = Field(default_factory=list)
+    owner_corp_email_list:           list[str] = Field(default_factory=list)
+    owner_corp_usa_email_list:       list[str] = Field(default_factory=list)
+    owner_corp_id_list:              list[str] = Field(default_factory=list)
     tracking_modality:               list[str]            # MULTI-VALUE per [D-037]
     actual_item_info:                str | None = None
     plm_id:                          str | None = None
