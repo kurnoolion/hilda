@@ -251,7 +251,7 @@ class TestDownloadDrrStatus:
             tracking_modality=["Email"], no_customer_upload=False,
             last_updated=datetime.now(timezone.utc), sort_order=1,
             path_id="item-1", force_tracking_enabled=True,
-            owner_corp_id="owner-1",
+            owner_corp_id=["owner-1"],
             item_path_id="item_1", tg_path_id="CPM",
         ))
 
@@ -306,7 +306,7 @@ class TestDownloadDrrStatus:
             tracking_modality=["Email"], no_customer_upload=False,
             last_updated=datetime.now(timezone.utc), sort_order=1,
             path_id="item-1", force_tracking_enabled=True,
-            owner_corp_id="owner-1",
+            owner_corp_id=["owner-1"],
             item_path_id="item_1", tg_path_id="CPM",
         ))
 
@@ -1088,7 +1088,7 @@ class TestUnroutedBrowse:
             delivery_state=delivery_state, tracking_modality=["Email"],
             no_customer_upload=False, last_updated=self._NOW,
             sort_order=item_no, path_id=f"item-{item_no}",
-            force_tracking_enabled=True, owner_corp_id="owner-1",
+            force_tracking_enabled=True, owner_corp_id=["owner-1"],
             item_path_id=f"item_{item_no}", tg_path_id=tg_name,
         )
 
@@ -1254,7 +1254,7 @@ class TestUnroutedRoutePost:
             delivery_state="Open", tracking_modality=["Email"],
             no_customer_upload=False, last_updated=self._NOW,
             sort_order=item_no, path_id=f"item-{item_no}",
-            force_tracking_enabled=True, owner_corp_id="owner-1",
+            force_tracking_enabled=True, owner_corp_id=["owner-1"],
             item_path_id=f"item_{item_no}", tg_path_id=tg_name,
         )
 

@@ -269,23 +269,20 @@ def _group_by_tg(items: list[Any]) -> dict[str, list[Any]]:
 
 
 def _resolve_group_assignee_corp_id(items: list[Any]) -> str:
-    """OWNER-5 (2026-08-16): PLM ticket assignee = first non-empty entry
-    of owner_corp_id_list across the group's items (OWNER-1 promoted this
-    field to a list). Falls back to the singular `owner_corp_id` for
-    pre-OWNER-1 rows whose backfill hasn't run yet.
+    """OWNER-5 (2026-08-16) + OWNER-7 (2026-08-16, B-final-B): PLM ticket
+    assignee = first non-empty entry of owner_corp_id across the group's
+    items (unsuffixed field is list-typed post B-final-B).
 
     Returns "" if no item in the group has any non-empty owner_corp_id.
     Caller MUST check "" and WARN + skip -- PLM tickets require an
     assignee, per architect ("PLM can be assigned to only one person")."""
     for it in items:
-        lst = getattr(it, "owner_corp_id_list", None) or []
+        lst = getattr(it, "owner_corp_id", None) or []
+        if not isinstance(lst, list):
+            continue
         for entry in lst:
             if entry and str(entry).strip():
                 return str(entry).strip()
-    for it in items:
-        singular = getattr(it, "owner_corp_id", None) or ""
-        if singular and singular.strip():
-            return singular.strip()
     return ""
 
 
@@ -309,16 +306,17 @@ def _process_tg_group(
     or create plm_id, write to SP, download files, ingest through router.
     All failures WARN + move on to next group.
 
-    Pre-work: derive PLM assignee from owner_corp_id_list (first non-empty
-    across the group per _resolve_group_assignee_corp_id). If none exists,
-    WARN + skip -- PLM requires an assignee and we won't fabricate one."""
+    Pre-work: derive PLM assignee from owner_corp_id (first non-empty entry
+    across the group per _resolve_group_assignee_corp_id -- unsuffixed
+    field is list-typed post B-final-B). If none exists, WARN + skip --
+    PLM requires an assignee and we won't fabricate one."""
     from core.src.issue_tracker.corp_plm import on_prem_client
 
     assignee_corp_id = _resolve_group_assignee_corp_id(items)
     if not assignee_corp_id:
         _log.warning(
             "PLM_POLL: no owner_corp_id resolvable for tg=%s device=%s "
-            "(%d items; owner_corp_id + owner_corp_id_list both empty) -- "
+            "(%d items; owner_corp_id list empty across group) -- "
             "skipping group this tick (PLM needs an assignee per architect)",
             tg_name, device_id, len(items),
         )

@@ -20,7 +20,7 @@ denormalization (TGGroupBase Pydantic model dropped).
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from core.src.email_service.protocol import (
     InboundMessage,
@@ -94,13 +94,12 @@ def resolve_sender_match(
 ) -> Literal["owner", "tg_alias", "cc", "mismatch"]:
     """Resolve sender against the 4-field owner identity per [D-105].
 
-    Lookup order:
-      (1) owner_corp_usa_email_list -- ANY entry match (OWNER-4 multi-owner)
-      (2) owner_corp_email_list     -- ANY entry match (OWNER-4 multi-owner)
-      (3) owner_corp_usa_email      -- singular fallback (pre-OWNER-2 rows)
-      (4) owner_corp_email          -- singular fallback (pre-OWNER-2 rows)
-      (5) tg_email_group_alias      -- TG-shared alias
-      (6) cc list                   -- cc'd participant
+    Lookup order (OWNER-7 2026-08-16, B-final-B: singular fallback removed
+    -- owner_corp_*_email are now unsuffixed lists on DeliveryItemBase):
+      (1) owner_corp_usa_email  -- ANY entry match (multi-owner list)
+      (2) owner_corp_email      -- ANY entry match (multi-owner list)
+      (3) tg_email_group_alias  -- TG-shared alias
+      (4) cc list               -- cc'd participant
       otherwise -> mismatch (caller does NOT reject the reply -- reply is
       still parsed + applied; sender_match=="mismatch" surfaces in the
       audit row per architect Q3 2026-08-14 "not strict; just add to audit").
@@ -110,23 +109,22 @@ def resolve_sender_match(
     audit trail captures the matching entry via sender_email regardless.
 
     expected_items is a list of dicts representing DeliveryItemBase rows;
-    per [D-106] TG fields are denormalized onto each item; per OWNER-1
-    both singular AND _list variants are populated.
+    per [D-106] TG fields are denormalized onto each item; per OWNER-7 the
+    owner_corp_*_email keys carry list values (unsuffixed after B-final-B
+    rename). Dict values that are strings (pre-OWNER-7 test fixtures) fall
+    into the tolerant path: any non-list value is treated as an empty list
+    for the check, which the caller-side data-shape upgrade is expected
+    to cover -- but string-typed values should not appear in freshly-
+    fetched rows after OWNER-7.
     """
     s = (sender_email or "").strip().lower()
     if not s:
         return "mismatch"
     cc_lower = {c.strip().lower() for c in cc_addrs if c}
     for item in expected_items:
-        # Multi-owner list check first (OWNER-4).
-        usa_list = [e.strip().lower() for e in (item.get("owner_corp_usa_email_list") or []) if e]
-        corp_list = [e.strip().lower() for e in (item.get("owner_corp_email_list") or []) if e]
+        usa_list = _lc_list(item.get("owner_corp_usa_email"))
+        corp_list = _lc_list(item.get("owner_corp_email"))
         if s in usa_list or s in corp_list:
-            return "owner"
-        # Singular fallback for pre-OWNER-2 rows (list would be [] there).
-        usa = (item.get("owner_corp_usa_email") or "").strip().lower()
-        corp = (item.get("owner_corp_email") or "").strip().lower()
-        if s and (s == usa or s == corp):
             return "owner"
     for item in expected_items:
         alias = (item.get("tg_email_group_alias") or item.get("email_group_alias") or "").strip().lower()
@@ -135,3 +133,12 @@ def resolve_sender_match(
     if s in cc_lower:
         return "cc"
     return "mismatch"
+
+
+def _lc_list(value: Any) -> set[str]:
+    """Coerce a list-of-strings owner field to a lowercased-stripped set
+    for membership testing. Non-list values (missing / None) return an
+    empty set. Empty strings inside the list are dropped."""
+    if not isinstance(value, list):
+        return set()
+    return {str(e).strip().lower() for e in value if e and str(e).strip()}

@@ -118,6 +118,9 @@ def _candidate_test_item(
     tg_email_group_alias: str | None = None,
     folder_routing_enabled: bool = False,
 ) -> dict:
+    # OWNER-7 (2026-08-16, B-final-B): owner_* fields are list-typed on
+    # DeliveryItemBase. Test fixture wraps the singular kwarg values
+    # (fixture-friendly signature) into single-element lists.
     return {
         "item_id":               item_id,
         "item_no":               item_no,
@@ -126,9 +129,9 @@ def _candidate_test_item(
         "item_type":             item_type,
         "tg_name":               tg_name,
         "tg_email_group_alias":  tg_email_group_alias,
-        "owner_corp_usa_email":  owner_corp_usa_email,
-        "owner_corp_email":      owner_corp_usa_email,
-        "owner_corp_id":         owner_corp_id,
+        "owner_corp_usa_email":  [owner_corp_usa_email] if owner_corp_usa_email else [],
+        "owner_corp_email":      [owner_corp_usa_email] if owner_corp_usa_email else [],
+        "owner_corp_id":         [owner_corp_id] if owner_corp_id else [],
         "folder_routing_enabled": folder_routing_enabled,
     }
 
@@ -142,9 +145,9 @@ def _default_item(item_id: str = "ITEM-DEFAULT") -> dict:
         "item_type":             ItemType.DEFAULT.value,
         "tg_name":               None,
         "tg_email_group_alias":  None,
-        "owner_corp_usa_email":  None,
-        "owner_corp_email":      None,
-        "owner_corp_id":         "default-owner",
+        "owner_corp_usa_email":  [],
+        "owner_corp_email":      [],
+        "owner_corp_id":         ["default-owner"],
         "folder_routing_enabled": False,
     }
 
@@ -305,42 +308,45 @@ class TestBodyParserStructured:
     # ------------------------------------------------------------------
 
     def test_sender_match_owner_via_usa_email_list_bob(self):
-        """Multi-owner: bob (2nd entry in owner_corp_usa_email_list) replies;
+        """Multi-owner: bob (2nd entry in owner_corp_usa_email list) replies;
         still resolves to 'owner' (any-owner match)."""
         item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
-        item["owner_corp_usa_email_list"] = ["alice@corp.example", "bob@corp.example", "carol@corp.example"]
+        item["owner_corp_usa_email"] = [
+            "alice@corp.example", "bob@corp.example", "carol@corp.example",
+        ]
         match = resolve_sender_match("bob@corp.example", (), [item])
         assert match == "owner"
 
     def test_sender_match_owner_via_usa_email_list_case_insensitive(self):
         """Sender casing differs; still matches (both sides lowercased)."""
         item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
-        item["owner_corp_usa_email_list"] = ["Alice@Corp.Example", "BOB@corp.example"]
+        item["owner_corp_usa_email"] = ["Alice@Corp.Example", "BOB@corp.example"]
         match = resolve_sender_match("bob@CORP.EXAMPLE", (), [item])
         assert match == "owner"
 
     def test_sender_match_owner_via_corp_email_list_fallback(self):
-        """usa_email_list has no match, corp_email_list has -- resolves 'owner'."""
+        """usa_email list has no match, corp_email list has -- resolves 'owner'."""
         item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
-        item["owner_corp_usa_email_list"] = ["alice@corp.example"]
-        item["owner_corp_email_list"]     = ["bob@corp.example"]
+        item["owner_corp_usa_email"] = ["alice@corp.example"]
+        item["owner_corp_email"]     = ["bob@corp.example"]
         match = resolve_sender_match("bob@corp.example", (), [item])
         assert match == "owner"
 
-    def test_sender_match_mismatch_when_neither_list_nor_singular_hits(self):
+    def test_sender_match_mismatch_when_list_populated_but_no_hit(self):
         """Non-owner sender + list populated (no match) -> mismatch."""
         item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
-        item["owner_corp_usa_email_list"] = ["alice@corp.example", "bob@corp.example"]
+        item["owner_corp_usa_email"] = ["alice@corp.example", "bob@corp.example"]
         match = resolve_sender_match("stranger@corp.example", (), [item])
         assert match == "mismatch"
 
-    def test_sender_match_pre_owner1_row_still_uses_singular_only(self):
-        """Backward-compat: row without _list fields (pre-OWNER-1 imports)
-        still matches via singular columns."""
+    def test_sender_match_empty_owner_lists_yield_mismatch(self):
+        """OWNER-7: no owner list at all -> mismatch (no fallback to
+        singular; singular columns dropped per B-final-B)."""
         item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
-        # Explicitly no _list keys in dict.
+        item["owner_corp_usa_email"] = []
+        item["owner_corp_email"] = []
         match = resolve_sender_match("alice@corp.example", (), [item])
-        assert match == "owner"
+        assert match == "mismatch"
 
 
 # ===========================================================================

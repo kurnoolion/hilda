@@ -51,11 +51,9 @@ def _make_item(**overrides):
         milestone_id="P1",
         customer_id="MMK",
         delivery_state="Open",
-        owner_corp_email="alice@corp.example",
-        # OWNER-5: PLM assignee derived from owner_corp_id_list[0] (or
-        # singular owner_corp_id fallback). Defaults populate both.
-        owner_corp_id="ALICE_ID",
-        owner_corp_id_list=["ALICE_ID"],
+        # OWNER-7 (B-final-B): unsuffixed owner_* fields are list-typed.
+        owner_corp_email=["alice@corp.example"],
+        owner_corp_id=["ALICE_ID"],   # PLM assignee = [0]
         plm_id="",
         actual_item_info="",
         # PLM-7: tracking_modality gate -- defaults to opted-in for tests
@@ -267,9 +265,9 @@ class TestFilterAndGroup:
         _seed_template_cache()
         items = [
             _make_item(delivery_item_id="X-1", item_no=1, tg_name="MQL-FIT",
-                       owner_corp_email="alice@corp"),
+                       owner_corp_email=["alice@corp"]),
             _make_item(delivery_item_id="X-2", item_no=2, tg_name="MQL-FIT",
-                       owner_corp_email="bob@corp"),  # ignored -- same TG
+                       owner_corp_email=["bob@corp"]),  # ignored -- same TG
         ]
         deps = SimpleNamespace(storage=_StubStorage(items=items), sp_writer=None)
         stats = poll_plm_once(deps)
@@ -277,17 +275,14 @@ class TestFilterAndGroup:
         assert mock_client.create_plm_ticket.call_count == 1
 
     def test_group_missing_owner_corp_id_skipped_with_stat(self, mock_client, ingest_recorder):
-        """OWNER-5: if no item in the TG group has a resolvable
-        owner_corp_id (list OR singular), the group is WARN + skipped;
-        counter tg_groups_missing_owner_corp_id increments; no ticket
-        is created."""
+        """OWNER-5/7: if no item in the TG group has a non-empty
+        owner_corp_id list entry, the group is WARN + skipped; counter
+        tg_groups_missing_owner_corp_id increments; no ticket is created."""
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()
         items = [
-            _make_item(delivery_item_id="X-1", item_no=1,
-                       owner_corp_id="", owner_corp_id_list=[]),
-            _make_item(delivery_item_id="X-2", item_no=2,
-                       owner_corp_id="", owner_corp_id_list=[""]),  # empty entry too
+            _make_item(delivery_item_id="X-1", item_no=1, owner_corp_id=[]),
+            _make_item(delivery_item_id="X-2", item_no=2, owner_corp_id=[""]),  # empty entry
         ]
         deps = SimpleNamespace(storage=_StubStorage(items=items), sp_writer=None)
         stats = poll_plm_once(deps)
@@ -298,14 +293,14 @@ class TestFilterAndGroup:
         mock_client.create_plm_ticket.assert_not_called()
 
     def test_group_assignee_from_list_first_entry(self, mock_client, ingest_recorder):
-        """OWNER-5: assignee is first non-empty entry of owner_corp_id_list
-        (OWNER-1 promoted this to a list). Passed to create_plm_ticket as
-        the `owner_corp_id` kwarg."""
+        """OWNER-5/7: assignee is first non-empty entry of owner_corp_id
+        (unsuffixed field is list-typed post B-final-B). Passed to
+        create_plm_ticket as the `owner_corp_id` kwarg."""
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()
         deps = SimpleNamespace(
             storage=_StubStorage(items=[
-                _make_item(owner_corp_id="", owner_corp_id_list=["ALICE_ID", "BOB_ID"]),
+                _make_item(owner_corp_id=["ALICE_ID", "BOB_ID"]),
             ]),
             sp_writer=None,
         )
@@ -313,22 +308,20 @@ class TestFilterAndGroup:
         _, kwargs = mock_client.create_plm_ticket.call_args
         assert kwargs["owner_corp_id"] == "ALICE_ID"
 
-    def test_group_assignee_falls_back_to_singular_when_list_empty(self, mock_client, ingest_recorder):
-        """OWNER-5 backward-compat: pre-OWNER-1 rows (before the list
-        backfill migration runs) have singular owner_corp_id but empty
-        owner_corp_id_list -- the assignee resolver falls back to
-        singular."""
+    def test_group_assignee_skips_empty_list_entries(self, mock_client, ingest_recorder):
+        """OWNER-7: first non-empty entry wins; empty-string entries in
+        the list are skipped defensively."""
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()
         deps = SimpleNamespace(
             storage=_StubStorage(items=[
-                _make_item(owner_corp_id="LEGACY_ID", owner_corp_id_list=[]),
+                _make_item(owner_corp_id=["", "  ", "REAL_ID"]),
             ]),
             sp_writer=None,
         )
         poll_plm_once(deps)
         _, kwargs = mock_client.create_plm_ticket.call_args
-        assert kwargs["owner_corp_id"] == "LEGACY_ID"
+        assert kwargs["owner_corp_id"] == "REAL_ID"
 
 
 # ---------------------------------------------------------------------------

@@ -510,16 +510,29 @@ def build_app(
         # Caller-resolves discipline: dashboard passes target identity from the
         # freshly-fetched target_row (4-field owner identity + tg_name + plm_id).
         try:
+            # OWNER-7 (2026-08-16): owner_* fields on DeliveryItemBase are
+            # list-typed post B-final-B; the assoc-table snapshot fields
+            # remain singular str per OWNER-1 (historic record + FR-5/D-035
+            # PLM fan-out + ix_assoc_owner_corp_id index). Coerce list ->
+            # first non-empty entry here so the snapshot captures a
+            # representative owner.
+            def _first(v):
+                if isinstance(v, list):
+                    for e in v:
+                        if e and str(e).strip():
+                            return str(e).strip()
+                    return ""
+                return v or ""
             await reassign_document_to_workitem(
                 file_hash=file_hash,
                 source_delivery_item_id=source_id,
                 target_delivery_item_id=target_id,
                 pm_id=pm_id,
                 target_tg_name=target_row.get("tg_name"),
-                target_owner_corp_id=target_row.get("owner_corp_id", ""),
-                target_owner_corp_usa_email=target_row.get("owner_corp_usa_email"),
-                target_owner_corp_email=target_row.get("owner_corp_email"),
-                target_owner_name=target_row.get("owner_name"),
+                target_owner_corp_id=_first(target_row.get("owner_corp_id")),
+                target_owner_corp_usa_email=_first(target_row.get("owner_corp_usa_email")),
+                target_owner_corp_email=_first(target_row.get("owner_corp_email")),
+                target_owner_name=_first(target_row.get("owner_name")),
                 target_plm_id=target_row.get("plm_id"),
             )
         except Exception as exc:

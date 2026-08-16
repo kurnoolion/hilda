@@ -112,7 +112,7 @@ def _mk_item(
         sort_order=item_no,
         path_id=f"item-{item_no}",
         force_tracking_enabled=True,
-        owner_corp_id="owner-1",
+        owner_corp_id=["owner-1"],
         item_path_id=f"item_{item_no}",
         tg_path_id=tg_name,
     )

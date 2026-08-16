@@ -70,37 +70,33 @@ def test_split_owner_list_handles_trailing_semicolon_and_whitespace():
     assert _split_owner_list(None) == []
 
 
-def test_merge_owner_field_dual_writes_singular_and_list():
-    """_merge_owner_field writes BOTH singular (first entry) AND _list (full)
-    when body_kvs has a non-empty parsed value."""
+def test_merge_owner_field_writes_list_under_unsuffixed_name():
+    """OWNER-7 (2026-08-16, B-final-B): _merge_owner_field writes the parsed
+    list under the unsuffixed name (was dual-write singular + _list pre-
+    OWNER-7). The unsuffixed field is now the list."""
     updates: dict = {}
     body_kvs = {"owner_corp_email": "alice@corp; bob@corp;"}
-    sdf._merge_owner_field(updates, body_kvs, "owner_corp_email", "owner_corp_email_list")
-    assert updates == {
-        "owner_corp_email":      "alice@corp",
-        "owner_corp_email_list": ["alice@corp", "bob@corp"],
-    }
+    sdf._merge_owner_field(updates, body_kvs, "owner_corp_email")
+    assert updates == {"owner_corp_email": ["alice@corp", "bob@corp"]}
 
 
 def test_merge_owner_field_null_guards_preserve_existing():
-    """Missing key OR empty parsed list -> skip BOTH writes (null-guard)."""
+    """Missing key OR empty parsed list -> skip the write (null-guard)."""
     updates: dict = {}
     # Missing key
-    sdf._merge_owner_field(updates, {}, "owner_name", "owner_name_list")
+    sdf._merge_owner_field(updates, {}, "owner_name")
     assert updates == {}
     # Empty string value
-    sdf._merge_owner_field(updates, {"owner_name": ""}, "owner_name", "owner_name_list")
+    sdf._merge_owner_field(updates, {"owner_name": ""}, "owner_name")
     assert updates == {}
     # Whitespace-only + trailing delimiters that yield empty parsed list
-    sdf._merge_owner_field(updates, {"owner_name": " ;; "}, "owner_name", "owner_name_list")
+    sdf._merge_owner_field(updates, {"owner_name": " ;; "}, "owner_name")
     assert updates == {}
 
 
-def test_merge_owner_field_single_owner_still_populates_both():
-    """Backward-compat: TPM entering just 'alice@corp' (no delimiter) still
-    dual-writes singular + list-of-1."""
+def test_merge_owner_field_single_owner_still_writes_list_of_one():
+    """Single-owner case (no delimiter): still writes a single-element list
+    (the unsuffixed field is list-typed post OWNER-7)."""
     updates: dict = {}
-    sdf._merge_owner_field(
-        updates, {"owner_corp_id": "alice"}, "owner_corp_id", "owner_corp_id_list",
-    )
-    assert updates == {"owner_corp_id": "alice", "owner_corp_id_list": ["alice"]}
+    sdf._merge_owner_field(updates, {"owner_corp_id": "alice"}, "owner_corp_id")
+    assert updates == {"owner_corp_id": ["alice"]}

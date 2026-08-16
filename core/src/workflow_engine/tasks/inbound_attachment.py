@@ -1137,6 +1137,17 @@ async def _persist_routed_attachment(
                 break
         if item_dict is None:
             continue
+        # OWNER-7 (2026-08-16): owner_* on DeliveryItemBase (item_dict) is
+        # list-typed; assoc snapshot fields remain singular str per architect
+        # (historic record + FR-5/D-035 PLM fan-out + ix_assoc_owner_corp_id).
+        # Coerce list -> first non-empty entry for the snapshot.
+        def _first(v):
+            if isinstance(v, list):
+                for e in v:
+                    if e and str(e).strip():
+                        return str(e).strip()
+                return ""
+            return v or ""
         try:
             deps.storage.add_document_item_association(DocumentItemAssociation(
                 file_hash=routed.file_hash,
@@ -1144,10 +1155,10 @@ async def _persist_routed_attachment(
                 milestone_id=item_dict.get("milestone_id") or "",
                 local_nsd_path=local_nsd_path_str,
                 nsd_path_type=nsd_path_type_value,
-                owner_corp_id=item_dict.get("owner_corp_id") or "",
-                owner_corp_usa_email=item_dict.get("owner_corp_usa_email"),
-                owner_corp_email=item_dict.get("owner_corp_email"),
-                owner_name=item_dict.get("owner_name"),
+                owner_corp_id=_first(item_dict.get("owner_corp_id")),
+                owner_corp_usa_email=(_first(item_dict.get("owner_corp_usa_email")) or None),
+                owner_corp_email=(_first(item_dict.get("owner_corp_email")) or None),
+                owner_name=(_first(item_dict.get("owner_name")) or None),
                 associated_at=now,
                 associated_by="auto:process_inbound_attachments",
             ))

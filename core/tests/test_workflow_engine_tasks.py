@@ -803,9 +803,10 @@ class TestOutreachTasks:
         """Storage-side owner_corp_usa_email beats event_context fallback."""
         email = _FakeAsyncEmailSender()
         storage = MockStorage()
+        # OWNER-7: owner_* on DeliveryItemBase is list-typed.
         storage.items["I-1234"] = SimpleNamespace(
-            owner_corp_usa_email="storage-usa@corp.example",
-            owner_corp_email="storage-fallback@corp.example",
+            owner_corp_usa_email=["storage-usa@corp.example"],
+            owner_corp_email=["storage-fallback@corp.example"],
         )
         d = TaskDeps(
             storage=storage, sp_writer=MockSp(), audit=MockAudit(),
@@ -819,12 +820,13 @@ class TestOutreachTasks:
         assert email.sent[0]["to"] == ["storage-usa@corp.example"]
 
     def test_resolve_recipient_falls_back_to_owner_corp_email(self):
-        """When storage owner_corp_usa_email is None, falls back to owner_corp_email per [D-080]."""
+        """When storage owner_corp_usa_email is empty, falls back to owner_corp_email per [D-080]."""
         email = _FakeAsyncEmailSender()
         storage = MockStorage()
+        # OWNER-7: owner_* is list-typed; empty list is the "no value" default.
         storage.items["I-1234"] = SimpleNamespace(
-            owner_corp_usa_email=None,
-            owner_corp_email="storage-fallback@corp.example",
+            owner_corp_usa_email=[],
+            owner_corp_email=["storage-fallback@corp.example"],
         )
         d = TaskDeps(
             storage=storage, sp_writer=MockSp(), audit=MockAudit(),
@@ -840,8 +842,8 @@ class TestOutreachTasks:
         email = _FakeAsyncEmailSender()
         storage = MockStorage()
         storage.items["I-1234"] = SimpleNamespace(
-            owner_corp_usa_email="storage@corp.example",
-            owner_corp_email=None,
+            owner_corp_usa_email=["storage@corp.example"],
+            owner_corp_email=[],
         )
         d = TaskDeps(
             storage=storage, sp_writer=MockSp(), audit=MockAudit(),
@@ -876,8 +878,8 @@ class TestOutreachTasks:
         email = _FakeAsyncEmailSender()
         storage = MockStorage()
         storage.items["I-1234"] = SimpleNamespace(
-            owner_corp_usa_email="owner@corp.example",
-            owner_corp_email=None,
+            owner_corp_usa_email=["owner@corp.example"],
+            owner_corp_email=[],
             reminder_count=0,
             last_reminder_triggered_at=None,
         )
@@ -906,8 +908,8 @@ class TestOutreachTasks:
         dev/test setups would loop Rule 2a forever)."""
         storage = MockStorage()
         storage.items["I-1234"] = SimpleNamespace(
-            owner_corp_usa_email=None,
-            owner_corp_email=None,
+            owner_corp_usa_email=[],
+            owner_corp_email=[],
             reminder_count=5,
             last_reminder_triggered_at=None,
         )
@@ -1380,7 +1382,7 @@ class TestImportDeliverableTracker:
         item = deps.storage.items[result["delivery_item_id"]]
         assert item.item_no == 5
         assert item.item_type == "test_tech_waiver_report"
-        assert item.owner_corp_email == "owner@corp.example"
+        assert item.owner_corp_email == ["owner@corp.example"]
         assert item.tg_name == "MNO-ETM"
         assert item.tracking_modality == ["Email"]
         assert item.force_tracking_enabled is True       # "Yes" -> True
@@ -1445,7 +1447,10 @@ def _mk_tracker(item_no, item_type, force_tracking_enabled=True, **kw):
         force_tracking_enabled=force_tracking_enabled,
         tg_name=kw.pop("tg_name", "MNO-ETM"),
         device_id=kw.pop("device_id", "SM-S671U1"),
-        owner_corp_email=kw.pop("owner_corp_email", "owner@corp.example"),
+        # OWNER-7 (2026-08-16): owner_* fields are list-typed. Accept caller's
+        # value verbatim (test authors write a list); default is single-owner
+        # list for kickoff shape compat.
+        owner_corp_email=kw.pop("owner_corp_email", ["owner@corp.example"]),
     )
     base.update(kw)
     return SimpleNamespace(**base)

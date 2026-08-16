@@ -479,7 +479,18 @@ async def route_unrouted_to_item(
                 src_local,
             )
 
-        # Step 7: create association
+        # Step 7: create association. OWNER-7 (2026-08-16): owner_* on
+        # DeliveryItemBase (target) is list-typed; assoc snapshot fields
+        # remain singular str per architect (historic record + FR-5/D-035
+        # PLM fan-out + ix_assoc_owner_corp_id index). Coerce list -> first
+        # non-empty entry so the snapshot captures a representative owner.
+        def _first(v):
+            if isinstance(v, list):
+                for e in v:
+                    if e and str(e).strip():
+                        return str(e).strip()
+                return ""
+            return v or ""
         session.add(
             DocumentItemAssociationTable(
                 file_hash=file_hash,
@@ -487,10 +498,10 @@ async def route_unrouted_to_item(
                 milestone_id=doc.milestone_id,
                 local_nsd_path=target_path.to_relative(),
                 nsd_path_type=NSDPathType.STAGED_NOT_CLASSIFIED.value,
-                owner_corp_id=getattr(target, "owner_corp_id", "") or "",
-                owner_corp_usa_email=getattr(target, "owner_corp_usa_email", None),
-                owner_corp_email=getattr(target, "owner_corp_email", None),
-                owner_name=getattr(target, "owner_name", None),
+                owner_corp_id=_first(getattr(target, "owner_corp_id", None)),
+                owner_corp_usa_email=(_first(getattr(target, "owner_corp_usa_email", None)) or None),
+                owner_corp_email=(_first(getattr(target, "owner_corp_email", None)) or None),
+                owner_name=(_first(getattr(target, "owner_name", None)) or None),
                 plm_id=getattr(target, "plm_id", None),
                 associated_at=datetime.now(timezone.utc),
                 associated_by=tpm_id,

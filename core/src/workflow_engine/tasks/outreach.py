@@ -77,20 +77,20 @@ def _resolve_recipient(deps, event_context: dict[str, Any], params: dict[str, An
 def _resolve_recipients(
     deps, event_context: dict[str, Any], params: dict[str, Any],
 ) -> list[str]:
-    """OWNER-3 (2026-08-14): resolve outreach recipient LIST per multi-owner
-    semantics. Returns [] if no owner is resolvable (caller writes audit-only
-    row + skips send).
+    """OWNER-3 (2026-08-14) + OWNER-7 (2026-08-16): resolve outreach recipient
+    LIST per multi-owner semantics. Returns [] if no owner is resolvable
+    (caller writes audit-only row + skips send).
 
-    Path A precedence (architect 2026-06-27, extended for lists 2026-08-14):
-      1. Explicit params.recipient                          (rule YAML can pin -- always single)
-      2. **SP-side owner_corp_usa_email** parsed as list    (live; via sp_writer; preferred per [D-080])
-      3. **SP-side owner_corp_email** parsed as list        (live fallback)
-      4. Storage DeliveryItem.owner_corp_usa_email_list     (offline fallback, populated by OWNER-2 dual-write)
-      5. Storage DeliveryItem.owner_corp_email_list         (offline fallback)
-      6. Storage singular owner_corp_usa_email / owner_corp_email
-         wrapped as single-element list                     (pre-OWNER-2 rows)
-      7. event_context.owner_corp_usa_email (legacy callers / fixtures) as single-element list
-      8. []  -> caller writes audit-only row, skips send
+    Path A precedence (architect 2026-06-27, extended for lists 2026-08-14,
+    simplified for B-final-B 2026-08-16 -- owner_* is now list-typed on
+    DeliveryItemBase so no more singular fallback rungs):
+      1. Explicit params.recipient                     (rule YAML can pin -- always single)
+      2. **SP-side owner_corp_usa_email** as list      (live; via sp_writer; preferred per [D-080])
+      3. **SP-side owner_corp_email** as list          (live fallback)
+      4. Storage DeliveryItem.owner_corp_usa_email     (offline fallback; JSON list post-OWNER-7)
+      5. Storage DeliveryItem.owner_corp_email         (offline fallback; JSON list)
+      6. event_context.owner_corp_usa_email            (legacy callers / fixtures) as single-element list
+      7. []  -> caller writes audit-only row, skips send
 
     Reading SP at fire-time means TPM mid-flight owner edits in SP are
     automatically honored without HILDA-side persistence. Failure modes
@@ -103,8 +103,6 @@ def _resolve_recipients(
     (OWNER-4). SP text column parsing uses _split_owner_list which
     accepts both ';' (SP convention) and ',' (TPM tolerance).
     """
-    from core.src.workflow_engine.tasks.sp_alert_imports import _split_owner_list
-
     explicit = params.get("recipient")
     if explicit:
         return [explicit]
@@ -123,25 +121,14 @@ def _resolve_recipients(
         if sp_owners:
             return sp_owners
 
-    # Fallback 1a: storage-cached owner LIST (new post-OWNER-2 field).
+    # Fallback: storage-cached owner list (post-OWNER-7, unsuffixed IS the list).
     if item is not None:
         list_field = (
-            getattr(item, "owner_corp_usa_email_list", None)
-            or getattr(item, "owner_corp_email_list", None)
-        )
-        if list_field:
-            return list(list_field)
-
-    # Fallback 1b: storage-cached SINGULAR (pre-OWNER-2 rows -- backward compat).
-    if item is not None:
-        singular = (
             getattr(item, "owner_corp_usa_email", None)
             or getattr(item, "owner_corp_email", None)
         )
-        if singular:
-            # Support the case where TPM has typed a semicolon-separated string
-            # into the singular column pre-OWNER-2 sync -- parse for safety.
-            return _split_owner_list(singular)
+        if list_field:
+            return list(list_field)
 
     # Fallback 2: event_context (legacy callers + tests that pre-populate).
     from_event = event_context.get("owner_corp_usa_email")

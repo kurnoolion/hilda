@@ -953,24 +953,21 @@ _P1_YELLOW_HEX = "FFFF00"
 
 
 def _resolve_display_owner(delivery_item: Any) -> str:
-    """OWNER-6 (2026-08-16): resolve the Owner column display value.
+    """OWNER-6/7 (2026-08-16): resolve the Owner column display value.
 
-    Multi-owner rule: if `owner_name_list` has any non-empty entries,
-    show them joined by `"; "` (SP-convention -- matches how TPMs type
-    them into the SP column). Falls back to singular `owner_name`
-    (pre-OWNER-1 rows whose backfill hasn't run), then to `tg_name` for
-    items with no owner identity at all (test fixtures, legacy rows) so
-    the column still says something meaningful.
+    Multi-owner rule: if `owner_name` has any non-empty entries, show them
+    joined by `"; "` (SP-convention -- matches how TPMs type them into the
+    SP column). `owner_name` is a list post B-final-B (OWNER-7). Falls
+    back to `tg_name` for items with no owner identity at all (test
+    fixtures, legacy rows) so the column still says something meaningful.
 
     Empty-string entries in the list are dropped defensively; whole-list
-    empty falls through the chain like `None`."""
-    lst = getattr(delivery_item, "owner_name_list", None) or []
-    cleaned = [str(n).strip() for n in lst if n and str(n).strip()]
-    if cleaned:
-        return "; ".join(cleaned)
-    singular = (getattr(delivery_item, "owner_name", None) or "").strip()
-    if singular:
-        return singular
+    empty (or missing) falls through to the tg_name fallback."""
+    lst = getattr(delivery_item, "owner_name", None) or []
+    if isinstance(lst, list):
+        cleaned = [str(n).strip() for n in lst if n and str(n).strip()]
+        if cleaned:
+            return "; ".join(cleaned)
     return (getattr(delivery_item, "tg_name", None) or "").strip()
 
 

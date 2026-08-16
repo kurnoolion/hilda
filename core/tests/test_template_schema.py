@@ -430,10 +430,12 @@ class TestPhase5Models:
         assert di.item_description is None
         assert di.plm_id is None
         # 4-field owner identity (added 2026-06-21):
-        assert di.owner_corp_usa_email is None
-        assert di.owner_corp_email is None
-        assert di.owner_corp_id is None
-        assert di.owner_name is None
+        # OWNER-7 (2026-08-16, B-final-B): owner_* fields are list-typed
+        # on DeliveryItemBase; empty list is the "no owner" default.
+        assert di.owner_corp_usa_email == []
+        assert di.owner_corp_email == []
+        assert di.owner_corp_id == []
+        assert di.owner_name == []
 
     def test_automation_rule_trigger_sub_event_optional(self) -> None:
         from core.src.template_schema import AutomationRuleBase, RuleScope, RuleActionType

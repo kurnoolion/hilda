@@ -763,14 +763,12 @@ async def _lookup_batch_items(batch_id: str) -> list[dict[str, Any]]:
         matched.append({
             "item_no":                  item_no_val,
             "delivery_item_id":         delivery_item_id,
-            "owner_corp_usa_email":     getattr(item, "owner_corp_usa_email", None),
-            "owner_corp_email":         getattr(item, "owner_corp_email", None),
-            # OWNER-4 (2026-08-14): multi-owner lists piped through so
-            # resolve_sender_match can check ANY owner email (not just
-            # first/singular). Empty list on pre-OWNER-2 rows -- falls
-            # back to singular match via or-chain in the resolver.
-            "owner_corp_usa_email_list": list(getattr(item, "owner_corp_usa_email_list", None) or []),
-            "owner_corp_email_list":     list(getattr(item, "owner_corp_email_list", None) or []),
+            # OWNER-7 (2026-08-16, B-final-B): owner_corp_*_email are now
+            # LIST-typed on DeliveryItemBase (unsuffixed = list post-rename).
+            # resolve_sender_match reads these lists directly per OWNER-4
+            # any-entry-match semantics.
+            "owner_corp_usa_email":     list(getattr(item, "owner_corp_usa_email", None) or []),
+            "owner_corp_email":         list(getattr(item, "owner_corp_email", None) or []),
             "tg_email_group_alias":     getattr(item, "tg_email_group_alias", None)
                                         or getattr(item, "email_group_alias", None),
         })

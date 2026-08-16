@@ -139,17 +139,16 @@ def sync_deliverable_fields_task(
     _merge_list(updates, body_kvs, "tracking_modality", _modality_to_list)
     _merge_item_description(updates, body_kvs)
 
-    # -- OWNER-2 (2026-08-14): 4 owner-identity fields dual-written per OWNER-1
-    # additive schema. SP text column carries semicolon-separated string
-    # ("alice@corp; bob@corp"); _split_owner_list parses to list; we set BOTH
-    # the singular field (= first parsed entry, backward-compat for pre-OWNER-3
-    # readers) AND the _list field (= full parsed list, new authoritative
-    # storage). Null-guard applies: if parse yields empty list, skip both --
-    # preserves whatever singular/list values are already in Postgres.
-    _merge_owner_field(updates, body_kvs, "owner_name",           "owner_name_list")
-    _merge_owner_field(updates, body_kvs, "owner_corp_email",     "owner_corp_email_list")
-    _merge_owner_field(updates, body_kvs, "owner_corp_usa_email", "owner_corp_usa_email_list")
-    _merge_owner_field(updates, body_kvs, "owner_corp_id",        "owner_corp_id_list")
+    # -- OWNER-7 (2026-08-16): 4 owner-identity fields are now LIST-TYPED
+    # (unsuffixed names carry the list; singular columns dropped per B-final-B).
+    # SP text column carries semicolon-separated string ("alice@corp; bob@corp");
+    # _split_owner_list parses to list; we write the list under the unsuffixed
+    # name. Null-guard: if body_kvs key missing OR parsed empty, skip (preserves
+    # whatever list is already in Postgres).
+    _merge_owner_field(updates, body_kvs, "owner_name")
+    _merge_owner_field(updates, body_kvs, "owner_corp_email")
+    _merge_owner_field(updates, body_kvs, "owner_corp_usa_email")
+    _merge_owner_field(updates, body_kvs, "owner_corp_id")
 
     if not updates:
         return {
@@ -266,28 +265,23 @@ def _merge_list(
 def _merge_owner_field(
     updates: dict[str, Any],
     body_kvs: dict[str, str],
-    singular_name: str,
-    list_name: str,
+    name: str,
 ) -> None:
-    """OWNER-2 (2026-08-14): dual-write an owner identity field. Reads the
-    SP text column at `singular_name` (e.g. 'owner_corp_email'), parses via
-    _split_owner_list (handles ';' + ',' delimiters), and writes:
-      updates[singular_name] = parsed[0]              # first entry (BC)
-      updates[list_name]     = parsed                 # full parsed list
+    """OWNER-7 (2026-08-16, B-final-B): write a list-typed owner identity
+    field. Reads the SP text column at `name` (e.g. 'owner_corp_email'),
+    parses via _split_owner_list (handles ';' + ',' delimiters), and writes:
+      updates[name] = parsed                          # full parsed list
 
     Null-guard: if body_kvs key is missing OR parsed list is empty, skip
-    BOTH writes (preserves whatever singular/list are already in Postgres).
-    Consistent with _merge_str/_merge_list null-preserve semantics.
-
-    OWNER-7 will drop singular_name + rename list_name back to unsuffixed."""
-    if singular_name not in body_kvs:
+    (preserves whatever list is already in Postgres). Consistent with
+    _merge_str / _merge_list null-preserve semantics."""
+    if name not in body_kvs:
         return
-    raw = body_kvs[singular_name]
+    raw = body_kvs[name]
     parsed = _split_owner_list(raw)
     if not parsed:
         return
-    updates[singular_name] = parsed[0]
-    updates[list_name] = parsed
+    updates[name] = parsed
 
 
 def _merge_item_description(updates: dict[str, Any], body_kvs: dict[str, str]) -> None:

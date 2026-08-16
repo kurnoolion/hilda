@@ -9,15 +9,27 @@ Other channels' tg_resolvers live in their owning modules:
 Lookup order per [D-105] 4-field owner identity (against denormalized
 DeliveryItemBase rows per [D-106] -- TGGroupBase Pydantic model dropped):
   (1) email_group_alias on To/CC list preferred when set
-  (2) sender reverse-lookup against owner_corp_usa_email (preferred-for-outreach)
-  (3) then owner_corp_email (fallback + PLM grouping match)
+  (2) sender reverse-lookup against ANY owner_corp_usa_email entry
+      (list-typed post OWNER-7 B-final-B; multi-owner match)
+  (3) then ANY owner_corp_email entry (fallback + PLM grouping match)
   (4) then CC list
 """
 from __future__ import annotations
 
+from typing import Any
+
 from core.src.email_service.protocol import InboundMessage
 
 __all__ = ["resolve_tg_from_email"]
+
+
+def _lc_list(value: Any) -> set[str]:
+    """Coerce a list-of-strings owner field to a lowercased-stripped set.
+    Non-list values (missing / None / unexpected type) return an empty
+    set. Empty strings inside the list are dropped."""
+    if not isinstance(value, list):
+        return set()
+    return {str(e).strip().lower() for e in value if e and str(e).strip()}
 
 
 def resolve_tg_from_email(
@@ -41,18 +53,16 @@ def resolve_tg_from_email(
             if tg:
                 return tg
 
-    # (2) sender == owner_corp_usa_email
+    # (2) sender in owner_corp_usa_email list (OWNER-7: field is list-typed)
     for row in candidate_di_rows:
-        usa = (row.get("owner_corp_usa_email") or "").strip().lower()
-        if usa and usa == sender_lower:
+        if sender_lower and sender_lower in _lc_list(row.get("owner_corp_usa_email")):
             tg = row.get("tg_name")
             if tg:
                 return tg
 
-    # (3) sender == owner_corp_email
+    # (3) sender in owner_corp_email list
     for row in candidate_di_rows:
-        corp = (row.get("owner_corp_email") or "").strip().lower()
-        if corp and corp == sender_lower:
+        if sender_lower and sender_lower in _lc_list(row.get("owner_corp_email")):
             tg = row.get("tg_name")
             if tg:
                 return tg

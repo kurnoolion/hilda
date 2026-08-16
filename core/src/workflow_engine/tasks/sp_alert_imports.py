@@ -233,19 +233,14 @@ def _build_delivery_item(
         delivery_state=body_kvs.get("delivery_state", "Not Started"),
         item_completion_pct=_to_int(body_kvs.get("item_completion_pct"), 0),
         # Owner identity per [D-105] 4-field -- SP-authoritative (TPM reassignable).
-        # OWNER-1/2 (2026-08-14): multi-owner semantics via additive `_list`
-        # fields. Ingest dual-writes: singular = first parsed entry (backward
-        # compat during OWNER-2..6), list = full parsed list. TPM enters a
-        # semicolon-separated string in the same SP text column; HILDA parses.
-        # See _split_owner_list above + DeliveryItemBase.owner_*_list fields.
-        owner_corp_usa_email=(_split_owner_list(body_kvs.get("owner_corp_usa_email"))[:1] or [None])[0],
-        owner_corp_email=(_split_owner_list(body_kvs.get("owner_corp_email"))[:1] or [None])[0],
-        owner_corp_id=(_split_owner_list(body_kvs.get("owner_corp_id"))[:1] or [None])[0],
-        owner_name=(_split_owner_list(body_kvs.get("owner_name"))[:1] or [None])[0],
-        owner_corp_usa_email_list=_split_owner_list(body_kvs.get("owner_corp_usa_email")),
-        owner_corp_email_list=_split_owner_list(body_kvs.get("owner_corp_email")),
-        owner_corp_id_list=_split_owner_list(body_kvs.get("owner_corp_id")),
-        owner_name_list=_split_owner_list(body_kvs.get("owner_name")),
+        # OWNER-7 (2026-08-16): unsuffixed fields are LIST-TYPED (per B-final-B
+        # rename). TPM enters a semicolon-separated string in the same SP text
+        # column; _split_owner_list parses to list. See docstring above +
+        # DeliveryItemBase.owner_* fields (all list[str]).
+        owner_corp_usa_email=_split_owner_list(body_kvs.get("owner_corp_usa_email")),
+        owner_corp_email=_split_owner_list(body_kvs.get("owner_corp_email")),
+        owner_corp_id=_split_owner_list(body_kvs.get("owner_corp_id")),
+        owner_name=_split_owner_list(body_kvs.get("owner_name")),
         # TG-denormalized per [D-106] -- SP-authoritative (Owner-Group cascade):
         tg_name=(body_kvs.get("tg_name") or None),
         tg_email_group_alias=(body_kvs.get("tg_email_group_alias") or None),
