@@ -375,6 +375,96 @@ class TestV2Body:
 
 
 # ---------------------------------------------------------------------------
+# OWNER-6 (2026-08-16) — Owner column derivation
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerColumnDisplay:
+    """Owner column (E) rules per OWNER-6:
+      1. owner_name_list joined by "; "  (preferred)
+      2. singular owner_name              (pre-OWNER-1 fallback)
+      3. tg_name                          (nothing owner-shaped set)
+    """
+
+    def _item_with_owners(self, item_no, **owners):
+        it = _item(item_no)
+        for k, v in owners.items():
+            setattr(it, k, v)
+        return it
+
+    def test_owner_column_joins_list_with_semicolon(self):
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = self._item_with_owners(1, owner_name_list=["Alice", "Bob", "Carol"])
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        # Row 16 = first data row (row 15 is section header)
+        assert ws.cell(row=16, column=5).value == "Alice; Bob; Carol"
+
+    def test_owner_column_single_list_entry(self):
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = self._item_with_owners(1, owner_name_list=["Alice"])
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        assert ws.cell(row=16, column=5).value == "Alice"
+
+    def test_owner_column_strips_and_drops_empty_list_entries(self):
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = self._item_with_owners(1, owner_name_list=["  Alice ", "", None, " Bob"])
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        assert ws.cell(row=16, column=5).value == "Alice; Bob"
+
+    def test_owner_column_falls_back_to_singular_when_list_empty(self):
+        """Pre-OWNER-1 rows have singular owner_name but empty
+        owner_name_list -- fallback to singular preserved."""
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = self._item_with_owners(1, owner_name_list=[], owner_name="LegacyAlice")
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        assert ws.cell(row=16, column=5).value == "LegacyAlice"
+
+    def test_owner_column_falls_back_to_tg_name_when_no_owner_identity(self):
+        """No owner_name at all -> fallback to tg_name so the column
+        still reads as it did pre-OWNER-6 (preserves existing behavior
+        for items without owner identity)."""
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = _item(1, tg_name="CPM")  # no owner_name/list at all
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        assert ws.cell(row=16, column=5).value == "CPM"
+
+    def test_owner_column_list_takes_precedence_over_singular(self):
+        """When both list and singular are set (transitional state,
+        OWNER-2 dual-write), list wins -- singular is the deprecated
+        one per architect direction."""
+        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+        it = self._item_with_owners(
+            1, owner_name_list=["Alice", "Bob"], owner_name="Alice",
+        )
+        ws = _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=grouping,
+        ))
+        assert ws.cell(row=16, column=5).value == "Alice; Bob"
+
+
+# ---------------------------------------------------------------------------
 # DRR-V2 mode — summary tables
 # ---------------------------------------------------------------------------
 
