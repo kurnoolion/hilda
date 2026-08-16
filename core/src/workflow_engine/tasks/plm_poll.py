@@ -1,13 +1,22 @@
 """PLM-3 (2026-08-14) -- beat-fired poll that creates PLM tickets per
-owner, downloads their files, and ingests them through the existing
+TG-in-scope, downloads their files, and ingests them through the existing
 Fr52AttachmentRouter pipeline (same shape as NSD2-3/4).
 
 Design in one sentence: for each (customer, device, milestone='P1') scope,
-group MQL-FIT + MNO-SOLUTION items by owner_corp_email; per owner group,
-create ONE PLM ticket if no plm_id exists yet (SP-first-with-Postgres-
-fallback lookup), write plm_id + actual_item_info back to SP, download
-all files attached to the ticket, dedup by hash, and route each new file
-through the router with the owner's items as candidates.
+group MQL-FIT + MNO-SOLUTION items by `tg_name`; per TG group, create ONE
+PLM ticket if no plm_id exists yet (SP-first-with-Postgres-fallback
+lookup), write plm_id + actual_item_info back to SP, download all files
+attached to the ticket, dedup by hash, and route each new file through
+the router with the TG group's items as candidates.
+
+Grouping key was owner_corp_email pre-OWNER-5 (2026-08-16); switched to
+tg_name per architect: "Owners are never shared across TGs; all items in
+a TG have the same owner list." tg_name is the semantic root of the
+"one PLM ticket per owner" invariant -- keying by tg_name is robust to
+the (rare) case where two TGs on the same device happen to share an
+owner_corp_email. Per group, `owner_corp_id[0]` (first entry of the
+list per OWNER-1) is the assignee written into the PLM ticket; groups
+with no non-empty owner_corp_id are WARN-logged and skipped.
 
 Task never raises; each layer WARNs + moves on, per NSD2 poll convention.
 
@@ -91,7 +100,12 @@ def poll_plm_once(deps: Any) -> dict[str, Any]:
         "correlation_id":          correlation_id,
         "scopes_scanned":          0,
         "eligible_items":          0,
-        "owner_groups":            0,
+        # OWNER-5 (2026-08-16): grouping key is now tg_name (was
+        # owner_corp_email). One group == one PLM ticket in the scope;
+        # per architect "owners are never shared across TGs" -- tg_name
+        # is the correct semantic root of the invariant.
+        "tg_groups":                     0,
+        "tg_groups_missing_owner_corp_id": 0,   # WARN + skipped -- no PLM assignee derivable
         "tickets_created":         0,
         "tickets_reused":          0,     # plm_id already present -> skip create
         "tickets_create_failed":   0,
@@ -163,8 +177,8 @@ def _poll_one_scope(
     milestone_id: str,
 ) -> None:
     """Load all items for (customer, device, milestone); keep MQL-FIT +
-    MNO-SOLUTION items in non-terminal state; group by owner_corp_email;
-    dispatch each owner group to _process_owner_group."""
+    MNO-SOLUTION items in non-terminal state; group by tg_name (OWNER-5);
+    dispatch each TG group to _process_tg_group."""
     try:
         all_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
     except Exception as exc:  # noqa: BLE001
@@ -181,19 +195,19 @@ def _poll_one_scope(
         return
 
     stats["eligible_items"] += len(eligible)
-    groups = _group_by_owner(eligible)
-    stats["owner_groups"] += len(groups)
+    groups = _group_by_tg(eligible)
+    stats["tg_groups"] += len(groups)
 
-    for owner_email, owner_items in groups.items():
-        _process_owner_group(
+    for tg_name, tg_items in groups.items():
+        _process_tg_group(
             deps=deps,
             stats=stats,
             correlation_id=correlation_id,
             customer_id=customer_id,
             device_id=device_id,
             milestone_id=milestone_id,
-            owner_email=owner_email,
-            items=owner_items,
+            tg_name=tg_name,
+            items=tg_items,
         )
 
 
@@ -227,23 +241,52 @@ def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
     return out
 
 
-def _group_by_owner(items: list[Any]) -> dict[str, list[Any]]:
-    """Group items by owner_corp_email (case-insensitive after strip).
-    Items with empty owner_corp_email are silently dropped -- there's no
-    one to attribute the PLM to; a WARN is logged so ops can chase."""
+def _group_by_tg(items: list[Any]) -> dict[str, list[Any]]:
+    """OWNER-5 (2026-08-16): group items by tg_name (was owner_corp_email
+    pre-OWNER-5). Per architect: "owners are never shared across TGs" --
+    grouping by tg_name is semantically correct AND robust to the (rare)
+    case where two TGs happen to share an owner_corp_email on the same
+    device. Assignee is derived per-group inside _process_tg_group from
+    owner_corp_id_list (first non-empty entry across the group's items).
+
+    Items with empty tg_name are dropped defensively (should never happen
+    for MQL-FIT / MNO-SOLUTION since _filter_eligible_items already
+    matched on tg_name, but keep the guard so a mutation upstream never
+    creates a "" bucket)."""
     groups: dict[str, list[Any]] = {}
     for it in items:
-        raw = getattr(it, "owner_corp_email", None) or ""
-        key = raw.strip().lower()
+        raw = getattr(it, "tg_name", None) or ""
+        key = raw.strip()
         if not key:
             _log.warning(
-                "PLM_POLL: item has empty owner_corp_email -- skipping "
-                "delivery_item_id=%s tg=%s",
-                _item_id(it), getattr(it, "tg_name", "?"),
+                "PLM_POLL: item has empty tg_name -- skipping "
+                "delivery_item_id=%s",
+                _item_id(it),
             )
             continue
         groups.setdefault(key, []).append(it)
     return groups
+
+
+def _resolve_group_assignee_corp_id(items: list[Any]) -> str:
+    """OWNER-5 (2026-08-16): PLM ticket assignee = first non-empty entry
+    of owner_corp_id_list across the group's items (OWNER-1 promoted this
+    field to a list). Falls back to the singular `owner_corp_id` for
+    pre-OWNER-1 rows whose backfill hasn't run yet.
+
+    Returns "" if no item in the group has any non-empty owner_corp_id.
+    Caller MUST check "" and WARN + skip -- PLM tickets require an
+    assignee, per architect ("PLM can be assigned to only one person")."""
+    for it in items:
+        lst = getattr(it, "owner_corp_id_list", None) or []
+        for entry in lst:
+            if entry and str(entry).strip():
+                return str(entry).strip()
+    for it in items:
+        singular = getattr(it, "owner_corp_id", None) or ""
+        if singular and singular.strip():
+            return singular.strip()
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +294,7 @@ def _group_by_owner(items: list[Any]) -> dict[str, list[Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _process_owner_group(
+def _process_tg_group(
     *,
     deps: Any,
     stats: dict[str, Any],
@@ -259,12 +302,28 @@ def _process_owner_group(
     customer_id: str,
     device_id: str,
     milestone_id: str,
-    owner_email: str,
+    tg_name: str,
     items: list[Any],
 ) -> None:
-    """For one owner group: resolve or create plm_id, write to SP, download
-    files, ingest through router. All failures WARN + move on to next owner."""
+    """OWNER-5 (2026-08-16): for one TG group (was owner group): resolve
+    or create plm_id, write to SP, download files, ingest through router.
+    All failures WARN + move on to next group.
+
+    Pre-work: derive PLM assignee from owner_corp_id_list (first non-empty
+    across the group per _resolve_group_assignee_corp_id). If none exists,
+    WARN + skip -- PLM requires an assignee and we won't fabricate one."""
     from core.src.issue_tracker.corp_plm import on_prem_client
+
+    assignee_corp_id = _resolve_group_assignee_corp_id(items)
+    if not assignee_corp_id:
+        _log.warning(
+            "PLM_POLL: no owner_corp_id resolvable for tg=%s device=%s "
+            "(%d items; owner_corp_id + owner_corp_id_list both empty) -- "
+            "skipping group this tick (PLM needs an assignee per architect)",
+            tg_name, device_id, len(items),
+        )
+        stats["tg_groups_missing_owner_corp_id"] += 1
+        return
 
     # Step 1: does any item already have plm_id populated? (Postgres check)
     existing_plm_id = _check_plm_id_state(deps, items, customer_id, device_id, milestone_id)
@@ -274,27 +333,29 @@ def _process_owner_group(
         stats["tickets_reused"] += 1
         plm_id = existing_plm_id
         _log.info(
-            "PLM_POLL: reuse plm_id=%s owner=%s device=%s (%d items)",
-            plm_id, owner_email, device_id, len(items),
+            "PLM_POLL: reuse plm_id=%s tg=%s device=%s (%d items)",
+            plm_id, tg_name, device_id, len(items),
         )
     else:
         # Create new ticket via on-prem script.
         payload = [(int(getattr(it, "item_no", 0) or 0),
                     str(getattr(it, "item_name", "") or "")) for it in items]
-        case_id, url = on_prem_client.create_plm_ticket(device_id, payload)
+        case_id, url = on_prem_client.create_plm_ticket(
+            device_id, payload, owner_corp_id=assignee_corp_id,
+        )
         if not case_id:
             _log.warning(
-                "PLM_POLL: create_plm_ticket returned empty for owner=%s "
-                "device=%s (%d items) -- skipping group this tick",
-                owner_email, device_id, len(items),
+                "PLM_POLL: create_plm_ticket returned empty for tg=%s "
+                "device=%s owner_corp_id=%s (%d items) -- skipping group this tick",
+                tg_name, device_id, assignee_corp_id, len(items),
             )
             stats["tickets_create_failed"] += 1
             return
         stats["tickets_created"] += 1
         plm_id = case_id
         _log.warning(
-            "PLM_POLL: created plm_id=%s url=%s owner=%s device=%s",
-            case_id, url, owner_email, device_id,
+            "PLM_POLL: created plm_id=%s url=%s tg=%s device=%s assignee=%s",
+            case_id, url, tg_name, device_id, assignee_corp_id,
         )
 
         # Step 2: write plm_id + actual_item_info back to SP for all items
@@ -307,7 +368,7 @@ def _process_owner_group(
             items=items, plm_id=case_id, url=url,
         )
 
-    # Step 3: download files into a per-owner scratch dir, walk it, ingest.
+    # Step 3: download files into a per-group scratch dir, walk it, ingest.
     _download_and_ingest(
         deps=deps, stats=stats, correlation_id=correlation_id,
         customer_id=customer_id, milestone_id=milestone_id,

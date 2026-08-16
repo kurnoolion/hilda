@@ -57,9 +57,11 @@ class TestCreatePlmTicket:
             p = argparse.ArgumentParser()
             p.add_argument("--device-id", required=True)
             p.add_argument("--items-json", required=True)
+            p.add_argument("--owner-corp-id", required=True)
             args = p.parse_args()
             items = json.loads(args.items_json)
             assert args.device_id == "SM-S671U1"
+            assert args.owner_corp_id == "ALICE_ID"
             assert items == [[10, "HW PL Test A"], [11, "HW PL Test B"]]
             print(json.dumps({
                 "case_id": "P20260810-03454",
@@ -68,10 +70,51 @@ class TestCreatePlmTicket:
             sys.exit(0)
         """)
         case_id, url = on_prem_client.create_plm_ticket(
-            "SM-S671U1", [(10, "HW PL Test A"), (11, "HW PL Test B")],
+            "SM-S671U1",
+            [(10, "HW PL Test A"), (11, "HW PL Test B")],
+            owner_corp_id="ALICE_ID",
         )
         assert case_id == "P20260810-03454"
         assert url == "https://splm.sec.corp/detail/K3483945abcd"
+
+    def test_empty_owner_corp_id_short_circuits_no_subprocess(self, scripts_env):
+        """OWNER-5: passing empty owner_corp_id must fail loud + local
+        BEFORE shelling out. Assignee is required per architect ("PLM
+        can be assigned to only one person"); refusing at the wrapper
+        boundary avoids the on-prem script surfacing a confusing
+        argparse error later."""
+        # Write a script that would succeed if invoked -- but the wrapper
+        # must short-circuit and not invoke it at all.
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import sys, json
+            print(json.dumps({"case_id": "SHOULD_NOT_HAPPEN", "url": "http://x"}))
+            sys.exit(0)
+        """)
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="",
+        ) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="   ",
+        ) == ("", "")
+
+    def test_owner_corp_id_is_stripped_before_pass(self, scripts_env):
+        """OWNER-5: leading/trailing whitespace on owner_corp_id is
+        stripped at the wrapper boundary before subprocess invocation."""
+        _write_script(scripts_env, "create_plm_ticket.py", """
+            import argparse, sys, json
+            p = argparse.ArgumentParser()
+            p.add_argument("--device-id", required=True)
+            p.add_argument("--items-json", required=True)
+            p.add_argument("--owner-corp-id", required=True)
+            args = p.parse_args()
+            case_id = "PASS" if args.owner_corp_id == "ALICE_ID" else f"FAIL:{args.owner_corp_id!r}"
+            print(json.dumps({"case_id": case_id, "url": "https://x"}))
+            sys.exit(0)
+        """)
+        case_id, _ = on_prem_client.create_plm_ticket(
+            "dev", [(1, "x")], owner_corp_id="  ALICE_ID  ",
+        )
+        assert case_id == "PASS"
 
     def test_script_exit_nonzero_returns_empty_tuple(self, scripts_env):
         _write_script(scripts_env, "create_plm_ticket.py", """
@@ -79,18 +122,24 @@ class TestCreatePlmTicket:
             print("some diagnostic", file=sys.stderr)
             sys.exit(1)
         """)
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_script_success_but_empty_stdout_returns_empty_tuple(self, scripts_env):
         _write_script(scripts_env, "create_plm_ticket.py", """
             import sys
             sys.exit(0)
         """)
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_script_missing_returns_empty_tuple(self, scripts_env):
         # No script written
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_timeout_returns_empty_tuple(self, scripts_env, monkeypatch):
         _write_script(scripts_env, "create_plm_ticket.py", """
@@ -100,7 +149,9 @@ class TestCreatePlmTicket:
             sys.exit(0)
         """)
         monkeypatch.setenv("HILDA_PLM_TIMEOUT_CREATE", "1")
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_stdout_not_json_returns_empty_tuple(self, scripts_env):
         """Prior contract emitted a bare case_id; new contract expects JSON.
@@ -110,7 +161,9 @@ class TestCreatePlmTicket:
             print("P20260810-03454")   # missing url + not JSON
             sys.exit(0)
         """)
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_json_missing_case_id_returns_empty_tuple(self, scripts_env):
         """Partial payload (url only) must not be persisted -- treated as failure."""
@@ -119,7 +172,9 @@ class TestCreatePlmTicket:
             print(json.dumps({"url": "https://x"}))
             sys.exit(0)
         """)
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_json_missing_url_returns_empty_tuple(self, scripts_env):
         """Partial payload (case_id only) must not be persisted -- treated as failure."""
@@ -128,7 +183,9 @@ class TestCreatePlmTicket:
             print(json.dumps({"case_id": "P123"}))
             sys.exit(0)
         """)
-        assert on_prem_client.create_plm_ticket("SM-S671U1", [(1, "x")]) == ("", "")
+        assert on_prem_client.create_plm_ticket(
+            "SM-S671U1", [(1, "x")], owner_corp_id="A_ID",
+        ) == ("", "")
 
     def test_json_extra_keys_ignored(self, scripts_env):
         """Wrapper tolerates additional keys in the payload (forward-compat)."""
@@ -142,7 +199,9 @@ class TestCreatePlmTicket:
             }))
             sys.exit(0)
         """)
-        case_id, url = on_prem_client.create_plm_ticket("dev", [(1, "x")])
+        case_id, url = on_prem_client.create_plm_ticket(
+            "dev", [(1, "x")], owner_corp_id="A_ID",
+        )
         assert (case_id, url) == ("P1", "https://x")
 
     def test_items_serialized_as_json_pairs(self, scripts_env):
@@ -152,6 +211,7 @@ class TestCreatePlmTicket:
             p = argparse.ArgumentParser()
             p.add_argument("--device-id", required=True)
             p.add_argument("--items-json", required=True)
+            p.add_argument("--owner-corp-id", required=True)
             args = p.parse_args()
             items = json.loads(args.items_json)
             all_ok = all(isinstance(x[0], int) and isinstance(x[1], str) for x in items)
@@ -160,7 +220,9 @@ class TestCreatePlmTicket:
             sys.exit(0)
         """)
         # Pass strings/ints mixed to confirm coercion at wrapper boundary
-        case_id, _ = on_prem_client.create_plm_ticket("dev", [("7", "A"), (42, "B")])
+        case_id, _ = on_prem_client.create_plm_ticket(
+            "dev", [("7", "A"), (42, "B")], owner_corp_id="A_ID",
+        )
         assert case_id == "PASS"
 
 

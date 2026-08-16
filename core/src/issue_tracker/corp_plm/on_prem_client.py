@@ -7,9 +7,14 @@ by the beat-fired PLM poll task (PLM-3).
 Three callable operations, each shelling out to a Python script under
 `HILDA_PLM_SCRIPTS_DIR` (default `/opt/plm_scripts`):
 
-  * create_plm_ticket(device_id, items) -> (case_id, url) tuple
+  * create_plm_ticket(device_id, items, owner_corp_id) -> (case_id, url) tuple
       ("", "") on failure; on success, case_id like "P20260810-03454"
       and url like "https://splm.sec.corp/.../K3483945xxxx".
+      `owner_corp_id` is the corp ID of the person the PLM ticket is
+      assigned to (per architect OWNER-5 2026-08-16: "PLM can be
+      assigned to only one person; if owner_corp_id is a list, the
+      first entry is used"). Passed to the on-prem script as
+      `--owner-corp-id`.
   * list_and_download_all(case_id, dir) -> int 0 on success, -1 on failure
   * close_plm_defect(case_id)           -> int 0 on success, -1 on failure
 
@@ -27,6 +32,10 @@ returncode reliably):
                           `case_id` (str) and `url` (str), e.g.
                           `{"case_id": "P20260810-03454", "url": "https://..."}`.
                           Any extra keys are ignored by the wrapper.
+                          Recognized args:
+                            --device-id       (str, required)
+                            --items-json      (JSON list of [item_no, title] pairs, required)
+                            --owner-corp-id   (str, required -- PLM assignee, OWNER-5)
      - list_and_download_all: print nothing (or file count for info)
      - close_plm_defect: print nothing
   3. On failure: exit with non-zero code (stderr optional but recommended).
@@ -166,9 +175,12 @@ def _run_script(
 def create_plm_ticket(
     device_id: str,
     items: Iterable[tuple[int, str]],
+    *,
+    owner_corp_id: str,
 ) -> tuple[str, str]:
     """Create a PLM ticket for `device_id` with a list of (item_no, item_title)
-    tuples to include in the ticket body. Returns a `(case_id, url)` tuple:
+    tuples to include in the ticket body, assigned to `owner_corp_id`.
+    Returns a `(case_id, url)` tuple:
 
       case_id -- e.g. "P20260810-03454" (the plm_id we persist)
       url     -- e.g. "https://splm.sec.corp/.../K3483945xxxx"
@@ -179,29 +191,49 @@ def create_plm_ticket(
     empty, the wrapper treats it as a partial failure and returns `("", "")`
     (we don't want to persist a plm_id without a clickable URL, or vice versa).
 
+    OWNER-5 (2026-08-16): `owner_corp_id` is a REQUIRED kwarg. Callers must
+    resolve the assignee before invoking (typically the first non-empty
+    entry of `owner_corp_id_list` across the group per architect "PLM can
+    be assigned to only one person"). Passing "" is rejected up front (we
+    don't want to shell out and let the on-prem script surface the error
+    later; fail loud + local).
+
     On-prem script contract:
-      python3 create_plm_ticket.py --device-id <device_id> --items-json <json>
+      python3 create_plm_ticket.py --device-id <device_id> \
+                                   --items-json <json>     \
+                                   --owner-corp-id <corp_id>
       -> stdout: JSON object with keys `case_id` and `url` (both str)
       -> stderr: optional diagnostic
       -> exit  : 0 on success, non-zero on failure
     """
+    if not owner_corp_id or not owner_corp_id.strip():
+        _log.warning(
+            "PLM_CLIENT: create_plm_ticket device=%s called with empty "
+            "owner_corp_id -- refusing to shell out (PLM requires assignee)",
+            device_id,
+        )
+        return ("", "")
     items_json = json.dumps([[int(no), str(title)] for (no, title) in items])
     rc, out, err = _run_script(
         SCRIPT_CREATE,
-        ["--device-id", device_id, "--items-json", items_json],
+        [
+            "--device-id", device_id,
+            "--items-json", items_json,
+            "--owner-corp-id", owner_corp_id.strip(),
+        ],
         timeout_sec=_timeout("HILDA_PLM_TIMEOUT_CREATE", 60),
         op_label="create_plm_ticket",
     )
     if rc != 0:
         _log.warning(
-            "PLM_CLIENT: create_plm_ticket device=%s exit=%s stderr=%s",
-            device_id, rc, err[:200],
+            "PLM_CLIENT: create_plm_ticket device=%s owner_corp_id=%s exit=%s stderr=%s",
+            device_id, owner_corp_id, rc, err[:200],
         )
         return ("", "")
     if not out:
         _log.warning(
-            "PLM_CLIENT: create_plm_ticket device=%s exit=0 but stdout empty",
-            device_id,
+            "PLM_CLIENT: create_plm_ticket device=%s owner_corp_id=%s exit=0 but stdout empty",
+            device_id, owner_corp_id,
         )
         return ("", "")
     try:
@@ -216,14 +248,14 @@ def create_plm_ticket(
     url     = str(payload.get("url") or "").strip()
     if not case_id or not url:
         _log.warning(
-            "PLM_CLIENT: create_plm_ticket device=%s incomplete payload "
+            "PLM_CLIENT: create_plm_ticket device=%s owner_corp_id=%s incomplete payload "
             "case_id=%r url=%r -- treating as failure",
-            device_id, case_id, url,
+            device_id, owner_corp_id, case_id, url,
         )
         return ("", "")
     _log.info(
-        "PLM_CLIENT: create_plm_ticket device=%s case_id=%s url=%s",
-        device_id, case_id, url,
+        "PLM_CLIENT: create_plm_ticket device=%s owner_corp_id=%s case_id=%s url=%s",
+        device_id, owner_corp_id, case_id, url,
     )
     return (case_id, url)
 
