@@ -300,6 +300,48 @@ class TestBodyParserStructured:
         match = resolve_sender_match("stranger@corp.example", (), [item])
         assert match == "mismatch"
 
+    # ------------------------------------------------------------------
+    # OWNER-4 (2026-08-14): multi-owner list match
+    # ------------------------------------------------------------------
+
+    def test_sender_match_owner_via_usa_email_list_bob(self):
+        """Multi-owner: bob (2nd entry in owner_corp_usa_email_list) replies;
+        still resolves to 'owner' (any-owner match)."""
+        item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
+        item["owner_corp_usa_email_list"] = ["alice@corp.example", "bob@corp.example", "carol@corp.example"]
+        match = resolve_sender_match("bob@corp.example", (), [item])
+        assert match == "owner"
+
+    def test_sender_match_owner_via_usa_email_list_case_insensitive(self):
+        """Sender casing differs; still matches (both sides lowercased)."""
+        item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
+        item["owner_corp_usa_email_list"] = ["Alice@Corp.Example", "BOB@corp.example"]
+        match = resolve_sender_match("bob@CORP.EXAMPLE", (), [item])
+        assert match == "owner"
+
+    def test_sender_match_owner_via_corp_email_list_fallback(self):
+        """usa_email_list has no match, corp_email_list has -- resolves 'owner'."""
+        item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
+        item["owner_corp_usa_email_list"] = ["alice@corp.example"]
+        item["owner_corp_email_list"]     = ["bob@corp.example"]
+        match = resolve_sender_match("bob@corp.example", (), [item])
+        assert match == "owner"
+
+    def test_sender_match_mismatch_when_neither_list_nor_singular_hits(self):
+        """Non-owner sender + list populated (no match) -> mismatch."""
+        item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
+        item["owner_corp_usa_email_list"] = ["alice@corp.example", "bob@corp.example"]
+        match = resolve_sender_match("stranger@corp.example", (), [item])
+        assert match == "mismatch"
+
+    def test_sender_match_pre_owner1_row_still_uses_singular_only(self):
+        """Backward-compat: row without _list fields (pre-OWNER-1 imports)
+        still matches via singular columns."""
+        item = _candidate_test_item(owner_corp_usa_email="alice@corp.example")
+        # Explicitly no _list keys in dict.
+        match = resolve_sender_match("alice@corp.example", (), [item])
+        assert match == "owner"
+
 
 # ===========================================================================
 # TestBodyParserTable -- HTML table reply parser (Phase B 2026-06-28)

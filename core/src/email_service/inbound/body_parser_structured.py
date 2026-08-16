@@ -95,20 +95,35 @@ def resolve_sender_match(
     """Resolve sender against the 4-field owner identity per [D-105].
 
     Lookup order:
-      (1) owner_corp_usa_email (preferred for outreach)
-      (2) owner_corp_email     (fallback + PLM grouping)
-      (3) tg_email_group_alias (TG-shared alias)
-      (4) cc list              (cc'd participant)
-      otherwise -> mismatch
+      (1) owner_corp_usa_email_list -- ANY entry match (OWNER-4 multi-owner)
+      (2) owner_corp_email_list     -- ANY entry match (OWNER-4 multi-owner)
+      (3) owner_corp_usa_email      -- singular fallback (pre-OWNER-2 rows)
+      (4) owner_corp_email          -- singular fallback (pre-OWNER-2 rows)
+      (5) tg_email_group_alias      -- TG-shared alias
+      (6) cc list                   -- cc'd participant
+      otherwise -> mismatch (caller does NOT reject the reply -- reply is
+      still parsed + applied; sender_match=="mismatch" surfaces in the
+      audit row per architect Q3 2026-08-14 "not strict; just add to audit").
+
+    OWNER-4 (2026-08-14): multi-owner semantics. A single item may have
+    N owners (all sharing accountability). Any owner's reply matches;
+    audit trail captures the matching entry via sender_email regardless.
 
     expected_items is a list of dicts representing DeliveryItemBase rows;
-    per [D-106] TG fields are denormalized onto each item.
+    per [D-106] TG fields are denormalized onto each item; per OWNER-1
+    both singular AND _list variants are populated.
     """
     s = (sender_email or "").strip().lower()
     if not s:
         return "mismatch"
     cc_lower = {c.strip().lower() for c in cc_addrs if c}
     for item in expected_items:
+        # Multi-owner list check first (OWNER-4).
+        usa_list = [e.strip().lower() for e in (item.get("owner_corp_usa_email_list") or []) if e]
+        corp_list = [e.strip().lower() for e in (item.get("owner_corp_email_list") or []) if e]
+        if s in usa_list or s in corp_list:
+            return "owner"
+        # Singular fallback for pre-OWNER-2 rows (list would be [] there).
         usa = (item.get("owner_corp_usa_email") or "").strip().lower()
         corp = (item.get("owner_corp_email") or "").strip().lower()
         if s and (s == usa or s == corp):
