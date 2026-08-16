@@ -4686,3 +4686,37 @@ Discovered 2026-08-14 via ProcMon capture:
 
 **Anchors**: `[D-152]` (NASCA IRM detection + docs-view download-only Ph-1); STATUS flag `[NEW 2026-08-14] NSD2 downloads land NASCA-encrypted; batch decryption blocked upstream`; ProcMon capture 2026-08-14 (command line: `C:\windows\pcdrm\drmendec.exe /d C:\windows\pcdrm\drmtmp\ex_<num>.tmp` from parent PID drmmenu64.dll via explorer.exe).
 
+---
+
+## D-172: Additive migration pattern for column-type changes (Option B; B-final-B renaming)
+
+**Status**: Active · **Date**: 2026-08-16
+
+**Context**: The OWNER-1..7 cascade (2026-08-14 → in-flight) changes 4 owner identity fields (`owner_name`, `owner_corp_email`, `owner_corp_usa_email`, `owner_corp_id`) from **single String** to **list-of-Strings** so a single work item can carry co-owners / backup contacts (architect: "same TG → identical owner list; ONE email TO: all owners; any owner can reply"). Column-type changes of this shape are not surgical — every callsite that reads or writes the field must move to the new shape. Grep across `core/src` surfaced ~15-20 callsites spanning ingest (`sp_alert_imports`, `sync_deliverable_fields`), outreach (`outreach.py` + Jinja templates), inbound reply parsing (`body_parser_structured`, `owner_reply.py`), PLM ticket creation (`plm_poll`, `on_prem_client`), DRR excel builder, dashboards, tests, migrations. Two shapes for landing this were on the table:
+- **Option A (destructive one-shot)**: single commit renames the column type in Postgres + Pydantic + all callsites atomically. Migration is short but the diff is huge, review is painful, and a broken intermediate state is impossible to recover from without a full revert. If ONE callsite is missed the whole tree breaks.
+- **Option B (additive)**: add NEW columns (`_list` suffix) alongside existing singulars; dual-write during transition; migrate readers one module at a time in small commits; final commit drops singulars and (optionally) renames `_list` → unsuffixed original names ("B-final-B" for "Option B with final rename back to Base names").
+
+**Decision**: Use Option B with B-final-B naming for column-type migrations. Pattern:
+1. **Add** — Alembic migration adds new columns with `nullable=False, server_default="[]"` (or type-appropriate empty value); backfill from singulars via `jsonb_build_array(...)` or equivalent. Pydantic models add the new field with `Field(default_factory=list)` alongside the deprecated singular.
+2. **Dual-write** — every writer (ingest, sync, PLM writeback, outreach echo) writes BOTH the singular AND the list; readers stay on the singular. System keeps working the whole time.
+3. **Migrate readers** — one commit per module (or small set): switch reader to consume the list; keep the singular as a fallback for pre-migration rows where the backfill might not have run. Each commit is small, reviewable, and independently deployable. Tests updated per commit.
+4. **Cleanup (B-final-B)** — final commit: drop singular columns via Alembic; rename `_list` → unsuffixed original names (so the final schema uses the SAME names as today, just list-typed). Update Pydantic + all callsites in the same commit (small at this point — everything already reads the list).
+
+**Why**:
+- **Reviewability at every step**. A single-commit destructive migration is a ~50-file diff a reviewer can only skim. Additive cadence produces 4-6 commits of ~5-15 files each, each with a clear scope ("switch outreach.py to the list", "switch owner_reply to the list").
+- **System stays functional at every commit**. Dual-write + read-singular means every intermediate state produces working software. Deploy anywhere in the sequence and things run. Contrast Option A where the intermediate state (between "column type changed" and "all callsites fixed") is a broken tree that can't ship.
+- **Reversibility is per-step, not all-or-nothing**. A wrong turn in step 3 reverts one commit; wrong turn in Option A reverts the whole cascade.
+- **Failure is loud, not silent**. Under Option A, a missed callsite silently reads the OLD field name (which no longer exists) and blows up at runtime. Under Option B, dual-write keeps both fields populated so a not-yet-migrated reader keeps working — the migration cadence is set by "how many readers are left," not "did I catch them all in one commit."
+- **B-final-B (rename back at the end)** preserves the semantic identity of the field. `owner_corp_email_list` is not a NEW concept; it's the SAME concept with a richer type. Keeping `_list` suffix forever would create a permanent "migration scar." Renaming back to `owner_corp_email` at the end (with list type) makes the final schema look like this-is-how-it-should-have-been-from-day-one.
+- **Cost of extra commits is cheap**. Dual-write code (`updates["owner_corp_email"] = parsed[0]; updates["owner_corp_email_list"] = parsed`) exists for the 4-6 commit window, then gets removed in cleanup. Small transient duplication in exchange for large gains in reviewability, reversibility, and shippability.
+
+**Consequences**:
+- **Precedent for future column-type migrations**. The next time a scalar field grows into a list (or gets a new sub-shape), the pattern is established: additive + dual-write + per-reader migration + B-final-B cleanup. No need to re-argue the shape.
+- **Naming convention during transition**. `_list` suffix on additive columns. This is a TRANSITIONAL name, not permanent — makes it easy to grep for "unfinished migrations" (`_list` lingering past cleanup = a code smell).
+- **Alembic revision cadence**. Two migrations per cascade: one at step 1 (add), one at step 4 (drop + rename). Middle steps are code-only, no schema change.
+- **Test discipline**. Every "migrate reader" commit adds new tests exercising the list path AND leaves the existing singular tests in place until cleanup. During transition, coverage of both paths matters.
+- **SharePoint side is untouched**. Architect confirmed: no new columns in the SP `Deliverables_MMK` list. TPMs still type semicolon-separated values into the SAME SP columns; HILDA's `_split_owner_list` parses them at ingest. The list-ification is a HILDA-side representation change, not an SP-side schema change.
+- **Applied first to**: OWNER-1..7 (4 owner identity fields, in-flight through 2026-08-16). Whatever cadence + scars observed here refine the pattern for the next application.
+
+**Anchors**: `[D-141]` (`corp_id_list` naming precedent — architect direction for list-shaped identity fields); `[D-170]` (tracking_modality naming convention — polling opt-in seam); `[D-152]` (NASCA IRM `is_drm_wrapped` — another additive column done in a single commit because it had zero readers pre-add; contrast case for when Option A is fine); `[D-168]` / `[D-169]` (NSD2/PLM cascades that surfaced multi-owner requirement); commits `505b115` (OWNER-1 add + backfill), `9808766` (OWNER-2 dual-write ingest), `0151ef8` (OWNER-3 outreach reader), `3fe1da3` (OWNER-4 reply parser reader); OWNER-5/6/7 pending (readers + cleanup).
+
