@@ -68,6 +68,33 @@ def _to_int(value: str | None, default: int = 0) -> int:
         return default
 
 
+def _split_owner_list(value: str | None) -> list[str]:
+    """OWNER-2 (2026-08-14): parse the SP text column for a multi-owner
+    identity field. Accepts semicolon (`;`, SP-convention) OR comma (`,`,
+    tolerance for TPMs who type either). Strips each entry, drops empties,
+    and dedups case-insensitively while preserving first-seen casing
+    (emails).
+
+    Example:  "alice@corp.com; bob@corp.com;  ALICE@corp.com "
+              -> ["alice@corp.com", "bob@corp.com"]
+
+    Empty/None -> empty list. Used for all 4 owner identity fields
+    (owner_name, owner_corp_email, owner_corp_usa_email, owner_corp_id)
+    per OWNER-1 additive-list schema."""
+    if not value:
+        return []
+    parts = [p.strip() for p in re.split(r"[;,]", value)]
+    parts = [p for p in parts if p]
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in parts:
+        key = p.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
 def _parse_item_description(raw: Any) -> list | None:
     """Parse FR-82 item_description value into list-of-lists (AND-of-OR groups).
 
@@ -205,11 +232,20 @@ def _build_delivery_item(
         # -- SP-only state fields (dynamic; never in template) --
         delivery_state=body_kvs.get("delivery_state", "Not Started"),
         item_completion_pct=_to_int(body_kvs.get("item_completion_pct"), 0),
-        # Owner identity per [D-105] 4-field -- SP-authoritative (TPM reassignable):
-        owner_corp_usa_email=(body_kvs.get("owner_corp_usa_email") or None),
-        owner_corp_email=(body_kvs.get("owner_corp_email") or None),
-        owner_corp_id=(body_kvs.get("owner_corp_id") or None),
-        owner_name=(body_kvs.get("owner_name") or None),
+        # Owner identity per [D-105] 4-field -- SP-authoritative (TPM reassignable).
+        # OWNER-1/2 (2026-08-14): multi-owner semantics via additive `_list`
+        # fields. Ingest dual-writes: singular = first parsed entry (backward
+        # compat during OWNER-2..6), list = full parsed list. TPM enters a
+        # semicolon-separated string in the same SP text column; HILDA parses.
+        # See _split_owner_list above + DeliveryItemBase.owner_*_list fields.
+        owner_corp_usa_email=(_split_owner_list(body_kvs.get("owner_corp_usa_email"))[:1] or [None])[0],
+        owner_corp_email=(_split_owner_list(body_kvs.get("owner_corp_email"))[:1] or [None])[0],
+        owner_corp_id=(_split_owner_list(body_kvs.get("owner_corp_id"))[:1] or [None])[0],
+        owner_name=(_split_owner_list(body_kvs.get("owner_name"))[:1] or [None])[0],
+        owner_corp_usa_email_list=_split_owner_list(body_kvs.get("owner_corp_usa_email")),
+        owner_corp_email_list=_split_owner_list(body_kvs.get("owner_corp_email")),
+        owner_corp_id_list=_split_owner_list(body_kvs.get("owner_corp_id")),
+        owner_name_list=_split_owner_list(body_kvs.get("owner_name")),
         # TG-denormalized per [D-106] -- SP-authoritative (Owner-Group cascade):
         tg_name=(body_kvs.get("tg_name") or None),
         tg_email_group_alias=(body_kvs.get("tg_email_group_alias") or None),
