@@ -41,6 +41,7 @@ __all__ = [
     "plm_poll_task",
     "poll_plm_once",
     "close_plm_defects_for_milestone",   # PLM-6 milestone-close hook
+    "ensure_plm_tickets_for_scope",       # PLMKO-1 kickoff-time synchronous create
 ]
 
 _log = logging.getLogger(__name__)
@@ -306,65 +307,17 @@ def _process_tg_group(
     or create plm_id, write to SP, download files, ingest through router.
     All failures WARN + move on to next group.
 
-    Pre-work: derive PLM assignee from owner_corp_id (first non-empty entry
-    across the group per _resolve_group_assignee_corp_id -- unsuffixed
-    field is list-typed post B-final-B). If none exists, WARN + skip --
-    PLM requires an assignee and we won't fabricate one."""
-    from core.src.issue_tracker.corp_plm import on_prem_client
-
-    assignee_corp_id = _resolve_group_assignee_corp_id(items)
-    if not assignee_corp_id:
-        _log.warning(
-            "PLM_POLL: no owner_corp_id resolvable for tg=%s device=%s "
-            "(%d items; owner_corp_id list empty across group) -- "
-            "skipping group this tick (PLM needs an assignee per architect)",
-            tg_name, device_id, len(items),
-        )
-        stats["tg_groups_missing_owner_corp_id"] += 1
-        return
-
-    # Step 1: does any item already have plm_id populated? (Postgres check)
-    existing_plm_id = _check_plm_id_state(deps, items, customer_id, device_id, milestone_id)
-
-    if existing_plm_id:
-        # Reuse existing ticket -- skip create, jump straight to download.
-        stats["tickets_reused"] += 1
-        plm_id = existing_plm_id
-        _log.info(
-            "PLM_POLL: reuse plm_id=%s tg=%s device=%s (%d items)",
-            plm_id, tg_name, device_id, len(items),
-        )
-    else:
-        # Create new ticket via on-prem script.
-        payload = [(int(getattr(it, "item_no", 0) or 0),
-                    str(getattr(it, "item_name", "") or "")) for it in items]
-        case_id, url = on_prem_client.create_plm_ticket(
-            device_id, payload, owner_corp_id=assignee_corp_id,
-        )
-        if not case_id:
-            _log.warning(
-                "PLM_POLL: create_plm_ticket returned empty for tg=%s "
-                "device=%s owner_corp_id=%s (%d items) -- skipping group this tick",
-                tg_name, device_id, assignee_corp_id, len(items),
-            )
-            stats["tickets_create_failed"] += 1
-            return
-        stats["tickets_created"] += 1
-        plm_id = case_id
-        _log.warning(
-            "PLM_POLL: created plm_id=%s url=%s tg=%s device=%s assignee=%s",
-            case_id, url, tg_name, device_id, assignee_corp_id,
-        )
-
-        # Step 2: write plm_id + actual_item_info back to SP for all items
-        # in this group (D-164 Pattern A: SP-authoritative state-mirror).
-        # SP CHANGED alert propagates to Postgres via _STR_FIELDS sync
-        # (PLM-2). Wrapped per-item so one failure doesn't lose the rest.
-        _write_plm_fields_to_sp(
-            deps=deps, stats=stats,
-            customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
-            items=items, plm_id=case_id, url=url,
-        )
+    PLMKO-1 (2026-08-17): the create-or-reuse phase (steps 1 + 2) is
+    extracted to `_ensure_plm_ticket_for_group` so kickoff_collection_task
+    can call it synchronously before firing outreach (guarantees plm_id
+    is populated in the outreach table's Tracking Modality column)."""
+    plm_id = _ensure_plm_ticket_for_group(
+        deps=deps, stats=stats,
+        customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        tg_name=tg_name, items=items,
+    )
+    if not plm_id:
+        return  # counters already bumped inside the helper; skip download
 
     # Step 3: download files into a per-group scratch dir, walk it, ingest.
     _download_and_ingest(
@@ -372,6 +325,161 @@ def _process_tg_group(
         customer_id=customer_id, milestone_id=milestone_id,
         plm_id=plm_id, items=items,
     )
+
+
+def _ensure_plm_ticket_for_group(
+    *,
+    deps: Any,
+    stats: dict[str, Any],
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+    tg_name: str,
+    items: list[Any],
+) -> str:
+    """PLMKO-1 (2026-08-17): resolve or create the PLM ticket for one TG
+    group. Returns the plm_id (existing OR newly-created), or "" on any
+    failure/skip. Counter bumping matches the pre-extraction _process_tg_group
+    behavior so plm_poll's stats remain intact.
+
+    Pre-work: derive PLM assignee from owner_corp_id (first non-empty entry
+    across the group per _resolve_group_assignee_corp_id, list-typed post
+    B-final-B). If none exists, WARN + skip -- PLM requires an assignee.
+
+    Shared by plm_poll's periodic tick (which then downloads) and
+    kickoff_collection_task's synchronous pre-outreach step (which just
+    needs the plm_id populated for the outreach email's Tracking Modality
+    column; download continues to happen via plm_poll's 15-min beat)."""
+    from core.src.issue_tracker.corp_plm import on_prem_client
+
+    assignee_corp_id = _resolve_group_assignee_corp_id(items)
+    if not assignee_corp_id:
+        _log.warning(
+            "PLM_ENSURE: no owner_corp_id resolvable for tg=%s device=%s "
+            "(%d items; owner_corp_id list empty across group) -- "
+            "skipping group (PLM needs an assignee per architect)",
+            tg_name, device_id, len(items),
+        )
+        stats["tg_groups_missing_owner_corp_id"] += 1
+        return ""
+
+    # Step 1: does any item already have plm_id populated? (Postgres check
+    # with SP-fallback for CHANGED-alert-in-flight window)
+    existing_plm_id = _check_plm_id_state(deps, items, customer_id, device_id, milestone_id)
+
+    if existing_plm_id:
+        stats["tickets_reused"] += 1
+        _log.info(
+            "PLM_ENSURE: reuse plm_id=%s tg=%s device=%s (%d items)",
+            existing_plm_id, tg_name, device_id, len(items),
+        )
+        return existing_plm_id
+
+    # Step 2: create new ticket via on-prem script.
+    payload = [(int(getattr(it, "item_no", 0) or 0),
+                str(getattr(it, "item_name", "") or "")) for it in items]
+    case_id, url = on_prem_client.create_plm_ticket(
+        device_id, payload, owner_corp_id=assignee_corp_id,
+    )
+    if not case_id:
+        _log.warning(
+            "PLM_ENSURE: create_plm_ticket returned empty for tg=%s "
+            "device=%s owner_corp_id=%s (%d items) -- skipping group",
+            tg_name, device_id, assignee_corp_id, len(items),
+        )
+        stats["tickets_create_failed"] += 1
+        return ""
+    stats["tickets_created"] += 1
+    _log.warning(
+        "PLM_ENSURE: created plm_id=%s url=%s tg=%s device=%s assignee=%s",
+        case_id, url, tg_name, device_id, assignee_corp_id,
+    )
+
+    # Step 3: write plm_id + actual_item_info back to SP (D-164 Pattern A).
+    # Wrapped per-item so one failure doesn't lose the rest.
+    _write_plm_fields_to_sp(
+        deps=deps, stats=stats,
+        customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        items=items, plm_id=case_id, url=url,
+    )
+    return case_id
+
+
+def _empty_plm_ensure_stats() -> dict[str, int]:
+    """Fresh stats dict for callers that don't have their own -- used by
+    ensure_plm_tickets_for_scope. Counters match plm_poll.poll_plm_once."""
+    return {
+        "tg_groups":                        0,
+        "tg_groups_missing_owner_corp_id":  0,
+        "tickets_created":                  0,
+        "tickets_reused":                   0,
+        "tickets_create_failed":            0,
+        "sp_writes_ok":                     0,
+        "sp_writes_failed":                 0,
+    }
+
+
+def ensure_plm_tickets_for_scope(
+    *,
+    deps: Any,
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+    items: list[Any],
+    tracking_modality_value: str = _PLM_MODALITY_VALUE,
+) -> dict[str, Any]:
+    """PLMKO-1 (2026-08-17): guarantee every CorporatePLM item in `items`
+    has a non-empty plm_id BEFORE the caller fires outreach. Shared entry
+    point used by kickoff_collection_task (the SP Start Collection path).
+
+    Filters `items` to those whose tracking_modality equals
+    `tracking_modality_value` (default "CorporatePLM"; tolerant of both
+    scalar-str and list forms per current D-037 shape), groups by tg_name
+    (OWNER-5), calls _ensure_plm_ticket_for_group per TG group.
+
+    Returns:
+      {
+        "plm_ids_by_item_id": {<delivery_item_id>: <plm_id>, ...},
+        "stats":              {<counter_name>: <int>, ...},
+      }
+
+    Items with a resolved plm_id (reused OR newly-created) appear in the
+    map. Items whose group was skipped (no assignee, create failed) DO
+    NOT appear -- caller sees a missing map entry as "no PLM yet, show
+    'CorporatePLM (pending)' in the outreach column."""
+    stats = _empty_plm_ensure_stats()
+    plm_ids_by_item_id: dict[str, str] = {}
+
+    plm_items = [it for it in items if _item_has_modality(it, tracking_modality_value)]
+    if not plm_items:
+        return {"plm_ids_by_item_id": plm_ids_by_item_id, "stats": stats}
+
+    groups = _group_by_tg(plm_items)
+    stats["tg_groups"] = len(groups)
+    for tg_name, group in groups.items():
+        plm_id = _ensure_plm_ticket_for_group(
+            deps=deps, stats=stats,
+            customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+            tg_name=tg_name, items=group,
+        )
+        if not plm_id:
+            continue
+        for it in group:
+            iid = _item_id(it)
+            if iid:
+                plm_ids_by_item_id[iid] = plm_id
+
+    return {"plm_ids_by_item_id": plm_ids_by_item_id, "stats": stats}
+
+
+def _item_has_modality(item: Any, value: str) -> bool:
+    """Modality is list[str] per D-037; scalar-str tolerated for legacy."""
+    mod = getattr(item, "tracking_modality", None)
+    if isinstance(mod, str):
+        return mod == value
+    if isinstance(mod, (list, tuple)):
+        return value in mod
+    return False
 
 
 def _check_plm_id_state(

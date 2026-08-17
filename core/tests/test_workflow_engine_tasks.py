@@ -939,6 +939,38 @@ class TestOutreachTasks:
         assert result["reminder_count"] == 3
 
 
+class TestOutreachModalityDisplay:
+    """MOD-1 (2026-08-17): outreach table 'Tracking Modality' column value
+    resolution per architect ask. modality_display() is pure -- no fixtures
+    needed; single-modality-per-item invariant per architect."""
+
+    def test_modality_display_email(self):
+        from core.src.workflow_engine.tasks.outreach import modality_display
+        assert modality_display("Email", None) == "email"
+        assert modality_display(["Email"], "") == "email"  # list-form tolerated
+
+    def test_modality_display_network_shared_drive(self):
+        from core.src.workflow_engine.tasks.outreach import modality_display
+        assert modality_display("NetworkSharedDrive", None) == "Network Shared Drive"
+
+    def test_modality_display_customer_jira_renders_verizon(self):
+        """Per architect 2026-08-17: CustomerJIRA renders 'Verizon JIRA' for
+        P1 milestone (hardcoded for now; MMK is the only live customer)."""
+        from core.src.workflow_engine.tasks.outreach import modality_display
+        assert modality_display("CustomerJIRA", None) == "Verizon JIRA"
+
+    def test_modality_display_plm_shows_plm_id_when_populated(self):
+        """CorporatePLM renders the plm_id string; falls back to
+        'CorporatePLM (pending)' when plm_id empty (edge case post-PLMKO-2:
+        should not appear unless synchronous create failed)."""
+        from core.src.workflow_engine.tasks.outreach import modality_display
+        assert modality_display("CorporatePLM", "P260804-92345") == "P260804-92345"
+        assert modality_display("CorporatePLM", "") == "CorporatePLM (pending)"
+        assert modality_display("CorporatePLM", None) == "CorporatePLM (pending)"
+        # Whitespace-only plm_id is treated as empty
+        assert modality_display("CorporatePLM", "   ") == "CorporatePLM (pending)"
+
+
 class TestSubmissionTasks:
     """ESCALATE + START_ITEM_COLLECTION + QUEUE_SUBMISSION -- Ph-1 wire-up."""
 

@@ -23,9 +23,69 @@ __all__ = [
     "send_initial_outreach_task",
     "send_reminder_task",
     "notify_new_owner_task",
+    "modality_display",           # MOD-1 (2026-08-17): outreach column helper
 ]
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MOD-1 (2026-08-17): Tracking Modality column value
+# ---------------------------------------------------------------------------
+# Per architect 2026-08-17: outreach email gets a "Tracking Modality" column
+# so owner sees HOW HILDA receives their docs per item. Method of OUTREACH is
+# always Email; the column describes the RECEPTION channel per item. Owner
+# must reply "Closed" for ALL items regardless of modality (existing D-138
+# behavior; no gate change).
+#
+# Mapping (architect ask 2026-08-17):
+#   Email               -> "email"
+#   NetworkSharedDrive  -> "Network Shared Drive"
+#   CustomerJIRA        -> "Verizon JIRA"   (hardcoded per architect for P1
+#                          milestone; MMK is the only live customer today.
+#                          TODO: generalize to per-customer label when a
+#                          non-Verizon customer needs CustomerJIRA support.)
+#   CorporatePLM        -> the plm_id string (e.g. "P260804-92345") when
+#                          populated; else "CorporatePLM (pending)" -- this
+#                          "pending" case should not normally appear post-
+#                          PLMKO-2 (kickoff synchronously creates before
+#                          firing outreach), but the fallback stays for
+#                          plm-create-failed edge cases so the owner still
+#                          gets useful context.
+
+
+_MODALITY_STATIC_LABELS = {
+    "Email":              "email",
+    "NetworkSharedDrive": "Network Shared Drive",
+    "CustomerJIRA":       "Verizon JIRA",
+}
+
+
+def modality_display(modality: Any, plm_id: str | None) -> str:
+    """Render one item's Tracking Modality column value for the outreach
+    table. `modality` is the item's tracking_modality field -- per D-037
+    it's list[str] but scalar-str is tolerated (defensive). Per architect
+    2026-08-17 a single item has exactly ONE modality value.
+
+    Returns "" for missing/empty modality (renders as empty cell). Returns
+    the raw modality string as fallback for unknown values so the column
+    still shows something meaningful during future modality additions."""
+    # Normalize modality to a single scalar string (first entry of list,
+    # or the scalar itself).
+    value = ""
+    if isinstance(modality, str):
+        value = modality.strip()
+    elif isinstance(modality, (list, tuple)):
+        for entry in modality:
+            if entry and str(entry).strip():
+                value = str(entry).strip()
+                break
+    if not value:
+        return ""
+    if value == "CorporatePLM":
+        plm = (plm_id or "").strip()
+        return plm if plm else "CorporatePLM (pending)"
+    return _MODALITY_STATIC_LABELS.get(value, value)
 
 
 def _record_reminder_attempt(deps, delivery_item_id: str | None) -> int | None:
@@ -419,9 +479,13 @@ def _fetch_template_inputs(
         return owner_identity, item_for_template
 
     # Always populate item shape from storage snapshot (cheap, no SP call).
+    # MOD-1 (2026-08-17): also carry tracking_modality + plm_id so the
+    # outreach template's Tracking Modality column renders per-row.
     item_for_template = {
-        "item_no":   getattr(item, "item_no", None),
-        "item_name": getattr(item, "item_name", None) or f"Item {getattr(item, 'item_no', '?')}",
+        "item_no":           getattr(item, "item_no", None),
+        "item_name":         getattr(item, "item_name", None) or f"Item {getattr(item, 'item_no', '?')}",
+        "tracking_modality": getattr(item, "tracking_modality", None),
+        "plm_id":            getattr(item, "plm_id", None) or "",
     }
 
     # SP-read for live owner_name (matches Path A: SP is source of truth for
@@ -520,12 +584,29 @@ def _render_outreach_table(
     The template includes:
       - greeting using owner.owner_name (falls back to "Owner" inside the j2)
       - HILDA-BATCH-ID anchor span (parser-readable)
-      - <table> with one row per item (item_no, item_name, status=Open, note=blank)
+      - <table> with one row per item (item_no, item_name, tracking_modality
+        display, status=Open, completion date, note=blank)
       - status legend + reply instructions
+
+    MOD-1 (2026-08-17): before render, computes each item's `modality_display`
+    field via modality_display() so the template just prints it verbatim.
+    Callers may pre-populate `tracking_modality` + `plm_id` on each item
+    dict; missing = renders as empty cell.
 
     Caller passes already-resolved data; this function does NOT do any IO.
     """
     from jinja2 import Environment, PackageLoader, select_autoescape
+
+    # Enrich items with modality_display so the Jinja template stays simple
+    # (no Python logic in .j2). Non-destructive per row (shallow copy).
+    enriched_items = []
+    for it in items:
+        row = dict(it) if isinstance(it, dict) else {"item_no": None, "item_name": None}
+        row["modality_display"] = modality_display(
+            row.get("tracking_modality"), row.get("plm_id"),
+        )
+        enriched_items.append(row)
+
     env = Environment(
         loader=PackageLoader("core.src.email_service", "templates"),
         autoescape=select_autoescape(["html", "j2"]),
@@ -533,7 +614,7 @@ def _render_outreach_table(
     template = env.get_template("outreach_table.j2")
     return template.render(
         owner=owner_identity,
-        items=items,
+        items=enriched_items,
         batch_id=batch_id,
     )
 

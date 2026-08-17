@@ -804,6 +804,38 @@ def kickoff_collection_task(
     items_transitioned = 0
     items_failed = 0
 
+    # PLMKO-2 (2026-08-17): before firing outreach, guarantee every
+    # CorporatePLM-tracked item in scope has a plm_id populated. Kickoff
+    # is the only synchronous path that can do this (plm_poll runs on a
+    # 15-min beat cadence, which would leave the first outreach email
+    # missing plm_ids for CorporatePLM items). Failures WARN + leave the
+    # item's plm_id empty; MOD-1 renders "CorporatePLM (pending)" in the
+    # modality column so owner sees the state clearly.
+    try:
+        from core.src.workflow_engine.tasks.plm_poll import ensure_plm_tickets_for_scope
+        ensure_result = ensure_plm_tickets_for_scope(
+            deps=deps,
+            customer_id=customer_id,
+            device_id=device_id or "",
+            milestone_id=milestone_id,
+            items=eligible,
+        )
+        plm_ids_by_item_id: dict[str, str] = ensure_result.get("plm_ids_by_item_id", {}) or {}
+        logger.info(
+            "kickoff_collection: PLM-ensure done customer=%s device=%s milestone=%s "
+            "resolved=%d stats=%s",
+            customer_id, device_id, milestone_id,
+            len(plm_ids_by_item_id), ensure_result.get("stats"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "kickoff_collection: PLM-ensure failed customer=%s milestone=%s: %s: %s "
+            "-- proceeding with empty plm_id map; outreach column will show "
+            "'CorporatePLM (pending)' for CorporatePLM items until plm_poll catches up",
+            customer_id, milestone_id, type(exc).__name__, str(exc)[:120],
+        )
+        plm_ids_by_item_id = {}
+
     for owner_key, group_items in owner_groups.items():
         # Build identity dict for the template (owner_name from SP).
         sample_owner_info = owner_map.get(
@@ -825,18 +857,28 @@ def kickoff_collection_task(
         # milestone alert's (customer, device, milestone) triple), but the
         # per-row copy is harmless and keeps the template + email code
         # independent of the surrounding task's scope.
-        item_dicts = [
-            {
-                "item_no":      getattr(it, "item_no", None),
-                "item_name":    getattr(it, "item_name", None) or f"Item {getattr(it, 'item_no', '?')}",
-                "customer_id":  customer_id,
-                "device_id":    device_id
-                                or getattr(it, "device_id", None)
-                                or getattr(it, "project_model", None),
-                "milestone_id": milestone_id,
-            }
-            for it in group_items
-        ]
+        #
+        # MOD-1 (2026-08-17): also propagate tracking_modality + plm_id
+        # so the outreach template's Tracking Modality column can render
+        # a per-row value. plm_id preference: PLMKO-2 ensure map (freshest
+        # after synchronous create) -> item's live attr (backup for
+        # non-CorporatePLM rows or reused-existing rows).
+        item_dicts = []
+        for it in group_items:
+            iid = getattr(it, "item_id", None) or getattr(it, "delivery_item_id", None)
+            live_plm_id = getattr(it, "plm_id", "") or ""
+            resolved_plm_id = plm_ids_by_item_id.get(iid) or live_plm_id
+            item_dicts.append({
+                "item_no":           getattr(it, "item_no", None),
+                "item_name":         getattr(it, "item_name", None) or f"Item {getattr(it, 'item_no', '?')}",
+                "customer_id":       customer_id,
+                "device_id":         device_id
+                                     or getattr(it, "device_id", None)
+                                     or getattr(it, "project_model", None),
+                "milestone_id":      milestone_id,
+                "tracking_modality": getattr(it, "tracking_modality", None),
+                "plm_id":            resolved_plm_id,
+            })
         # Deterministic batch_id from (correlation_id, owner_key) prefix.
         batch_seed = f"{correlation_id}-{owner_key}"
         batch_id = f"BATCH-{_uuid.uuid5(_uuid.NAMESPACE_URL, batch_seed).hex[:10]}"
