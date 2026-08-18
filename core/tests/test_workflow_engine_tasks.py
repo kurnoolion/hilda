@@ -99,13 +99,16 @@ class MockStorage:
         pass
 
     def find_items_by_natural_key(self, customer_id, tg_name, item_no,
-                                    only_active=True, device_id=None):
+                                    only_active=True, device_id=None,
+                                    milestone_id=None):
         # device_id added 2026-07-03 for import-idempotency cross-device fix;
-        # None preserves FR-82 tag_propagation cross-device semantics.
+        # milestone_id added 2026-08-18 (DEDUP-1) for cross-milestone fix.
+        # Both None preserves FR-82 tag_propagation cross-scope semantics.
         return [i for i in self.items.values()
                 if getattr(i, "customer_id", None) == customer_id
                 and getattr(i, "tg_name", None) == tg_name
                 and getattr(i, "item_no", None) == item_no
+                and (milestone_id is None or getattr(i, "milestone_id", None) == milestone_id)
                 and (device_id is None
                      or getattr(i, "device_id", None) == device_id)]
 
@@ -1340,13 +1343,14 @@ class TestImportDeliverableTracker:
         from core.src.workflow_engine.tasks.sp_alert_imports import (
             import_deliverable_tracker_task,
         )
-        # Pre-seed an existing item matching the natural key
-        # (customer_id=MMK, device_id=SM-S671U1, tg_name=MNO-ETM, item_no=5).
-        # device_id added 2026-07-03 per import-idempotency cross-device fix.
+        # Pre-seed an existing item matching the natural key.
+        # device_id added 2026-07-03 per import-idempotency cross-device fix;
+        # milestone_id added 2026-08-18 per DEDUP-1 cross-milestone fix.
         existing = SimpleNamespace(
             item_id="MMK-SM-S671U1-P1-5",
             customer_id="MMK",
             device_id="SM-S671U1",
+            milestone_id="P1",
             tg_name="MNO-ETM",
             item_no=5,
         )

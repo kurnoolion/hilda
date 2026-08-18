@@ -230,6 +230,62 @@ async def test_find_items_by_natural_key_returns_empty_when_no_match():
     assert matches == []
 
 
+# ---------------------------------------------------------------------------
+# DEDUP-1 (2026-08-18): milestone_id scoping in natural-key lookup.
+# Regression coverage for the bug where P1 items were silently dropped as
+# "already_exists" because they collided with DRR items sharing the same
+# (customer, device, tg, item_no) key on the same device.
+# ---------------------------------------------------------------------------
+
+
+async def test_find_items_by_natural_key_scoped_by_milestone_id():
+    """DEDUP-1: two items with SAME (customer, device, tg, item_no) but
+    DIFFERENT milestone_id must NOT collide. Prior bug: the DRR row was
+    returned when looking up the P1 row -> import task treated as
+    'already_exists' -> P1 row never created."""
+    await create_delivery_item(_mk_item(
+        item_id="drr-31", customer_id="MMK", device_id="SM-S671U1",
+        tg_name="CPM", item_no=31, milestone_id="DRR",
+    ))
+    await create_delivery_item(_mk_item(
+        item_id="p1-31", customer_id="MMK", device_id="SM-S671U1",
+        tg_name="CPM", item_no=31, milestone_id="P1",
+    ))
+
+    # With milestone_id filter, each lookup returns exactly its own row.
+    drr = await find_items_by_natural_key(
+        customer_id="MMK", tg_name="CPM", item_no=31,
+        device_id="SM-S671U1", milestone_id="DRR",
+    )
+    assert len(drr) == 1 and drr[0].item_id == "drr-31"
+
+    p1 = await find_items_by_natural_key(
+        customer_id="MMK", tg_name="CPM", item_no=31,
+        device_id="SM-S671U1", milestone_id="P1",
+    )
+    assert len(p1) == 1 and p1[0].item_id == "p1-31"
+
+
+async def test_find_items_by_natural_key_spans_milestones_when_omitted():
+    """FR-82 tag_propagation preservation: when milestone_id is NOT passed,
+    the lookup INTENTIONALLY spans milestones (same-tg + same-item_no
+    across DRR and P1 both match) so tag updates propagate to all copies.
+    Also spans devices when device_id is None (pre-existing behavior)."""
+    await create_delivery_item(_mk_item(
+        item_id="drr-31", customer_id="MMK", device_id="SM-S671U1",
+        tg_name="CPM", item_no=31, milestone_id="DRR",
+    ))
+    await create_delivery_item(_mk_item(
+        item_id="p1-31", customer_id="MMK", device_id="SM-S671U1",
+        tg_name="CPM", item_no=31, milestone_id="P1",
+    ))
+
+    matches = await find_items_by_natural_key(
+        customer_id="MMK", tg_name="CPM", item_no=31,
+    )
+    assert {m.item_id for m in matches} == {"drr-31", "p1-31"}
+
+
 # -----------------------------------------------------------------------------
 # Sync PostgresStorage wrapper -- Protocol conformance
 # -----------------------------------------------------------------------------

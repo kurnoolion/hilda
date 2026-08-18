@@ -201,21 +201,30 @@ async def get_by_customer_and_sp_id(
 async def find_items_by_natural_key(
     customer_id: str, tg_name: str, item_no: int,
     device_id: str | None = None,
+    milestone_id: str | None = None,
 ) -> list[DeliveryItemBase]:
     """Idempotency lookup per [D-118] Chunk 3.
 
     Two callers with DIFFERENT semantics:
-      - sp_alert_imports (import idempotency): pass device_id -- lookup is
-        scoped to (customer, device, tg, item_no). Prevents cross-device
-        dedup when TPM sets up N devices and SP fires N ADDED alerts per
-        work_item -- previously the (customer, tg, item_no)-only lookup
-        treated device 2..N as duplicates and dropped them.
-      - tag_propagation (FR-82): pass device_id=None -- INTENTIONALLY spans
-        devices so a tag update propagates to all devices' copies of the
-        matching work_item per tracker/MODULE.md.
+      - sp_alert_imports (import idempotency): pass BOTH device_id AND
+        milestone_id -- lookup is scoped to
+        (customer, device, milestone, tg, item_no). Prevents cross-milestone
+        dedup when a device has multiple milestones sharing item_no ranges
+        (e.g. DRR 1..87 and P1 1..107 both use item_no=31 for SM-S671U1).
+        Also prevents the pre-existing cross-device dedup fix from 2026-07-03.
+      - tag_propagation (FR-82): pass device_id=None AND milestone_id=None --
+        INTENTIONALLY spans both devices AND milestones so a tag update
+        propagates to all copies of the matching work_item per
+        tracker/MODULE.md.
 
-    device_id is keyword-only when supplied and defaults to None to preserve
-    backward compat with the FR-82 caller.
+    Both device_id and milestone_id are keyword-only when supplied and
+    default to None to preserve backward compat with the FR-82 caller.
+
+    DEDUP-1 (2026-08-18): milestone_id filter added after live corp-box
+    test surfaced 14 P1 items dropped as "already_exists" because they
+    collided with DRR items sharing the same (customer, device, tg,
+    item_no) key. Prior to this fix the idempotency check silently
+    swallowed both the fresh SP ADD alerts AND sync-1's backfill retries.
     """
     async with session_scope() as session:
         conditions = [
@@ -225,6 +234,8 @@ async def find_items_by_natural_key(
         ]
         if device_id is not None:
             conditions.append(DeliveryItemTable.device_id == device_id)
+        if milestone_id is not None:
+            conditions.append(DeliveryItemTable.milestone_id == milestone_id)
         stmt = select(DeliveryItemTable).where(*conditions)
         rows = (await session.execute(stmt)).scalars().all()
         return [_row_to_pydantic(r) for r in rows]
@@ -527,10 +538,12 @@ class PostgresStorage:
     def find_items_by_natural_key(
         self, *, customer_id: str, tg_name: str, item_no: int,
         device_id: str | None = None,
+        milestone_id: str | None = None,
     ) -> list[DeliveryItemBase]:
         return run_async_sync(
             lambda: find_items_by_natural_key(
-                customer_id, tg_name, item_no, device_id=device_id,
+                customer_id, tg_name, item_no,
+                device_id=device_id, milestone_id=milestone_id,
             )
         )
 

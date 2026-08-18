@@ -93,7 +93,8 @@ class MockStorage:
             for k, v in fields.items():
                 setattr(self.doc_index_by_hash[file_hash], k, v)
 
-    def find_items_by_natural_key(self, customer_id, tg_name, item_no, only_active=True):
+    def find_items_by_natural_key(self, customer_id, tg_name, item_no,
+                                    only_active=True, device_id=None, milestone_id=None):
         return [
             i for i in self.items.values()
             if getattr(i, "customer_id", None) == customer_id
