@@ -174,6 +174,37 @@ class TestFilterAndGroup:
         stats = poll_plm_once(deps)
         assert stats["eligible_items"] == 1
 
+    def test_mno_solution_case_insensitive_match(self, mock_client, ingest_recorder):
+        """PLMCASE-1 (2026-08-18): SP UI engineer may use mixed-case
+        'MNO-Solution'. Live corp box surfaced 44 items silently dropped
+        because the frozenset was hardcoded 'MNO-SOLUTION'. Filter now
+        lowercases both sides -- both cases match."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(tg_name="MNO-Solution")]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 1
+        assert stats["tickets_created"] == 1  # confirms it flows through to create
+
+    def test_mixed_case_variants_collapse_into_one_tg_group(self, mock_client, ingest_recorder):
+        """PLMCASE-1: two items on same device with tg_name variants
+        'MNO-Solution' and 'MNO-SOLUTION' must land in ONE PLM ticket
+        (one group), not two -- otherwise the 'one PLM ticket per TG'
+        invariant is violated."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(storage=_StubStorage(items=[
+            _make_item(delivery_item_id="X-1", item_no=1, tg_name="MNO-Solution"),
+            _make_item(delivery_item_id="X-2", item_no=2, tg_name="MNO-SOLUTION"),
+        ]), sp_writer=None)
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 2
+        assert stats["tg_groups"] == 1     # collapsed
+        assert stats["tickets_created"] == 1
+
     def test_terminal_state_dropped(self, mock_client, ingest_recorder):
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()

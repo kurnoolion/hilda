@@ -55,8 +55,15 @@ _log = logging.getLogger(__name__)
 _PLM_MILESTONE_ID = "P1"
 
 # tg_name values whose items participate in PLM ticket creation.
-# Match is exact (case-sensitive after strip).
-_PLM_ELIGIBLE_TG_NAMES = frozenset({"MQL-FIT", "MNO-SOLUTION"})
+# Match is CASE-INSENSITIVE (compared as lowercase) so SP UI casing
+# variants like "MNO-Solution" and "MNO-SOLUTION" both match. Fix
+# 2026-08-18 (PLMCASE-1): live corp box surfaced 44 P1 MNO-Solution
+# items silently invisible to plm_poll because the frozenset held
+# "MNO-SOLUTION" but SP-side data was "MNO-Solution". Case-insensitive
+# match protects against future SP UI engineer casing drift without
+# code touch. The stored set is lowercased once; the check lowercases
+# the tg_name at compare time.
+_PLM_ELIGIBLE_TG_NAMES = frozenset({"mql-fit", "mno-solution"})
 
 # delivery_state values that DISQUALIFY an item from PLM eligibility.
 _PLM_TERMINAL_STATES = frozenset({"Closed", "Cancelled", "CloseInProgress"})
@@ -216,7 +223,7 @@ def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
     """PLM-7 (2026-08-14): gate on tracking_modality in addition to tg_name.
 
     Eligible when ALL apply:
-      tg_name in ('MQL-FIT', 'MNO-SOLUTION')
+      tg_name in ('MQL-FIT', 'MNO-SOLUTION')  -- CASE-INSENSITIVE match
       device_id matches scope
       'CorporatePLM' in tracking_modality  (list membership)
       delivery_state NOT in terminal states (Closed, Cancelled, CloseInProgress)
@@ -224,10 +231,14 @@ def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
     Strict gate -- no fallback to tg-name-only. Items with missing
     tracking_modality are opted out (TPM must explicitly enable via the
     SP Choice column). P1 milestone is not TPM-live yet so no backward-
-    compat concern (per architect 2026-08-14)."""
+    compat concern (per architect 2026-08-14).
+
+    PLMCASE-1 (2026-08-18): tg_name compared as lowercase after strip so
+    SP-side casing variants (MNO-Solution vs MNO-SOLUTION) all match --
+    see _PLM_ELIGIBLE_TG_NAMES docstring."""
     out: list[Any] = []
     for it in all_items:
-        tg = (getattr(it, "tg_name", None) or "").strip()
+        tg = (getattr(it, "tg_name", None) or "").strip().lower()
         if tg not in _PLM_ELIGIBLE_TG_NAMES:
             continue
         if (getattr(it, "device_id", None) or "").strip() != device_id.strip():
@@ -253,11 +264,17 @@ def _group_by_tg(items: list[Any]) -> dict[str, list[Any]]:
     Items with empty tg_name are dropped defensively (should never happen
     for MQL-FIT / MNO-SOLUTION since _filter_eligible_items already
     matched on tg_name, but keep the guard so a mutation upstream never
-    creates a "" bucket)."""
+    creates a "" bucket).
+
+    PLMCASE-1 (2026-08-18): the group key is lowercased so casing variants
+    (MNO-Solution + MNO-SOLUTION) collapse into one group -- otherwise
+    they'd generate two PLM tickets per architect "one PLM ticket per TG"
+    invariant. Case-insensitive match here matches the case-insensitive
+    filter in _filter_eligible_items."""
     groups: dict[str, list[Any]] = {}
     for it in items:
         raw = getattr(it, "tg_name", None) or ""
-        key = raw.strip()
+        key = raw.strip().lower()
         if not key:
             _log.warning(
                 "PLM_POLL: item has empty tg_name -- skipping "
