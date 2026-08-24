@@ -729,3 +729,98 @@ class TestDefaultTagValidator:
         with pytest.raises(Exception) as exc:
             self._mk([["Default", "waiver"]])
         assert "default" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# NSDMATCH-4 (2026-08-24): InboundAttachment.match_hint separates tag-match
+# input from filename. NSD ingest supplies the immediate parent folder name
+# as match_hint; the router uses it for item_description substring matching
+# (Q1(b) folder-only) while filename still drives doc-type regex classification
+# (Q2(A) two-input). Multiple items sharing the same tag-set disambiguate via
+# ["default"]-tag tiebreaker per existing TG_DEFAULT_MULTIMATCH (D-151).
+# ---------------------------------------------------------------------------
+
+
+class TestMatchHintNsdRouting:
+    """Router-level tests: exercise _route_to_items with an InboundAttachment
+    carrying match_hint. Focus: tag substring match uses match_hint; filename
+    remains the surface used elsewhere in the router.
+    """
+
+    @staticmethod
+    def _atch(filename: str, match_hint: str | None):
+        from core.src.email_service.protocol import InboundAttachment
+        return InboundAttachment(
+            filename=filename,
+            content=b"",
+            content_type="application/octet-stream",
+            file_hash="deadbeef",
+            match_hint=match_hint,
+        )
+
+    @pytest.mark.asyncio
+    async def test_match_hint_matches_folder_name_not_filename(self):
+        """Attachment filename is 'report.pdf' (no tag words). match_hint is
+        'HAC T-Coil' -- router should route to the [["HAC"]] item purely on
+        the folder-name substring; without match_hint this would fall through.
+        """
+        r = _mk_router(ph1=True)
+        matches, res = await r._route_to_items(
+            self._atch(filename="report.pdf", match_hint="HAC T-Coil"),
+            [_item("HAC-1", tg_name="HW PL", item_description=[["HAC"]])],
+        )
+        assert len(matches) == 1
+        assert matches[0].item_id == "HAC-1"
+        assert res == RoutingResolution.SUBSTRING_MATCH
+
+    @pytest.mark.asyncio
+    async def test_default_tiebreaker_wins_on_multi_match(self):
+        """3 HAC items -- all have [["HAC"]], one also has ["default"].
+        Router picks the default-tagged one via TG_DEFAULT_MULTIMATCH.
+        """
+        r = _mk_router(ph1=True)
+        items = [
+            _item("HAC-A", tg_name="HW PL", item_description=[["HAC"]]),
+            _item("HAC-B", tg_name="HW PL", item_description=[["HAC"]]),
+            _item("HAC-DEFAULT", tg_name="HW PL",
+                  item_description=[["HAC"], ["default"]]),
+        ]
+        matches, res = await r._route_to_items(
+            self._atch(filename="anything.pdf", match_hint="HAC T-Coil"),
+            items,
+        )
+        assert len(matches) == 1
+        assert matches[0].item_id == "HAC-DEFAULT"
+        assert res == RoutingResolution.TG_DEFAULT_MULTIMATCH
+
+    @pytest.mark.asyncio
+    async def test_match_hint_none_falls_back_to_filename(self):
+        """Email/PLM ingest passes match_hint=None -- router falls back to
+        filename for tag matching (pre-NSDMATCH behavior preserved).
+        """
+        r = _mk_router(ph1=True)
+        matches, res = await r._route_to_items(
+            self._atch(filename="hac_report.pdf", match_hint=None),
+            [_item("HAC-1", tg_name="HW PL", item_description=[["hac"]])],
+        )
+        assert len(matches) == 1
+        assert matches[0].item_id == "HAC-1"
+
+    @pytest.mark.asyncio
+    async def test_match_hint_ignores_filename_for_tags(self):
+        """Filename contains 'HAC' but match_hint is 'Other Folder' -- router
+        must NOT match the HAC item; folder-only match per Q1(b).
+        """
+        r = _mk_router(ph1=True)
+        default_wi = _default_wi()
+        matches, res = await r._route_to_items(
+            self._atch(filename="hac_report.pdf", match_hint="Other Folder"),
+            [
+                _item("HAC-1", tg_name="HW PL", item_description=[["HAC"]]),
+                default_wi,
+            ],
+        )
+        # No tag match on 'Other Folder' -> Ph-1 substring-only pass falls
+        # through to milestone Default WI (STAGED_DEFAULT).
+        assert res == RoutingResolution.STAGED_DEFAULT
+        assert matches[0].item_id == default_wi["item_id"]

@@ -360,23 +360,28 @@ class Fr52AttachmentRouter:
         candidate_items: list[dict],
     ) -> tuple[list[AttachmentItemMatch], RoutingResolution]:
         """Branch B: FR-52 5-step routing. Returns (matches, resolution)."""
+        # NSDMATCH-2 (2026-08-24): tag-match input = attachment.match_hint
+        # when set (NSD ingest supplies the immediate parent folder name),
+        # else falls back to filename. `filename` var stays for doc-type
+        # regex classification which is orthogonal to tag routing.
         filename = (attachment.filename or "").lower()
+        match_input = (attachment.match_hint or attachment.filename or "").lower()
 
         # ---- Step B1: strict substring match per FR-82 + architect 2026-06-29 ----
         # item_description is list-of-lists with AND-of-OR semantics:
         #   outer list = OR (any group matching is enough)
-        #   inner list = AND (every tag in the group must appear in filename)
+        #   inner list = AND (every tag in the group must appear in match_input)
         # Examples:
-        #   [["Sustainability"]]                       -> match if filename contains "Sustainability"
-        #   [["SDoc"], ["Qualification", "Product"]]   -> match if filename contains "SDoc"
+        #   [["Sustainability"]]                       -> match if match_input contains "Sustainability"
+        #   [["SDoc"], ["Qualification", "Product"]]   -> match if match_input contains "SDoc"
         #                                                  OR (contains both "Qualification" AND "Product")
-        #   [["5G", "LC"]]                             -> match if filename contains both "5G" AND "LC"
+        #   [["5G", "LC"]]                             -> match if match_input contains both "5G" AND "LC"
         # Earlier flat-AND impl was incorrect; broke architect live test 2026-06-29
         # ("Sustainability" file didn't match item with [["Sustainability"]] tag).
         #
         # Per architect 2026-07-22 refinement (D-151): TG-scoped shortcuts +
         # `["default"]` tag semantics. See _tg_scoped_route for details.
-        b1_matches, b1_resolution = self._tg_scoped_route(filename, candidate_items)
+        b1_matches, b1_resolution = self._tg_scoped_route(match_input, candidate_items)
         if b1_matches:
             return b1_matches, b1_resolution
 

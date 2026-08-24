@@ -425,11 +425,20 @@ def _ingest_new_nsd2_file(
     delivery_item_ids = [i for i in (_item_id(it) for it in items) if i]
     batch_id = f"NSD2-{file_hash[:12]}"
 
+    # NSDMATCH-3 (2026-08-24): pass immediate parent folder name as
+    # match_hint so the router uses folder-name for tag substring match
+    # (item_description) while keeping filename for doc-type regex
+    # classification. Empty parent (file at device-folder root) -> None
+    # -> router falls back to filename for both, preserving pre-NSDMATCH
+    # behavior for that edge case.
+    from pathlib import PurePosixPath as _PP
+    _parent = _PP(filename).parent.name or None
     attachment = InboundAttachment(
         filename=filename,
         content=content,
         content_type="application/octet-stream",
         file_hash=file_hash,
+        match_hint=_parent,
     )
 
     async def _run() -> dict[str, Any]:

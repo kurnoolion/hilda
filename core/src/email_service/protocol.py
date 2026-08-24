@@ -62,6 +62,13 @@ class InboundAttachment:
     content: bytes
     content_type: str           # MIME type
     file_hash: str              # sha256 of content; used by D-039 Step 0 dedup
+    # NSDMATCH-1 (2026-08-24): tag-match input override for the Fr52 router.
+    # When set, router uses this string (lowercased) for item_description
+    # substring matching INSTEAD of `filename`, while `filename` is still
+    # used for doc-type regex classification (two-input separation).
+    # Populated by NSD ingest (immediate parent folder name); None for
+    # email/PLM ingest -> router falls back to `filename` for both.
+    match_hint: str | None = None
 
 
 @dataclass(frozen=True)
