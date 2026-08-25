@@ -409,6 +409,8 @@ def _ingest_new_nsd2_file(
     from core.src.template_schema.enums import IngestSource
     from core.src.workflow_engine.tasks.inbound_attachment import (
         _build_ph1_router,
+        _is_archive_attachment,               # PLMARCH-3 (2026-08-24)
+        _process_archive_attachment,          # PLMARCH-3 (2026-08-24)
         _process_regular_attachment,
         _widen_candidates_for_router,
     )
@@ -465,6 +467,19 @@ def _ingest_new_nsd2_file(
             )
             return {"processed": 0}
 
+        # PLMARCH-3 (2026-08-24): dispatch archives so inner entries route
+        # per-file through Fr52 (mirror email/PLM paths). Non-archives go
+        # through the regular attachment path as before.
+        if _is_archive_attachment(attachment):
+            return await _process_archive_attachment(
+                deps=deps,
+                router=router,
+                attachment=attachment,
+                candidate_items=candidate_items,
+                batch_id=batch_id,
+                correlation_id=correlation_id,
+                ingest_source=IngestSource.NETWORK_SHARED_DRIVE.value,
+            )
         return await _process_regular_attachment(
             deps=deps,
             router=router,

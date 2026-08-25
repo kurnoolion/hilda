@@ -368,6 +368,7 @@ async def _process_archive_attachment(
     candidate_items: list[dict],
     batch_id: str,
     correlation_id: str,
+    ingest_source: str | None = None,
     _depth: int = 0,
     _seen_hashes: set[str] | None = None,
     _path_prefix: str = "",
@@ -470,7 +471,10 @@ async def _process_archive_attachment(
             doc_type=DocType.ARCHIVE_CONTAINER.value,  # DOCTYPE-1 (2026-08-08): sentinel for outer-archive audit rows; prior "" failed Pydantic validation and silently dropped the row
             doc_id_slug=None,
             rev_number=None,
-            ingest_source=IngestSource.EMAIL.value,
+            # PLMARCH-1 (2026-08-24): honor ingest_source when caller
+            # supplies one (PLM / NSD2); default EMAIL preserves email-path
+            # behavior. Outer archive audit row lineage matches the source.
+            ingest_source=(ingest_source or IngestSource.EMAIL.value),
             original_filename=filename,
             first_page_excerpt="",
             is_final=False,                            # container, not deliverable
@@ -553,6 +557,7 @@ async def _process_archive_attachment(
                     candidate_items=candidate_items,
                     batch_id=batch_id,
                     correlation_id=correlation_id,
+                    ingest_source=ingest_source,        # PLMARCH-1: propagate
                     _depth=_depth + 1,
                     _seen_hashes=_seen_hashes,
                     _path_prefix=inner_rel,
@@ -565,6 +570,7 @@ async def _process_archive_attachment(
                     candidate_items=candidate_items,
                     batch_id=batch_id,
                     correlation_id=correlation_id,
+                    ingest_source=ingest_source,        # PLMARCH-1: propagate
                 )
         except Exception as exc:  # noqa: BLE001
             stats["failed"] += 1

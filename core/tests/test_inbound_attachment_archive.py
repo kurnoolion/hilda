@@ -386,3 +386,182 @@ class TestNestedArchiveRecursion:
         )
         # Exactly one replicate call, for the OUTER filename.
         assert nest_env.replicate_calls == ["outer.zip"]
+
+
+# ---------------------------------------------------------------------------
+# PLMARCH-4 (2026-08-24): ingest_source threads through the archive processor
+# so PLM/NSD zip contents get tagged with the right lineage (CORPORATE_PLM /
+# NETWORK_SHARED_DRIVE) instead of the pre-fix hardcoded EMAIL default.
+# ---------------------------------------------------------------------------
+
+
+class _IngestSourceRecordingStorage:
+    """Records every DocumentIndexRow the archive processor writes so we can
+    assert the ingest_source field on the outer-archive audit row."""
+    def __init__(self):
+        self.rows = []
+    def add_document_index_row(self, row):
+        self.rows.append(row)
+
+
+def _mk_deps_recording():
+    from types import SimpleNamespace
+    return SimpleNamespace(storage=_IngestSourceRecordingStorage())
+
+
+class _RegularSpyWithIngestSource:
+    """Records the ingest_source passed to _process_regular_attachment for
+    each inner leaf so we can verify propagation to inner-file routing."""
+    def __init__(self):
+        self.calls = []   # list of (filename, ingest_source)
+
+    async def __call__(self, **kw):
+        self.calls.append((kw["attachment"].filename, kw.get("ingest_source")))
+        return {
+            "processed": 1, "routed_with_match": 0, "routed_unrouted": 1,
+            "duplicates": 0, "items_incremented": set(), "events_fired": 0,
+        }
+
+
+class TestArchiveIngestSourcePropagation:
+
+    async def test_plm_archive_tags_outer_and_inner_as_corporate_plm(
+        self, monkeypatch,
+    ):
+        """PLM path: caller passes ingest_source='CorporatePLM'. Assert:
+        (a) outer-archive audit row lands with ingest_source='CorporatePLM'
+            (NOT the pre-fix hardcoded 'Email')
+        (b) inner leaves reach _process_regular_attachment with
+            ingest_source='CorporatePLM' too (recursion propagates)"""
+        from core.src.workflow_engine.tasks.inbound_attachment import (
+            _process_archive_attachment,
+        )
+        from core.src.template_schema.enums import IngestSource
+
+        spy = _RegularSpyWithIngestSource()
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._process_regular_attachment",
+            spy,
+        )
+        async def _noop(*a, **kw): pass
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._replicate_outer_archive_to_tgs",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._audit", _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._save_outer_archive_to_default_tg",
+            _noop,
+        )
+
+        deps = _mk_deps_recording()
+        outer_bytes = _make_zip({"a.pdf": b"aa", "b.docx": b"bb"})
+
+        await _process_archive_attachment(
+            deps=deps, router=None,
+            attachment=_mk_att("outer.zip", outer_bytes),
+            candidate_items=[{"customer_id": "MMK", "device_id": "SM-TEST",
+                              "milestone_id": "P1"}],
+            batch_id="BATCH-plm-1", correlation_id="corr-plm-1",
+            ingest_source=IngestSource.CORPORATE_PLM.value,
+        )
+
+        # (a) outer audit row has CorporatePLM ingest_source
+        assert len(deps.storage.rows) == 1
+        assert deps.storage.rows[0].ingest_source == IngestSource.CORPORATE_PLM.value
+
+        # (b) both inner leaves reached the router with CorporatePLM
+        assert {f for (f, _) in spy.calls} == {"a.pdf", "b.docx"}
+        assert all(
+            src == IngestSource.CORPORATE_PLM.value for (_, src) in spy.calls
+        ), spy.calls
+
+    async def test_nsd_archive_tags_outer_and_inner_as_network_shared_drive(
+        self, monkeypatch,
+    ):
+        """NSD path variant of the above -- ingest_source='NetworkSharedDrive'."""
+        from core.src.workflow_engine.tasks.inbound_attachment import (
+            _process_archive_attachment,
+        )
+        from core.src.template_schema.enums import IngestSource
+
+        spy = _RegularSpyWithIngestSource()
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._process_regular_attachment",
+            spy,
+        )
+        async def _noop(*a, **kw): pass
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._replicate_outer_archive_to_tgs",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._audit", _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._save_outer_archive_to_default_tg",
+            _noop,
+        )
+
+        deps = _mk_deps_recording()
+        outer_bytes = _make_zip({"report.pdf": b"payload"})
+
+        await _process_archive_attachment(
+            deps=deps, router=None,
+            attachment=_mk_att("hac_docs.zip", outer_bytes),
+            candidate_items=[{"customer_id": "MMK", "device_id": "SM-TEST",
+                              "milestone_id": "P1"}],
+            batch_id="BATCH-nsd-1", correlation_id="corr-nsd-1",
+            ingest_source=IngestSource.NETWORK_SHARED_DRIVE.value,
+        )
+        assert deps.storage.rows[0].ingest_source == IngestSource.NETWORK_SHARED_DRIVE.value
+        assert spy.calls == [("report.pdf", IngestSource.NETWORK_SHARED_DRIVE.value)]
+
+    async def test_default_ingest_source_stays_email_for_backward_compat(
+        self, monkeypatch,
+    ):
+        """No ingest_source passed -> outer audit row falls back to EMAIL
+        (preserves pre-PLMARCH-1 behavior for the email path). Inner leaves
+        get ingest_source=None (propagates as-is; _process_regular_attachment
+        applies its own EMAIL default per line 984)."""
+        from core.src.workflow_engine.tasks.inbound_attachment import (
+            _process_archive_attachment,
+        )
+        from core.src.template_schema.enums import IngestSource
+
+        spy = _RegularSpyWithIngestSource()
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._process_regular_attachment",
+            spy,
+        )
+        async def _noop(*a, **kw): pass
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._replicate_outer_archive_to_tgs",
+            _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._audit", _noop,
+        )
+        monkeypatch.setattr(
+            "core.src.workflow_engine.tasks.inbound_attachment._save_outer_archive_to_default_tg",
+            _noop,
+        )
+
+        deps = _mk_deps_recording()
+        outer_bytes = _make_zip({"x.pdf": b"x"})
+
+        await _process_archive_attachment(
+            deps=deps, router=None,
+            attachment=_mk_att("email.zip", outer_bytes),
+            candidate_items=[{"customer_id": "MMK", "device_id": "SM-TEST",
+                              "milestone_id": "P1"}],
+            batch_id="BATCH-e-1", correlation_id="corr-e-1",
+            # NB: no ingest_source kwarg
+        )
+        assert deps.storage.rows[0].ingest_source == IngestSource.EMAIL.value
+        # Inner call sees None (unspecified) -- _process_regular_attachment
+        # applies EMAIL default itself; from the archive dispatcher's POV
+        # we just verify we didn't accidentally pass EMAIL through.
+        assert spy.calls == [("x.pdf", None)]

@@ -726,6 +726,8 @@ def _ingest_new_plm_file(
     from core.src.template_schema.enums import IngestSource
     from core.src.workflow_engine.tasks.inbound_attachment import (
         _build_ph1_router,
+        _is_archive_attachment,               # PLMARCH-2 (2026-08-24)
+        _process_archive_attachment,          # PLMARCH-2 (2026-08-24)
         _process_regular_attachment,
         _widen_candidates_for_router,
     )
@@ -758,6 +760,17 @@ def _ingest_new_plm_file(
                 customer_id, delivery_item_ids[:3],
             )
             return {"processed": 0}
+        # PLMARCH-2 (2026-08-24): dispatch archives to the extractor so
+        # inner entries route per-file through Fr52 (mirror email-path
+        # behavior from D-155 / NEST-1). Non-archives go through the
+        # regular attachment path as before.
+        if _is_archive_attachment(attachment):
+            return await _process_archive_attachment(
+                deps=deps, router=router, attachment=attachment,
+                candidate_items=candidate_items,
+                batch_id=batch_id, correlation_id=correlation_id,
+                ingest_source=IngestSource.CORPORATE_PLM.value,
+            )
         return await _process_regular_attachment(
             deps=deps, router=router, attachment=attachment,
             candidate_items=candidate_items,
