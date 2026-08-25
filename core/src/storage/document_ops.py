@@ -701,8 +701,15 @@ async def tpm_resolve_doc_type(
         carrier, device, milestone, tg, item = _internal_segments(assoc.local_nsd_path)
         original = doc.original_filename if doc else file_hash
         if resolved:
+            # RECLASS-BUGFIX (2026-08-24): pass original_filename so the target
+            # path ends with .../revN/<filename> (a file inside the revN dir),
+            # NOT .../revN (a file named literally 'revN' at the doc_id_slug
+            # level). NSDPath.internal_classified defaults original_filename=''
+            # to the directory-only form for relocation helpers; TPM reclassify
+            # is a real file move -> must supply the leaf.
             target = NSDPath.internal_classified(
-                carrier, device, milestone, tg, item, new_doc_type.value, doc_id_slug, rev_number,
+                carrier, device, milestone, tg, item,
+                new_doc_type.value, doc_id_slug, rev_number, original,
             )
         else:
             target = NSDPath.internal_staged_revision(

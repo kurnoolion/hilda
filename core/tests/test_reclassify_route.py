@@ -162,3 +162,9 @@ class TestReclassifyRoute:
             assert assoc.nsd_path_type == NSDPathType.CLASSIFIED.value
             # New path lives under the concrete doc_type folder now
             assert "test_report" in assoc.local_nsd_path.lower()
+            # RECLASS-BUGFIX (2026-08-24): path must end with
+            # `.../revN/<original_filename>`, NOT `.../revN` (which would
+            # create a file literally named "rev1" at doc_id_slug/ level).
+            # Regression guard for the internal_classified factory contract.
+            assert assoc.local_nsd_path.endswith("/rev1/hac_report.pdf"), \
+                f"expected .../rev1/hac_report.pdf, got {assoc.local_nsd_path!r}"
