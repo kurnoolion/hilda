@@ -110,6 +110,17 @@ class TgFileEntry:
     # or the latest version is TPM/human-authored (TPM has already merged /
     # re-edited on top of the owner copy, no outstanding merge).
     needs_merge: bool = False
+    # RECLASS-1 (2026-08-24): doc_type + file_hash + is_staged surfaced to the
+    # TG-view template so TPM can spot Unresolved rows and click Reclassify.
+    # `doc_type` values include "Unresolved" (sentinel for classification miss)
+    # + concrete types (TestReport, TechReport, Waiver, ...). `is_staged` is
+    # True when ANY association for this doc's file_hash is at nsd_path_type=
+    # STAGED_NOT_CLASSIFIED -- gates the Reclassify button. `file_hash` is the
+    # sha256 already stored on document_version; used by the reclassify POST
+    # handler as the primary key into tpm_resolve_doc_type.
+    doc_type: str = ""
+    file_hash: str = ""
+    is_staged: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +331,15 @@ async def list_files_in_tg(
     captures the full path; UI can group by first-segment on client side if
     it wants to render subdirectories.
     """
+    # RECLASS-1 (2026-08-24): batch-fetch doc_type + is_staged from the
+    # sibling tables (document_index, document_item_association) keyed by
+    # file_hash. Only one round-trip per table (WHERE file_hash IN <set>).
+    from core.src.storage.db import (
+        DocumentIndexTable as _DocIx,
+        DocumentItemAssociationTable as _DocAssoc,
+    )
+    from core.src.storage.models import NSDPathType as _NPT
+
     async with _session() as session:
         result = await session.execute(
             select(DocumentVersionTable).where(
@@ -349,6 +369,27 @@ async def list_files_in_tg(
                 (v.saved_by or "") for v in all_versions
             }
 
+        # RECLASS-1: batch-resolve doc_type from document_index + is_staged
+        # from document_item_association for the current rows.
+        hashes = list({r.sha256 for r in current_rows if r.sha256})
+        doc_type_by_hash: dict[str, str] = {}
+        staged_hashes: set[str] = set()
+        if hashes:
+            ix_rows = (await session.execute(
+                select(_DocIx.file_hash, _DocIx.doc_type)
+                .where(_DocIx.file_hash.in_(hashes))
+            )).all()
+            doc_type_by_hash = {h: (dt or "") for h, dt in ix_rows}
+
+            assoc_rows = (await session.execute(
+                select(_DocAssoc.file_hash)
+                .where(
+                    _DocAssoc.file_hash.in_(hashes),
+                    _DocAssoc.nsd_path_type == _NPT.STAGED_NOT_CLASSIFIED.value,
+                )
+            )).all()
+            staged_hashes = {h for (h,) in assoc_rows}
+
     def _needs_merge(current_saved_by: str, all_saved_by: set[str]) -> bool:
         # Current must be owner AND at least one prior version must be
         # non-owner (TPM/human). Owner sentinel = "auto"; TPM = "unknown" or
@@ -370,6 +411,9 @@ async def list_files_in_tg(
                 r.saved_by or "",
                 saved_by_set_by_path.get(r.view_relative_path, set()),
             ),
+            doc_type=doc_type_by_hash.get(r.sha256, ""),
+            file_hash=r.sha256 or "",
+            is_staged=r.sha256 in staged_hashes,
         )
         for r in current_rows
     ]

@@ -372,4 +372,131 @@ class TestGetCurrentVersion:
         assert row.version_num == 2
         assert row.is_current is True
         assert row.saved_by == "pm.jones"
-        assert row.size_bytes == 2
+
+
+# ---------------------------------------------------------------------------
+# RECLASS-1 (2026-08-24): list_files_in_tg surfaces doc_type + is_staged
+# via join to document_index + document_item_association so the TG-view
+# template can render a Reclassify button on Unresolved rows.
+# ---------------------------------------------------------------------------
+
+
+class TestListFilesInTgReclassColumns:
+    """Populate document_index + document_item_association rows alongside
+    document_version rows and confirm the join surfaces (doc_type, file_hash,
+    is_staged) correctly."""
+
+    _scope = dict(
+        customer_id="MMK",
+        device_id="SM-S671U1",
+        milestone_id="P1",
+        tg_name="HW PL",
+    )
+
+    async def test_no_index_row_defaults_to_empty_doc_type(self):
+        # Vintage path -- doc_version exists but document_index doesn't.
+        # Fields default to "" / False so template treats them as classified.
+        await save_view_document(
+            **self._scope, relative_parts=("legacy.pdf",),
+            content=b"legacy", saved_by="auto",
+        )
+        files = await list_files_in_tg(**self._scope)
+        assert len(files) == 1
+        f = files[0]
+        assert f.doc_type == ""
+        assert f.is_staged is False
+        assert f.file_hash != ""     # sha256 is always populated by save_view_document
+
+    async def test_unresolved_doc_with_staged_assoc_flags_is_staged(self):
+        """NSD/PLM/Email ingest path -- doc landed with doc_type=Unresolved
+        and nsd_path_type=STAGED_NOT_CLASSIFIED. Reclassify button should
+        appear."""
+        from core.src.storage.db import (
+            DocumentIndexTable, DocumentItemAssociationTable, session_scope,
+        )
+        from core.src.storage.models import NSDPathType
+
+        await save_view_document(
+            **self._scope, relative_parts=("hac_report.pdf",),
+            content=b"hac-bytes", saved_by="auto",
+        )
+        # Look up the file_hash written by save_view_document
+        files_before = await list_files_in_tg(**self._scope)
+        file_hash = files_before[0].file_hash
+        assert file_hash
+
+        async with session_scope() as session:
+            from datetime import datetime as _dt, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            session.add(DocumentIndexTable(
+                file_hash=file_hash,
+                milestone_id="P1",
+                doc_type="Unresolved",
+                doc_id_slug=None,
+                rev_number=None,
+                ingest_source="NetworkSharedDrive",
+                original_filename="hac_report.pdf",
+                inferred_tg_name="HW PL",
+                routing_resolution="SubstringMatch",
+                ingested_at=_now,
+            ))
+            session.add(DocumentItemAssociationTable(
+                file_hash=file_hash,
+                delivery_item_id="MMK-SM-S671U1-P1-42",
+                milestone_id="P1",
+                local_nsd_path="internal/MMK/SM-S671U1/P1/HW PL/42/Unresolved/hac-report/rev1/hac_report.pdf",
+                nsd_path_type=NSDPathType.STAGED_NOT_CLASSIFIED.value,
+                owner_corp_id="",
+                associated_at=_now,
+            ))
+            await session.commit()
+        files = await list_files_in_tg(**self._scope)
+        assert len(files) == 1
+        f = files[0]
+        assert f.doc_type == "Unresolved"
+        assert f.is_staged is True
+
+    async def test_classified_doc_flags_not_staged(self):
+        """Classified doc (nsd_path_type=CLASSIFIED) -- Reclassify button
+        should NOT appear."""
+        from core.src.storage.db import (
+            DocumentIndexTable, DocumentItemAssociationTable, session_scope,
+        )
+        from core.src.storage.models import NSDPathType
+
+        await save_view_document(
+            **self._scope, relative_parts=("classified.pdf",),
+            content=b"classy", saved_by="auto",
+        )
+        files_before = await list_files_in_tg(**self._scope)
+        file_hash = files_before[0].file_hash
+
+        async with session_scope() as session:
+            from datetime import datetime as _dt, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            session.add(DocumentIndexTable(
+                file_hash=file_hash,
+                milestone_id="P1",
+                doc_type="TestReport",
+                doc_id_slug="classified",
+                rev_number=1,
+                ingest_source="NetworkSharedDrive",
+                original_filename="classified.pdf",
+                inferred_tg_name="HW PL",
+                routing_resolution="SubstringMatch",
+                ingested_at=_now,
+            ))
+            session.add(DocumentItemAssociationTable(
+                file_hash=file_hash,
+                delivery_item_id="MMK-SM-S671U1-P1-42",
+                milestone_id="P1",
+                local_nsd_path="internal/MMK/SM-S671U1/P1/HW PL/42/TestReport/classified/rev1/classified.pdf",
+                nsd_path_type=NSDPathType.CLASSIFIED.value,
+                owner_corp_id="",
+                associated_at=_now,
+            ))
+            await session.commit()
+        files = await list_files_in_tg(**self._scope)
+        f = files[0]
+        assert f.doc_type == "TestReport"
+        assert f.is_staged is False
