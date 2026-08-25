@@ -16,6 +16,31 @@
 <p>All documents received for this technology group. Zip archives were
 auto-extracted preserving folder structure; every save creates a new version.</p>
 
+{# RECLASS-2 (2026-08-24): flash banner after reclassify POST redirect. #}
+{% set _outcome = request.query_params.get('outcome') %}
+{% if _outcome == 'reclassified' %}
+  <div style="background:#e6f7e6; border:1px solid #4a4; color:#141; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✓ Reclassified as <strong>{{ request.query_params.get('doc_type') }}</strong>.
+    File moved to the new doc-type folder; next submit-to-carrier tick will pick it up.
+  </div>
+{% elif _outcome == 'not_staged' %}
+  <div style="background:#fff3cd; border:1px solid #b90; color:#630; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ⚠ Nothing to reclassify — the doc is already classified.
+  </div>
+{% elif _outcome == 'invalid_doc_type' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ Invalid doc type: <code>{{ request.query_params.get('error') }}</code>
+  </div>
+{% elif _outcome == 'no_doc_row' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ Document not found: <code>{{ request.query_params.get('error') }}</code>
+  </div>
+{% elif _outcome == 'partial_failure' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ Reclassify partially failed: <code>{{ request.query_params.get('error') }}</code>
+  </div>
+{% endif %}
+
 {% if files|length == 0 %}
   <p><em>No documents in this group yet.</em></p>
 {% else %}
@@ -23,6 +48,7 @@ auto-extracted preserving folder structure; every save creates a new version.</p
     <thead>
       <tr>
         <th>Filename</th>
+        <th>Doc Type</th>
         <th>Size</th>
         <th>Versions</th>
         <th>Last saved</th>
@@ -47,6 +73,39 @@ auto-extracted preserving folder structure; every save creates a new version.</p
           {% endif %}
           {% if f.is_drm_wrapped %}
             <span title="Wrapped by corp IRM (NASCA) in transit. In-browser edit unavailable — download and open locally in a NASCA-aware Office client." style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #a55; color:#a55; border-radius:3px; font-size:0.85em;">🔒 DRM</span>
+          {% endif %}
+        </td>
+        {# RECLASS-3 (2026-08-24): Doc Type column. Show current doc_type
+           label. When f.is_staged=True (nsd_path_type=STAGED_NOT_CLASSIFIED),
+           render an inline Reclassify form so TPM can promote the doc from
+           Unresolved to a concrete type (TestReport, TechReport, Waiver,
+           CompCertRel). Post to /tg/{tg_name}/reclassify -- handler resolves
+           the delivery_item_id + slug + TPM email itself. #}
+        <td>
+          {% if f.is_staged %}
+            <form method="post"
+                  action="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/reclassify"
+                  style="display:inline; margin:0;">
+              <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
+              <select name="new_doc_type" required
+                      style="padding:0.15em 0.3em; font-size:0.9em; margin-right:0.3em;">
+                <option value="">— pick type —</option>
+                <option value="test_report">Test Report</option>
+                <option value="tech_report">Tech Report</option>
+                <option value="waiver">Waiver</option>
+                <option value="compliance_certification_release_notes">Compliance Cert / Release Notes</option>
+              </select>
+              <button type="submit"
+                      style="padding:0.15em 0.6em; font-size:0.9em; background:#1a3a6c; color:#fff; border:0; border-radius:2px; cursor:pointer;"
+                      onclick="return confirm('Reclassify this doc as the selected type? File will move to the new doc-type folder + become carrier-eligible.');">
+                Reclassify
+              </button>
+              <div style="font-size:0.75em; color:#900; margin-top:0.15em;">
+                {{ f.doc_type or 'Unresolved' }} — not classified
+              </div>
+            </form>
+          {% else %}
+            {{ f.doc_type or '—' }}
           {% endif %}
         </td>
         <td>{{ f.size_bytes }}</td>

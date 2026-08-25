@@ -431,7 +431,7 @@ class TestListFilesInTgReclassColumns:
             session.add(DocumentIndexTable(
                 file_hash=file_hash,
                 milestone_id="P1",
-                doc_type="Unresolved",
+                doc_type="unresolved",
                 doc_id_slug=None,
                 rev_number=None,
                 ingest_source="NetworkSharedDrive",
@@ -453,7 +453,7 @@ class TestListFilesInTgReclassColumns:
         files = await list_files_in_tg(**self._scope)
         assert len(files) == 1
         f = files[0]
-        assert f.doc_type == "Unresolved"
+        assert f.doc_type == "unresolved"
         assert f.is_staged is True
 
     async def test_classified_doc_flags_not_staged(self):
@@ -477,7 +477,7 @@ class TestListFilesInTgReclassColumns:
             session.add(DocumentIndexTable(
                 file_hash=file_hash,
                 milestone_id="P1",
-                doc_type="TestReport",
+                doc_type="test_report",
                 doc_id_slug="classified",
                 rev_number=1,
                 ingest_source="NetworkSharedDrive",
@@ -498,5 +498,5 @@ class TestListFilesInTgReclassColumns:
             await session.commit()
         files = await list_files_in_tg(**self._scope)
         f = files[0]
-        assert f.doc_type == "TestReport"
+        assert f.doc_type == "test_report"
         assert f.is_staged is False

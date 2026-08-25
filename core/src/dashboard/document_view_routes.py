@@ -683,6 +683,14 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 # view_tree_tg.html when an owner-authored version landed on
                 # top of a prior TPM edit -- manual merge required.
                 "needs_merge":         f.needs_merge,
+                # RECLASS-2 (2026-08-24): pass reclassify inputs to template
+                # so it can render Reclassify button + doc_type dropdown on
+                # is_staged rows. Template posts (file_hash, new_doc_type)
+                # to /browse/{c}/{d}/{m}/reclassify -- POST handler derives
+                # delivery_item_id + slug internally.
+                "doc_type":            f.doc_type,
+                "file_hash":           f.file_hash,
+                "is_staged":           f.is_staged,
             })
         return templates.TemplateResponse(
             request,
@@ -846,6 +854,156 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         )
         return RedirectResponse(
             url=redirect_url, status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # ----- RECLASS-2 (2026-08-24): TPM doc_type reclassification -----------
+    # FR-87 step B UI. When TPM sees an Unresolved doc in the per-TG view,
+    # picks the right doc_type from a dropdown -> POST here. Handler resolves
+    # the (delivery_item_id, slug, tpm_email) trio, calls the existing
+    # tpm_resolve_doc_type storage helper (which moves the file to the new
+    # doc_type path + upgrades nsd_path_type to CLASSIFIED). Ingest-source
+    # agnostic -- works for NSD / PLM / Email docs equally.
+
+    @app.post(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/reclassify",
+        response_class=HTMLResponse, response_model=None,
+    )
+    async def browse_reclassify(
+        customer_id: str, device_id: str, milestone_id: str, tg_name: str,
+        request: Request,
+        file_hash: str = Form(...),
+        new_doc_type: str = Form(...),
+        principal=Depends(_auth),
+    ):
+        """TPM reclassifies an Unresolved doc's doc_type. Resolves inputs
+        automatically:
+          - delivery_item_id(s): every STAGED_NOT_CLASSIFIED association
+            with this file_hash gets promoted (typically ONE per Option B
+            routing; N-way OK if the same doc landed on N items).
+          - doc_id_slug + rev_number: derived from filename via
+            Fr52AttachmentRouter._slug_from_filename + rev=1 (Ph-1
+            NEW_DOCUMENT convention; matches ingest-time slug generation
+            path that would have fired if the classifier hadn't missed).
+          - pm_id: TPM email from Projects_<customer> SP list via
+            tpm_notification._read_tpm_email. Falls back to a sentinel on
+            lookup miss (audit still captures the reclassify event).
+
+        Post-Redirect-Get back to /browse/{c}/{d}/{m}/tg/{tg_name}/ with
+        ?outcome=<code>[&error=<detail>] so browser refresh doesn't replay.
+        """
+        from urllib.parse import urlencode
+        from core.src.email_service.inbound.attachment_router import (
+            Fr52AttachmentRouter as _Fr52,
+        )
+        from core.src.storage.db import (
+            DocumentIndexTable, DocumentItemAssociationTable, session_scope,
+        )
+        from core.src.storage.models import NSDPathType
+        from core.src.storage.document_ops import tpm_resolve_doc_type
+        from core.src.template_schema import DocType
+        from sqlalchemy import select
+
+        # Validate new_doc_type is a real DocType enum value (defense against
+        # form-tampering; the template dropdown only exposes valid options).
+        try:
+            new_doc_type_enum = DocType(new_doc_type)
+        except ValueError:
+            params = {"outcome": "invalid_doc_type", "error": new_doc_type[:60]}
+            return RedirectResponse(
+                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        # Look up the file's document_index row (for original filename ->
+        # slug derivation) + all STAGED_NOT_CLASSIFIED associations.
+        async with session_scope() as session:
+            di_row = (await session.execute(
+                select(DocumentIndexTable).where(DocumentIndexTable.file_hash == file_hash)
+            )).scalar_one_or_none()
+            if di_row is None:
+                params = {"outcome": "no_doc_row", "error": file_hash[:12]}
+                return RedirectResponse(
+                    url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            assocs = (await session.execute(
+                select(DocumentItemAssociationTable).where(
+                    DocumentItemAssociationTable.file_hash == file_hash,
+                    DocumentItemAssociationTable.nsd_path_type == NSDPathType.STAGED_NOT_CLASSIFIED.value,
+                )
+            )).scalars().all()
+            filename = di_row.original_filename or ""
+            item_ids = [a.delivery_item_id for a in assocs]
+
+        if not item_ids:
+            params = {"outcome": "not_staged", "error": file_hash[:12]}
+            return RedirectResponse(
+                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        # Derive slug + rev=1 (Ph-1 NEW_DOCUMENT). Slug generation matches
+        # ingest-time convention -- if the file had classified at ingest, it
+        # would have gotten this same slug.
+        doc_id_slug = _Fr52._slug_from_filename(filename)
+        rev_number = 1
+
+        # Fetch TPM email from Projects_<customer> for pm_id / audit attribution.
+        # Fallback: dashboard auth principal (X-User-Email) is a distant runner-up;
+        # ultimate fallback: "tpm@unknown" sentinel matches SETUP-1 tolerance.
+        tpm_email: str | None = None
+        deps_state = getattr(request.app.state, "task_deps", None)
+        if deps_state is not None:
+            try:
+                from core.src.workflow_engine.tasks.tpm_notification import _read_tpm_email
+                tpm_email, _ = _read_tpm_email(deps_state, customer_id, device_id)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "RECLASSIFY: TPM email lookup failed customer=%s device=%s: %s",
+                    customer_id, device_id, type(exc).__name__,
+                )
+        if not tpm_email:
+            tpm_email = (
+                getattr(principal, "email", None)
+                or getattr(principal, "user_id", None)
+                or "tpm@unknown"
+            )
+
+        _log.warning(
+            "RECLASSIFY: POST scope=%s/%s/%s/%s file_hash=%s new_doc_type=%s "
+            "assocs=%d pm_id=%s",
+            customer_id, device_id, milestone_id, tg_name,
+            file_hash[:12], new_doc_type_enum.value, len(item_ids), tpm_email,
+        )
+
+        # Reclassify each staged association. Any one failure -> abort remainder
+        # (partial state is confusing; caller can retry after fixing root cause).
+        errors: list[str] = []
+        for item_id in item_ids:
+            try:
+                await tpm_resolve_doc_type(
+                    file_hash=file_hash,
+                    delivery_item_id=item_id,
+                    new_doc_type=new_doc_type_enum,
+                    doc_id_slug=doc_id_slug,
+                    rev_number=rev_number,
+                    pm_id=tpm_email,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{item_id}:{type(exc).__name__}")
+                _log.warning(
+                    "RECLASSIFY: tpm_resolve_doc_type failed item=%s file_hash=%s: %s: %s",
+                    item_id, file_hash[:12], type(exc).__name__, str(exc)[:200],
+                )
+                break
+
+        outcome = "reclassified" if not errors else "partial_failure"
+        params: dict[str, str] = {"outcome": outcome, "doc_type": new_doc_type_enum.value}
+        if errors:
+            params["error"] = "; ".join(errors)[:200]
+        return RedirectResponse(
+            url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+            status_code=status.HTTP_303_SEE_OTHER,
         )
 
     # ----- Chunk 7: per-file versions list ---------------------------------
