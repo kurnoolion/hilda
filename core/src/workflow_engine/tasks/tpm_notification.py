@@ -100,11 +100,28 @@ def tpm_notification_tick_task(
             )
             continue
 
+        # DEV-FILTER-2 (2026-08-24): drop Milestones rows whose device_id
+        # isn't in the customer's template.yaml `devices:` whitelist.
+        # SP UI engineer's test-device milestone rows pollute the shared
+        # customer list; without this filter tpm_notification_tick fires
+        # missed-window / partial-data ops alerts for phantom scopes.
+        # Same pass-through rules as DEV-FILTER-1 (email_polling.py:230):
+        # empty device_id -> pass (defensive), template not cached -> pass
+        # (avoid drops during config windows).
+        from core.src.template_schema import template_lookup as _tl
+        _known_devices = _tl.list_known_devices(customer_id)
         for row in milestones:
             milestone_id = _row_get(row, "milestone_id") or _row_get(row, "Title") or ""
             device_id = _row_get(row, "project_model") or _row_get(row, "device_id") or ""
             target_date_raw = _row_get(row, "target_date")
             if not (milestone_id and device_id):
+                continue
+            if _known_devices and device_id not in _known_devices:
+                _log.info(
+                    "tpm_notification_tick: DEV-FILTER-2 skip customer=%s "
+                    "device=%s (not in template.yaml devices=%r) milestone=%s",
+                    customer_id, device_id, _known_devices, milestone_id,
+                )
                 continue
             target_date = _parse_target_date(target_date_raw)
             if target_date is None:
