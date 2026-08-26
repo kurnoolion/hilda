@@ -196,6 +196,57 @@ class TestCountUnrouted:
         assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 0
 
 
+class TestArchiveContainerExcluded:
+    """ARCH-UNROUTED-1 (2026-08-26) -- D-155 outer-archive audit rows
+    (doc_type=archive_container, no association) are NOT "unrouted" in the
+    TPM-manual-routing sense. Prior behavior surfaced them in /_unknownTG/
+    alongside their own replicated-to-matched-TG view-tree copy, so TPMs
+    saw the same .zip / .7z in two places and tried to route the audit
+    container as if it were an orphan document.
+    """
+
+    async def test_list_excludes_archive_container(self):
+        # Real orphan .pdf + audit-only .zip container. Only the pdf shows.
+        await add_document_index_row(_mk_doc(
+            file_hash=HASH_A, filename="orphan.pdf",
+        ))
+        await add_document_index_row(DocumentIndexRow(
+            file_hash=HASH_B,
+            milestone_id="DRR",
+            customer_id="MMK",
+            device_id="SM-A012U",
+            doc_type=DocType.ARCHIVE_CONTAINER,
+            doc_id_slug=None,
+            rev_number=None,
+            ingest_source=IngestSource.EMAIL,
+            original_filename="pack.zip",
+            routing_resolution=RoutingResolution.ARCHIVE_CONTAINER,
+            ingested_at=NOW,
+        ))
+        rows = await list_unrouted_for_scope("MMK", "SM-A012U", "DRR")
+        assert [r.file_hash for r in rows] == [HASH_A]
+
+    async def test_count_excludes_archive_container(self):
+        await add_document_index_row(_mk_doc(
+            file_hash=HASH_A, filename="orphan.pdf",
+        ))
+        await add_document_index_row(DocumentIndexRow(
+            file_hash=HASH_B,
+            milestone_id="DRR",
+            customer_id="MMK",
+            device_id="SM-A012U",
+            doc_type=DocType.ARCHIVE_CONTAINER,
+            doc_id_slug=None,
+            rev_number=None,
+            ingest_source=IngestSource.EMAIL,
+            original_filename="pack.zip",
+            routing_resolution=RoutingResolution.ARCHIVE_CONTAINER,
+            ingested_at=NOW,
+        ))
+        # Badge count reflects only the real orphan pdf, not the container.
+        assert await count_unrouted_for_scope("MMK", "SM-A012U", "DRR") == 1
+
+
 class TestListAllUnroutedScopes:
     """UR-8: enumerate distinct (customer, device, milestone) tuples in
     document_index for the weekly ops digest scan."""

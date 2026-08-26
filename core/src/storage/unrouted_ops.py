@@ -129,11 +129,16 @@ async def count_unrouted_for_scope(
     avoids loading rows + the second dup-hash query the list helper does.
     """
     async with session_scope() as session:
+        # ARCH-UNROUTED-1 (2026-08-26): mirror the ARCHIVE_CONTAINER
+        # exclusion from list_unrouted_for_scope so the badge count
+        # matches what the /_unknownTG/ list actually shows.
+        from core.src.template_schema.enums import DocType as _DT
         result = await session.execute(
             select(func.count()).select_from(DocumentIndexTable).where(
                 DocumentIndexTable.customer_id == customer_id,
                 DocumentIndexTable.device_id == device_id,
                 DocumentIndexTable.milestone_id == milestone_id,
+                DocumentIndexTable.doc_type != _DT.ARCHIVE_CONTAINER.value,
                 ~select(DocumentItemAssociationTable.file_hash).where(
                     DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash
                 ).exists(),
@@ -164,11 +169,24 @@ async def list_unrouted_for_scope(
         # UI surfaces. We deliberately don't filter on routing_resolution
         # itself -- the absence of an association is the authoritative
         # signal.
+        #
+        # ARCH-UNROUTED-1 (2026-08-26): exclude ARCHIVE_CONTAINER audit
+        # rows from the unrouted lister. D-155 archive dispatch writes an
+        # unassociated DocumentIndex row per outer archive as a container
+        # audit -- inner files carry the actual routing/associations, the
+        # outer bytes are also replicated to matched-TG view trees via
+        # _replicate_outer_archive_to_tgs. Without this filter the outer
+        # .7z / .zip shows up in BOTH /_unknownTG/ (via this lister) AND
+        # matched-TG file lists (via list_files_in_tg) -- confuses TPMs
+        # who see the same file "in two places" and try to route the
+        # audit container as if it were a real orphan doc.
+        from core.src.template_schema.enums import DocType as _DT
         result = await session.execute(
             select(DocumentIndexTable).where(
                 DocumentIndexTable.customer_id == customer_id,
                 DocumentIndexTable.device_id == device_id,
                 DocumentIndexTable.milestone_id == milestone_id,
+                DocumentIndexTable.doc_type != _DT.ARCHIVE_CONTAINER.value,
                 ~select(DocumentItemAssociationTable.file_hash).where(
                     DocumentItemAssociationTable.file_hash == DocumentIndexTable.file_hash
                 ).exists(),
