@@ -81,6 +81,21 @@ class ReconcileConfig(BaseModel):
     sync_6_close_in_progress: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=300
     )
+    # SYNC7-1 (2026-08-26): retry-unrouted sweeper. When new eligible
+    # delivery_item rows land in Postgres AFTER an NSD/PLM tick has already
+    # ingested files whose folder-tag would match them, the files stay
+    # stuck in _unrouted (dedup by file_hash prevents next tick from
+    # re-attempting the routing decision). This sync re-runs the router's
+    # substring-match logic against the CURRENT candidate pool for each
+    # unrouted file with folder context; when exactly one candidate item
+    # matches, promotes the association via route_unrouted_to_item.
+    # elapsed_threshold_sec=0 -- fires immediately per tick (no timing
+    # race concern; if a file is unrouted AND a matching item now exists,
+    # retry is unambiguously the right call). Cross-TG multi-match still
+    # skips (respects D-153 constraint).
+    sync_7_retry_unrouted: SyncTypeConfig = SyncTypeConfig(
+        enabled=True, elapsed_threshold_sec=0
+    )
 
     @classmethod
     def from_sources(

@@ -99,6 +99,10 @@ def reconcile_all_task(
         "sync_5_skipped":             0,
         "sync_6_advanced":            0,   # CIP-4 stuck-CloseInProgress sweeper
         "sync_6_skipped":             0,
+        "sync_7_routed":              0,   # SYNC7-1 retry-unrouted promoted
+        "sync_7_multi_match":         0,   # SYNC7-1 ambiguous (skipped)
+        "sync_7_no_match":            0,   # SYNC7-1 no candidate matched (skipped)
+        "sync_7_skipped":             0,
     }
 
     correlation_id = f"reconcile-{uuid.uuid4().hex[:12]}"
@@ -156,6 +160,14 @@ def reconcile_all_task(
         except Exception as exc:  # noqa: BLE001
             _log.warning("sync_6_error: milestone=%s: %s", milestone_id, type(exc).__name__)
             stats["sync_6_skipped"] += 1
+        try:
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, correlation_id,
+                customer_id, device_id, milestone_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync_7_error: milestone=%s: %s", milestone_id, type(exc).__name__)
+            stats["sync_7_skipped"] += 1
 
     _log.info("reconcile_all: %s", stats)
     return {"outcome": "fired", "correlation_id": correlation_id, **stats}
@@ -931,5 +943,163 @@ def _sync_6_close_in_progress(
                     "elapsed_sec":     elapsed,
                     "pg_state_prior":  pg_state,
                     "trigger_source":  "sync_backfill_close_in_progress",
+                },
+            )
+
+
+# ---------------------------------------------------------------------------
+# SYNC7-1 (2026-08-26): retry-unrouted sweeper
+# ---------------------------------------------------------------------------
+
+def _matches_any_tag_group(text: str, groups: list[list[str]]) -> bool:
+    """Mirror of `Fr52AttachmentRouter._any_group_matches` substring semantics
+    (AND-of-OR). Local copy to avoid pulling the full router class for what
+    is a 4-line predicate. IMEI reserved-literal handling intentionally
+    omitted -- sync-7 operates on folder-name match_input where the IMEI
+    Excel-only branch doesn't apply."""
+    for group in groups:
+        if all(tag.lower() in text for tag in group):
+            return True
+    return False
+
+
+def _sync_7_retry_unrouted(
+    deps: Any, cfg: ReconcileConfig, stats: dict[str, int], correlation_id: str,
+    customer_id: str, device_id: str, milestone_id: str,
+) -> None:
+    """SYNC7-1 (2026-08-26): retry routing for files stuck in _unrouted when
+    new eligible items now exist in the candidate pool.
+
+    Timing race the sync closes: TPM adds delivery_item rows via SP alert
+    import AFTER an NSD/PLM tick ingested a file whose folder-tag would
+    match them -> file lands in _unrouted (the ingest-time candidate pool
+    didn't include the newly-added items) -> dedup by file_hash prevents
+    the next tick from re-attempting -> file stays stuck until TPM triages
+    via the UR-5 /_unknownTG/ UI.
+
+    Sync-7 runs each meta-reconciler tick and:
+      1. `list_unrouted_for_scope` -- fetches every DocumentIndex row in
+         scope with no association.
+      2. For each unrouted doc:
+         a. Derive match_hint = parent folder name of original_filename
+            (NSDMATCH-3 semantics, D-173). No parent -> skip (email-ingested;
+            no folder context to rescue).
+         b. `list_route_candidates_for_scope` -- the current eligible-target
+            item pool (Confirmation + Default excluded, per manual-triage
+            semantics).
+         c. Substring-match parent-folder against each candidate's
+            item_description via the router's AND-of-OR tag-group logic.
+         d. EXACTLY ONE candidate matches -> promote via
+            `route_unrouted_to_item` (creates association, moves bytes to
+            staging path, updates document_index, writes audit).
+         e. Zero matches -> skipped (no candidate; leave for TPM triage).
+         f. Multi-match -> skipped (ambiguous; leave for TPM triage;
+            respects D-153 cross-TG constraint semantics).
+
+    Idempotent: once a file is routed the next tick's `list_unrouted` no
+    longer surfaces it (has association). Naturally converges. Configured
+    with elapsed_threshold_sec=0 -- fires immediately per tick since the
+    predicate (unrouted AND matching item exists) doesn't race any
+    concurrent path.
+
+    Cross-TG constraint: multi-match across items in DIFFERENT tg_names
+    falls into the multi-match skip branch above, deferring the routing
+    decision to the TPM. Sync-7 is deliberately conservative -- only the
+    unambiguous single-TG single-item case is auto-promoted.
+    """
+    sync_cfg = cfg.sync_7_retry_unrouted
+    if not sync_cfg.enabled:
+        stats["sync_7_skipped"] += 1
+        return
+
+    from pathlib import PurePosixPath
+    from core.src.email_service.inbound.attachment_router import (
+        Fr52AttachmentRouter,
+    )
+    from core.src.storage.unrouted_ops import UnroutedStorage
+
+    us = UnroutedStorage()
+    try:
+        unrouted = us.list_unrouted(
+            customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_7_list_unrouted_failed: milestone=%s: %s: %s",
+            milestone_id, type(exc).__name__, str(exc)[:120],
+        )
+        return
+    if not unrouted:
+        return
+
+    try:
+        candidates = us.list_route_candidates(
+            customer_id=customer_id, device_id=device_id, milestone_id=milestone_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_7_list_candidates_failed: milestone=%s: %s: %s",
+            milestone_id, type(exc).__name__, str(exc)[:120],
+        )
+        return
+    if not candidates:
+        return
+
+    for doc in unrouted:
+        parent = PurePosixPath(doc.original_filename or "").parent.name.lower()
+        if not parent:
+            continue  # email-ingested or root-level file; no folder context
+        matches: list = []
+        for cand in candidates:
+            desc = getattr(cand, "item_description", None)
+            groups = Fr52AttachmentRouter._extract_tag_groups(desc)
+            if not groups:
+                continue
+            if _matches_any_tag_group(parent, groups):
+                matches.append(cand)
+        if len(matches) == 0:
+            stats["sync_7_no_match"] += 1
+            continue
+        if len(matches) > 1:
+            stats["sync_7_multi_match"] += 1
+            _log.info(
+                "sync_7_multi_match: file_hash=%s parent=%r matched %d items -- skipping",
+                doc.file_hash[:12], parent, len(matches),
+            )
+            continue
+
+        target = matches[0]
+        target_iid = getattr(target, "item_id", None)
+        if not target_iid:
+            continue
+        try:
+            result = us.route(
+                file_hash=doc.file_hash,
+                target_delivery_item_id=target_iid,
+                tpm_id="reconcile-sync-7",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "sync_7_route_failed: file_hash=%s target=%s: %s: %s",
+                doc.file_hash[:12], target_iid,
+                type(exc).__name__, str(exc)[:120],
+            )
+            continue
+
+        if getattr(result, "outcome", None) == "routed":
+            stats["sync_7_routed"] += 1
+            _audit(
+                deps,
+                "reconcile_sync_7_retry_unrouted_routed",
+                target_iid,
+                {
+                    "milestone_id":      milestone_id,
+                    "customer_id":       customer_id,
+                    "device_id":         device_id,
+                    "correlation_id":    correlation_id,
+                    "file_hash":         doc.file_hash,
+                    "original_filename": doc.original_filename,
+                    "parent_folder":     parent,
+                    "trigger_source":    "sync_backfill_retry_unrouted",
                 },
             )

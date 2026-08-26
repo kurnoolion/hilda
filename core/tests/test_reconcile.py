@@ -21,12 +21,14 @@ from core.src.workflow_engine.reconcile_config import (
 from core.src.workflow_engine.tasks.reconcile import (
     _elapsed_seconds,
     _iter_tuples,
+    _matches_any_tag_group,
     _sync_1_delivery_item_count,
     _sync_2_start_collection,
     _sync_3_pm_approval,
     _sync_4_submit_to_carrier,
     _sync_5_close_all_items,
     _sync_6_close_in_progress,
+    _sync_7_retry_unrouted,
 )
 
 
@@ -628,3 +630,223 @@ class TestIterTuples:
         finally:
             template_lookup._CACHE.clear()
             template_lookup._CACHE.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# SYNC7-1 (2026-08-26): retry-unrouted sweeper
+# ---------------------------------------------------------------------------
+
+
+class TestMatchesAnyTagGroup:
+    """Predicate mirror of Fr52 substring matching used by sync-7."""
+
+    def test_single_tag_hit(self):
+        assert _matches_any_tag_group("16. cec(done)", [["CEC"]]) is True
+
+    def test_case_insensitive_on_tag_side(self):
+        # Contract: text arg is pre-lowercased by caller (mirrors router's
+        # match_input contract). Tags in item_description may be mixed-case;
+        # predicate lowercases them internally.
+        assert _matches_any_tag_group("hac t-coil", [["HAC"]]) is True
+        assert _matches_any_tag_group("hac t-coil", [["hac"]]) is True
+
+    def test_and_within_group_all_required(self):
+        # AND semantics inside a group: both tags must appear.
+        assert _matches_any_tag_group("wifi ota v2", [["wifi", "ota"]]) is True
+        assert _matches_any_tag_group("wifi only", [["wifi", "ota"]]) is False
+
+    def test_or_across_groups(self):
+        # OR across outer groups: any group matching is enough.
+        assert _matches_any_tag_group(
+            "california energy", [["cec"], ["california", "energy"]]
+        ) is True
+
+    def test_empty_groups(self):
+        assert _matches_any_tag_group("anything", []) is False
+
+    def test_no_hit(self):
+        assert _matches_any_tag_group("15. wpc(done)", [["CEC"]]) is False
+
+
+class TestSync7RetryUnrouted:
+    """Full sync-7 pass with mocked UnroutedStorage. Verifies:
+      - single-match unrouted doc -> routed via us.route + audit written
+      - multi-match -> skipped (multi_match counter incremented)
+      - zero-match -> skipped (no_match counter incremented)
+      - no folder context (root-level filename) -> silently skipped
+      - disabled config -> sync_7_skipped incremented, no work done
+    """
+
+    def _cfg(self, enabled: bool = True) -> ReconcileConfig:
+        return ReconcileConfig(
+            sync_7_retry_unrouted=SyncTypeConfig(
+                enabled=enabled, elapsed_threshold_sec=0,
+            ),
+        )
+
+    def _stats(self) -> dict[str, int]:
+        return {
+            "sync_7_routed": 0,
+            "sync_7_multi_match": 0,
+            "sync_7_no_match": 0,
+            "sync_7_skipped": 0,
+        }
+
+    def _mk_doc(
+        self, file_hash: str, filename: str,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            file_hash=file_hash,
+            original_filename=filename,
+            ingested_at=datetime.now(timezone.utc),
+            doc_type="unresolved",
+            is_dup_hash_elsewhere=False,
+        )
+
+    def _mk_cand(
+        self, item_no: int, description, tg_name: str = "HW PL",
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            item_id=f"MMK-SM-S671U1-P1-{item_no}",
+            item_no=item_no,
+            tg_name=tg_name,
+            item_description=description,
+        )
+
+    def test_disabled_config_skips(self):
+        cfg = self._cfg(enabled=False)
+        stats = self._stats()
+        deps = _mk_deps()
+        _sync_7_retry_unrouted(
+            deps, cfg, stats, "corr-1", "MMK", "SM-S671U1", "P1",
+        )
+        assert stats["sync_7_skipped"] == 1
+        assert stats["sync_7_routed"] == 0
+
+    def test_single_match_promotes_to_item(self):
+        cfg = self._cfg()
+        stats = self._stats()
+        deps = _mk_deps()
+
+        us_mock = MagicMock()
+        us_mock.list_unrouted.return_value = [
+            self._mk_doc("hash-cec-1", "16. CEC(done)/report.pdf"),
+        ]
+        us_mock.list_route_candidates.return_value = [
+            self._mk_cand(20, [["FCC"]]),
+            self._mk_cand(22, [["CEC"]]),   # ← unique match for "cec(done)"
+            self._mk_cand(21, [["HAC"]]),
+        ]
+        us_mock.route.return_value = SimpleNamespace(
+            outcome="routed", file_hash="hash-cec-1",
+            target_delivery_item_id="MMK-SM-S671U1-P1-22",
+        )
+        with patch(
+            "core.src.storage.unrouted_ops.UnroutedStorage",
+            return_value=us_mock,
+        ):
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, "corr-2", "MMK", "SM-S671U1", "P1",
+            )
+        assert stats["sync_7_routed"] == 1
+        assert stats["sync_7_multi_match"] == 0
+        assert stats["sync_7_no_match"] == 0
+        # us.route was invoked with the correct target + tpm sentinel
+        us_mock.route.assert_called_once()
+        call_kwargs = us_mock.route.call_args.kwargs
+        assert call_kwargs["file_hash"] == "hash-cec-1"
+        assert call_kwargs["target_delivery_item_id"] == "MMK-SM-S671U1-P1-22"
+        assert call_kwargs["tpm_id"] == "reconcile-sync-7"
+        # audit was written
+        assert deps.audit.method_calls  # any audit call happened
+
+    def test_multi_match_skips(self):
+        cfg = self._cfg()
+        stats = self._stats()
+        deps = _mk_deps()
+        us_mock = MagicMock()
+        us_mock.list_unrouted.return_value = [
+            self._mk_doc("hash-hac-1", "HAC/report.pdf"),
+        ]
+        # Two items match the "hac" substring -> ambiguous, skip.
+        us_mock.list_route_candidates.return_value = [
+            self._mk_cand(21, [["HAC"]]),
+            self._mk_cand(19, [["HAC"]]),
+        ]
+        with patch(
+            "core.src.storage.unrouted_ops.UnroutedStorage",
+            return_value=us_mock,
+        ):
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, "corr-3", "MMK", "SM-S671U1", "P1",
+            )
+        assert stats["sync_7_routed"] == 0
+        assert stats["sync_7_multi_match"] == 1
+        us_mock.route.assert_not_called()
+
+    def test_zero_match_skips(self):
+        cfg = self._cfg()
+        stats = self._stats()
+        deps = _mk_deps()
+        us_mock = MagicMock()
+        us_mock.list_unrouted.return_value = [
+            self._mk_doc("hash-xyz", "XYZ/report.pdf"),
+        ]
+        us_mock.list_route_candidates.return_value = [
+            self._mk_cand(20, [["FCC"]]),
+            self._mk_cand(22, [["CEC"]]),
+        ]
+        with patch(
+            "core.src.storage.unrouted_ops.UnroutedStorage",
+            return_value=us_mock,
+        ):
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, "corr-4", "MMK", "SM-S671U1", "P1",
+            )
+        assert stats["sync_7_no_match"] == 1
+        assert stats["sync_7_routed"] == 0
+        us_mock.route.assert_not_called()
+
+    def test_no_folder_context_silently_skipped(self):
+        # Root-level filename (e.g. email attachment) -> parent = "" -> no
+        # match_hint to work with. Sync-7 silently skips (doesn't increment
+        # no_match either -- email-ingested files are outside sync-7's remit).
+        cfg = self._cfg()
+        stats = self._stats()
+        deps = _mk_deps()
+        us_mock = MagicMock()
+        us_mock.list_unrouted.return_value = [
+            self._mk_doc("hash-email", "root-level.pdf"),
+        ]
+        us_mock.list_route_candidates.return_value = [
+            self._mk_cand(22, [["CEC"]]),
+        ]
+        with patch(
+            "core.src.storage.unrouted_ops.UnroutedStorage",
+            return_value=us_mock,
+        ):
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, "corr-5", "MMK", "SM-S671U1", "P1",
+            )
+        # Neither routed, multi_match, nor no_match: silently skipped.
+        assert stats["sync_7_routed"] == 0
+        assert stats["sync_7_multi_match"] == 0
+        assert stats["sync_7_no_match"] == 0
+        us_mock.route.assert_not_called()
+
+    def test_empty_unrouted_early_return(self):
+        cfg = self._cfg()
+        stats = self._stats()
+        deps = _mk_deps()
+        us_mock = MagicMock()
+        us_mock.list_unrouted.return_value = []
+        with patch(
+            "core.src.storage.unrouted_ops.UnroutedStorage",
+            return_value=us_mock,
+        ):
+            _sync_7_retry_unrouted(
+                deps, cfg, stats, "corr-6", "MMK", "SM-S671U1", "P1",
+            )
+        # No candidates fetched (early return on empty unrouted).
+        us_mock.list_route_candidates.assert_not_called()
+        assert stats["sync_7_routed"] == 0

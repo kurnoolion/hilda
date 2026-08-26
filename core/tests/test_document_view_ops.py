@@ -500,3 +500,59 @@ class TestListFilesInTgReclassColumns:
         f = files[0]
         assert f.doc_type == "test_report"
         assert f.is_staged is False
+
+    async def test_classified_doc_type_wins_over_stale_staged_assoc(self):
+        """RECLASS-BUGFIX-2 (2026-08-26): doc_type on document_index is the
+        source of truth for is_staged. A concrete doc_type
+        (test_report / compliance_certification_release_notes / ...) MUST
+        yield is_staged=False even when a stale document_item_association
+        row still carries nsd_path_type=STAGED_NOT_CLASSIFIED. Regression
+        guard for the row-1 shape seen on the corp box: doc_type classified
+        at ingest but assoc left at STAGED_NOT_CLASSIFIED, which caused the
+        template to render 'compliance_certification_release_notes -- not
+        classified' + a spurious Reclassify dropdown on already-classified
+        docs.
+        """
+        from core.src.storage.db import (
+            DocumentIndexTable, DocumentItemAssociationTable, session_scope,
+        )
+        from core.src.storage.models import NSDPathType
+
+        await save_view_document(
+            **self._scope, relative_parts=("release_notes.docx",),
+            content=b"release-notes-bytes", saved_by="auto",
+        )
+        files_before = await list_files_in_tg(**self._scope)
+        file_hash = files_before[0].file_hash
+
+        async with session_scope() as session:
+            from datetime import datetime as _dt, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            session.add(DocumentIndexTable(
+                file_hash=file_hash,
+                milestone_id="P1",
+                doc_type="compliance_certification_release_notes",
+                doc_id_slug="release-notes",
+                rev_number=1,
+                ingest_source="NetworkSharedDrive",
+                original_filename="release_notes.docx",
+                inferred_tg_name="HW PL",
+                routing_resolution="SubstringMatch",
+                ingested_at=_now,
+            ))
+            # Stale assoc: STAGED_NOT_CLASSIFIED even though doc_type is real.
+            session.add(DocumentItemAssociationTable(
+                file_hash=file_hash,
+                delivery_item_id="MMK-SM-S671U1-P1-42",
+                milestone_id="P1",
+                local_nsd_path="internal/staged/release_notes.docx",
+                nsd_path_type=NSDPathType.STAGED_NOT_CLASSIFIED.value,
+                owner_corp_id="",
+                associated_at=_now,
+            ))
+            await session.commit()
+        files = await list_files_in_tg(**self._scope)
+        f = files[0]
+        assert f.doc_type == "compliance_certification_release_notes"
+        assert f.is_staged is False, \
+            "Concrete doc_type MUST win over stale STAGED_NOT_CLASSIFIED assoc"
