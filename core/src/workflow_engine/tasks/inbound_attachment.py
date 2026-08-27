@@ -357,6 +357,44 @@ async def _process_regular_attachment(
             "process_inbound_attachments: view-tree write failed: %s: %s",
             type(exc).__name__, str(exc)[:120],
         )
+
+    # MTR-1 (2026-08-27): post view-tree-write, recompute
+    # manual_triage_required per item for each TG touched. Owner resend after
+    # a TPM edit produces needs_merge=True; SP UI Submit-to-Carrier gate
+    # depends on the flag being written back. Best-effort; failures logged.
+    try:
+        from core.src.workflow_engine.tasks.manual_triage import (
+            refresh_manual_triage_after_view_save,
+        )
+        seen_tg_scopes: set[tuple[str, str, str, str]] = set()
+        for cand in candidate_items:
+            cid = cand.get("customer_id")
+            did = cand.get("device_id")
+            mid = cand.get("milestone_id")
+            tgn = cand.get("tg_name")
+            if not all([cid, did, mid, tgn]):
+                continue
+            scope_key = (cid, did, mid, tgn)
+            if scope_key in seen_tg_scopes:
+                continue
+            seen_tg_scopes.add(scope_key)
+            try:
+                await refresh_manual_triage_after_view_save(
+                    deps,
+                    customer_id=cid, device_id=did, milestone_id=mid,
+                    tg_name=tgn, correlation_id=f"ingest-{batch_id[:12]}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "MTR-1 post-ingest refresh failed scope=%s: %s: %s",
+                    scope_key, type(exc).__name__, str(exc)[:120],
+                )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "MTR-1 post-ingest refresh outer failed: %s: %s",
+            type(exc).__name__, str(exc)[:120],
+        )
+
     return stats
 
 

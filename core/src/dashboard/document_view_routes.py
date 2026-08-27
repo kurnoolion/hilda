@@ -1539,6 +1539,27 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "wopi callback: saved v%d (%d bytes) for %s",
                 row.version_num, row.size_bytes, view_relative_path,
             )
+            # MTR-1 (2026-08-27): post-save trigger -- recompute needs_merge
+            # across the TG's docs, update delivery_item.manual_triage_required
+            # and push to SP so the SP UI Submit-to-Carrier button gates
+            # correctly. Best-effort; failures logged but don't fail the save.
+            try:
+                deps_state = getattr(request.app.state, "task_deps", None)
+                if deps_state is not None:
+                    from core.src.workflow_engine.tasks.manual_triage import (
+                        refresh_manual_triage_after_view_save,
+                    )
+                    await refresh_manual_triage_after_view_save(
+                        deps_state,
+                        customer_id=cust, device_id=dev,
+                        milestone_id=mile, tg_name=tg,
+                        correlation_id=f"wopi-{row.version_id[:12]}",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "MTR-1 post-save refresh failed for %s: %s: %s",
+                    view_relative_path, type(exc).__name__, str(exc)[:200],
+                )
             return JSONResponse({"error": 0})
 
         # Legacy path: raw-bytes WOPI PutFile (no JSON body, no status).
@@ -1554,6 +1575,25 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                    details={"version_num": row.version_num,
                             "size_bytes": row.size_bytes,
                             "protocol": "wopi_putfile_raw"})
+            # MTR-1 (2026-08-27): mirror the JSON-callback branch's post-save
+            # refresh so both WOPI paths keep manual_triage_required in sync.
+            try:
+                deps_state = getattr(request.app.state, "task_deps", None)
+                if deps_state is not None:
+                    from core.src.workflow_engine.tasks.manual_triage import (
+                        refresh_manual_triage_after_view_save,
+                    )
+                    await refresh_manual_triage_after_view_save(
+                        deps_state,
+                        customer_id=cust, device_id=dev,
+                        milestone_id=mile, tg_name=tg,
+                        correlation_id=f"wopi-raw-{row.version_id[:12]}",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "MTR-1 post-save refresh failed for %s: %s: %s",
+                    view_relative_path, type(exc).__name__, str(exc)[:200],
+                )
             return JSONResponse({"error": 0})
 
         # Status 1/3/4/7 or missing url: acknowledge without saving.
