@@ -456,14 +456,53 @@ class TestSync3PmApproval:
             mock_pm.apply.return_value = SimpleNamespace(result={"outcome": "mirrored"})
             _sync_3_pm_approval(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
         assert stats["sync_3_dispatched"] == 1
-        # Verify event_ctx does NOT carry delivery_state (SP UI didn't write it)
-        # apply.call_args.kwargs = {'args': (params, event_ctx), 'throw': False}
+        # Verify event_ctx does NOT carry delivery_state (SP UI didn't write it).
+        # RECON-6 (2026-08-27): shape is field_deltas at top level, not
+        # derived_fields.body_kvs -- see test_recon6_field_deltas_shape below.
         args_tuple = mock_pm.apply.call_args.kwargs["args"]
         _, event_ctx = args_tuple
-        body_kvs = (event_ctx.get("derived_fields") or {}).get("body_kvs", {})
-        assert "delivery_state" not in body_kvs
-        assert body_kvs.get("pm_approval_at") is not None
-        assert body_kvs.get("pm_approval_pm_id") == "pm@corp.com"
+        deltas = event_ctx.get("field_deltas") or {}
+        assert "delivery_state" not in deltas
+        assert "pm_approval_at" in deltas
+        assert "pm_approval_pm_id" in deltas
+
+    def test_recon6_field_deltas_shape(self):
+        """RECON-6 (2026-08-27): apply_pm_approval_task reads
+        event_context['field_deltas'] (dict[str, tuple[old, new]]) per
+        rule_engine.models.TriggerEvent protocol. Prior sync-3 payload
+        nested values under derived_fields.body_kvs, which the task
+        silently ignored -> every dispatch returned 'skipped_no_deltas'
+        with no state advance. Regression guard: assert the exact top-
+        level field_deltas key + tuple shape the task consumes."""
+        cfg = ReconcileConfig()
+        pg_items = [_mk_item(1, "SM-1", "UnderPMReview")]
+        sp_items = [{
+            "item_no":            1,
+            "pm_approval_at":     _iso_ago(600),
+            "pm_approval_pm_id":  "t.arasu@samsung.com",
+        }]
+        deps = _mk_deps(pg_items=pg_items, sp_items=sp_items)
+        stats = {"sync_3_dispatched": 0, "sync_3_skipped": 0}
+        with patch(
+            "core.src.workflow_engine.tasks.pm_approval.apply_pm_approval_task"
+        ) as mock_pm:
+            mock_pm.apply.return_value = SimpleNamespace(result={"outcome": "mirrored"})
+            _sync_3_pm_approval(deps, cfg, stats, "cid", "MMK", "SM-1", "P1")
+        args_tuple = mock_pm.apply.call_args.kwargs["args"]
+        _, event_ctx = args_tuple
+        # (1) field_deltas is a TOP-LEVEL key (not nested under derived_fields)
+        assert "field_deltas" in event_ctx, \
+            "field_deltas MUST be top-level -- apply_pm_approval reads " \
+            "event_context['field_deltas'], not derived_fields.body_kvs"
+        # (2) Values are (old, new) TUPLES per TriggerEvent protocol
+        deltas = event_ctx["field_deltas"]
+        for field_name in ("pm_approval_at", "pm_approval_pm_id"):
+            assert field_name in deltas, f"{field_name} must be present"
+            val = deltas[field_name]
+            assert isinstance(val, (tuple, list)) and len(val) >= 2, \
+                f"{field_name} must be a (old, new) tuple; got {type(val).__name__}"
+        # (3) Sanity: new-values match SP input
+        assert deltas["pm_approval_pm_id"][1] == "t.arasu@samsung.com"
 
 
 # ---------------------------------------------------------------------------

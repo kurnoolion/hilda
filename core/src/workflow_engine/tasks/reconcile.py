@@ -613,19 +613,25 @@ def _sync_3_pm_approval(
         if elapsed is None or elapsed < sub_cfg.elapsed_threshold_sec:
             continue
 
+        # RECON-6 (2026-08-27): apply_pm_approval reads event_context['field_deltas']
+        # (dict[str, tuple[old, new]]) per rule_engine.models.TriggerEvent, NOT
+        # derived_fields.body_kvs. The prior payload shape silently produced
+        # "skipped_no_deltas" on every sync-3 dispatch; log line
+        # `apply_pm_approval_task ENTRY ... field_deltas_keys=[]` was the
+        # tell. SP UI writes only pm_approval_at + pm_approval_pm_id per the
+        # 2026-07-15 serialization ask (RECON-1); HILDA drives the RFS
+        # advance downstream inside apply_pm_approval_task via
+        # update_delivery_state. `old` values are None -- sync-3 is a
+        # backfill, not a delta capture; the task only reads new values.
         event_ctx = {
             "customer_id":      customer_id,
             "delivery_item_id": it_id,
             "milestone_id":     milestone_id,
             "correlation_id":   correlation_id,
             "trigger_source":   "sync_backfill_pm_approval",
-            "derived_fields": {
-                "body_kvs": {
-                    # SP UI no longer writes delivery_state on approve; only
-                    # pm_approval_at + pm_approval_pm_id. HILDA drives RFS.
-                    "pm_approval_at":     str(sp_approval_at),
-                    "pm_approval_pm_id":  str(sp_row.get("pm_approval_pm_id") or ""),
-                },
+            "field_deltas": {
+                "pm_approval_at":     (None, str(sp_approval_at)),
+                "pm_approval_pm_id":  (None, str(sp_row.get("pm_approval_pm_id") or "")),
             },
         }
         try:
