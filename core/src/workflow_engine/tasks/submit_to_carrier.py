@@ -214,13 +214,40 @@ def submit_to_carrier_task(
                 all_ok = False
                 continue
 
+            # UPLOAD-SUBDIR-PLM-1 (2026-08-27): PLM zip ingest preserves the
+            # in-zip folder structure on carrier upload. Archive container
+            # segments (`.zip` / `.7z`) are stripped -- only the *inside-the-
+            # archive* folder structure survives to Google Drive. NSD ingest
+            # and PLM loose files remain flat (base behavior). Gating on
+            # document_index.ingest_source == CorporatePLM. See STATUS +
+            # DECISIONS UPLOAD-SUBDIR-PLM-1.
+            effective_target_dir = target_folder
+            try:
+                file_hash = getattr(assoc, "file_hash", "") or ""
+                if file_hash:
+                    doc_ix = deps.storage.get_document_index_row_by_hash(file_hash)
+                    ingest_src = (
+                        getattr(doc_ix, "ingest_source", "") if doc_ix else ""
+                    )
+                    if ingest_src == "CorporatePLM":
+                        subdir = _plm_subdir_prefix_from_local_path(local_path)
+                        if subdir:
+                            effective_target_dir = target_folder.rstrip("/") + "/" + subdir
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "UPLOAD-SUBDIR-PLM-1: subdir compute failed item=%s: %s: %s -- "
+                    "falling back to flat target",
+                    item_id, type(exc).__name__, str(exc)[:120],
+                )
+                effective_target_dir = target_folder
+
             try:
                 result = _upload_one(
                     deps,
                     device_id=device_id,
                     milestone_id=milestone_id,
                     source_dir=source_dir,
-                    target_dir=target_folder,
+                    target_dir=effective_target_dir,
                     filename=filename,
                     customer_delivery_info=customer_delivery_info,
                 )
@@ -250,7 +277,7 @@ def submit_to_carrier_task(
                     "customer_id":    customer_id,
                     "milestone_id":   milestone_id,
                     "filename":       filename[:120],
-                    "target_dir":     target_folder[:120],
+                    "target_dir":     effective_target_dir[:120],
                     "correlation_id": correlation_id,
                 })
             else:
@@ -260,7 +287,7 @@ def submit_to_carrier_task(
                     "customer_id":    customer_id,
                     "milestone_id":   milestone_id,
                     "filename":       filename[:120],
-                    "target_dir":     target_folder[:120],
+                    "target_dir":     effective_target_dir[:120],
                     "error_code":     error_code or "",
                     "correlation_id": correlation_id,
                 })
@@ -329,6 +356,77 @@ def _resolve_nsd_volume_prefix(deps: Any) -> str:
     return os.path.expanduser(
         os.environ.get("HILDA_CUSTOMER_ADAPTER_NSD_VOLUME_PREFIX", "")
     )
+
+
+# UPLOAD-SUBDIR-PLM-1 (2026-08-27) constants + helper -----------------------
+# Archive-container segments to strip from the PLM subdir prefix. Compared
+# lowercased against segment suffixes so `report.zip` / `data.7z` / `foo.RAR`
+# all trigger. Extend if new archive types get first-class ingest support.
+_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
+
+# Path-hostile characters replaced defensively before subdir goes to the
+# carrier binding. Backslashes get swapped to underscore so Windows-authored
+# archives don't cause the drive binding to mis-parse; control characters
+# stripped outright. Spaces + Unicode letters are preserved (user's example
+# "i am c" folder must survive intact).
+_SUBDIR_HOSTILE_CHARS = ("\\",)
+
+
+def _sanitize_subdir_segment(seg: str) -> str:
+    """Defensive per UPLOAD-SUBDIR-PLM-1 #3. Backslashes -> underscore
+    (Windows-authored archive names); control chars stripped; trailing dots
+    stripped (Windows filesystem hostile). Preserves spaces + everything
+    Unicode-printable so `i am c` survives verbatim."""
+    result = seg
+    for ch in _SUBDIR_HOSTILE_CHARS:
+        result = result.replace(ch, "_")
+    result = "".join(c for c in result if ord(c) >= 32)
+    return result.rstrip(". ")
+
+
+def _plm_subdir_prefix_from_local_path(local_nsd_path: str) -> str:
+    """UPLOAD-SUBDIR-PLM-1 (2026-08-27) -- derive the effective subdir prefix
+    that should ride under `target_folder` on Google Drive for a PLM-ingested
+    file.
+
+    Design (user 2026-08-27 confirm):
+      * Anchor at rev<N> or _staged_classification segment (whichever appears
+        in the path); take all subsequent segments EXCEPT the final basename.
+      * Strip archive-container segments (`.zip` / `.7z` / `.rar` suffix,
+        case-insensitive) -- outer + all nested zip names disappear.
+      * Sanitize surviving segments (backslash -> underscore, strip control
+        chars, strip trailing dot / space) via `_sanitize_subdir_segment`.
+      * Empty result = flat upload (loose file with no in-archive folder).
+
+    Examples:
+      internal/.../rev1/a.pdf                                      -> ''
+      internal/.../rev1/b.zip/i am c/d.pdf                         -> 'i am c'
+      internal/.../rev1/outer.zip/inner.zip/x/y.pdf                -> 'x'
+      internal/.../rev1/report.7z/folder/nested/file.pdf           -> 'folder/nested'
+      internal/.../_staged_classification/report.zip/folder/x.pdf  -> 'folder'
+    """
+    from pathlib import PurePosixPath as _P
+    parts = _P(local_nsd_path).parts
+    if not parts:
+        return ""
+    root_idx = -1
+    for i, seg in enumerate(parts):
+        if seg.startswith("rev") or seg == "_staged_classification":
+            root_idx = i
+            break
+    if root_idx < 0 or root_idx >= len(parts) - 1:
+        return ""
+    # Take segments between the anchor and the final basename.
+    subdir_parts = parts[root_idx + 1 : -1]
+    kept: list[str] = []
+    for seg in subdir_parts:
+        low = seg.lower()
+        if any(low.endswith(ext) for ext in _ARCHIVE_EXTS):
+            continue
+        clean = _sanitize_subdir_segment(seg)
+        if clean:
+            kept.append(clean)
+    return "/".join(kept)
 
 
 def _resolve_source_dir_and_filename(
