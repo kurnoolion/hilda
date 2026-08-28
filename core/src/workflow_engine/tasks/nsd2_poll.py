@@ -576,8 +576,14 @@ def _ingest_new_nsd2_file(
             new_loop.close()
 
     _log.warning(
-        "NSD2_POLL_INGEST: item=%s filename=%r file_hash=%s result=%s",
-        delivery_item_id, filename, file_hash[:16],
+        # NSD-ERR-1 (2026-08-27): log the plural `delivery_item_ids[:3]` (in-
+        # scope from _run's closure via candidate widen setup) -- the prior
+        # singular `delivery_item_id` reference triggered a NameError on every
+        # ingest call, masking the actual per-file result with a spurious
+        # exception in the outer error handler at line ~323. Single-item
+        # slice via `[:3]` keeps log lines bounded.
+        "NSD2_POLL_INGEST: items=%s filename=%r file_hash=%s result=%s",
+        delivery_item_ids[:3], filename, file_hash[:16],
         {k: (list(v) if isinstance(v, set) else v)
          for k, v in (result or {}).items()},
     )
