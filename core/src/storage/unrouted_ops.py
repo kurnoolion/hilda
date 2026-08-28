@@ -530,6 +530,13 @@ async def route_unrouted_to_item(
         doc.routing_resolution = RoutingResolution.TPM_REASSIGNED.value
         doc.inferred_tg_name = target_tg
 
+        # Capture fields for AUTO-CLASSIFY-RELNOTES-1 post-commit sweep
+        # (need target.item_type + doc.doc_type + doc.original_filename after
+        # the session closes).
+        _target_item_type = getattr(target, "item_type", "") or ""
+        _current_doc_type = doc.doc_type or DocType.UNRESOLVED.value
+        _original_filename = doc.original_filename or ""
+
         await session.commit()
         _log.warning(
             "MANUAL_ROUTE: SUCCESS committed file_hash=%s target=%s tg=%s "
@@ -537,6 +544,49 @@ async def route_unrouted_to_item(
             file_hash[:12], target_delivery_item_id, target_tg,
             target_path.to_relative(),
         )
+
+    # AUTO-CLASSIFY-RELNOTES-1 (2026-08-27): symmetric to
+    # attachment_router's inline auto-promotion. When TPM manually routes
+    # an UNRESOLVED doc to a compliance_certification_release_notes item,
+    # promote doc_type via tpm_resolve_doc_type -- same code path as the
+    # Reclassify UI. Effect: file moves _staged_classification/ -> rev1/
+    # + assoc.nsd_path_type: STAGED_NOT_CLASSIFIED -> CLASSIFIED. Best-
+    # effort: any failure is logged but does NOT roll back the manual-
+    # route commit (which is already persisted above); TPM can fall back
+    # to the Reclassify UI on the staged file.
+    if _current_doc_type == DocType.UNRESOLVED.value:
+        from core.src.email_service.inbound.attachment_router import (
+            _singleton_alignment_doc_type,
+            Fr52AttachmentRouter as _Fr52,
+        )
+        _singleton = _singleton_alignment_doc_type(_target_item_type)
+        if _singleton is not None:
+            try:
+                from core.src.storage.document_ops import tpm_resolve_doc_type
+                _slug = _Fr52._slug_from_filename(_original_filename)
+                await tpm_resolve_doc_type(
+                    file_hash=file_hash,
+                    delivery_item_id=target_delivery_item_id,
+                    new_doc_type=_singleton,
+                    doc_id_slug=_slug,
+                    rev_number=1,
+                    pm_id=tpm_id or "tpm@unknown",
+                )
+                _log.warning(
+                    "AUTO_CLASSIFY_RELNOTES: manual-route auto-promoted "
+                    "file_hash=%s target=%s item_type=%s doc_type=%s "
+                    "slug=%s (UNRESOLVED -> CLASSIFIED)",
+                    file_hash[:12], target_delivery_item_id,
+                    _target_item_type, _singleton.value, _slug,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "AUTO_CLASSIFY_RELNOTES: manual-route promotion FAILED "
+                    "file_hash=%s target=%s %s: %s -- file remains STAGED, "
+                    "TPM can Reclassify manually",
+                    file_hash[:12], target_delivery_item_id,
+                    type(exc).__name__, str(exc)[:120],
+                )
 
     # Step 9: audit (best-effort; separate transaction)
     try:

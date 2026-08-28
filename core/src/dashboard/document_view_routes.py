@@ -691,6 +691,14 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "doc_type":            f.doc_type,
                 "file_hash":           f.file_hash,
                 "is_staged":           f.is_staged,
+                # RECLASS-UI-SCOPE-1 (2026-08-27): per-row Reclassify options
+                # scoped to the routed item's item_type (FR-86 alignment).
+                # Template renders one <option> per entry; when singleton +
+                # is_staged, the sole option is preselected so TPM clicks
+                # once. When empty (no routed item known), template falls
+                # back to legacy 4-option dropdown.
+                "item_type":           f.item_type,
+                "allowed_doc_types":   list(f.allowed_doc_types),
             })
         return templates.TemplateResponse(
             request,
@@ -937,6 +945,44 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
 
         if not item_ids:
             params = {"outcome": "not_staged", "error": file_hash[:12]}
+            return RedirectResponse(
+                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        # RECLASS-UI-SCOPE-1 (2026-08-27): FR-86 alignment defense. UI
+        # dropdown offers only aligned options, but a form-tampered POST
+        # could still submit a misaligned new_doc_type -- reject it here
+        # so the file doesn't silently re-stage on the next classification
+        # sweep. Look up each association's item_type and require alignment
+        # for ALL of them (under D-155 one-doc-one-item this is normally a
+        # single check).
+        from core.src.email_service.inbound.attachment_router import (
+            Fr52AttachmentRouter as _Fr52,
+        )
+        from core.src.storage.db import DeliveryItemTable as _DelItm
+        # DeliveryItemTable's primary-key column is `item_id` (not
+        # `delivery_item_id`) -- session.get() uses PK directly.
+        async with session_scope() as _s:
+            _item_types: list[str] = []
+            for iid in item_ids:
+                _di = await _s.get(_DelItm, iid)
+                if _di is not None and _di.item_type:
+                    _item_types.append(_di.item_type)
+        _misaligned = [
+            it for it in _item_types
+            if not _Fr52._fr86_aligned(it, new_doc_type_enum.value)
+        ]
+        if _misaligned:
+            params = {
+                "outcome": "misaligned",
+                "error": f"{new_doc_type_enum.value} not valid for item_type={_misaligned[0]}",
+            }
+            _log.warning(
+                "RECLASSIFY: rejected misaligned pick file_hash=%s "
+                "new_doc_type=%s item_types=%s",
+                file_hash[:12], new_doc_type_enum.value, _item_types,
+            )
             return RedirectResponse(
                 url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
                 status_code=status.HTTP_303_SEE_OTHER,

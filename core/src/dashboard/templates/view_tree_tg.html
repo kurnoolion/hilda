@@ -39,6 +39,11 @@ auto-extracted preserving folder structure; every save creates a new version.</p
   <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
     ✗ Reclassify partially failed: <code>{{ request.query_params.get('error') }}</code>
   </div>
+{% elif _outcome == 'misaligned' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ Doc type not valid for this item: <code>{{ request.query_params.get('error') }}</code>
+    — pick a value from the (scoped) dropdown.
+  </div>
 {% endif %}
 
 {% if files|length == 0 %}
@@ -87,13 +92,26 @@ auto-extracted preserving folder structure; every save creates a new version.</p
                   action="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/reclassify"
                   style="display:inline; margin:0;">
               <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
+              {# RECLASS-UI-SCOPE-1 (2026-08-27): dropdown scoped to
+                 f.allowed_doc_types (FR-86-aligned for the routed item's
+                 item_type). Singleton -> preselected + no placeholder.
+                 Empty allowed_doc_types (no routed item known) falls back
+                 to legacy 4-option list. #}
               <select name="new_doc_type" required
                       style="padding:0.15em 0.3em; font-size:0.9em; margin-right:0.3em;">
+                {% set opts = f.allowed_doc_types or ['test_report', 'tech_report', 'waiver', 'compliance_certification_release_notes'] %}
+                {% set labels = {
+                    'test_report': 'Test Report',
+                    'tech_report': 'Tech Report',
+                    'waiver': 'Waiver',
+                    'compliance_certification_release_notes': 'Compliance Cert / Release Notes',
+                } %}
+                {% if opts|length != 1 %}
                 <option value="">— pick type —</option>
-                <option value="test_report">Test Report</option>
-                <option value="tech_report">Tech Report</option>
-                <option value="waiver">Waiver</option>
-                <option value="compliance_certification_release_notes">Compliance Cert / Release Notes</option>
+                {% endif %}
+                {% for dt in opts %}
+                <option value="{{ dt }}"{% if opts|length == 1 %} selected{% endif %}>{{ labels.get(dt, dt) }}</option>
+                {% endfor %}
               </select>
               <button type="submit"
                       style="padding:0.15em 0.6em; font-size:0.9em; background:#1a3a6c; color:#fff; border:0; border-radius:2px; cursor:pointer;"

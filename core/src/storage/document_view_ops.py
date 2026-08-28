@@ -126,6 +126,16 @@ class TgFileEntry:
     doc_type: str = ""
     file_hash: str = ""
     is_staged: bool = False
+    # RECLASS-UI-SCOPE-1 (2026-08-27): item_type + allowed_doc_types drive
+    # per-row scoping of the Reclassify dropdown. `item_type` is the
+    # winning routed item's item_type (via document_item_association ->
+    # delivery_item join; under D-155 one-doc-one-item this is a single
+    # value). `allowed_doc_types` is the list of doc_type strings FR-86
+    # accepts for that item_type; template renders one <option> per entry.
+    # Both empty when: no assoc yet (vintage doc), or multiple assocs with
+    # no intersection (rare N-way with incompatible slots).
+    item_type: str = ""
+    allowed_doc_types: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +349,11 @@ async def list_files_in_tg(
     # RECLASS-1 (2026-08-24): batch-fetch doc_type + is_staged from the
     # sibling tables (document_index, document_item_association) keyed by
     # file_hash. Only one round-trip per table (WHERE file_hash IN <set>).
-    from core.src.storage.db import DocumentIndexTable as _DocIx
+    from core.src.storage.db import (
+        DeliveryItemTable as _DelItm,
+        DocumentIndexTable as _DocIx,
+        DocumentItemAssociationTable as _DocAssoc,
+    )
 
     async with _session() as session:
         result = await session.execute(
@@ -383,6 +397,23 @@ async def list_files_in_tg(
             )).all()
             doc_type_by_hash = {h: (dt or "") for h, dt in ix_rows}
 
+        # RECLASS-UI-SCOPE-1 (2026-08-27): resolve routed item's item_type per
+        # file, so template can render the Reclassify dropdown scoped to
+        # FR-86-aligned options. Join document_item_association -> delivery_item.
+        # Under D-155 one-doc-one-item this yields a single item_type; on rare
+        # N-way we take the intersection of allowed sets (empty if incompatible).
+        item_types_by_hash: dict[str, set[str]] = {}
+        if hashes:
+            assoc_rows = (await session.execute(
+                select(_DocAssoc.file_hash, _DelItm.item_type)
+                .join(_DelItm, _DocAssoc.delivery_item_id == _DelItm.item_id)
+                .where(_DocAssoc.file_hash.in_(hashes))
+            )).all()
+            for fh, it in assoc_rows:
+                if not it:
+                    continue
+                item_types_by_hash.setdefault(fh, set()).add(it)
+
     def _needs_merge(current_saved_by: str, all_saved_by: set[str]) -> bool:
         # Current must be owner AND at least one prior version must be
         # non-owner (TPM/human). Owner sentinel = "auto"; TPM = "unknown" or
@@ -390,6 +421,43 @@ async def list_files_in_tg(
         if current_saved_by != "auto":
             return False
         return any(sb != "auto" for sb in all_saved_by)
+
+    def _allowed_for_item_types(item_types: set[str]) -> tuple[str, ...]:
+        """RECLASS-UI-SCOPE-1: intersection of FR-86-aligned doc_type sets
+        across all routed items for this file. Mirrors
+        Fr52AttachmentRouter._fr86_aligned. Under D-155 one-doc-one-item the
+        set is a singleton; multi-item is rare N-way. Confirmation + default
+        item_types accept ANY doc_type -> all 4."""
+        from core.src.template_schema.enums import DocType, ItemType
+        ALL = (
+            DocType.TEST_REPORT.value,
+            DocType.TECH_REPORT.value,
+            DocType.WAIVER.value,
+            DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+        )
+        TTWR = (
+            DocType.TEST_REPORT.value,
+            DocType.TECH_REPORT.value,
+            DocType.WAIVER.value,
+        )
+        RELNOTES = (DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,)
+        per_item: list[tuple[str, ...]] = []
+        for it in item_types:
+            if it == ItemType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value:
+                per_item.append(RELNOTES)
+            elif it == ItemType.TEST_TECH_WAIVER_REPORT.value:
+                per_item.append(TTWR)
+            elif it in (ItemType.CONFIRMATION.value, ItemType.DEFAULT.value):
+                per_item.append(ALL)
+            else:
+                per_item.append(())  # unknown item_type -> no options
+        if not per_item:
+            return ()
+        # Intersection preserving canonical order.
+        common = set(per_item[0])
+        for opts in per_item[1:]:
+            common &= set(opts)
+        return tuple(dt for dt in ALL if dt in common)
 
     entries = [
         TgFileEntry(
@@ -412,6 +480,10 @@ async def list_files_in_tg(
             # (offer Reclassify).
             is_staged=doc_type_by_hash.get(r.sha256, "__missing__")
                 in ("", "unresolved"),
+            item_type=(next(iter(item_types_by_hash.get(r.sha256, set())), "")),
+            allowed_doc_types=_allowed_for_item_types(
+                item_types_by_hash.get(r.sha256, set())
+            ),
         )
         for r in current_rows
     ]

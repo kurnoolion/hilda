@@ -43,7 +43,35 @@ from core.src.template_schema.enums import DocType, ItemType
 if TYPE_CHECKING:
     from core.src.llm.protocol import LLMProvider
 
-__all__ = ["Fr52AttachmentRouter", "StorageBackend", "TgResolverProtocol", "load_doc_type_rules"]
+__all__ = [
+    "Fr52AttachmentRouter",
+    "StorageBackend",
+    "TgResolverProtocol",
+    "load_doc_type_rules",
+    "_singleton_alignment_doc_type",
+]
+
+
+def _singleton_alignment_doc_type(item_type: str) -> "DocType | None":
+    """AUTO-CLASSIFY-RELNOTES-1 (2026-08-27): when the given item_type has
+    exactly ONE FR-86-aligned doc_type, return it -- else None.
+
+    Used by both the router's Branch A auto-promotion and unrouted_ops's
+    manual-route auto-promotion: an UNRESOLVED doc landing on such an item
+    can be safely auto-classified without a TPM click.
+
+    Currently ONE item_type has singleton alignment:
+      compliance_certification_release_notes -> COMPLIANCE_CERTIFICATION_RELEASE_NOTES
+
+    Excluded intentionally:
+      * test_tech_waiver_report -- 3 valid doc_types (test_report, tech_report,
+        waiver); ambiguous, TPM must pick.
+      * default / Confirmation -- accept any doc_type per FR-86; no promotion
+        signal.
+    """
+    if item_type == ItemType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value:
+        return DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +288,36 @@ class Fr52AttachmentRouter:
                 if cand.get("item_id") == primary_item.item_id:
                     primary_item_dict = cand
                     break
+
+        # AUTO-CLASSIFY-RELNOTES-1 (2026-08-27): singleton-alignment auto-
+        # promotion. When the filename-regex classifier came back UNRESOLVED
+        # (no rule matched) AND the routed item's item_type has exactly ONE
+        # FR-86-aligned doc_type (currently: compliance_certification_release_notes),
+        # promote doc_type inline before Step C's gate_passes evaluates.
+        # This lets Step C fill in slug + rev=1 this cycle and Step D dispatch
+        # CLASSIFIED -- file lands directly at rev1/, no STAGED bounce, no
+        # TPM Reclassify click. Safe because: (1) only fires when NO rule
+        # matched at all -- misaligned-but-recognized doc_types (e.g. a
+        # "Test Results" file resolving to test_report on a release-notes
+        # slot) still stage for TPM review; (2) release_notes items accept
+        # exactly this one doc_type per FR-86, so the promotion is
+        # unambiguous. See also unrouted_ops.route_unrouted_to_item for the
+        # symmetric manual-route auto-promotion.
+        if (doc_type_value == DocType.UNRESOLVED.value
+                and primary_item_dict is not None):
+            _singleton = _singleton_alignment_doc_type(
+                primary_item_dict.get("item_type") or ""
+            )
+            if _singleton is not None:
+                logger.warning(
+                    "AUTO_CLASSIFY_RELNOTES: promoting UNRESOLVED -> %s "
+                    "for item=%s (item_type=%s) filename=%r file_hash=%s",
+                    _singleton.value, primary_item.item_id,
+                    primary_item_dict.get("item_type"),
+                    attachment.filename, attachment.file_hash[:12],
+                )
+                doc_type_value = _singleton.value
+                cls_resolution = ClassificationResolution.FILENAME_REGEX
 
         gate_passes = (
             doc_type_value != DocType.UNRESOLVED.value
