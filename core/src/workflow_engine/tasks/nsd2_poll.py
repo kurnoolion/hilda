@@ -285,6 +285,30 @@ def _poll_one_device(
         device_id, milestone_id, device_folder, len(items),
     )
 
+    # DRM-1 (2026-08-28): force-decrypt DRM-wrapped files under device_folder
+    # BEFORE the walk reads bytes. On-prem script POSTs to corp DRM endpoint
+    # (folder-only payload -> API decrypts every file in folder; idempotent
+    # per corp API contract 2026-08-28). On failure -> skip this device this
+    # tick per architect ask; next tick retries. Wrapped bytes would ingest
+    # as opaque blobs and be useless downstream, so gating is correct.
+    #
+    # NOTE (open question): the corp API takes a single folder_path. If it
+    # decrypts recursively into subfolders, one call here covers the whole
+    # walk_fn traversal. If it only handles the top-level, DRM-wrapped files
+    # in deeper subdirs will still be wrapped after this call -- follow-up
+    # would push decrypt into walk_nsd2_directory's per-directory step.
+    # Deferred until corp confirms recursion behavior; single call is
+    # correct+cheap for both cases and can be enhanced without contract change.
+    from core.src.storage.drm_client import decrypt_folder as _drm_decrypt_folder
+    if not _drm_decrypt_folder(str(device_folder)):
+        stats["devices_decrypt_failed"] = stats.get("devices_decrypt_failed", 0) + 1
+        _log.warning(
+            "NSD2_POLL: DRM decrypt failed for device=%s folder=%s -- "
+            "skipping walk this tick; retry next tick",
+            device_id, device_folder,
+        )
+        return
+
     for rel_path, file_bytes, file_hash in walk_fn(device_folder, customer_id):
         stats["files_yielded"] += 1
 
