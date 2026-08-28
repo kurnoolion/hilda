@@ -59,6 +59,18 @@ _log = logging.getLogger(__name__)
 _PHASE_DAY_BEFORE = "day_before"
 _PHASE_DAY_OF     = "day_of"
 
+# DRR-GATE-1 (2026-08-28): tpm_notification is a DRR-only workflow (docstring,
+# subject prefix, attachment name all say "DRR closure final status"). Gate
+# the tick to milestone_ids that start with "DRR" so setting a target_date
+# on P1 / LTE-OTA / other milestones doesn't accidentally fire a DRR-branded
+# email + attachment. Case-insensitive + strip trailing whitespace so
+# "DRR", "DRR ", "DRR Closure", "DRR Version 5.7" all match.
+_DRR_MILESTONE_PREFIX = "DRR"
+
+
+def _is_drr_milestone(milestone_id: str) -> bool:
+    return (milestone_id or "").strip().upper().startswith(_DRR_MILESTONE_PREFIX)
+
 # CommunicationLog action_type marker for idempotency lookups.
 _AUDIT_ACTION_SENT   = "tpm_drr_notification_sent"
 _AUDIT_ACTION_MISSED = "tpm_drr_notification_missed_window"
@@ -121,6 +133,17 @@ def tpm_notification_tick_task(
                     "tpm_notification_tick: DEV-FILTER-2 skip customer=%s "
                     "device=%s (not in template.yaml devices=%r) milestone=%s",
                     customer_id, device_id, _known_devices, milestone_id,
+                )
+                continue
+            # DRR-GATE-1 (2026-08-28): only DRR-prefixed milestones fire the
+            # DRR closure notification. Skip P1 / LTE-OTA / etc. so a
+            # target_date accidentally set on a non-DRR row doesn't send
+            # a DRR-branded email.
+            if not _is_drr_milestone(milestone_id):
+                _log.info(
+                    "tpm_notification_tick: DRR-GATE-1 skip customer=%s "
+                    "device=%s milestone=%s (not DRR-prefixed)",
+                    customer_id, device_id, milestone_id,
                 )
                 continue
             target_date = _parse_target_date(target_date_raw)
