@@ -375,6 +375,35 @@ def _iter_active_scopes(deps: Any):
             yield (customer_id, device_id, _NSD2_MILESTONE_ID)
 
 
+# NSD-STRICT-1 (2026-08-27) helper -------------------------------------------
+def _any_candidate_substring_hits(match_input: str, candidate_items: list) -> bool:
+    """Return True if AT LEAST ONE non-Default candidate item's
+    item_description tag-set substring-matches `match_input`. Uses the same
+    AND-of-OR predicate the router applies at _tg_scoped_route stage 1.
+
+    Default WIs (item_type=='default') are EXCLUDED from the check because
+    they're the milestone-level catch-all and shouldn't count as evidence
+    that the folder is claimed by a real work item.
+
+    IMEI reserved-literal (D-154) handling is NOT included -- the strict
+    pre-check is a folder-name substring test, not a filename-classifier
+    test, so IMEI Excel semantics don't apply.
+    """
+    from core.src.email_service.inbound.attachment_router import (
+        Fr52AttachmentRouter as _Fr52,
+    )
+    for cand in candidate_items:
+        if (cand.get("item_type") or "").lower() == "default":
+            continue
+        groups = _Fr52._extract_tag_groups(cand.get("item_description"))
+        if not groups:
+            continue
+        for group in groups:
+            if all(str(t).lower() in match_input for t in group):
+                return True
+    return False
+
+
 def _ingest_new_nsd2_file(
     *,
     deps: Any,
@@ -466,6 +495,39 @@ def _ingest_new_nsd2_file(
                 customer_id, delivery_item_ids[:3],
             )
             return {"processed": 0}
+
+        # NSD-STRICT-1 (2026-08-27): for NON-ARCHIVE NSD files, pre-check that
+        # at least one candidate item's item_description substring-matches the
+        # folder-name match_hint. When none match, skip ingest entirely -- do
+        # NOT fall back to TDN-1 default (which would land the file on an
+        # unrelated `["default"]`-marked item, either CLASSIFIED-on-wrong-item
+        # or STAGED per FR-86 alignment). Per user 2026-08-27: for MMK, this
+        # skips docs that belong to a DIFFERENT milestone (e.g. WPC docs are
+        # DRR-milestone, currently being polled under P1 by mistake); a future
+        # DRR->P1 migration task will move them explicitly.
+        #
+        # Applies to REGULAR files only. Archives still go through
+        # _process_archive_attachment (inner files each hit routing
+        # individually; archive-inner strict-skip is a separate follow-up
+        # if needed).
+        #
+        # File stays on the NSD share. Next tick's dedup would re-check --
+        # but no document_index row exists, so it re-attempts the routing
+        # from scratch. If template.yaml adds a matching tag in the interim,
+        # the file routes correctly on the next tick.
+        if not _is_archive_attachment(attachment):
+            match_input = (attachment.match_hint or attachment.filename or "").lower()
+            if match_input and not _any_candidate_substring_hits(match_input, candidate_items):
+                _log.warning(
+                    "NSD_SKIP_NO_ITEM: no candidate item matches folder=%r; "
+                    "skipping file=%r hash=%s customer=%s device=%s milestone=%s "
+                    "-- add matching tag to template.yaml or wait for milestone migration",
+                    (attachment.match_hint or "")[:120],
+                    filename[:180], file_hash[:16],
+                    customer_id, delivery_item_ids[0][:24] if delivery_item_ids else "?",
+                    milestone_id,
+                )
+                return {"processed": 0, "skipped_no_item": 1}
 
         # PLMARCH-3 (2026-08-24): dispatch archives so inner entries route
         # per-file through Fr52 (mirror email/PLM paths). Non-archives go
