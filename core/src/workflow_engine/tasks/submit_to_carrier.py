@@ -148,8 +148,15 @@ def submit_to_carrier_task(
     skipped_already  = 0    # already SubmittedToCustomer
     skipped_upload   = 0    # no_customer_upload OR target_folder null
     skipped_no_files = 0    # zero classified files
-    uploaded_items   = 0
+    uploaded_items   = 0    # work items whose ALL files posted OK + transitioned
     partial_items    = 0    # at least one False -- item stays in RFS
+    # SUBMIT-STATS-1 (2026-08-28): milestone-level file totals were previously
+    # discarded after each item loop (only `uploaded_items` survived), which
+    # made the log line "uploaded=5" ambiguous when 12 files had actually
+    # posted across those 5 items. Track per-file counters so stats reflect
+    # what actually hit the carrier.
+    files_uploaded_total = 0
+    files_failed_total   = 0
 
     for item in items:
         item_id       = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
@@ -292,6 +299,11 @@ def submit_to_carrier_task(
                     "correlation_id": correlation_id,
                 })
 
+        # SUBMIT-STATS-1: accumulate per-file counters into milestone totals
+        # BEFORE state-transition branch so partial items still contribute.
+        files_uploaded_total += files_ok
+        files_failed_total   += files_failed
+
         # -- Per-item state transition on all-files-success -------------------
         if all_ok and files_ok > 0:
             transitioned = _transition_to_submitted(
@@ -318,10 +330,13 @@ def submit_to_carrier_task(
             )
 
     _log.info(
-        "submit_to_carrier: milestone=%s scanned=%d uploaded=%d partial=%d "
-        "skipped_already=%d skipped_state=%d skipped_upload=%d skipped_no_files=%d",
+        "submit_to_carrier: milestone=%s scanned=%d uploaded_items=%d "
+        "partial_items=%d skipped_already=%d skipped_state=%d "
+        "skipped_upload=%d skipped_no_files=%d files_uploaded=%d "
+        "files_failed=%d",
         milestone_id, scanned, uploaded_items, partial_items,
         skipped_already, skipped_state, skipped_upload, skipped_no_files,
+        files_uploaded_total, files_failed_total,
     )
     return {
         "outcome":            "fired",
@@ -334,6 +349,14 @@ def submit_to_carrier_task(
         "skipped_state":      skipped_state,
         "skipped_upload":     skipped_upload,
         "skipped_no_files":   skipped_no_files,
+        # SUBMIT-STATS-1 (2026-08-28): per-file totals so the caller /
+        # operator can distinguish "5 work items with 12 files total" from
+        # "5 work items with 5 files total". uploaded_items counts items
+        # whose ALL files posted OK and whose state advanced; files_uploaded
+        # counts every individual file that hit the carrier (including
+        # files inside partial_items).
+        "files_uploaded":     files_uploaded_total,
+        "files_failed":       files_failed_total,
     }
 
 
