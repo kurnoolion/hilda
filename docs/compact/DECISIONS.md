@@ -4848,3 +4848,98 @@ Discovered 2026-08-14 via ProcMon capture:
 
 **Anchors**: `[D-142]` (5-sync meta-reconciler architecture — now 6 with sync-7); `[D-143]` (SP-alerts-are-best-effort — sync-7 extends the "reconciler as best-effort backstop" philosophy from SP alerts to router candidate-pool timing); `[D-158]` (UR-5/6 manual triage UI — sync-7 is the automated peer for the unambiguous single-match case); `[D-173]` (NSDMATCH `match_hint` — sync-7 reuses parent-folder-name derivation); `[D-153]` (cross-TG constraint — sync-7's multi-match skip preserves it); `[D-155]` (archive-as-container — sync-7's parent-folder derivation stops at the archive boundary same as ingest-time NSDMATCH); UR-3 (storage helpers reused); `list_unrouted_for_scope` docstring at [unrouted_ops.py:150](core/src/storage/unrouted_ops.py:150); commit `<pending>` (SYNC7-1..4 cascade).
 
+---
+
+## D-177: Router auto-classifies UNRESOLVED doc_type on singleton-alignment items
+
+**Status**: Active · **Date**: 2026-08-27
+
+**Context**: FR-86 alignment invariant maps `item_type` → set of allowed `doc_type` values. For `compliance_certification_release_notes` items, exactly ONE doc_type aligns (`compliance_certification_release_notes` itself). Files landing on those items with `doc_type=UNRESOLVED` (filename regex didn't match any rule) were staging to `_staged_classification/`, forcing TPM to click Reclassify and pick the only valid value. High-volume, zero-information-gain manual step. Options considered:
+- **Option A (auto-promote in router)**: at Step D dispatch, if `doc_type=UNRESOLVED` AND `primary_item.item_type` has singleton FR-86 alignment, promote doc_type inline. File lands CLASSIFIED at rev1/ this cycle, TPM never sees it.
+- **Option B (stage-and-suggest)**: keep staging behavior; add UI hint "one-click promote to release_notes" on the reclassify dropdown for singleton-alignment items. Still forces one click per doc.
+- **Option C (extend alignment more broadly)**: also auto-promote for TTWR items (3 valid doc_types) by picking one via secondary heuristic. Rejected — ambiguity is real; TPM's judgment is needed.
+
+**Decision**: Option A. New module-level helper `_singleton_alignment_doc_type(item_type: str) -> DocType | None` in `attachment_router.py`. Called at the seam right after `_route_to_items` returns and BEFORE Step C's `gate_passes` evaluates — so Step C's slug assignment fires this cycle and Step D dispatches `CLASSIFIED`. Fires ONLY when `doc_type_value == UNRESOLVED.value` AND primary_item has singleton alignment (currently: `compliance_certification_release_notes` → `COMPLIANCE_CERTIFICATION_RELEASE_NOTES`). Symmetric wiring in `unrouted_ops.route_unrouted_to_item` — after the STAGED_NOT_CLASSIFIED transaction commits, best-effort post-commit block invokes `tpm_resolve_doc_type` when the manually-picked target has singleton alignment, so the file moves from `_staged_classification/` → `rev1/` and the assoc upgrades to `CLASSIFIED` (same code path as the Reclassify UI).
+
+**Why**:
+- **Fires only when regex gave NO signal.** A recognized-but-misaligned doc_type (e.g. filename resolves to `test_report` on a release-notes slot) still stages — the "item 15 case" (file with "Test Results" in a release-notes folder) that motivated NSD-STRICT-1 is NOT silenced by this promotion. TPM review preserved for the genuinely-ambiguous cases.
+- **Router flow is strictly sequential** (verified by architect 2026-08-27) — `_classify_doc_type` → `_route_to_items` → Step C → Step D all inside one `route()` call, no parallelism. By the time the promotion seam runs, both `doc_type_value` AND `primary_item.item_type` are in hand.
+- **Confirmation + default item_types excluded from the helper.** FR-86 says they accept any doc_type ("informational" / "catch-all"), so there's no unique doc_type to promote to. Architect confirmed 2026-08-27 that in practice their config has neither — Default WI is dead code, Confirmation items have no documents. Both arms are safe no-ops even if config drifts.
+- **Manual-route symmetric wiring uses existing tested helper.** `tpm_resolve_doc_type` already handles the state transition (file move + `nsd_path_type` promotion + `local_nsd_path` rewrite). Zero new storage logic; the post-commit invocation is best-effort — any failure logs but does NOT roll back the manual-route commit (file stays STAGED, TPM can still Reclassify manually).
+- **Rejected Option B** because a one-click UI is still a click; the promotion is unambiguous — no TPM judgment call.
+
+**Consequences**:
+- **`_singleton_alignment_doc_type` becomes the extension point** for any future item_type that grows a singleton alignment. Adding one is a one-line helper edit; no cascading changes.
+- **Router audit trail**: promoted files log `AUTO_CLASSIFY_RELNOTES: promoting UNRESOLVED -> <doc_type> for item=<id> item_type=<...> filename=<...>` at WARNING so ops can grep for the auto-promotion path.
+- **Manual-route audit**: symmetric `AUTO_CLASSIFY_RELNOTES: manual-route auto-promoted file_hash=<...> target=<...> item_type=<...> (UNRESOLVED -> CLASSIFIED)`. Failures log at WARNING but the manual-route commit is already persisted; retryable via TPM Reclassify UI.
+- **UI dropdown fallback still needed** (see D-178) for TTWR items whose 3 valid doc_types can't be auto-picked. Both D-177 and D-178 ship together as one commit.
+- **7 pure-function tests** (`test_auto_classify_relnotes.py`) locking in singleton semantics + FR-86 belt-and-suspenders check.
+
+**Anchors**: FR-86 (alignment invariant); D-174 (RECLASS UI — this is the "no-click needed" counterpart); D-155 (one-doc-one-item under normal routing — makes singleton-item auto-classify unambiguous); commit `c7ad579`.
+
+---
+
+## D-178: Reclassify UI dropdown scoped to FR-86-aligned doc_types per routed item
+
+**Status**: Active · **Date**: 2026-08-27
+
+**Context**: RECLASS UI (D-174) shipped with a hard-coded dropdown of all 4 doc_types (`test_report` / `tech_report` / `waiver` / `compliance_certification_release_notes`). TPM could pick any value regardless of the routed item's `item_type`. If the pick misaligned per FR-86, `tpm_resolve_doc_type` would succeed (writes the new doc_type), but the next classification pass or reconcile sweep would re-stage the file — silent thrash, mis-classified doc_type persisted mid-cycle. Options:
+- **Option A (scope dropdown to aligned options per routed item)**: `list_files_in_tg` computes per-file `allowed_doc_types` via a JOIN through `document_item_association` → `delivery_item.item_type`; template renders one `<option>` per aligned entry. Singleton (release-notes) preselected → one click. TTWR → 3 options. Empty allowed set → template legacy 4-option fallback.
+- **Option B (keep hard-coded dropdown + server-side reject on misalignment)**: dropdown stays 4 options; handler rejects mis-aligned POST with a flash banner. TPM discovers the misalignment only after clicking Submit.
+- **Option C (validate on the server AND scope the UI)**: belt-and-suspenders — UI shows only valid options; handler still validates in case of form-tampering.
+
+**Decision**: Option C. `TgFileEntry` grows two fields: `item_type: str` (the winning routed item's item_type — under D-155 one-doc-one-item this is a single value) and `allowed_doc_types: tuple[str, ...]` (intersection of FR-86-aligned doc_types across all associations). `list_files_in_tg` performs the JOIN + intersection computation. Template renders dropdown from `f.allowed_doc_types`; singleton → single preselected `<option>`, no "— pick type —" placeholder. Empty allowed set → legacy 4-option fallback (safe default for vintage docs with no assoc, or rare N-way with incompatible slots). `browse_reclassify` handler looks up each association's item_type via `DeliveryItemTable` (PK `item_id`) and rejects with `outcome=misaligned` flash banner if any item_type refuses the picked doc_type. Handler-side check catches form-tampered bypass.
+
+**Why**:
+- **Prevents silent thrash.** Without scoping, TPMs could pick misaligned values that would silently re-stage on next sweep. Users would see the file "un-classify itself" without explanation.
+- **Singleton preselect makes release-notes reclassify a one-click op.** Combined with D-177's ingest-time auto-classify, most release-notes files never see the UI at all; the ones that do (manual route → TPM confirms) are one click.
+- **Empty-set fallback keeps legacy docs working.** Vintage docs with no `document_item_association` row (imported before D-158 or migrated from other sources) render the legacy 4-option list rather than a broken empty dropdown.
+- **N-way intersection is the safe merge.** Rare case: same file associated with N items of different item_types. The set-intersection means the dropdown only offers doc_types that align with ALL of them. If intersection is empty → fallback to legacy — TPM still has agency, no silent block.
+- **Server-side alignment defense** (Option C over pure A) catches curl/POST-man submissions that bypass the UI. Cost is one Postgres round-trip per reclassify POST; benefit is silent-thrash-proof.
+- **DeliveryItemTable PK correction found + fixed mid-shipping**: SQLAlchemy column is `item_id`, not `delivery_item_id`. Original draft used `.delivery_item_id` in the JOIN + `session.get()` call, would have thrown `AttributeError` on first hit. Caught by regression test failure; fixed by using PK-based `session.get(DeliveryItemTable, iid)`.
+
+**Consequences**:
+- **`TgFileEntry` schema growth**: two new fields. Backward-compatible (both default to empty). Callers unaffected unless they render the dropdown; template's `f.allowed_doc_types or [<legacy 4>]` idiom handles both new and legacy call sites.
+- **New flash banner**: `outcome=misaligned` renders "✗ Doc type not valid for this item: `<value>` not valid for item_type=`<...>` — pick a value from the (scoped) dropdown."
+- **9 pure-function tests** (`test_reclass_ui_scope.py`) locking in intersection semantics: singleton, TTWR triple, Confirmation all-4, empty input, unknown item_type, N-way empty intersection, Confirmation+release_notes intersects to release_notes only.
+- **Ships in same commit as D-177** (`c7ad579`). The two cascades together mean release-notes items need zero TPM clicks (D-177 auto-promote at ingest) OR one click (D-178 singleton preselect for manually-routed cases).
+- **Future extension point**: if new item_types are added with their own alignment sets, `_allowed_for_item_types` (inner helper in `list_files_in_tg`) is the one place to update. Both D-177 and D-178 respect the same FR-86 source-of-truth (`Fr52AttachmentRouter._fr86_aligned`), keeping the two paths in sync.
+
+**Anchors**: FR-86 (alignment invariant — the truth source both paths respect); D-174 (RECLASS UI — this scopes its dropdown); D-155 (one-doc-one-item — makes single item_type per file the norm); D-177 (companion auto-promote — together they eliminate the release-notes reclassify click); commit `c7ad579`.
+
+---
+
+## D-179: DRM force-decrypt as subprocess-isolated on-prem helper, called pre-ingest per NSD folder
+
+**Status**: Active · **Date**: 2026-08-28
+
+**Context**: Corp DLP wraps files on the NSD share with IRM/DRM encryption. Reading those bytes into HILDA yields opaque blobs — the file_hash + filename are still meaningful for routing, but downstream (view-tree save, OnlyOffice edit, Google Drive upload) all fail because the content is encrypted. Prior D-171 investigation ruled out standalone invocation of the DRM decrypt binary from HILDA (destroys files as a tamper response). The corp DLP team subsequently stood up a REST decrypt service (endpoint URL held in ops config; accepts POST with `{folder_path, file_name?}`, returns `{success, message}`). Options for wiring HILDA to it:
+- **Option A (in-container Python request via `requests`)**: add call site directly to `nsd2_poll.py`. Simplest; couples worker image to endpoint reachability.
+- **Option B (subprocess-isolated on-prem helper)**: mirror PLM pattern — standalone Python script at `/opt/drm_decrypt_scripts/drm_decrypt.py` (stdlib-only `urllib`), hilda-worker shells out via `subprocess.run`. Preserves the "on-prem scripts run in host Python, HILDA container calls them by name" convention already established for PLM.
+- **Option C (dedicated decrypt-sidecar container)**: separate container in docker-compose. Overkill for a single HTTP call per folder.
+
+**Decision**: Option B. Three-piece cascade:
+1. **On-prem helper** at `scripts/drm_decrypt_scripts/drm_decrypt.py`, deployed to `/opt/drm_decrypt_scripts/` on the host. Stdlib-only (`urllib`, no `requests`). CLI accepts `--folder-path` (required) + `--file-name` (optional; omitted = API batch-decrypts every file in folder per API confirm 2026-08-28) + `--endpoint` (defaults to a placeholder; real value injected via env or CLI on the deployed script). Success → JSON on stdout, exit 0. Failure → stderr diagnostic, exit 1-5 (distinct codes: HTTP error / transport / API-reported / unexpected).
+2. **Wrapper module** `core/src/storage/drm_client.py`: single public `decrypt_folder(folder_path: str) -> bool`. Config via env vars — `HILDA_DRM_SCRIPTS_DIR` (default `/opt/drm_decrypt_scripts`), `HILDA_DRM_PYTHON` (default `python3`), `HILDA_DRM_TIMEOUT` (default `120` sec), `HILDA_DRM_ENABLED` (`false`/`0`/`no`/`off` → short-circuits `True` for dev/CI envs that lack reach to the endpoint). Failure policy: any non-zero subprocess return → WARN log + `False`.
+3. **`nsd2_poll` wire seam**: called once per device folder, immediately after `resolve_fn` returns `device_folder` and BEFORE `walk_fn` starts yielding bytes. Decrypt failure → `devices_decrypt_failed` stat increment + return early → skip walk this tick, retry next tick. API confirmed 2026-08-28 to recurse into subdirs, so a single call at `device_folder` root covers the full walk (no per-subfolder loop needed).
+
+**Why**:
+- **Subprocess isolation preserves the PLM pattern** already understood by ops. Adding a second on-prem service integration alongside PLM at `/opt/plm_scripts/` (D-169) keeps deployment topology consistent — one directory per host-side integration, RO bind-mount into hilda-worker, no coupling to hilda-worker's Python env.
+- **`HILDA_DRM_ENABLED` short-circuit prevents dev-env breakage.** Dev machines without reach to the decrypt endpoint can't hit it; without the flag, every ingest tick would fail. `HILDA_DRM_ENABLED=false` returns `True` from the wrapper without invoking the script, so ingest proceeds as if decryption succeeded — safe because dev envs won't have real DRM-wrapped bytes anyway.
+- **Skip + retry-next-tick semantics** (architect-directed 2026-08-28) — never abort the poll, never ingest wrapped bytes. API idempotency (safe to call on already-plaintext files, per API confirm) makes retries harmless.
+- **Batch mode (no `--file-name`) is cheaper than per-file.** N files in a folder → 1 subprocess launch + 1 HTTP round-trip instead of N. Matches API intent per the design pass.
+- **API recurses into subdirs** (confirmed post-ship 2026-08-28) — validates the single-call-at-root wire seam. If the confirmation had been "no recursion," follow-up would have pushed the call into `walk_nsd2_directory`'s per-directory step. Cheap to enhance without changing the wrapper contract.
+- **Docker-compose bind-mount already present on host**, and `_DEFAULT_SCRIPTS_DIR = "/opt/drm_decrypt_scripts"` in code matches. No env-var changes needed on the host for the default deploy; optional `HILDA_DRM_PYTHON=/opt/plm_venv/bin/python` for venv consistency with PLM scripts.
+- **Endpoint URL is deploy-config, not source-tree config.** Public code carries a placeholder default; real endpoint lives in the on-prem script's CLI invocation or env, so no privacy-sensitive network address ships in this repo.
+
+**Consequences**:
+- **New env var contract** across four names (`HILDA_DRM_SCRIPTS_DIR`, `HILDA_DRM_PYTHON`, `HILDA_DRM_TIMEOUT`, `HILDA_DRM_ENABLED`). All have safe defaults; the deployed compose file needs zero additions to its env block.
+- **New `devices_decrypt_failed` stat** in `nsd2_poll` result dict. Non-zero value on a tick means at least one device's decrypt failed — ops-alertable signal.
+- **11 wrapper tests** (`test_drm_client.py`): disabled short-circuit variants, empty path, missing script, non-zero return, timeout, spawn OSError, batch-mode regression (verifies `--file-name` is NOT passed), custom + bad timeout env fallback.
+- **On-prem script has no HILDA tests** — runs in host python env, tested manually via `python3 drm_decrypt.py --folder-path <real folder>` on the host (documented smoke-test one-liner in the docstring).
+- **Deploy hygiene added to STATUS Flags**: copy script to host `/opt/drm_decrypt_scripts/`; leave compose env alone (bind-mount present, defaults match); optionally set `HILDA_DRM_PYTHON` for venv reuse; set `HILDA_DRM_ENABLED=false` on machines lacking network reach to the endpoint.
+- **Ops trace pattern**: grep hilda-worker logs for `DRM_CLIENT:` prefix to trace every decrypt call outcome; on-prem script writes to stdout/stderr which the subprocess wrapper log-forwards.
+- **Not extended to email / PLM ingest paths.** Email attachments arrive unwrapped over SMTP. PLM downloads come through an API that returns unwrapped bytes. Only the NSD share content needs pre-ingest decryption. If a future ingest source lands wrapped bytes, `decrypt_folder` is directly reusable.
+
+**Anchors**: D-171 (DRM anti-tampering investigation — established that standalone DRM binary invocation is unsafe, motivating the sanctioned-endpoint approach); D-169 (PLM subprocess pattern this mirrors); D-152 (`is_drm_wrapped` per-file DRM sniff — complementary safeguard at file read time); D-168 (NSD2 poll architecture — wire seam lives inside this task); commits `9a766ee`, `fe5512d`.
+
