@@ -121,3 +121,44 @@ class TestAnyCandidateSubstringHits:
         assert _any_candidate_substring_hits("1. hw release notes(done)", cands) is True
         # WPC folder -> nothing hits.
         assert _any_candidate_substring_hits("15. wpc(done)", cands) is False
+
+
+# ===========================================================================
+# NSD-STRICT-CARRIER-SHORTCIRCUIT-1 (2026-09-09): carrier-allowlist customers
+# (D-189: MMK -> VZW/Verizon) bypass NSD-STRICT-1 entirely, because the walk
+# has already trusted the whole subtree under the carrier folder. Dynamic
+# sub-folder names ('Skylo NTN', 'Power Management', 'Test reports') that
+# cannot be enumerated in template.yaml must NOT be skipped -- they route
+# via TG_DEFAULT_MULTIMATCH / TDN-1 to a `["default"]`-tagged catch-all.
+# ===========================================================================
+
+
+class TestCarrierAllowlistShortCircuit:
+    """The customer_id gate on NSD-STRICT-1 -- pure predicate check."""
+
+    def test_mmk_is_carrier_allowlist_customer(self):
+        # If this assertion changes, the short-circuit gate in nsd2_poll
+        # must be revisited: MMK's exemption is the point of the fix.
+        from core.src.storage.nsd2_resolver import allowed_root_folders
+        assert allowed_root_folders("MMK") is not None
+        assert allowed_root_folders("MMK") == ("VZW", "Verizon")
+
+    def test_non_carrier_customers_still_gated(self):
+        # Every other customer_id returns None -- NSD-STRICT-1 applies to
+        # them as before.
+        from core.src.storage.nsd2_resolver import allowed_root_folders
+        for cid in ("ACME", "OTHER", "", "verizon", "vzw"):
+            assert allowed_root_folders(cid) is None, cid
+
+    def test_shortcircuit_guard_present_in_nsd2_poll_source(self):
+        """The guard is a 3-line condition; a regression would strip it and
+        the failure would only surface at deploy. Inspect the source directly
+        so a broken merge fails HERE, not in production logs."""
+        import inspect
+        from core.src.workflow_engine.tasks import nsd2_poll
+        src = inspect.getsource(nsd2_poll._ingest_new_nsd2_file)
+        # Both halves of the guard must be intact.
+        assert "_allowed_root_folders(customer_id) is None" in src
+        assert "not _is_archive_attachment(attachment)" in src
+        # And the strict-gate warning has not been removed.
+        assert "NSD_SKIP_NO_ITEM" in src

@@ -285,23 +285,35 @@ def submit_to_carrier_task(
             effective_target_dir = target_folder
             try:
                 is_view = bool(getattr(assoc, "is_view", False))
+                # UPLOAD-NSD-SUBDIR-1 (2026-09-09): ingest_source is now
+                # consulted on the VIEW branch too, to pick the NSD-specific
+                # carrier-relative subdir helper. Previously only fetched for
+                # non-view (PLM internal-tree) files.
                 ingest_src = ""
-                if not is_view:
-                    file_hash = getattr(assoc, "file_hash", "") or ""
-                    if file_hash:
-                        doc_ix = deps.storage.get_document_index_row_by_hash(file_hash)
-                        ingest_src = (
-                            getattr(doc_ix, "ingest_source", "") if doc_ix else ""
-                        )
+                file_hash = getattr(assoc, "file_hash", "") or ""
+                if file_hash:
+                    doc_ix = deps.storage.get_document_index_row_by_hash(file_hash)
+                    ingest_src = (
+                        getattr(doc_ix, "ingest_source", "") if doc_ix else ""
+                    )
                 # UPLOAD-PLAN-1 (2026-09-06): the subdir rule now lives in
                 # storage.upload_plan so the TG view and the download-all
-                # preview compute the identical destination. Behaviour is
-                # unchanged -- the branch simply moved.
+                # preview compute the identical destination.
+                # UPLOAD-NSD-SUBDIR-1 (2026-09-09): pass the customer's
+                # carrier-allowlist tuple and this item's item_description so
+                # the NSD branch can strip only the immediate-post-carrier
+                # segment that the router actually matched on.
+                from core.src.storage.nsd2_resolver import (
+                    allowed_root_folders as _allowed_root_folders,
+                )
+                _carrier_allowed = _allowed_root_folders(customer_id) or ()
                 subdir = _carrier_subdir(
                     relative_path=local_path,
                     is_view=is_view,
                     from_zip=bool(getattr(assoc, "from_zip", False)),
                     ingest_source=ingest_src,
+                    allowed_carrier_folders=_carrier_allowed,
+                    item_description=getattr(item, "item_description", None),
                 )
                 # UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06): a TPM-chosen folder
                 # REPLACES the item's target_folder. The subdir still rides

@@ -321,6 +321,34 @@ def is_allowed_root_folder(folder_name: str, customer_id: str) -> bool:
 NSD2_DEFAULT_MAX_FILE_BYTES: int = 500 * 1024 * 1024   # 500 MB
 
 
+# NSD-DRM-DECRYPT-1 (2026-09-09): DRM-wrapped archives on the NSD share are
+# NASCA-encrypted internally -- their contents are garbage until an external
+# decrypt step emits a sibling file whose stem contains 'decrypt'
+# (e.g. `foo.zip` -> `foo_decrypt.zip`, `bar.7z` -> `bar_decrypt.7z`). Both
+# files stay on the share; only the decrypted sibling is worth ingesting.
+# Applies to ALL customers -- DRM is not customer-scoped -- and to the archive
+# extensions HILDA already opens: .zip, .7z, .rar.
+#
+# Non-archive files (.pdf, .xlsx, .txt, ...) are unaffected. An archive whose
+# stem contains 'decrypt' passes the filter regardless of the source file's
+# actual encryption status; the ingest pipeline downstream is responsible
+# for the extraction failure if a mislabelled file lies about being decrypted.
+_DRM_DECRYPT_STEM_MARKER: str = "decrypt"
+_DRM_ARCHIVE_EXTS: tuple[str, ...] = (".zip", ".7z", ".rar")
+
+
+def _is_drm_wrapped_archive(filename: str) -> bool:
+    """Return True when `filename` is an NSD-share archive whose stem does
+    NOT contain 'decrypt' (case-insensitive) -- i.e. the pre-decrypt DRM
+    original, whose contents are encrypted. See NSD-DRM-DECRYPT-1 above."""
+    lowered = (filename or "").lower()
+    if not any(lowered.endswith(ext) for ext in _DRM_ARCHIVE_EXTS):
+        return False
+    dot = lowered.rfind(".")
+    stem = lowered[:dot] if dot > 0 else lowered
+    return _DRM_DECRYPT_STEM_MARKER not in stem
+
+
 def _name_tokens(folder_name: str) -> set[str]:
     """Split a folder name into lowercased alphanumeric tokens.
     'Deliverables - DISH Config' -> {'deliverables', 'dish', 'config'}."""
@@ -468,6 +496,7 @@ def walk_nsd2_directory(
     skipped_excluded = 0
     skipped_oversized = 0
     skipped_unreadable = 0
+    skipped_drm_wrapped = 0
 
     # NSD2-VZW-1: three real layouts exist under the same NSD2 tree --
     #   S948U (M3)     -> VZW/ + STG/ + loose files      (partition at depth 0)
@@ -548,6 +577,21 @@ def walk_nsd2_directory(
                     continue
                 if not child.is_file():
                     continue  # symlink, socket, etc.
+                # NSD-DRM-DECRYPT-1: skip archives that lack the 'decrypt'
+                # stem marker BEFORE stat/read -- the encrypted body is not
+                # worth pulling into memory even to reject it. WARN so the
+                # skip is visible in production (WARNING is the deployed
+                # containers' root level; INFO would be silent).
+                if _is_drm_wrapped_archive(child.name):
+                    _log.warning(
+                        "NSD2_WALK: skipped DRM-wrapped archive %s "
+                        "(stem lacks 'decrypt' marker; expecting sibling "
+                        "`<stem>_decrypt.<ext>` from the DRM decrypt step) "
+                        "customer=%s",
+                        child, customer_id,
+                    )
+                    skipped_drm_wrapped += 1
+                    continue
                 # File — size check first (avoid reading giant files)
                 try:
                     size = child.stat().st_size
@@ -590,9 +634,10 @@ def walk_nsd2_directory(
     _log.warning(
         "NSD2_WALK: root=%s customer=%s summary yielded=%d "
         "skipped_excluded=%d skipped_oversized=%d skipped_unreadable=%d "
-        "anchors=%s mode=%s",
+        "skipped_drm_wrapped=%d anchors=%s mode=%s",
         root, customer_id, yielded,
         skipped_excluded, skipped_oversized, skipped_unreadable,
+        skipped_drm_wrapped,
         [a.relative_to(root).as_posix() for a in anchors] if anchors else "-",
         "anchored" if gated else "whole-device-folder",
     )

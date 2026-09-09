@@ -534,7 +534,23 @@ def _ingest_new_nsd2_file(
         # but no document_index row exists, so it re-attempts the routing
         # from scratch. If template.yaml adds a matching tag in the interim,
         # the file routes correctly on the next tick.
-        if not _is_archive_attachment(attachment):
+        #
+        # NSD-STRICT-CARRIER-SHORTCIRCUIT-1 (2026-09-09): for CARRIER-ALLOWLIST
+        # customers (D-189: MMK -> VZW/Verizon), the walk itself has already
+        # trusted the whole subtree under the carrier folder. Applying
+        # NSD-STRICT-1 on top would double-veto dynamic sub-folder names --
+        # 'Skylo NTN (For Solution team)', 'Power Management', 'Test reports',
+        # etc. -- that can never be enumerated in template.yaml. Skip the
+        # gate; let the router fall through to a `["default"]`-marked catch-all
+        # item via TG_DEFAULT_MULTIMATCH / TDN-1, and let UPLOAD-NSD-SUBDIR-1
+        # preserve the sub-folder path on the carrier upload.
+        from core.src.storage.nsd2_resolver import (
+            allowed_root_folders as _allowed_root_folders,
+        )
+        if (
+            not _is_archive_attachment(attachment)
+            and _allowed_root_folders(customer_id) is None
+        ):
             match_input = (attachment.match_hint or attachment.filename or "").lower()
             if match_input and not _any_candidate_substring_hits(match_input, candidate_items):
                 _log.warning(

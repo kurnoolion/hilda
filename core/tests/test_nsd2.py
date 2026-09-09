@@ -354,13 +354,16 @@ class TestCarrierRootAllowlist:
         assert rels == ["VZW/a/b/c/d/leaf.pdf"]
 
     def test_carrier_without_allowlist_is_unchanged(self, tmp_path):
+        # NSD-DRM-DECRYPT-1 (2026-09-09): 'VZW M3 HW Deliverables.zip' has no
+        # 'decrypt' marker in its stem, so it's filtered as a DRM-wrapped
+        # archive on ALL customers (DRM is not customer-scoped). Everything
+        # else here is a non-archive file and reaches the yield untouched.
         from core.src.storage.nsd2_resolver import walk_nsd2_directory
         root = self._build(tmp_path)
         rels = sorted(r[0] for r in walk_nsd2_directory(root, "OTHER"))
         assert rels == [
             "Miracle Workbook Final_ver 1.8_1229.xlsx",
             "STG/stg_internal.xlsx",
-            "VZW M3 HW Deliverables.zip",
             "VZW/sub/deep.pdf",
             "VZW/vzw_report.pdf",
         ]
@@ -967,3 +970,104 @@ class TestPollNsd2OnceEndToEnd:
         assert len(candidate_items) == 2
         candidate_ids = {getattr(it, "delivery_item_id", None) for it in candidate_items}
         assert candidate_ids == {"MMK-SM-A015V-P1-1", "MMK-SM-A015V-P1-2"}
+
+
+# ===========================================================================
+# NSD-DRM-DECRYPT-1 (2026-09-09): walk skips DRM-wrapped archives whose stem
+# lacks the 'decrypt' marker. Applies to ALL customers; DRM is not
+# customer-scoped.
+# ===========================================================================
+
+
+class TestIsDrmWrappedArchive:
+    """The stem-marker predicate. Substring match, case-insensitive."""
+
+    @pytest.mark.parametrize("name", [
+        "foo.zip", "report.7z", "bundle.rar",
+        "FOO.ZIP", "MIXED_case.Zip",
+        "release notes final.zip",
+    ])
+    def test_archive_without_decrypt_stem_is_skipped(self, name: str) -> None:
+        from core.src.storage.nsd2_resolver import _is_drm_wrapped_archive
+        assert _is_drm_wrapped_archive(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "foo_decrypt.zip", "foo.decrypt.zip", "decrypt-final.7z",
+        "DECRYPT_bundle.RAR", "release_notes_decrypt.zip",
+        "prefix-DeCrYpT-suffix.zip",
+    ])
+    def test_archive_with_decrypt_stem_passes(self, name: str) -> None:
+        from core.src.storage.nsd2_resolver import _is_drm_wrapped_archive
+        assert _is_drm_wrapped_archive(name) is False
+
+    @pytest.mark.parametrize("name", [
+        "foo.pdf", "spec.xlsx", "notes.txt", "readme",
+        "no_extension_at_all",
+    ])
+    def test_non_archive_extensions_always_pass(self, name: str) -> None:
+        from core.src.storage.nsd2_resolver import _is_drm_wrapped_archive
+        # Non-archives never trigger the filter -- they're not DRM candidates.
+        assert _is_drm_wrapped_archive(name) is False
+
+    def test_extension_only_no_stem_is_skipped(self) -> None:
+        from core.src.storage.nsd2_resolver import _is_drm_wrapped_archive
+        # '.zip' with no stem -- pathological but not decrypt-marked.
+        assert _is_drm_wrapped_archive(".zip") is True
+
+    def test_empty_string_passes(self) -> None:
+        from core.src.storage.nsd2_resolver import _is_drm_wrapped_archive
+        assert _is_drm_wrapped_archive("") is False
+
+
+class TestWalkSkipsDrmWrappedArchives:
+    """End-to-end walk-level integration. Files landing inside the allowed
+    carrier subtree still get filtered."""
+
+    def test_plain_zip_inside_vzw_is_skipped(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "release_notes.zip").write_bytes(b"encrypted")
+        (tmp_path / "VZW" / "release_notes_decrypt.zip").write_bytes(b"decrypted")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/release_notes_decrypt.zip"]
+
+    def test_all_customers_get_filter_not_just_mmk(self, tmp_path):
+        # Non-carrier-allowlist customer walks the whole tree; DRM filter
+        # still fires there.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "foo.zip").write_bytes(b"encrypted")
+        (tmp_path / "foo_decrypt.zip").write_bytes(b"decrypted")
+        (tmp_path / "keep.pdf").write_bytes(b"pdf")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "OTHER"))
+        assert rels == ["foo_decrypt.zip", "keep.pdf"]
+
+    def test_pdf_and_xlsx_untouched(self, tmp_path):
+        # Non-archive extensions must not be caught by the DRM filter.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "spec.pdf").write_bytes(b"a")
+        (tmp_path / "VZW" / "matrix.xlsx").write_bytes(b"b")
+        (tmp_path / "VZW" / "notes.txt").write_bytes(b"c")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/matrix.xlsx", "VZW/notes.txt", "VZW/spec.pdf"]
+
+    def test_seven_zip_and_rar_also_filtered(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "bundle.7z").write_bytes(b"e")
+        (tmp_path / "VZW" / "bundle_decrypt.7z").write_bytes(b"d")
+        (tmp_path / "VZW" / "archive.rar").write_bytes(b"e")
+        (tmp_path / "VZW" / "decrypt-archive.rar").write_bytes(b"d")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == [
+            "VZW/bundle_decrypt.7z",
+            "VZW/decrypt-archive.rar",
+        ]
+
+    def test_decrypt_zip_at_any_depth_kept(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW" / "Audio").mkdir(parents=True)
+        (tmp_path / "VZW" / "Audio" / "report.zip").write_bytes(b"e")
+        (tmp_path / "VZW" / "Audio" / "report_decrypt.zip").write_bytes(b"d")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/Audio/report_decrypt.zip"]

@@ -36,6 +36,7 @@ __all__ = [
     "ARCHIVE_EXTS",
     "carrier_subdir",
     "effective_target_dir",
+    "nsd_subdir_prefix_from_relative_path",
     "plm_subdir_prefix_from_local_path",
     "sanitize_subdir_segment",
     "view_subdir_prefix",
@@ -140,17 +141,139 @@ def _join_clean(segments) -> str:
     return "/".join(kept)
 
 
+def _folder_hits_any_tag_group(
+    folder_name: str, item_description: Any,
+) -> bool:
+    """Case-insensitive AND-of-OR substring match of `folder_name` against
+    `item_description`'s tag groups, mirroring the router's `_extract_tag_groups`
+    predicate. Groups whose sole tag is `default` (item_type='default'
+    catch-all) are excluded from evidence -- an "unmatched" folder that reaches
+    a `["default"]`-tagged item routed via TDN-1 fallback, not because the
+    default tag matched the folder name.
+
+    Returns True iff at least one non-default group's every tag is a substring
+    of `folder_name` (lowercased). Empty / malformed descriptions return False.
+    """
+    if not folder_name or not item_description:
+        return False
+    lowered = folder_name.lower()
+    groups: list[list[str]] = []
+    if isinstance(item_description, str):
+        groups = [[t.strip()] for t in item_description.split(",") if t.strip()]
+    elif isinstance(item_description, list):
+        for entry in item_description:
+            if isinstance(entry, str):
+                if entry.strip():
+                    groups.append([entry.strip()])
+            elif isinstance(entry, list):
+                inner = [s.strip() for s in entry
+                         if isinstance(s, str) and s.strip()]
+                if inner:
+                    groups.append(inner)
+    for group in groups:
+        if len(group) == 1 and group[0].lower() == "default":
+            continue
+        if all(t.lower() in lowered for t in group):
+            return True
+    return False
+
+
+def nsd_subdir_prefix_from_relative_path(
+    relative_path: str,
+    *,
+    allowed_carrier_folders: tuple[str, ...],
+    item_description: Any = None,
+) -> str:
+    """UPLOAD-NSD-SUBDIR-1 (2026-09-09) -- subdir for an NSD-ingested file.
+
+    NSD walk yields paths relative to the DEVICE folder root, so a file at
+    `<device>/VZW/Audio(Done)/foo.pdf` reaches this as `VZW/Audio(Done)/foo.pdf`.
+    The carrier folder (VZW or Verizon per D-189 allowlist) becomes the
+    upload anchor: everything above it -- including nested-carrier prefix like
+    `some_folder/VZW/...` -- is stripped, and what remains is the subdir that
+    rides under the item's `target_folder`.
+
+    The first path segment immediately AFTER the carrier folder is treated
+    specially:
+
+      * If it substring-hits any of the routed item's real (non-default)
+        `item_description` tag groups, the router routed via that folder and
+        the item's `target_folder` already represents it. Strip the segment,
+        because otherwise the destination would double-nest (target_folder ==
+        "Audio", subdir "Audio(Done)/x/y.pdf" -> "Audio/Audio(Done)/x/y.pdf").
+      * Otherwise the router fell through to a `["default"]`-tagged catch-all
+        (D-189 walks the whole carrier subtree; NSD-STRICT-1 no longer skips
+        these unmatched folders per Fix 1). Preserve the segment so the Drive
+        destination reflects the NSD source structure.
+
+    Deeper segments always survive (matched OR unmatched), minus any
+    archive-container segments (an NSD zip is unpacked; its inner folders,
+    including intermediate directories, must reach the carrier verbatim).
+
+    Examples given `allowed_carrier_folders=("VZW", "Verizon")` and
+    `item_description=[["Audio"]]`:
+
+      VZW/foo.pdf                                    -> ''
+      VZW/Audio(Done)/foo.pdf                        -> ''           (matched -> strip)
+      VZW/Audio(Done)/sub/foo.pdf                    -> 'sub'        (matched -> strip; deeper kept)
+      VZW/Skylo NTN/foo.pdf   (desc=[["default"]])   -> 'Skylo NTN'  (unmatched -> keep)
+      VZW/Skylo NTN/sub/foo.pdf (desc=[["default"]]) -> 'Skylo NTN/sub'
+      some_folder/VZW/Power Management/foo.pdf       -> 'Power Management'  (nested carrier)
+      VZW/Audio(Done)/report.zip/inner/x.pdf         -> 'inner'      (matched strip + zip drop)
+
+    A path that has no allowed_carrier_folders segment returns "" -- the file
+    is either at the device-folder root (rare; UPLOAD-FLAT-1 fallback) or the
+    layout is malformed. Callers should NOT invoke this helper for
+    non-NSD-ingest paths; the branch selection happens in `carrier_subdir`.
+    """
+    parts = PurePosixPath(relative_path).parts
+    if not parts:
+        return ""
+    lowered_allowed = {a.strip().lower() for a in allowed_carrier_folders}
+    if not lowered_allowed:
+        return ""
+    # SHALLOWEST carrier occurrence wins -- the walk is anchored there, so a
+    # deeper 'VZW' inside content is text, not a re-anchor.
+    carrier_idx = -1
+    for i, seg in enumerate(parts):
+        if seg.lower() in lowered_allowed:
+            carrier_idx = i
+            break
+    if carrier_idx < 0:
+        return ""
+    tail = parts[carrier_idx + 1 : -1]  # exclude filename basename
+    if not tail:
+        return ""
+    first, rest = tail[0], tail[1:]
+    if _folder_hits_any_tag_group(first, item_description):
+        # Matched -- strip first; keep deeper (minus archive segments).
+        return _join_clean(rest)
+    # Unmatched -- keep first, plus deeper (minus archive segments).
+    return _join_clean((first, *rest))
+
+
 def carrier_subdir(
     *,
     relative_path: str,
     is_view: bool,
     from_zip: bool,
     ingest_source: str = "",
+    allowed_carrier_folders: tuple[str, ...] = (),
+    item_description: Any = None,
 ) -> str:
     """The subdir that rides under `target_folder` for one upload file.
 
     Mirrors the branch that lived inline in submit_to_carrier's item loop:
 
+      * NSD ingest (`ingest_source == 'NetworkSharedDrive'`) with a non-empty
+        `allowed_carrier_folders` -- UPLOAD-NSD-SUBDIR-1 governs. Handled
+        BEFORE the generic view branch because NSD passes the share-relative
+        path as the view filename (from_zip may be False for a raw NSD file
+        OR True for a file extracted from an NSD-ingested zip), and neither
+        of the legacy branches would yield the right answer:
+          - view+from_zip=False -> "" (flat, loses Skylo/Power-Management)
+          - view+from_zip=True  -> view_subdir_prefix which drops the whole
+            5-segment view prefix, not the carrier prefix
       * view-tree file  -- subdir ONLY when the document came from an archive.
         UPLOAD-FLAT-1 (2026-08-31): NSD ingest passes the share-relative path
         as the filename, so an ordinary file sitting in an NSD folder also
@@ -163,6 +286,16 @@ def carrier_subdir(
         PLM-only, so items with no view-tree presence behave exactly as they
         did before UPLOAD-VIEW-1.
     """
+    if (
+        is_view
+        and ingest_source == "NetworkSharedDrive"
+        and allowed_carrier_folders
+    ):
+        return nsd_subdir_prefix_from_relative_path(
+            relative_path,
+            allowed_carrier_folders=allowed_carrier_folders,
+            item_description=item_description,
+        )
     if is_view:
         return view_subdir_prefix(relative_path) if from_zip else ""
     if ingest_source == "CorporatePLM":

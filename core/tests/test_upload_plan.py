@@ -19,6 +19,7 @@ from core.src.storage.upload_plan import (
     ARCHIVE_EXTS,
     carrier_subdir,
     effective_target_dir,
+    nsd_subdir_prefix_from_relative_path,
     plm_subdir_prefix_from_local_path,
     sanitize_subdir_segment,
     view_subdir_prefix,
@@ -203,3 +204,197 @@ class TestSubmitToCarrierStillUsesTheseHelpers:
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 roots.add(node.module.split(".")[0])
         assert roots <= {"__future__", "pathlib"}, f"non-stdlib imports: {roots}"
+
+
+# ---------------------------------------------------------------------------
+# UPLOAD-NSD-SUBDIR-1 (2026-09-09) -- NSD carrier-relative subdir helper.
+# ---------------------------------------------------------------------------
+CARRIER = ("VZW", "Verizon")
+
+
+class TestNsdSubdirPrefixMatchedFolder:
+    """Immediate-post-carrier folder that substring-hits a REAL (non-default)
+    tag group -- the router routed via that folder, so target_folder already
+    represents it. Strip it, keep deeper structure."""
+
+    def test_top_level_file_directly_under_carrier(self) -> None:
+        # No sub-folder to preserve OR strip; deeper tail is empty.
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"]],
+        ) == ""
+
+    def test_matched_first_folder_is_stripped(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Audio(Done)/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"]],
+        ) == ""
+
+    def test_matched_first_folder_deep_structure_preserved(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Audio(Done)/sub/nested/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"]],
+        ) == "sub/nested"
+
+    def test_matched_first_folder_with_inner_zip(self) -> None:
+        # Zip-container segment is dropped from the deeper tail.
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Audio(Done)/report.zip/inner/x.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"]],
+        ) == "inner"
+
+    def test_multi_tag_and_group_all_must_match(self) -> None:
+        # [["A","B"]] is one AND-group; folder must contain both.
+        both = "SDoc Qualification (final)"
+        one_only = "SDoc only"
+        assert nsd_subdir_prefix_from_relative_path(
+            f"VZW/{both}/x.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["SDoc", "Qualification"]],
+        ) == ""
+        assert nsd_subdir_prefix_from_relative_path(
+            f"VZW/{one_only}/x.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["SDoc", "Qualification"]],
+        ) == "SDoc only"
+
+
+class TestNsdSubdirPrefixUnmatchedFolder:
+    """Immediate-post-carrier folder that does NOT substring-hit any real tag
+    group -- the router fell through to a `["default"]`-tagged catch-all via
+    TDN-1. The folder is dynamic content that must survive on the carrier."""
+
+    def test_unmatched_folder_kept_default_only_desc(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Skylo NTN (For Solution team)/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Skylo NTN (For Solution team)"
+
+    def test_unmatched_folder_deep_structure_preserved(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Power Management/rev3/x.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Power Management/rev3"
+
+    def test_unmatched_folder_with_real_tags_that_dont_hit(self) -> None:
+        # Item has real tags, but this folder just doesn't match them.
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Test reports/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"], ["Camera"]],
+        ) == "Test reports"
+
+    def test_item_description_none_treats_as_unmatched(self) -> None:
+        # A caller that lacks item_description context degrades to "keep".
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Skylo NTN/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=None,
+        ) == "Skylo NTN"
+
+
+class TestNsdSubdirPrefixCarrierAnchoring:
+    def test_nested_carrier_layout(self) -> None:
+        # S671U1/some_folder/VZW/Power Management/foo.pdf reaches walk as
+        # 'some_folder/VZW/Power Management/foo.pdf' (path is relative to
+        # device folder root). The 'some_folder/' prefix is stripped.
+        assert nsd_subdir_prefix_from_relative_path(
+            "some_folder/VZW/Power Management/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Power Management"
+
+    def test_carrier_name_matches_case_insensitively(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "vzw/Skylo/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Skylo"
+        assert nsd_subdir_prefix_from_relative_path(
+            "VERIZON/Skylo/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Skylo"
+
+    def test_shallowest_carrier_wins_when_nested(self) -> None:
+        # A path with two allowed folder names is anchored at the SHALLOWEST
+        # -- the deeper occurrence is content, not a re-anchor.
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/VZW/inner/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "VZW/inner"
+
+    def test_no_carrier_in_path_returns_empty(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "STG/deeper/foo.pdf",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == ""
+
+    def test_empty_allowed_carrier_folders_returns_empty(self) -> None:
+        assert nsd_subdir_prefix_from_relative_path(
+            "VZW/Skylo/foo.pdf",
+            allowed_carrier_folders=(),
+            item_description=[["default"]],
+        ) == ""
+
+
+class TestCarrierSubdirNsdBranch:
+    """`carrier_subdir` dispatches to the NSD helper when
+    ingest_source == 'NetworkSharedDrive' AND allowed_carrier_folders is
+    non-empty. Every other combination falls back to the legacy branches."""
+
+    def test_dispatches_to_nsd_branch(self) -> None:
+        assert carrier_subdir(
+            relative_path="VZW/Skylo/foo.pdf",
+            is_view=True, from_zip=False,
+            ingest_source="NetworkSharedDrive",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["default"]],
+        ) == "Skylo"
+
+    def test_nsd_ingest_without_allowlist_falls_back_to_view_branch(self) -> None:
+        # A non-carrier-allowlist NSD customer takes the legacy view branch:
+        # from_zip=False -> flat upload, matching pre-Fix-2 behavior.
+        assert carrier_subdir(
+            relative_path="VZW/Skylo/foo.pdf",
+            is_view=True, from_zip=False,
+            ingest_source="NetworkSharedDrive",
+            allowed_carrier_folders=(),
+            item_description=None,
+        ) == ""
+
+    def test_non_view_ignores_new_kwargs(self) -> None:
+        # Internal-tree PLM path never enters the NSD branch even if
+        # allowed_carrier_folders happens to be passed.
+        assert carrier_subdir(
+            relative_path=INTERNAL + "b.zip/i am c/d.pdf",
+            is_view=False, from_zip=True,
+            ingest_source="CorporatePLM",
+            allowed_carrier_folders=CARRIER,
+            item_description=[["Audio"]],
+        ) == "i am c"
+
+    def test_legacy_view_from_zip_true_unaffected_for_non_nsd(self) -> None:
+        # Email-ingested archive: NSD kwargs default to empty, view path
+        # applies with from_zip=True.
+        assert carrier_subdir(
+            relative_path=VIEW + "b.zip/i am c/d.pdf",
+            is_view=True, from_zip=True,
+            ingest_source="",
+        ) == "i am c"
+
+    def test_defaults_preserve_backwards_compat(self) -> None:
+        # Old-style call site (no new kwargs) still returns the same answer.
+        assert carrier_subdir(
+            relative_path=VIEW + "a.pdf",
+            is_view=True, from_zip=False,
+            ingest_source="",
+        ) == ""
