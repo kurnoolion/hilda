@@ -578,6 +578,24 @@ class PostgresStorage:
         )
         return run_async_sync(lambda: _list(delivery_item_id))
 
+    def list_upload_files_for_item(self, delivery_item_id: str) -> list[Any]:
+        """UPLOAD-VIEW-1 (2026-08-30): sync wrapper for submit_to_carrier --
+        one ItemUploadFile per revision family, resolved to its current
+        view-tree version, waivers and archive containers already excluded."""
+        from core.src.storage.document_view_ops import (
+            list_upload_files_for_item as _list,
+        )
+        return run_async_sync(lambda: _list(delivery_item_id))
+
+    def list_migrated_upload_files_for_item(self, delivery_item_id: str) -> list[Any]:
+        """DRRP1-1 (2026-09-01): sync wrapper -- documents another milestone's
+        work-item contributes to this item's submission per
+        milestone_item_mapping. Empty when nothing maps to this item."""
+        from core.src.storage.document_view_ops import (
+            list_migrated_upload_files_for_item as _list,
+        )
+        return run_async_sync(lambda: _list(delivery_item_id))
+
     def list_documents_for_item_display(
         self, delivery_item_id: str,
     ) -> list[Any]:

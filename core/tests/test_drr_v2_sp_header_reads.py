@@ -183,17 +183,17 @@ class TestReadMilestoneHeaders:
 
 class TestReadProjectHeaders:
 
-    def test_returns_le_and_ffw_when_row_present(self):
+    def test_returns_ta_and_ffw_when_row_present(self):
         deps = _mk_deps_with_projects([
             {
                 "project_model": "SM-S671U1",
-                "LE": "2026-09-01",
+                "TA": "2026-09-01",
                 "FFW": "2026-08-20",
             },
         ])
         got = _read_project_headers(deps, "MMK", "SM-S671U1")
         assert set(got.keys()) == set(_PROJECT_HEADER_FIELDS)
-        assert got["LE"] == "2026-09-01"
+        assert got["TA"] == "2026-09-01"
         assert got["FFW"] == "2026-08-20"
 
     def test_empty_projects_yields_all_none_and_warns(self, caplog):
@@ -210,7 +210,7 @@ class TestReadProjectHeaders:
         deps = _mk_deps_with_projects([
             {
                 "project_model": "SM-S671U1",
-                "LE": "",
+                "TA": "",
                 "FFW": "2026-08-20",
             },
         ])
@@ -219,7 +219,7 @@ class TestReadProjectHeaders:
             logger="core.src.workflow_engine.tasks.tpm_notification",
         ):
             got = _read_project_headers(deps, "MMK", "SM-S671U1")
-        assert got["LE"] is None
+        assert got["TA"] is None
         assert got["FFW"] == "2026-08-20"
         blank_warnings = [
             r for r in caplog.records if "blank on project" in r.getMessage()
@@ -241,11 +241,11 @@ class TestReadProjectHeaders:
         """canonical_filters={'project_model': device_id} narrows on the SP
         side, but if multiple rows come back the helper picks the first."""
         deps = _mk_deps_with_projects([
-            {"project_model": "SM-S671U1", "LE": "first-LE", "FFW": "first-FFW"},
-            {"project_model": "SM-S671U1", "LE": "second-LE", "FFW": "second-FFW"},
+            {"project_model": "SM-S671U1", "TA": "first-TA", "FFW": "first-FFW"},
+            {"project_model": "SM-S671U1", "TA": "second-TA", "FFW": "second-FFW"},
         ])
         got = _read_project_headers(deps, "MMK", "SM-S671U1")
-        assert got["LE"] == "first-LE"
+        assert got["TA"] == "first-TA"
         assert got["FFW"] == "first-FFW"
 
 

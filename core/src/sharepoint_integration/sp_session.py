@@ -27,12 +27,15 @@ ratify the digest-dance lifecycle as an ADR.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import requests
 from requests_ntlm import HttpNtlmAuth
 
 from core.src.diagnostics import PipelineError
+
+_log = logging.getLogger(__name__)
 
 
 def list_item_type(list_display_name: str) -> str:
@@ -238,10 +241,22 @@ class SpSession:
         data = json.dumps(body) if body is not None else None
         headers = self._write_headers(http_method)
         resp = self._session.post(url, headers=headers, data=data)
+        # SPWLOG-1: the transport waist -- every create, merge and delete
+        # passes here, so this line is the guarantee that no SP mutation can
+        # happen without a log record. Headers are never logged: they carry
+        # the digest and the WSSAUTH cookie (NFR-2).
+        _log.warning(
+            "SP_HTTP: method=%s status=%s bytes=%s url=%s",
+            http_method, resp.status_code, len(data or ""), url,
+        )
         if resp.status_code == 403:
             self._refresh_digest()
             headers = self._write_headers(http_method)
             resp = self._session.post(url, headers=headers, data=data)
+            _log.warning(
+                "SP_HTTP: method=%s status=%s url=%s (after digest refresh)",
+                http_method, resp.status_code, url,
+            )
         if return_body:
             try:
                 payload = resp.json() if resp.content else {}

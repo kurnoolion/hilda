@@ -46,12 +46,14 @@ from core.src.storage import (
     read_file,
     reassign_document_to_workitem,
     resolve_download_token,
+    resolve_migration_source,
     tpm_resolve_doc_type as storage_tpm_resolve_doc_type,
 )
 from core.src.template_schema import DocType, ItemType
 
 from .auth import AuthPrincipal, require_authenticated_principal
 from .config import DashboardConfig
+from .url_prefix import join as _url_join
 
 __all__ = ["build_app", "MilestoneRefreshState"]
 
@@ -175,7 +177,50 @@ def build_app(
     """
     cfg = config or DashboardConfig.from_sources()
     state = refresh_state or MilestoneRefreshState()
+    # DRRP1-API-1 (2026-09-08): the milestone_item_mapping cache is
+    # PROCESS-LOCAL and was only ever loaded by workflow_engine's
+    # bootstrap_task_deps, which runs in hilda-worker / hilda-beat.
+    # hilda-api starts as `uvicorn core.src.dashboard.app:build_app`, so its
+    # cache stayed empty and get_target_item_no returned None for every item.
+    # Two consequences, both silent:
+    #   * DRRP1-DEST-1's migrated carrier destination could never resolve, so
+    #     a DRR page reported "work item is marked no_customer_upload" for
+    #     every row -- the exact behaviour that change was meant to replace.
+    #   * build_milestone_manifest, which also runs here, omitted EVERY
+    #     migrated document. The submission preview and download-all zip
+    #     therefore under-reported what submit_to_carrier uploads, since that
+    #     runs in the worker where the cache IS loaded. A preview disagreeing
+    #     with the submission is worse than no preview.
+    # Best-effort by design: a carrier with no mapping file is the normal
+    # case, and nothing here may stop the dashboard from serving.
+    import logging as _logging
+    try:
+        from core.src.template_schema import milestone_item_mapping as _mim
+        _loaded = _mim.load_all_mappings()
+        _logging.getLogger(__name__).warning(
+            "dashboard milestone_item_mapping wired: customers=%s",
+            [cid for cid, ok in _loaded.items() if ok],
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logging.getLogger(__name__).warning(
+            "dashboard milestone_item_mapping load FAILED: %s: %s -- "
+            "migrated destinations and manifest rows will be missing",
+            type(exc).__name__, str(exc)[:160],
+        )
+
     templates = Jinja2Templates(directory=str(cfg.jinja_templates_dir))
+
+    # URLPFX-1: every template builds hrefs and form actions as
+    # `{{ url_prefix }}/browse/...`. One global on the single shared
+    # Jinja2Templates instance covers all 12 render sites across app.py,
+    # document_view_routes.py and feedback_routes.py.
+    templates.env.globals["url_prefix"] = cfg.url_prefix
+
+    # Local alias for the emitters in this module. Routes are declared
+    # unprefixed (nginx strips /hilda before proxying); only what we hand
+    # back to the browser needs the prefix.
+    def _u(path: str) -> str:
+        return _url_join(cfg.url_prefix, path)
 
     # 2026-07-01 architect lock: doc_type humanizer for Ph-1 template display.
     # Turns snake_case enum values ("compliance_certification_release_notes")
@@ -367,8 +412,73 @@ def build_app(
                                               if hasattr(doc.doc_type, "value")
                                               else str(doc.doc_type)),
                         "ingested_at":       doc.ingested_at,
-                        "download_url":      f"/dl/{token}" if token else None,
+                        "download_url":      _u(f"/dl/{token}") if token else None,
+                        # DRRP1-1 chunk 4: empty for the item's own documents.
+                        "migrated_from":     "",
                     })
+
+                # DRRP1-1 chunk 4 (2026-09-01): append documents that ANOTHER
+                # milestone's work-item contributes to this item's submission,
+                # per milestone_item_mapping. For MMK, deliverables collected
+                # during DRR are submitted as part of P1, so a TPM looking at
+                # the P1 item needs to see what will actually ship -- otherwise
+                # the item reads as having no documents while submit_to_carrier
+                # is about to upload several.
+                #
+                # Read-only and clearly labelled: the document belongs to the
+                # source item, and NO rows are created here. The download token
+                # is minted against the SOURCE item_id because that is where the
+                # association lives.
+                #
+                # Deliberately reuses the same get_documents_for_item /
+                # list_associations_for_item / make_download_token path as the
+                # item's own documents above, rather than rendering from
+                # ItemUploadFile: that shape carries neither file_hash nor
+                # ingested_at, and duplicating the row-building would be a
+                # second thing to keep in step with the own-documents branch.
+                migrated_docs: list[dict[str, Any]] = []
+                try:
+                    src = await resolve_migration_source(item_key)
+                except Exception:
+                    src = None
+                if src is not None:
+                    label = f"{src.milestone} #{src.item_no}"
+                    try:
+                        s_docs = await get_documents_for_item(src.item_id)
+                    except Exception:
+                        s_docs = []
+                    try:
+                        s_assocs = await list_associations_for_item(src.item_id)
+                    except Exception:
+                        s_assocs = []
+                    s_assoc_by_hash = {a.file_hash: a for a in s_assocs}
+                    for doc in s_docs:
+                        if s_assoc_by_hash.get(doc.file_hash) is None:
+                            continue
+                        doc_type_val = (doc.doc_type.value
+                                        if hasattr(doc.doc_type, "value")
+                                        else str(doc.doc_type))
+                        # Waivers are never submitted to the carrier for any
+                        # milestone, so showing one here as "will be submitted
+                        # with this item" would be actively misleading. Mirrors
+                        # the same exclusion in list_upload_files_for_item.
+                        if doc_type_val == DocType.WAIVER.value:
+                            continue
+                        try:
+                            s_token = await make_download_token(
+                                doc.file_hash, src.item_id,
+                                ttl_seconds=cfg.token_ttl_seconds,
+                            )
+                        except Exception:
+                            s_token = None
+                        migrated_docs.append({
+                            "original_filename": doc.original_filename,
+                            "doc_type":          doc_type_val,
+                            "ingested_at":       doc.ingested_at,
+                            "download_url":      _u(f"/dl/{s_token}") if s_token else None,
+                            "migrated_from":     label,
+                        })
+                docs_ph1.extend(migrated_docs)
 
             return templates.TemplateResponse(
                 request=request,
@@ -422,7 +532,7 @@ def build_app(
                 "doc_id_slug":           doc.doc_id_slug,
                 "rev_number":            doc.rev_number,
                 "original_filename":     doc.original_filename,
-                "download_url":          f"/dl/{token}",
+                "download_url":          _u(f"/dl/{token}"),
                 "parser_result":         getattr(doc, "parser_result", None),
                 "llm_review_findings":   getattr(doc, "llm_review_findings", None),
                 "inferred_tg_name":      getattr(assoc, "inferred_tg_name", None) if assoc else None,
@@ -561,7 +671,7 @@ def build_app(
                 pass
 
         return RedirectResponse(
-            url=f"/docs/{customer_id}/{sp_id}",
+            url=_u(f"/docs/{customer_id}/{sp_id}"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -649,7 +759,7 @@ def build_app(
                 pass
 
         return RedirectResponse(
-            url=f"/docs/{customer_id}/{sp_id}",
+            url=_u(f"/docs/{customer_id}/{sp_id}"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
 

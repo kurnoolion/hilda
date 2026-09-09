@@ -833,15 +833,106 @@ class TestFr52AttachmentRouter:
         assert len(result.matches) == 5
         # All committed per FR-79; threshold is over -- caller logs EML-W007
 
-    async def test_unresolved_doc_type_on_unknown_filename(self):
+    async def test_unknown_filename_falls_back_to_test_report(self):
+        # DOCTYPE-FALLBACK-1 (2026-09-02): the filename regex still misses,
+        # but the routed item is test_tech_waiver_report, so the keyword
+        # ladder's default rung resolves it rather than staging for TPM.
+        # Previously asserted UNRESOLVED -- that behaviour was replaced
+        # deliberately, see test_unknown_filename_stays_unresolved_off_scope
+        # for the case that still stages.
         router = _make_router()
         att = _attachment("xxx_unknownformat.pdf")
         item = _candidate_test_item(item_description=None, item_name="zzz")
         default = _default_item()
         result = await router.route(att, "BATCH-1", [item, default])
-        # Filename regex misses -> Ph-1 first cut returns UNRESOLVED
+        assert result.doc_type == DocType.TEST_REPORT.value
+        assert (result.classification_resolution
+                == ClassificationResolution.FILENAME_FALLBACK_KEYWORD)
+
+    async def test_waiver_dot_doc_now_resolves_at_step_1(self):
+        # DOCTYPE-EXT-1 (2026-09-02): the default waiver rule was
+        # .*waiver.*\.(pdf|docx|xlsx)$ -- note 'doc' absent -- so a waiver
+        # sent as .doc missed Step 1 and relied on the keyword fallback.
+        # Extension groups are now normalised to one canonical set at load,
+        # so this resolves by regex and never reaches the fallback.
+        router = _make_router()
+        att = _attachment("xxx_unknownformat_waiver.doc")
+        item = _candidate_test_item(item_description=None, item_name="zzz")
+        result = await router.route(att, "BATCH-1", [item, _default_item()])
+        assert result.doc_type == DocType.WAIVER.value
+        assert (result.classification_resolution
+                == ClassificationResolution.FILENAME_REGEX)
+
+    @pytest.mark.parametrize("ext", ["ppt", "pptx", "xlsm", "xls", "htm"])
+    async def test_waiver_resolves_for_every_canonical_extension(self, ext):
+        # Extensions that were missing from one or more rule groups before
+        # DOCTYPE-EXT-1. 'ppt' is the one that caused the live mis-filing.
+        router = _make_router()
+        att = _attachment(f"SM-DEVICE-001 Waiver Request.{ext}")
+        item = _candidate_test_item(item_description=None, item_name="zzz")
+        result = await router.route(att, "BATCH-1", [item, _default_item()])
+        assert result.doc_type == DocType.WAIVER.value, ext
+
+    async def test_waiver_name_vetoes_promotion_to_compliance(self):
+        """DOCTYPE-WAIVER-VETO-1: a waiver-named file routed onto a
+        compliance_certification_release_notes item must NOT be
+        singleton-auto-promoted to compliance.
+
+        Live 2026-09-02: three '..._Waiver Request_*.ppt' files missed Step 1
+        on an extension gap, routed onto a compliance item, and were filed as
+        compliance release notes -- aligned and CLASSIFIED at rev1. Extension
+        is .msg here so Step 1 still misses (DOCTYPE-EXT-1 fixed .ppt), which
+        is what drives the doc into the promotion branch where the veto lives.
+        """
+        router = _make_router()
+        att = _attachment("SM-DEVICE-001 Waiver Request_WPC Certi.msg")
+        item = _candidate_test_item(
+            item_type=ItemType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+            item_description=None,
+            item_name="zzz",
+        )
+        result = await router.route(att, "BATCH-1", [item, _default_item()])
+        assert result.doc_type == DocType.WAIVER.value
+        assert (result.classification_resolution
+                == ClassificationResolution.FILENAME_FALLBACK_KEYWORD)
+        # WAIVER on a release-notes item is misaligned per FR-86, so it
+        # stages for TPM rather than being filed as delivered.
+        assert result.nsd_path_type == NSDPathType.STAGED_NOT_CLASSIFIED
+
+    async def test_non_waiver_name_still_promotes_to_compliance(self):
+        # The veto must not disable AUTO-CLASSIFY-RELNOTES-1 generally.
+        router = _make_router()
+        att = _attachment("xxx_unknownformat.msg")
+        item = _candidate_test_item(
+            item_type=ItemType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+            item_description=None,
+            item_name="zzz",
+        )
+        result = await router.route(att, "BATCH-1", [item, _default_item()])
+        assert (result.doc_type
+                == DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value)
+
+    async def test_waiver_with_listed_extension_resolves_at_step_1(self):
+        # Belt and braces: the YAML rule still wins when it matches, so the
+        # fallback is a backstop rather than a replacement.
+        router = _make_router()
+        att = _attachment("xxx_unknownformat_waiver.pdf")
+        item = _candidate_test_item(item_description=None, item_name="zzz")
+        result = await router.route(att, "BATCH-1", [item, _default_item()])
+        assert result.doc_type == DocType.WAIVER.value
+        assert (result.classification_resolution
+                == ClassificationResolution.FILENAME_REGEX)
+
+    async def test_unknown_filename_stays_unresolved_off_scope(self):
+        # The fallback is item_type-scoped: routed onto a Default item there
+        # is no aligned doc_type to guess, so the doc still stages for TPM
+        # with the original UNRESOLVED signal intact.
+        router = _make_router()
+        att = _attachment("xxx_unknownformat.pdf")
+        result = await router.route(att, "BATCH-1", [_default_item()])
         assert result.doc_type == DocType.UNRESOLVED.value
-        assert result.classification_resolution == ClassificationResolution.UNRESOLVED_LOW_CONFIDENCE
+        assert (result.classification_resolution
+                == ClassificationResolution.UNRESOLVED_LOW_CONFIDENCE)
 
     async def test_misaligned_pair_lands_staged_not_classified(self):
         """FR-86: test_tech_waiver_report item + doc_type=compliance_certification_release_notes

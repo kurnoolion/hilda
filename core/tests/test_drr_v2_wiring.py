@@ -171,7 +171,7 @@ class TestBuildDrrV2Context:
             }],
             project_rows=[{
                 "project_model": "SM-S671U1",
-                "LE": date(2026, 6, 11),
+                "TA": date(2026, 6, 11),
                 "FFW": date(2026, 5, 13),
             }],
         )
@@ -188,7 +188,7 @@ class TestBuildDrrV2Context:
         assert ctx["section_grouping"] is not None
         assert len(ctx["section_grouping"]) == 1
         assert ctx["milestone_headers"]["req_version"] == "Oct 25"
-        assert ctx["project_headers"]["LE"] == date(2026, 6, 11)
+        assert ctx["project_headers"]["TA"] == date(2026, 6, 11)
         assert ctx["logo_path"] == str(tmp_path / "verizon.png")
 
     def test_missing_template_yields_none_section_grouping(self):
@@ -205,7 +205,7 @@ class TestBuildDrrV2Context:
         assert set(ctx["milestone_headers"].keys()) == {
             "fld_lockdown_date", "req_version", "target_date",
         }
-        assert set(ctx["project_headers"].keys()) == {"LE", "FFW"}
+        assert set(ctx["project_headers"].keys()) == {"TA", "FFW"}
 
     def test_result_dict_keys_match_builder_signature(self):
         """The returned dict is meant to be spread as **kwargs into

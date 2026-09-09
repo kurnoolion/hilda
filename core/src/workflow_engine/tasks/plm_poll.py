@@ -3,7 +3,7 @@ TG-in-scope, downloads their files, and ingests them through the existing
 Fr52AttachmentRouter pipeline (same shape as NSD2-3/4).
 
 Design in one sentence: for each (customer, device, milestone='P1') scope,
-group MQL-FIT + MNO-SOLUTION items by `tg_name`; per TG group, create ONE
+group the CorporatePLM-tracked items by `tg_name`; per TG group, create ONE
 PLM ticket if no plm_id exists yet (SP-first-with-Postgres-fallback
 lookup), write plm_id + actual_item_info back to SP, download all files
 attached to the ticket, dedup by hash, and route each new file through
@@ -54,16 +54,18 @@ _log = logging.getLogger(__name__)
 
 _PLM_MILESTONE_ID = "P1"
 
-# tg_name values whose items participate in PLM ticket creation.
-# Match is CASE-INSENSITIVE (compared as lowercase) so SP UI casing
-# variants like "MNO-Solution" and "MNO-SOLUTION" both match. Fix
-# 2026-08-18 (PLMCASE-1): live corp box surfaced 44 P1 MNO-Solution
-# items silently invisible to plm_poll because the frozenset held
-# "MNO-SOLUTION" but SP-side data was "MNO-Solution". Case-insensitive
-# match protects against future SP UI engineer casing drift without
-# code touch. The stored set is lowercased once; the check lowercases
-# the tg_name at compare time.
-_PLM_ELIGIBLE_TG_NAMES = frozenset({"mql-fit", "mno-solution"})
+# PLMTG-1 (2026-08-31): the hardcoded tg_name allowlist that used to live here
+# (`frozenset({"mql-fit", "mno-solution"})`) is GONE. PLM participation is
+# gated solely on `tracking_modality` containing "CorporatePLM", which is what
+# template.yaml declares. See _filter_eligible_items for the full rationale.
+#
+# Historical note kept because it explains why the set existed and why removing
+# it is safe: PLMCASE-1 (2026-08-18) had to make the set match case-insensitively
+# after 44 live MNO-Solution items went silently invisible (set held
+# "MNO-SOLUTION", SP data was "MNO-Solution"). That class of bug -- a code-side
+# list drifting from TPM-authored data -- is exactly what removing the set
+# eliminates. _group_by_tg still lowercases its grouping key so casing variants
+# collapse into ONE ticket per the [D-035] one-ticket-per-TG invariant.
 
 # delivery_state values that DISQUALIFY an item from PLM eligibility.
 _PLM_TERMINAL_STATES = frozenset({"Closed", "Cancelled", "CloseInProgress"})
@@ -116,6 +118,7 @@ def poll_plm_once(deps: Any) -> dict[str, Any]:
         "tg_groups_missing_owner_corp_id": 0,   # WARN + skipped -- no PLM assignee derivable
         "tickets_created":         0,
         "tickets_reused":          0,     # plm_id already present -> skip create
+        "plm_ids_backfilled":      0,     # PLMBF-1: stragglers filled on reuse
         "tickets_create_failed":   0,
         "sp_writes_ok":            0,
         "sp_writes_failed":        0,
@@ -184,9 +187,9 @@ def _poll_one_scope(
     device_id: str,
     milestone_id: str,
 ) -> None:
-    """Load all items for (customer, device, milestone); keep MQL-FIT +
-    MNO-SOLUTION items in non-terminal state; group by tg_name (OWNER-5);
-    dispatch each TG group to _process_tg_group."""
+    """Load all items for (customer, device, milestone); keep CorporatePLM-
+    tracked items in non-terminal state (PLMTG-1); group by tg_name
+    (OWNER-5); dispatch each TG group to _process_tg_group."""
     try:
         all_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
     except Exception as exc:  # noqa: BLE001
@@ -220,26 +223,44 @@ def _poll_one_scope(
 
 
 def _filter_eligible_items(all_items: list[Any], device_id: str) -> list[Any]:
-    """PLM-7 (2026-08-14): gate on tracking_modality in addition to tg_name.
+    """Gate PLM participation on tracking_modality.
 
     Eligible when ALL apply:
-      tg_name in ('MQL-FIT', 'MNO-SOLUTION')  -- CASE-INSENSITIVE match
-      device_id matches scope
       'CorporatePLM' in tracking_modality  (list membership)
+      device_id matches scope
+      non-empty tg_name (the grouping key -- one ticket per TG per [D-035])
       delivery_state NOT in terminal states (Closed, Cancelled, CloseInProgress)
 
-    Strict gate -- no fallback to tg-name-only. Items with missing
-    tracking_modality are opted out (TPM must explicitly enable via the
-    SP Choice column). P1 milestone is not TPM-live yet so no backward-
-    compat concern (per architect 2026-08-14).
+    Strict gate on modality -- items with missing tracking_modality are opted
+    out; the TPM must explicitly enable PLM via template.yaml / the SP Choice
+    column (per architect 2026-08-14).
 
-    PLMCASE-1 (2026-08-18): tg_name compared as lowercase after strip so
-    SP-side casing variants (MNO-Solution vs MNO-SOLUTION) all match --
-    see _PLM_ELIGIBLE_TG_NAMES docstring."""
+    PLMTG-1 (2026-08-31): the hardcoded tg_name allowlist
+    (`{"mql-fit", "mno-solution"}`) was REMOVED. It dated from PLM-3, before
+    PLM-7 added the modality gate, and by 2026-08-31 the two gates had drifted:
+    a live GPS item on MMK/SM-S671U1/P1 carried
+    `tracking_modality=["CorporatePLM"]` in template.yaml but was silently
+    filtered out here, so it never got a ticket and its plm_id stayed NULL
+    indefinitely. Adding "gps" to the set would have repeated the problem on
+    the next TG onboarded.
+
+    tracking_modality IS the declaration of intent and template.yaml is already
+    authoritative for structural DeliveryItem fields per [D-141], so it is now
+    the single gate. Note this was behaviour-neutral at the time of the change:
+    only GPS / MNO-Solution / MQL-FIT carried CorporatePLM in live data, so the
+    eligible set was identical either way -- the difference is that adding a TG
+    now needs no code change.
+
+    Trade-off accepted (user 2026-08-31): setting CorporatePLM on a TG in
+    template.yaml is now sufficient to start creating tickets for it, with no
+    second brake in code. That is deliberate -- template.yaml is edited
+    intentionally."""
     out: list[Any] = []
     for it in all_items:
-        tg = (getattr(it, "tg_name", None) or "").strip().lower()
-        if tg not in _PLM_ELIGIBLE_TG_NAMES:
+        # tg_name must be non-empty: it is the PLM grouping key, and an empty
+        # key would be dropped by _group_by_tg anyway. Filtering here keeps
+        # the two functions' contracts aligned.
+        if not (getattr(it, "tg_name", None) or "").strip():
             continue
         if (getattr(it, "device_id", None) or "").strip() != device_id.strip():
             continue
@@ -261,10 +282,9 @@ def _group_by_tg(items: list[Any]) -> dict[str, list[Any]]:
     device. Assignee is derived per-group inside _process_tg_group from
     owner_corp_id_list (first non-empty entry across the group's items).
 
-    Items with empty tg_name are dropped defensively (should never happen
-    for MQL-FIT / MNO-SOLUTION since _filter_eligible_items already
-    matched on tg_name, but keep the guard so a mutation upstream never
-    creates a "" bucket).
+    Items with empty tg_name are dropped defensively (should never happen --
+    _filter_eligible_items already requires a non-empty tg_name -- but keep
+    the guard so a mutation upstream never creates a "" bucket).
 
     PLMCASE-1 (2026-08-18): the group key is lowercased so casing variants
     (MNO-Solution + MNO-SOLUTION) collapse into one group -- otherwise
@@ -390,6 +410,51 @@ def _ensure_plm_ticket_for_group(
             "PLM_ENSURE: reuse plm_id=%s tg=%s device=%s (%d items)",
             existing_plm_id, tg_name, device_id, len(items),
         )
+        # PLMBF-1 (2026-08-31): backfill stragglers.
+        #
+        # The reuse branch used to return here without writing anything, and
+        # _check_plm_id_state only needs ONE item in the group to carry a
+        # plm_id. So any item that missed the original write was never filled
+        # in: every later tick short-circuited on its populated sibling. Two
+        # routes into that state, both permanent:
+        #   * the create-path SP write is best-effort per item, so an item
+        #     whose SP row wasn't found was skipped with no retry;
+        #   * items that joined the group AFTER the ticket was created (fresh
+        #     import, or tracking_modality patched to CorporatePLM later) were
+        #     never in the original write at all.
+        # Live corp box 2026-08-31: 39 of 54 CorporatePLM items on
+        # MMK/SM-S671U1/P1 had a NULL plm_id while their groups had tickets.
+        #
+        # Impact was denormalization only -- _download_and_ingest receives the
+        # group's resolved plm_id, so files always ingested correctly -- but
+        # the SP PLM column read blank and the outreach email showed
+        # "CorporatePLM (pending)" instead of the real ticket.
+        #
+        # Only items whose stored plm_id differs from the resolved one are
+        # written, so a healthy group costs zero extra SP calls.
+        stragglers = [
+            it for it in items
+            if (getattr(it, "plm_id", None) or "").strip() != existing_plm_id
+        ]
+        if stragglers:
+            _log.warning(
+                "PLMBF-1: backfilling plm_id=%s onto %d/%d items in tg=%s "
+                "device=%s (group already had a ticket)",
+                existing_plm_id, len(stragglers), len(items), tg_name, device_id,
+            )
+            # actual_item_info (the PLM URL) is not recoverable on the reuse
+            # path -- create_plm_ticket returned it, and it is not stored on
+            # the item. Pass "" so _write_plm_fields_to_sp writes plm_id ONLY
+            # and never blanks an actual_item_info that a prior write set.
+            _write_plm_fields_to_sp(
+                deps=deps, stats=stats,
+                customer_id=customer_id, device_id=device_id,
+                milestone_id=milestone_id,
+                items=stragglers, plm_id=existing_plm_id, url="",
+            )
+            stats["plm_ids_backfilled"] = (
+                stats.get("plm_ids_backfilled", 0) + len(stragglers)
+            )
         return existing_plm_id
 
     # Step 2: create new ticket via on-prem script.
@@ -430,6 +495,7 @@ def _empty_plm_ensure_stats() -> dict[str, int]:
         "tg_groups_missing_owner_corp_id":  0,
         "tickets_created":                  0,
         "tickets_reused":                   0,
+        "plm_ids_backfilled":               0,   # PLMBF-1
         "tickets_create_failed":            0,
         "sp_writes_ok":                     0,
         "sp_writes_failed":                 0,
@@ -606,12 +672,28 @@ def _write_plm_fields_to_sp(
                 _log.warning("PLM_POLL: SP row missing _sp_id item_no=%s", item_no)
                 stats["sp_writes_failed"] += 1
                 continue
-            deps.sp_writer.update_item(
-                entity="delivery_items",
-                scope=scope,
-                item_id=sp_id,
-                canonical_fields={"plm_id": plm_id, "actual_item_info": url},
+            # PLMBF-1 (2026-08-31): only include actual_item_info when we
+            # actually have a URL. The backfill path calls in with url="" (the
+            # PLM URL isn't recoverable once the ticket exists), and writing ""
+            # would blank whatever a prior successful write had set.
+            canonical_fields: dict[str, Any] = {"plm_id": plm_id}
+            if url:
+                canonical_fields["actual_item_info"] = url
+            # SPWLOG-1: distinguish the backfill path (url="") from a normal
+            # PLM write in the SP_WRITE log -- PLMBF-1 touches many rows per
+            # tick and is the likeliest source of an SP alert burst.
+            from core.src.sharepoint_integration.write_audit import (
+                sp_write_origin,
             )
+
+            origin = "plm_poll.backfill" if not url else "plm_poll.write"
+            with sp_write_origin(origin):
+                deps.sp_writer.update_item(
+                    entity="delivery_items",
+                    scope=scope,
+                    item_id=sp_id,
+                    canonical_fields=canonical_fields,
+                )
             stats["sp_writes_ok"] += 1
         except Exception as exc:  # noqa: BLE001
             _log.warning(

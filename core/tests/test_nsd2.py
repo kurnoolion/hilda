@@ -194,6 +194,10 @@ class TestResolveNsd2DeviceFolder:
 
 class TestWalkNsd2Directory:
 
+    # NSD2-VZW-1: these run against a FLAT device folder (no carrier
+    # partition folder), so the depth-0 allowlist gate stays disengaged and
+    # the legacy denylist walk applies -- see TestFlatDeviceFolder.
+
     def test_happy_path_yields_expected_files(self, tmp_path):
         from core.src.storage.nsd2_resolver import walk_nsd2_directory
         (tmp_path / "a.pdf").write_bytes(b"aaa")
@@ -211,19 +215,11 @@ class TestWalkNsd2Directory:
         _rel, data, sha = results[0]
         assert sha == hashlib.sha256(data).hexdigest()
 
-    def test_mmk_exclusion_prunes_subtree(self, tmp_path):
-        from core.src.storage.nsd2_resolver import walk_nsd2_directory
-        (tmp_path / "keep.pdf").write_bytes(b"keep")
-        (tmp_path / "Comcast Overrides").mkdir()
-        (tmp_path / "Comcast Overrides" / "drop1.pdf").write_bytes(b"drop1")
-        (tmp_path / "Comcast Overrides" / "sub" / "drop2.pdf").parent.mkdir(parents=True)
-        (tmp_path / "Comcast Overrides" / "sub" / "drop2.pdf").write_bytes(b"drop2")
-        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
-        assert rels == ["keep.pdf"]
-
     def test_deep_excluded_subfolder_pruned(self, tmp_path):
+        # Flat layout -> denylist still guards against a foreign carrier
+        # folder nested anywhere below.
         from core.src.storage.nsd2_resolver import walk_nsd2_directory
-        (tmp_path / "Deep" / "DISH Config" / "leaf.pdf").parent.mkdir(parents=True)
+        (tmp_path / "Deep" / "DISH Config").mkdir(parents=True)
         (tmp_path / "Deep" / "DISH Config" / "leaf.pdf").write_bytes(b"x")
         (tmp_path / "Deep" / "keep.pdf").write_bytes(b"y")
         rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
@@ -240,8 +236,387 @@ class TestWalkNsd2Directory:
         from core.src.storage.nsd2_resolver import walk_nsd2_directory
         (tmp_path / "small.pdf").write_bytes(b"x" * 100)
         (tmp_path / "big.bin").write_bytes(b"x" * 5000)
-        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK", max_file_bytes=1000)]
+        rels = [
+            r[0] for r in walk_nsd2_directory(tmp_path, "MMK", max_file_bytes=1000)
+        ]
         assert rels == ["small.pdf"]
+
+    def test_oversized_cap_still_applies_inside_allowed_folder(self, tmp_path):
+        # The depth-0 allowlist must not disable the size cap below it.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "small.pdf").write_bytes(b"x" * 100)
+        (tmp_path / "VZW" / "big.bin").write_bytes(b"x" * 5000)
+        rels = [
+            r[0] for r in walk_nsd2_directory(tmp_path, "MMK", max_file_bytes=1000)
+        ]
+        assert rels == ["VZW/small.pdf"]
+
+
+# ===========================================================================
+# NSD2-VZW-1: carrier root allowlist
+# ===========================================================================
+
+
+class TestCarrierRootAllowlist:
+    """Only the contents of an allowlisted top-level folder are ingested.
+
+    Mirrors the real SM-DEVICE-002 (M3) device folder: STG/ and VZW/ side by
+    side, plus a loose workbook and a 338 MB 'VZW M3 HW Deliverables.zip'
+    that the archive extractor would otherwise fan out.
+    """
+
+    @staticmethod
+    def _build(tmp_path):
+        (tmp_path / "STG").mkdir()
+        (tmp_path / "STG" / "stg_internal.xlsx").write_bytes(b"stg")
+        (tmp_path / "VZW" / "sub").mkdir(parents=True)
+        (tmp_path / "VZW" / "vzw_report.pdf").write_bytes(b"vzw")
+        (tmp_path / "VZW" / "sub" / "deep.pdf").write_bytes(b"deep")
+        (tmp_path / "Miracle Workbook Final_ver 1.8_1229.xlsx").write_bytes(b"m")
+        (tmp_path / "VZW M3 HW Deliverables.zip").write_bytes(b"z")
+        return tmp_path
+
+    def test_only_vzw_subtree_is_yielded(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build(tmp_path)
+        rels = sorted(r[0] for r in walk_nsd2_directory(root, "MMK"))
+        assert rels == ["VZW/sub/deep.pdf", "VZW/vzw_report.pdf"]
+
+    def test_stg_sibling_is_skipped(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build(tmp_path)
+        rels = [r[0] for r in walk_nsd2_directory(root, "MMK")]
+        assert not any(r.startswith("STG/") for r in rels)
+
+    def test_loose_root_files_are_skipped(self, tmp_path):
+        # Including the zip -- otherwise the extractor fans it out into
+        # many leaf documents that were never under VZW/.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build(tmp_path)
+        rels = [r[0] for r in walk_nsd2_directory(root, "MMK")]
+        assert "VZW M3 HW Deliverables.zip" not in rels
+        assert "Miracle Workbook Final_ver 1.8_1229.xlsx" not in rels
+
+    def test_unlisted_carrier_folders_are_skipped(self, tmp_path):
+        # A denylist could not do this -- ATT/TMO/Sprint were never enumerated.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        for name in ("ATT", "TMO", "Sprint", "USC"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "x.pdf").write_bytes(b"x")
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "keep.pdf").write_bytes(b"k")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/keep.pdf"]
+
+    def test_verizon_spelling_also_allowed(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "Verizon").mkdir()
+        (tmp_path / "Verizon" / "a.pdf").write_bytes(b"a")
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        assert rels == ["Verizon/a.pdf"]
+
+    def test_match_is_case_insensitive(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "vzw").mkdir()
+        (tmp_path / "vzw" / "a.pdf").write_bytes(b"a")
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        assert rels == ["vzw/a.pdf"]
+
+    def test_match_is_exact_not_substring_so_vzw_se_is_excluded(self, tmp_path):
+        # 'VZW SE' is a different carrier scope and was on the old denylist;
+        # exact matching keeps it out without needing that denylist.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW SE").mkdir()
+        (tmp_path / "VZW SE" / "x.pdf").write_bytes(b"x")
+        assert list(walk_nsd2_directory(tmp_path, "MMK")) == []
+
+    def test_no_filtering_below_the_allowed_folder(self, tmp_path):
+        # Architect 2026-09-01: "all files under vzw/ folder are uploaded".
+        # These four names all match the old 'CHA'/'CCT'/'STG' substrings and
+        # would previously have been pruned inside VZW/.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        for name in ("Charging", "Mechanical", "Exchange", "Chart"):
+            (tmp_path / "VZW" / name).mkdir(parents=True)
+            (tmp_path / "VZW" / name / "f.pdf").write_bytes(b"f")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == [
+            "VZW/Charging/f.pdf", "VZW/Chart/f.pdf",
+            "VZW/Exchange/f.pdf", "VZW/Mechanical/f.pdf",
+        ]
+
+    def test_nested_depth_is_unlimited_inside_allowed_folder(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        deep = tmp_path / "VZW" / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (deep / "leaf.pdf").write_bytes(b"x")
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        assert rels == ["VZW/a/b/c/d/leaf.pdf"]
+
+    def test_carrier_without_allowlist_is_unchanged(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build(tmp_path)
+        rels = sorted(r[0] for r in walk_nsd2_directory(root, "OTHER"))
+        assert rels == [
+            "Miracle Workbook Final_ver 1.8_1229.xlsx",
+            "STG/stg_internal.xlsx",
+            "VZW M3 HW Deliverables.zip",
+            "VZW/sub/deep.pdf",
+            "VZW/vzw_report.pdf",
+        ]
+
+    def test_anchor_choice_is_logged_at_warning(self, tmp_path, caplog):
+        # The old prune logged at INFO, which the containers (WARNING) drop,
+        # so files vanished with no production trace. The anchor decision is
+        # the auditable record of what was ingested and what was unreachable.
+        import logging
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            list(walk_nsd2_directory(root, "MMK"))
+        blob = "\n".join(r.getMessage() for r in caplog.records)
+        assert "carrier anchor(s)" in blob
+        assert "mode=anchored" in blob
+
+
+class TestFlatDeviceFolder:
+    """Not every device folder is carrier-partitioned.
+
+    Real layout for S731U (S25 FE): the numbered deliverable folders sit
+    straight under the device model with no VZW/ or STG/ wrapper. Gating
+    that on 'VZW' would ingest nothing, so the depth-0 gate only engages
+    when a carrier partition is actually present.
+    """
+
+    NUMBERED = (
+        "1. HW Release notes(done)",
+        "2. DMDform(done)",
+        "3. HAC Report(done)",
+        "4. Water mark indicator(done)",
+        "5. Water and Toxic Enforcement-ROH(done)",
+        "6. California warranty law(done)",
+    )
+
+    def test_flat_layout_ingests_every_numbered_folder(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        for name in self.NUMBERED:
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "f.pdf").write_bytes(b"x")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == sorted(f"{n}/f.pdf" for n in self.NUMBERED)
+
+    def test_flat_layout_ingests_loose_root_files(self, tmp_path):
+        # No partition -> nothing to be "outside", so root files count.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "notes.pdf").write_bytes(b"x")
+        (tmp_path / "1. HW Release notes(done)").mkdir()
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        assert rels == ["notes.pdf"]
+
+    def test_partition_detected_via_allowlisted_folder(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "keep.pdf").write_bytes(b"k")
+        (tmp_path / "1. HW Release notes(done)").mkdir()
+        (tmp_path / "1. HW Release notes(done)" / "drop.pdf").write_bytes(b"d")
+        (tmp_path / "loose.xlsx").write_bytes(b"l")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/keep.pdf"]
+
+    def test_denylisted_folder_but_no_anchor_falls_back_and_still_prunes(
+        self, tmp_path
+    ):
+        # STG present, no VZW anywhere -> nonconforming, so fall back rather
+        # than ingest nothing. STG's CONTENTS are still kept out by the
+        # denylist, which is the property that actually matters.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "STG").mkdir()
+        (tmp_path / "STG" / "x.pdf").write_bytes(b"x")
+        (tmp_path / "loose.xlsx").write_bytes(b"l")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["loose.xlsx"]
+
+    def test_flat_layout_logs_the_fallback(self, tmp_path, caplog):
+        import logging
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "1. HW Release notes(done)").mkdir()
+        (tmp_path / "1. HW Release notes(done)" / "f.pdf").write_bytes(b"x")
+        with caplog.at_level(logging.WARNING):
+            list(walk_nsd2_directory(tmp_path, "MMK"))
+        blob = "\n".join(r.getMessage() for r in caplog.records)
+        assert "NONCONFORMING LAYOUT" in blob
+
+
+class TestNestedCarrierAnchor:
+    """The carrier folder is not always a direct child of the device folder.
+
+    Real layout for F776U (Filp8): device -> Deliverable/ -> VZW/ -> numbered
+    folders. A depth-0-only gate treated 'Deliverable' as an ordinary folder,
+    disengaged, and leaked 'Deliverable/ATT/' and loose files.
+    """
+
+    @staticmethod
+    def _build_f776u(tmp_path):
+        for n in ("1. HW RN (Done)", "2. DMDform (Done)"):
+            (tmp_path / "Deliverable" / "VZW" / n).mkdir(parents=True)
+            (tmp_path / "Deliverable" / "VZW" / n / "f.pdf").write_bytes(b"x")
+        (tmp_path / "Deliverable" / "STG").mkdir(parents=True)
+        (tmp_path / "Deliverable" / "STG" / "i.xlsx").write_bytes(b"s")
+        (tmp_path / "Deliverable" / "ATT").mkdir(parents=True)
+        (tmp_path / "Deliverable" / "ATT" / "a.pdf").write_bytes(b"a")
+        (tmp_path / "Deliverable" / "notes.txt").write_bytes(b"n")
+        (tmp_path / "rootloose.txt").write_bytes(b"r")
+        return tmp_path
+
+    def test_vzw_one_level_down_is_found(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build_f776u(tmp_path)
+        rels = sorted(r[0] for r in walk_nsd2_directory(root, "MMK"))
+        assert rels == [
+            "Deliverable/VZW/1. HW RN (Done)/f.pdf",
+            "Deliverable/VZW/2. DMDform (Done)/f.pdf",
+        ]
+
+    def test_sibling_carrier_beside_the_anchor_is_unreachable(self, tmp_path):
+        # ATT is not on the denylist -- only the anchor keeps it out.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        root = self._build_f776u(tmp_path)
+        rels = [r[0] for r in walk_nsd2_directory(root, "MMK")]
+        assert not any("ATT" in r for r in rels)
+        assert not any("STG" in r for r in rels)
+        assert "Deliverable/notes.txt" not in rels
+        assert "rootloose.txt" not in rels
+
+    def test_shallowest_anchor_wins(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "top.pdf").write_bytes(b"t")
+        (tmp_path / "Deliverable" / "VZW").mkdir(parents=True)
+        (tmp_path / "Deliverable" / "VZW" / "deep.pdf").write_bytes(b"d")
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        assert rels == ["VZW/top.pdf"]
+
+    def test_vzw_nested_inside_denylisted_folder_is_never_an_anchor(self, tmp_path):
+        # Otherwise 'STG/VZW/' would re-admit the subtree the denylist exists
+        # to keep out.
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "STG" / "VZW").mkdir(parents=True)
+        (tmp_path / "STG" / "VZW" / "leak.pdf").write_bytes(b"l")
+        assert list(walk_nsd2_directory(tmp_path, "MMK")) == []
+
+    def test_multiple_anchors_at_same_level_all_ingested(self, tmp_path):
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "VZW").mkdir()
+        (tmp_path / "VZW" / "a.pdf").write_bytes(b"a")
+        (tmp_path / "Verizon").mkdir()
+        (tmp_path / "Verizon" / "b.pdf").write_bytes(b"b")
+        rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
+        assert rels == ["VZW/a.pdf", "Verizon/b.pdf"]
+
+    def test_anchor_deeper_than_the_cap_is_not_found(self, tmp_path):
+        # Guards the flat-fallback boundary: beyond the cap we must not scan
+        # forever, and the tree is treated as nonconforming.
+        from core.src.storage.nsd2_resolver import (
+            walk_nsd2_directory, NSD2_ANCHOR_SEARCH_MAX_DEPTH,
+        )
+        deep = tmp_path
+        for i in range(NSD2_ANCHOR_SEARCH_MAX_DEPTH + 2):
+            deep = deep / f"w{i}"
+        (deep / "VZW").mkdir(parents=True)
+        (deep / "VZW" / "x.pdf").write_bytes(b"x")
+        rels = [r[0] for r in walk_nsd2_directory(tmp_path, "MMK")]
+        # Falls back to whole-device-folder mode rather than finding it.
+        assert rels and rels[0].endswith("x.pdf")
+
+    def test_nonconforming_layout_is_logged_loudly(self, tmp_path, caplog):
+        # The fallback is a guess, so it must be visible: the HW PL TG needs
+        # a worklist of device folders to normalise.
+        import logging
+        from core.src.storage.nsd2_resolver import walk_nsd2_directory
+        (tmp_path / "1. HW RN (Done)").mkdir()
+        (tmp_path / "1. HW RN (Done)" / "f.pdf").write_bytes(b"x")
+        with caplog.at_level(logging.WARNING):
+            list(walk_nsd2_directory(tmp_path, "MMK"))
+        blob = "\n".join(r.getMessage() for r in caplog.records)
+        assert "NONCONFORMING LAYOUT" in blob
+        assert "mode=whole-device-folder" in blob
+
+
+class TestFindCarrierAnchors:
+    def test_returns_empty_for_carrier_without_allowlist(self, tmp_path):
+        from core.src.storage.nsd2_resolver import find_carrier_anchors
+        (tmp_path / "VZW").mkdir()
+        assert find_carrier_anchors(tmp_path, "OTHER") == ([], False)
+
+    def test_marker_flag_true_when_only_denylisted_folder_present(self, tmp_path):
+        from core.src.storage.nsd2_resolver import find_carrier_anchors
+        (tmp_path / "STG").mkdir()
+        anchors, saw_marker = find_carrier_anchors(tmp_path, "MMK")
+        assert anchors == [] and saw_marker is True
+
+    def test_marker_flag_false_for_flat_layout(self, tmp_path):
+        from core.src.storage.nsd2_resolver import find_carrier_anchors
+        (tmp_path / "1. HW RN (Done)").mkdir()
+        anchors, saw_marker = find_carrier_anchors(tmp_path, "MMK")
+        assert anchors == [] and saw_marker is False
+
+    def test_missing_root_is_handled(self, tmp_path):
+        from core.src.storage.nsd2_resolver import find_carrier_anchors
+        assert find_carrier_anchors(tmp_path / "nope", "MMK") == ([], False)
+
+
+class TestDenylistWholeTokenMatching:
+    """NSD2-VZW-1: single-word needles match whole tokens, not substrings.
+
+    The substring form silently pruned plausible HW-deliverable folder
+    names, subtree and all, and logged it at INFO so production never saw it.
+    """
+
+    def test_cha_no_longer_matches_ordinary_words(self):
+        from core.src.storage.nsd2_resolver import is_excluded_folder_name
+        for name in ("Charging", "Mechanical", "Exchange", "Chart",
+                     "Discharge", "Charging Test Results"):
+            assert is_excluded_folder_name(name, "MMK") is False, name
+
+    def test_real_carrier_tokens_still_match(self):
+        from core.src.storage.nsd2_resolver import is_excluded_folder_name
+        for name in ("CHA", "CCT", "DISH Config", "STG", "TFN Notes",
+                     "Comcast Overrides", "STRATEGIC", "Tracfone", "Charter"):
+            assert is_excluded_folder_name(name, "MMK") is True, name
+
+    def test_multiword_needle_still_substring_matches(self):
+        from core.src.storage.nsd2_resolver import is_excluded_folder_name
+        assert is_excluded_folder_name("VZW SE", "MMK") is True
+        assert is_excluded_folder_name("Deliverables - VZW SE Special",
+                                       "MMK") is True
+
+    def test_california_warranty_law_is_not_excluded(self):
+        # From the real S731U device folder.
+        from core.src.storage.nsd2_resolver import is_excluded_folder_name
+        assert is_excluded_folder_name("6. California warranty law(done)",
+                                       "MMK") is False
+
+
+class TestIsAllowedRootFolder:
+    def test_allowlisted_names(self):
+        from core.src.storage.nsd2_resolver import is_allowed_root_folder
+        for name in ("VZW", "vzw", " VZW ", "Verizon", "verizon"):
+            assert is_allowed_root_folder(name, "MMK") is True
+
+    def test_rejected_names(self):
+        from core.src.storage.nsd2_resolver import is_allowed_root_folder
+        for name in ("STG", "VZW SE", "ATT", "TMO", "VZW2", "", "Verizon SE"):
+            assert is_allowed_root_folder(name, "MMK") is False
+
+    def test_carrier_without_allowlist_accepts_everything(self):
+        from core.src.storage.nsd2_resolver import is_allowed_root_folder
+        for name in ("STG", "anything", ""):
+            assert is_allowed_root_folder(name, "OTHER") is True
+
+    def test_allowed_root_folders_returns_none_for_unlisted_carrier(self):
+        from core.src.storage.nsd2_resolver import allowed_root_folders
+        assert allowed_root_folders("OTHER") is None
+        assert allowed_root_folders("MMK") == ("VZW", "Verizon")
 
     def test_missing_root_yields_empty(self):
         from core.src.storage.nsd2_resolver import walk_nsd2_directory

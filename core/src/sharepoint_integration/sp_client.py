@@ -19,6 +19,7 @@ Q4 follow-up (marked OPEN in MODULE.md).
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Iterable
 
 import requests
@@ -26,6 +27,18 @@ import requests
 from core.src.diagnostics import PipelineError
 from core.src.sharepoint_integration.config import GlobalSharePointConfig
 from core.src.sharepoint_integration.sp_session import SpSession
+from core.src.sharepoint_integration.write_audit import (
+    SP_WRITE_ORIGIN,
+    caller_ref,
+    redact_fields,
+)
+
+_log = logging.getLogger(__name__)
+
+
+def _origin() -> str:
+    """Explicit `sp_write_origin` label if one is set, else stack-derived."""
+    return SP_WRITE_ORIGIN.get() or caller_ref()
 
 
 class SpClient:
@@ -135,8 +148,13 @@ class SpClient:
         *,
         customer_id: str,
     ) -> str:
+        origin = _origin()
         status, body = await asyncio.to_thread(
             self._session.create, list_name, customer_id, fields
+        )
+        _log.warning(
+            "SP_WRITE: op=create list=%s status=%s origin=%s %s",
+            list_name, status, origin, redact_fields(fields),
         )
         if status >= 400:
             sp_code = _extract_sp_code_from_payload(body, status)
@@ -180,8 +198,16 @@ class SpClient:
         *,
         customer_id: str,
     ) -> None:
+        origin = _origin()
         status = await asyncio.to_thread(
             self._session.merge, list_name, customer_id, item_id, fields
+        )
+        # SPWLOG-1: routine SP writes log at WARNING, matching plm_poll's
+        # tick lines -- the deployed containers run at WARNING, so INFO here
+        # would be invisible exactly when it is needed.
+        _log.warning(
+            "SP_WRITE: op=update list=%s item_id=%s status=%s origin=%s %s",
+            list_name, item_id, status, origin, redact_fields(fields),
         )
         if status >= 400:
             if status == 401:
@@ -199,7 +225,12 @@ class SpClient:
             )
 
     async def delete_list_item(self, list_name: str, item_id: str) -> None:
+        origin = _origin()
         status = await asyncio.to_thread(self._session.delete, list_name, item_id)
+        _log.warning(
+            "SP_WRITE: op=delete list=%s item_id=%s status=%s origin=%s",
+            list_name, item_id, status, origin,
+        )
         if status >= 400:
             if status == 401:
                 raise PipelineError(

@@ -42,6 +42,7 @@ from core.src.dashboard.feedback_config import (
     is_valid_bug_type,
 )
 from core.src.storage.feedback_ops import FeedbackStorage
+from core.src.dashboard.url_prefix import join as _url_join
 
 __all__ = ["register_feedback_routes"]
 
@@ -100,9 +101,13 @@ async def _notify_bot_of_new_ticket(
             f"{ticket.bug_type}"
         )
         base_url = (getattr(cfg, "reverse_proxy_origin", "") or "").rstrip("/")
-        view_url = (
-            f"{base_url}/feedback/{ticket.customer_id}/{ticket.device_id}/"
-            f"{ticket.milestone_id}"
+        # URLPFX-1: this link is emailed, so it must carry the public
+        # prefix as well as the origin -- the recipient clicks it from
+        # outside, where only /hilda/* is served.
+        view_url = base_url + _url_join(
+            getattr(cfg, "url_prefix", ""),
+            f"/feedback/{ticket.customer_id}/{ticket.device_id}/"
+            f"{ticket.milestone_id}",
         )
         att_line = (
             f"\nAttachment: {ticket.attachment_filename} "
@@ -165,6 +170,11 @@ def register_feedback_routes(
     # Stash on state so tests can introspect + override without app rebuild.
     app.state.feedback_storage = fs
 
+    def _u(path: str) -> str:
+        """URLPFX-1: prefix an emitted url. Routes stay unprefixed because
+        nginx strips /hilda before proxying."""
+        return _url_join(getattr(cfg, "url_prefix", ""), path)
+
     @app.get(
         "/feedback/{customer}/{device}",
         response_class=HTMLResponse,
@@ -173,7 +183,7 @@ def register_feedback_routes(
     async def redirect_to_default_milestone(customer: str, device: str):
         """Bare-scope URL redirects to the default milestone landing page."""
         return RedirectResponse(
-            url=f"/feedback/{customer}/{device}/{_DEFAULT_MILESTONE}",
+            url=_u(f"/feedback/{customer}/{device}/{_DEFAULT_MILESTONE}"),
             status_code=status.HTTP_302_FOUND,
         )
 
@@ -324,7 +334,7 @@ def register_feedback_routes(
         await _notify_bot_of_new_ticket(request.app, cfg, ticket)
 
         return RedirectResponse(
-            url=f"/feedback/{customer}/{device}/{target_milestone}",
+            url=_u(f"/feedback/{customer}/{device}/{target_milestone}"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
 

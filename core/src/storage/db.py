@@ -139,6 +139,27 @@ class DocumentItemAssociationTable(Base):
     upload_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     associated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     associated_by: Mapped[str] = mapped_column(String(128), default="auto")
+    # UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06): TPM-chosen carrier folder for this
+    # document, replacing the work item's `target_folder` at upload time. NULL
+    # -- the overwhelming majority -- means "use the item's folder".
+    #
+    # Exists because the TPM's concern is WHERE a document lands on Google
+    # Drive, not which work item holds it. A folder is frequently owned by
+    # several items (P1 #14 and #20 share one), so picking a folder carries no
+    # information about which item was meant; re-assigning the document would
+    # invent an intent the TPM never expressed, and would drag in a
+    # revision-family split, internal-tree file moves, a changed DRR->P1
+    # mapping target, and a relaxed STR-E009 guard. Overriding the folder
+    # changes the destination and nothing else -- no file moves, no state
+    # change, so PM approval is unaffected either way.
+    #
+    # Written to EVERY member of the doc_id_slug revision family, never just
+    # the selected hash: otherwise a TPM redirects rev1, the owner sends rev2,
+    # and rev2 silently uploads to the original folder. The archive-derived
+    # subdir still rides underneath, so zip structure is preserved.
+    upload_target_folder_override: Mapped[str | None] = mapped_column(
+        String(512), nullable=True
+    )
 
 
 class CommunicationLogTable(Base):

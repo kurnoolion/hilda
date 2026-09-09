@@ -79,6 +79,12 @@ class UnroutedFileRow:
     is_dup_hash_elsewhere: bool      # true if the same file_hash is
                                      # associated with any OTHER item in
                                      # the DB (UI badge trigger)
+    # UNROUTED-TG-SCOPE-1 (2026-09-03): channel-resolved TG for this doc, or
+    # "" when the ingest candidates spanned TGs (multi-TG email batch) or it
+    # predates the resolver being wired. Drives the manual-route dropdown
+    # scope: known TG -> only that TG's items; blank -> every item in the
+    # milestone, since there is no scope to infer.
+    inferred_tg_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -217,6 +223,7 @@ async def list_unrouted_for_scope(
                 ingested_at=r.ingested_at,
                 doc_type=r.doc_type or "",
                 is_dup_hash_elsewhere=(r.file_hash in associated_hashes),
+                inferred_tg_name=(r.inferred_tg_name or ""),
             )
             for r in rows
         ]
@@ -225,6 +232,7 @@ async def list_unrouted_for_scope(
 async def list_route_candidates_for_scope(
     customer_id: str, device_id: str, milestone_id: str,
     excluded_item_names: list[str] | None = None,
+    tg_name: str | None = None,
 ) -> list[Any]:
     """Return delivery_item rows eligible as manual-route targets.
 
@@ -235,6 +243,11 @@ async def list_route_candidates_for_scope(
                                    user is manually routing AWAY from)
       * item_name NOT IN excluded_item_names (config-driven exclusion per
         Final-DRR pattern; MMK's item 85 goes here)
+      * tg_name == tg_name when supplied (UNROUTED-TG-SCOPE-1). A document
+        belongs to exactly ONE TG folder in the view tree per [D-153], so a
+        doc received for one TG should never be offered items from another.
+        Pass None -- the multi-TG-email case -- to keep the milestone-wide
+        list.
 
     Does NOT filter by delivery_state -- per architect ask 2026-07-31,
     Closed items are legitimate targets (TPM may attach a late doc).
@@ -251,6 +264,8 @@ async def list_route_candidates_for_scope(
         )
         if excluded:
             stmt = stmt.where(DeliveryItemTable.item_name.notin_(excluded))
+        if tg_name and tg_name.strip():
+            stmt = stmt.where(DeliveryItemTable.tg_name == tg_name.strip())
         stmt = stmt.order_by(DeliveryItemTable.item_no)
         result = await session.execute(stmt)
         return list(result.scalars().all())
@@ -385,9 +400,18 @@ async def route_unrouted_to_item(
             f"item_{getattr(target, 'item_no', 'x')}"
         )
         target_tg_path_id = getattr(target, "tg_path_id", None) or target_tg
+        # UNROUTED-TG-SCOPE-1 (2026-09-03): the TG segment MUST mirror what
+        # ingest used, or the relocate reads from a path that doesn't exist.
+        # internal_default_workitem takes `inferred_tg_name or "_unknown_tg"`
+        # at ingest (inbound_attachment._nsd_path_for), and inferred_tg_name
+        # is now actually populated for single-TG candidate sets. Hardcoding
+        # "_unknown_tg" here was correct only while the resolver was wired to
+        # None. Rows ingested before this change still have NULL and still
+        # resolve to "_unknown_tg", so both vintages are found.
         source_path = NSDPath.internal_default_workitem(
             doc.customer_id or "", doc.device_id or "", doc.milestone_id,
-            "_unknown_tg", doc.original_filename,
+            (doc.inferred_tg_name or "").strip() or "_unknown_tg",
+            doc.original_filename,
         )
         target_path = NSDPath.internal_staged_classification(
             doc.customer_id or "", doc.device_id or "", doc.milestone_id,
@@ -554,39 +578,104 @@ async def route_unrouted_to_item(
     # effort: any failure is logged but does NOT roll back the manual-
     # route commit (which is already persisted above); TPM can fall back
     # to the Reclassify UI on the staged file.
+    from core.src.email_service.inbound.attachment_router import (
+        _singleton_alignment_doc_type,
+        filename_says_waiver,
+        keyword_fallback_doc_type,
+        Fr52AttachmentRouter as _Fr52,
+    )
+
+    _singleton: "DocType | None" = None
+    _resolution_kind = ""
+
     if _current_doc_type == DocType.UNRESOLVED.value:
-        from core.src.email_service.inbound.attachment_router import (
-            _singleton_alignment_doc_type,
-            Fr52AttachmentRouter as _Fr52,
-        )
         _singleton = _singleton_alignment_doc_type(_target_item_type)
-        if _singleton is not None:
-            try:
-                from core.src.storage.document_ops import tpm_resolve_doc_type
-                _slug = _Fr52._slug_from_filename(_original_filename)
-                await tpm_resolve_doc_type(
-                    file_hash=file_hash,
-                    delivery_item_id=target_delivery_item_id,
-                    new_doc_type=_singleton,
-                    doc_id_slug=_slug,
-                    rev_number=1,
-                    pm_id=tpm_id or "tpm@unknown",
-                )
-                _log.warning(
-                    "AUTO_CLASSIFY_RELNOTES: manual-route auto-promoted "
-                    "file_hash=%s target=%s item_type=%s doc_type=%s "
-                    "slug=%s (UNRESOLVED -> CLASSIFIED)",
-                    file_hash[:12], target_delivery_item_id,
-                    _target_item_type, _singleton.value, _slug,
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.warning(
-                    "AUTO_CLASSIFY_RELNOTES: manual-route promotion FAILED "
-                    "file_hash=%s target=%s %s: %s -- file remains STAGED, "
-                    "TPM can Reclassify manually",
-                    file_hash[:12], target_delivery_item_id,
-                    type(exc).__name__, str(exc)[:120],
-                )
+        # DOCTYPE-WAIVER-VETO-1 (2026-09-02) shipped on the INGEST path only.
+        # Without it here, a '..._Waiver Request_*.ppt' whose doc_type never
+        # resolved, manually routed onto a compliance item, is promoted to
+        # compliance_certification_release_notes -- aligned, CLASSIFIED at
+        # rev1, and uploaded to the carrier. That is precisely the incident
+        # the veto was written to stop. Only the singleton rung needs the
+        # guard: keyword_fallback_doc_type tests for waiver itself.
+        if _singleton is not None and filename_says_waiver(_original_filename):
+            _log.warning(
+                "DOCTYPE_WAIVER_VETO: manual-route filename=%r says waiver "
+                "-- declining promotion to %s on target=%s (item_type=%s); "
+                "leaving STAGED for TPM Reclassify (file_hash=%s)",
+                _original_filename, _singleton.value,
+                target_delivery_item_id, _target_item_type, file_hash[:12],
+            )
+            _singleton = None
+        elif _singleton is None:
+            # DOCTYPE-FALLBACK-1 (2026-09-02): same keyword ladder the router
+            # applies at ingest. Without it, a doc that would have been
+            # auto-classified on the ingest path stays STAGED purely because
+            # it arrived unrouted -- the TPM would have to Reclassify by hand
+            # immediately after routing it.
+            _singleton = keyword_fallback_doc_type(
+                _original_filename, _target_item_type
+            )
+        _resolution_kind = "UNRESOLVED -> CLASSIFIED"
+
+    elif _Fr52._fr86_aligned(_target_item_type, _current_doc_type):
+        # UNROUTED-ALIGNED-1 (2026-09-08): doc_type was ALREADY resolved and
+        # is already FR-86-aligned with the item the TPM picked. There is
+        # nothing to promote, so the sweep skipped this file entirely -- and
+        # step 7's unconditional STAGED_NOT_CLASSIFIED write then left it
+        # parked forever: excluded from carrier upload AND from DRR->P1
+        # migration, under a reason string asserting a mismatch that does not
+        # exist. Live case: a test_report routed by hand onto MMK DRR #53
+        # (test_tech_waiver_report), which is exactly where the automatic
+        # router files its siblings as CLASSIFIED.
+        #
+        # tpm_resolve_doc_type guards on nsd_path_type, not on doc_type
+        # changing, so passing the doc_type the file already carries still
+        # performs the _staged_classification/ -> rev1/ move and the
+        # STAGED_NOT_CLASSIFIED -> CLASSIFIED flip.
+        try:
+            _singleton = DocType(_current_doc_type)
+        except ValueError:
+            # Not a DocType member. Leave staged rather than guess; the index
+            # writes enum values, so this should be unreachable.
+            _singleton = None
+        _resolution_kind = "ALIGNED -> CLASSIFIED"
+
+    else:
+        _log.warning(
+            "MANUAL_ROUTE: doc_type=%s is NOT FR-86-aligned with item_type=%s "
+            "on target=%s -- file stays STAGED for TPM Reclassify "
+            "(file_hash=%s)",
+            _current_doc_type, _target_item_type,
+            target_delivery_item_id, file_hash[:12],
+        )
+
+    if _singleton is not None:
+        try:
+            from core.src.storage.document_ops import tpm_resolve_doc_type
+            _slug = _Fr52._slug_from_filename(_original_filename)
+            await tpm_resolve_doc_type(
+                file_hash=file_hash,
+                delivery_item_id=target_delivery_item_id,
+                new_doc_type=_singleton,
+                doc_id_slug=_slug,
+                rev_number=1,
+                pm_id=tpm_id or "tpm@unknown",
+            )
+            _log.warning(
+                "AUTO_CLASSIFY_RELNOTES: manual-route resolved "
+                "file_hash=%s target=%s item_type=%s doc_type=%s "
+                "slug=%s (%s)",
+                file_hash[:12], target_delivery_item_id,
+                _target_item_type, _singleton.value, _slug, _resolution_kind,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "AUTO_CLASSIFY_RELNOTES: manual-route resolution FAILED "
+                "file_hash=%s target=%s %s: %s -- file remains STAGED, "
+                "TPM can Reclassify manually",
+                file_hash[:12], target_delivery_item_id,
+                type(exc).__name__, str(exc)[:120],
+            )
 
     # Step 9: audit (best-effort; separate transaction)
     try:

@@ -11,6 +11,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from core.src.dashboard import url_prefix as _url_prefix
+
 __all__ = ["DashboardConfig"]
 
 _DEFAULT_CONFIG_PATH = Path("config/dashboard.json")
@@ -20,6 +22,7 @@ _ENV_MAP = {
     "bind_host":                  "HILDA_DASHBOARD_BIND_HOST",
     "bind_port":                  "HILDA_DASHBOARD_BIND_PORT",
     "reverse_proxy_origin":       "HILDA_DASHBOARD_REVERSE_PROXY_ORIGIN",
+    "url_prefix":                 _url_prefix.ENV_VAR,
     "refresh_rate_limit_seconds": "HILDA_DASHBOARD_REFRESH_RATE_LIMIT_SECONDS",
     "token_ttl_seconds":          "HILDA_DASHBOARD_TOKEN_TTL_SECONDS",
     "static_files_dir":           "HILDA_DASHBOARD_STATIC_FILES_DIR",
@@ -43,6 +46,10 @@ class DashboardConfig(BaseModel):
     bind_host:                  str        = "0.0.0.0"
     bind_port:                  int        = 8443
     reverse_proxy_origin:       str        = "https://hilda-proxy.corp"
+    # URLPFX-1 (2026-09-07): public path prefix. nginx serves /hilda/* and
+    # strips it, so routes stay unprefixed and only EMITTED urls carry this.
+    # "" serves at the root. See dashboard/url_prefix.py.
+    url_prefix:                 str        = _url_prefix.DEFAULT_URL_PREFIX
     refresh_rate_limit_seconds: int        = 300                       # FR-56 default 5 min
     token_ttl_seconds:          int        = 300                       # FR-61 default 300 s
     static_files_dir:           Path | None = None
@@ -78,6 +85,15 @@ class DashboardConfig(BaseModel):
     # item-name exclusion everywhere.
     manual_routing_excluded_item_names:      list[str] = []
     manual_routing_excluded_milestone_names: list[str] = []
+
+    @field_validator("url_prefix", mode="before")
+    @classmethod
+    def _normalize_url_prefix(cls, v):
+        """Canonicalise to "" or "/seg". Normalising at the config boundary
+        rather than at each use means a trailing slash in dashboard.json
+        cannot turn every link on every page into `//browse/...`, which a
+        browser resolves as protocol-relative against the wrong host."""
+        return _url_prefix.normalize(v if isinstance(v, str) else None)
 
     @field_validator(
         "manual_routing_excluded_item_names",

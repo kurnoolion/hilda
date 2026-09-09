@@ -556,3 +556,119 @@ class TestListFilesInTgReclassColumns:
         assert f.doc_type == "compliance_certification_release_notes"
         assert f.is_staged is False, \
             "Concrete doc_type MUST win over stale STAGED_NOT_CLASSIFIED assoc"
+
+
+# ---------------------------------------------------------------------------
+# DOCTYPE-MISALIGN-UI-1 (2026-09-03): is_staged_not_classified
+# ---------------------------------------------------------------------------
+
+
+class TestListFilesInTgStagedNotClassified:
+    """`is_staged_not_classified` mirrors the predicate the UPLOADER uses
+    (nsd_path_type vs CLASSIFIED), so the TG view and the carrier submission
+    set cannot disagree.
+
+    RECLASS-BUGFIX-2 redefined `is_staged` to mean "doc_type is ''/unresolved",
+    which left the misaligned-but-classified case with no UI at all: the row
+    rendered a real doc_type and looked complete while
+    list_upload_files_for_item silently dropped it. Live case that motivated
+    this: a `.*volte.*` filename classified test_report, routed to an MNO-UX
+    item whose item_type is compliance_certification_release_notes.
+    """
+
+    _scope = dict(
+        customer_id="MMK",
+        device_id="SM-S671U1",
+        milestone_id="P1",
+        tg_name="HW PL",
+    )
+
+    async def _seed(self, filename, doc_type, nsd_path_type, item_type):
+        from datetime import datetime as _dt, timezone as _tz
+        from core.src.storage.db import (
+            DeliveryItemTable, DocumentIndexTable,
+            DocumentItemAssociationTable, session_scope,
+        )
+        await save_view_document(
+            **self._scope, relative_parts=(filename,),
+            content=filename.encode(), saved_by="auto",
+        )
+        file_hash = (await list_files_in_tg(**self._scope))[0].file_hash
+        item_id = "MMK-SM-S671U1-P1-77"
+        now = _dt.now(_tz.utc)
+        async with session_scope() as session:
+            session.add(DeliveryItemTable(
+                item_id=item_id, customer_id="MMK", device_id="SM-S671U1",
+                milestone_id="P1", item_no=77, item_type=item_type,
+                item_name=f"Item 77 ({item_type})",
+                tg_name="HW PL", delivery_state="Open",
+                last_updated=now, sort_order=77, path_id="p77",
+            ))
+            session.add(DocumentIndexTable(
+                file_hash=file_hash, milestone_id="P1", doc_type=doc_type,
+                doc_id_slug=filename.rsplit(".", 1)[0], rev_number=1,
+                ingest_source="NetworkSharedDrive",
+                original_filename=filename, inferred_tg_name="HW PL",
+                routing_resolution="SubstringMatch", ingested_at=now,
+            ))
+            session.add(DocumentItemAssociationTable(
+                file_hash=file_hash, delivery_item_id=item_id,
+                milestone_id="P1",
+                local_nsd_path=f"internal/x/{filename}",
+                nsd_path_type=nsd_path_type, owner_corp_id="",
+                associated_at=now,
+            ))
+            await session.commit()
+        return (await list_files_in_tg(**self._scope))[0]
+
+    async def test_misaligned_classified_doc_is_flagged(self):
+        # The regression: test_report on a release-notes item.
+        from core.src.storage.models import NSDPathType
+        f = await self._seed(
+            "volte_odr.pdf", "test_report",
+            NSDPathType.STAGED_NOT_CLASSIFIED.value,
+            "compliance_certification_release_notes",
+        )
+        assert f.doc_type == "test_report"
+        # is_staged stays False -- no contradictory "<type> -- not classified"
+        assert f.is_staged is False
+        # ...but the exclusion is now visible.
+        assert f.is_staged_not_classified is True
+
+    async def test_aligned_classified_doc_is_not_flagged(self):
+        from core.src.storage.models import NSDPathType
+        f = await self._seed(
+            "power_test.pdf", "test_report",
+            NSDPathType.CLASSIFIED.value, "test_tech_waiver_report",
+        )
+        assert f.is_staged is False
+        assert f.is_staged_not_classified is False
+
+    async def test_flag_tracks_path_type_not_alignment(self):
+        # Aligned doc_type but assoc still staged (partial reclassify). The
+        # uploader excludes it, so the flag must fire -- it mirrors upload
+        # reality, not FR-86 alignment.
+        from core.src.storage.models import NSDPathType
+        f = await self._seed(
+            "hac.pdf", "compliance_certification_release_notes",
+            NSDPathType.STAGED_NOT_CLASSIFIED.value,
+            "compliance_certification_release_notes",
+        )
+        assert f.is_staged_not_classified is True
+
+    async def test_unresolved_doc_sets_both_flags(self):
+        from core.src.storage.models import NSDPathType
+        f = await self._seed(
+            "mystery.pdf", "unresolved",
+            NSDPathType.STAGED_NOT_CLASSIFIED.value, "test_tech_waiver_report",
+        )
+        assert f.is_staged is True
+        assert f.is_staged_not_classified is True
+
+    async def test_defaults_false_with_no_association(self):
+        await save_view_document(
+            **self._scope, relative_parts=("orphan.pdf",),
+            content=b"orphan", saved_by="auto",
+        )
+        f = (await list_files_in_tg(**self._scope))[0]
+        assert f.is_staged_not_classified is False

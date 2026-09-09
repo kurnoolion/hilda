@@ -10,6 +10,7 @@ from core.src.dashboard.document_view_routes import (
     _resolve_scoped_token,
     _make_wopi_jwt,
     _verify_wopi_jwt,
+    _effective_open_mode,
     _open_mode_for,
     _encode_file_id,
     _decode_file_id,
@@ -34,7 +35,7 @@ async def env(tmp_path):
 
 @pytest.fixture
 def cfg():
-    return DashboardConfig(
+    return DashboardConfig(url_prefix="", 
         mock_auth=True,
         ph1_minimal=False,
         wopi_jwt_secret="test-secret-abcdef1234567890",
@@ -119,6 +120,38 @@ class TestOpenMode:
         """Outlook .msg and SQLite .db files are download-only per architect."""
         assert _open_mode_for("message.msg") == "download"
         assert _open_mode_for("Cache.MSG") == "download"
+
+
+class TestEffectiveOpenMode:
+    """EDIT-GATE-1: which of Edit / View / Download the UI may offer, and
+    therefore which scoped token gets minted."""
+
+    def test_unrestricted_passes_the_mode_through(self):
+        assert _effective_open_mode("editor") == "editor"
+        assert _effective_open_mode("native") == "native"
+        assert _effective_open_mode("download") == "download"
+
+    def test_drm_and_superseded_downgrade_everything(self):
+        assert _effective_open_mode("editor", is_drm_wrapped=True) == "download"
+        assert _effective_open_mode("native", is_superseded=True) == "download"
+
+    def test_pending_classification_withholds_edit(self):
+        """An unclassified or misaligned file is not yet a deliverable."""
+        assert _effective_open_mode(
+            "editor", pending_classification=True,
+        ) == "download"
+
+    def test_pending_classification_keeps_native_view(self):
+        """You often have to open a file to decide its doc_type, so View must
+        survive -- only Edit is withheld."""
+        assert _effective_open_mode(
+            "native", pending_classification=True,
+        ) == "native"
+
+    def test_classified_file_keeps_edit(self):
+        assert _effective_open_mode(
+            "editor", pending_classification=False,
+        ) == "editor"
         assert _open_mode_for("state.db") == "download"
 
     def test_legacy_binary_office_is_download_only_2026_07_24(self):
@@ -1035,7 +1068,7 @@ class TestEditorEmbed:
         assert r.status_code == 415
 
     async def test_edit_page_503_when_not_configured(self):
-        cfg_empty = DashboardConfig(
+        cfg_empty = DashboardConfig(url_prefix="", 
             mock_auth=True, ph1_minimal=False,
             wopi_jwt_secret="", onlyoffice_public_url="",
         )
@@ -1121,7 +1154,7 @@ class TestUnroutedBrowse:
 
     async def test_excluded_item_names_filtered_when_milestone_matches(self):
         """Architect ask 2026-08-01: MMK's item 85 excluded in DRR only."""
-        cfg = DashboardConfig(
+        cfg = DashboardConfig(url_prefix="", 
             mock_auth=True, ph1_minimal=False,
             wopi_jwt_secret="s", onlyoffice_public_url="http://oo.test",
             manual_routing_excluded_item_names=["Item 85"],
@@ -1145,7 +1178,7 @@ class TestUnroutedBrowse:
     async def test_excluded_item_names_ignored_outside_configured_milestones(self):
         """When milestone whitelist is non-empty, exclusion applies ONLY there.
         Item 85 in a non-DRR milestone stays visible."""
-        cfg = DashboardConfig(
+        cfg = DashboardConfig(url_prefix="", 
             mock_auth=True, ph1_minimal=False,
             wopi_jwt_secret="s", onlyoffice_public_url="http://oo.test",
             manual_routing_excluded_item_names=["Item 85"],

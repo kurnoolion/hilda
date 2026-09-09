@@ -47,7 +47,7 @@ MILESTONE_HEADER_FIELDS: tuple[str, ...] = (
 )
 
 PROJECT_HEADER_FIELDS: tuple[str, ...] = (
-    "LE",
+    "TA",
     "FFW",
 )
 
@@ -162,7 +162,7 @@ def read_project_headers(
     customer_id: str,
     device_id: str,
 ) -> dict[str, Any]:
-    """Read LE + FFW from the Projects_<customer_id> row keyed on
+    """Read TA + FFW from the Projects_<customer_id> row keyed on
     project_model=device_id. Never raises."""
     from core.src.sharepoint_integration.config import ListScope
 
@@ -186,7 +186,7 @@ def read_project_headers(
     if not rows:
         _log.warning(
             "drr_v2_context: read_project_headers: no Projects row matched "
-            "customer=%s device=%s -- DRR header LE + FFW cells will render blank",
+            "customer=%s device=%s -- DRR header TA + FFW cells will render blank",
             customer_id, device_id,
         )
         return empty

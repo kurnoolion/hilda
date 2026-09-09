@@ -69,6 +69,7 @@ def _mk_doc(
     customer: str = "MMK", device: str = "SM-A012U",
     filename: str = "report.pdf",
     resolution: RoutingResolution = RoutingResolution.STAGED_DEFAULT,
+    doc_type: DocType = DocType.TEST_REPORT,
 ) -> DocumentIndexRow:
     """Default resolution=STAGED_DEFAULT (fell through to Default WI) --
     what live unrouted files carry. "Unrouted" for the UI is defined by
@@ -76,7 +77,7 @@ def _mk_doc(
     return DocumentIndexRow(
         file_hash=file_hash, milestone_id=milestone,
         customer_id=customer, device_id=device,
-        doc_type=DocType.TEST_REPORT,
+        doc_type=doc_type,
         doc_id_slug=None, rev_number=None,
         ingest_source=IngestSource.EMAIL,
         original_filename=filename,
@@ -363,6 +364,77 @@ class TestRouteUnroutedToItem:
         assocs = await list_associations_for_file(file_hash)
         assert len(assocs) == 1
         assert assocs[0].delivery_item_id == target_id
+        # UNROUTED-ALIGNED-1 (2026-09-08): _mk_doc defaults to
+        # doc_type=test_report and _mk_item to item_type=
+        # test_tech_waiver_report -- an FR-86-ALIGNED pair. This assertion
+        # previously expected STAGED_NOT_CLASSIFIED, encoding the defect: a
+        # correctly-routed document was parked in staged classification and
+        # silently excluded from carrier upload and DRR->P1 migration.
+        assert assocs[0].nsd_path_type == NSDPathType.CLASSIFIED
+
+    async def test_misaligned_route_still_stages(self):
+        """The mirror of the happy path: doc_type resolved but NOT aligned
+        with the chosen item stays staged, because the TPM has asserted a
+        routing that contradicts the classification and only they can say
+        which one is wrong."""
+        await add_document_index_row(_mk_doc(
+            file_hash=HASH_A, filename="report.pdf",
+            doc_type=DocType.TEST_REPORT,
+        ))
+        item = _mk_item(item_type="compliance_certification_release_notes")
+        await create_delivery_item(item)
+        await write_file(
+            NSDPath.internal_default_workitem(
+                "MMK", "SM-A012U", "DRR", "_unknown_tg", "report.pdf",
+            ),
+            _bytes(b"file bytes here"),
+        )
+        result = await route_unrouted_to_item(
+            file_hash=HASH_A, target_delivery_item_id=item.item_id,
+            tpm_id="tpm@corp",
+        )
+        assert result.outcome == "routed"
+        from core.src.storage.document_ops import list_associations_for_file
+        assocs = await list_associations_for_file(HASH_A)
+        assert assocs[0].nsd_path_type == NSDPathType.STAGED_NOT_CLASSIFIED
+
+    async def test_waiver_is_not_promoted_onto_a_compliance_item(self):
+        """DOCTYPE-WAIVER-VETO-1 parity for the manual-route path.
+
+        An UNRESOLVED doc_type routed onto a compliance item is promoted by
+        singleton alignment -- but a filename carrying the template's waiver
+        marker must not be, or a waiver files as
+        compliance_certification_release_notes, aligns, classifies at rev1
+        and ships to the carrier. Staging a waiver is recoverable; shipping
+        one because it was mislabelled is not.
+        """
+        fn = "SM-DEVICE-001 Waiver Request_WPC Certi.ppt"
+        await add_document_index_row(_mk_doc(
+            file_hash=HASH_A, filename=fn, doc_type=DocType.UNRESOLVED,
+        ))
+        item = _mk_item(item_type="compliance_certification_release_notes")
+        await create_delivery_item(item)
+        await write_file(
+            NSDPath.internal_default_workitem(
+                "MMK", "SM-A012U", "DRR", "_unknown_tg", fn,
+            ),
+            _bytes(b"waiver bytes"),
+        )
+        result = await route_unrouted_to_item(
+            file_hash=HASH_A, target_delivery_item_id=item.item_id,
+            tpm_id="tpm@corp",
+        )
+        assert result.outcome == "routed"
+
+        from core.src.storage.document_ops import (
+            get_document_index_row_by_hash, list_associations_for_file,
+        )
+        doc = await get_document_index_row_by_hash(HASH_A)
+        assert doc.doc_type != DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES, (
+            "a waiver must never be auto-promoted to compliance on the "
+            "manual-route path"
+        )
+        assocs = await list_associations_for_file(HASH_A)
         assert assocs[0].nsd_path_type == NSDPathType.STAGED_NOT_CLASSIFIED
 
     async def test_doc_not_found(self):
@@ -466,3 +538,163 @@ class TestRouteUnroutedToItem:
         )
         filenames = [f.filename for f in files]
         assert "report.pdf" in filenames
+
+
+# ---------------------------------------------------------------------------
+# UNROUTED-TG-SCOPE-1 (2026-09-03): TG-scoped manual-route candidates
+# ---------------------------------------------------------------------------
+
+
+class TestSoleTgResolver:
+    """`sole_tg_resolver` is what finally populates
+    document_index.inferred_tg_name -- the tg_resolver slot was wired to None
+    for EVERY channel, so the column, FR-78 and [D-060] all existed unused.
+
+    It returns the single TG when the candidate set has one (true by
+    construction for NSD, gated to 'HW PL', and for PLM, one TG per ticket
+    per [D-035]) and None when candidates span TGs, which is the honest
+    answer for a multi-TG email batch.
+    """
+
+    def test_single_tg_returns_it(self):
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        items = [{"tg_name": "HW PL"}, {"tg_name": "HW PL"}]
+        assert sole_tg_resolver(items, "", (), ()) == "HW PL"
+
+    def test_multiple_tgs_returns_none(self):
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        items = [{"tg_name": "HW PL"}, {"tg_name": "SW PL"}]
+        assert sole_tg_resolver(items, "", (), ()) is None
+
+    def test_blank_and_missing_tg_names_are_ignored(self):
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        items = [{"tg_name": "HW PL"}, {"tg_name": ""}, {"tg_name": None}, {}]
+        assert sole_tg_resolver(items, "", (), ()) == "HW PL"
+
+    def test_no_tg_at_all_returns_none(self):
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        assert sole_tg_resolver([], "", (), ()) is None
+        assert sole_tg_resolver([{"tg_name": ""}], "", (), ()) is None
+
+    def test_whitespace_is_stripped(self):
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        items = [{"tg_name": " HW PL "}, {"tg_name": "HW PL"}]
+        assert sole_tg_resolver(items, "", (), ()) == "HW PL"
+
+    def test_conforms_to_protocol_call_shape(self):
+        # Router invokes it by keyword with all four args.
+        from core.src.email_service.inbound.attachment_router import sole_tg_resolver
+        assert sole_tg_resolver(
+            candidate_items=[{"tg_name": "GPS"}],
+            sender="x@y", to_addrs=("a@b",), cc_addrs=("c@d",),
+        ) == "GPS"
+
+
+class TestRouteCandidatesTgFilter:
+    async def _seed_two_tgs(self):
+        await create_delivery_item(_mk_item(
+            item_id="MMK-SM-A012U-DRR-5", item_no=5, tg_name="CPM"))
+        await create_delivery_item(_mk_item(
+            item_id="MMK-SM-A012U-DRR-6", item_no=6, tg_name="HW PL"))
+        await create_delivery_item(_mk_item(
+            item_id="MMK-SM-A012U-DRR-7", item_no=7, tg_name="HW PL"))
+
+    async def test_no_tg_filter_returns_all(self):
+        await self._seed_two_tgs()
+        cands = await list_route_candidates_for_scope("MMK", "SM-A012U", "DRR")
+        assert {c.item_no for c in cands} == {5, 6, 7}
+
+    async def test_tg_filter_scopes_to_that_tg(self):
+        await self._seed_two_tgs()
+        cands = await list_route_candidates_for_scope(
+            "MMK", "SM-A012U", "DRR", tg_name="HW PL")
+        assert {c.item_no for c in cands} == {6, 7}
+        assert all(c.tg_name == "HW PL" for c in cands)
+
+    async def test_blank_tg_filter_is_ignored(self):
+        # Blank must behave as "no filter", not "match empty tg_name".
+        await self._seed_two_tgs()
+        for blank in ("", "   ", None):
+            cands = await list_route_candidates_for_scope(
+                "MMK", "SM-A012U", "DRR", tg_name=blank)
+            assert {c.item_no for c in cands} == {5, 6, 7}, blank
+
+    async def test_unknown_tg_returns_empty(self):
+        # Handler treats empty as "fall back to milestone-wide" so the TPM
+        # is never left with a dead dropdown.
+        await self._seed_two_tgs()
+        cands = await list_route_candidates_for_scope(
+            "MMK", "SM-A012U", "DRR", tg_name="NO-SUCH-TG")
+        assert cands == []
+
+    async def test_tg_filter_composes_with_exclusion(self):
+        await self._seed_two_tgs()
+        cands = await list_route_candidates_for_scope(
+            "MMK", "SM-A012U", "DRR", tg_name="HW PL",
+            excluded_item_names=["Some deliverable"],
+        )
+        assert cands == []
+
+
+class TestUnroutedRowCarriesTg:
+    async def test_inferred_tg_name_surfaced(self):
+        doc = _mk_doc(file_hash=HASH_A)
+        doc = doc.model_copy(update={"inferred_tg_name": "HW PL"})
+        await add_document_index_row(doc)
+        rows = await list_unrouted_for_scope("MMK", "SM-A012U", "DRR")
+        assert len(rows) == 1
+        assert rows[0].inferred_tg_name == "HW PL"
+
+    async def test_null_inferred_tg_name_becomes_empty_string(self):
+        # Pre-resolver rows. Handler reads "" as "no scope -> show all".
+        await add_document_index_row(_mk_doc(file_hash=HASH_B))
+        rows = await list_unrouted_for_scope("MMK", "SM-A012U", "DRR")
+        assert rows[0].inferred_tg_name == ""
+
+
+class TestRouteReadsFromTgScopedSourcePath:
+    """The coupling that made this change risky: ingest writes the unrouted
+    file to `<inferred_tg_name>/_unrouted/`, but route_unrouted_to_item
+    hardcoded `_unknown_tg` when computing the source path. Populating
+    inferred_tg_name without fixing that would have made every newly
+    ingested unrouted file unroutable -- the move would read a path that
+    does not exist.
+    """
+
+    async def test_routes_file_written_under_its_tg_segment(self):
+        doc = _mk_doc(file_hash=HASH_A, filename="hw_doc.pdf")
+        doc = doc.model_copy(update={"inferred_tg_name": "HW PL"})
+        await add_document_index_row(doc)
+        item = _mk_item(tg_name="HW PL")
+        await create_delivery_item(item)
+        # Ingest-side path: TG segment, NOT _unknown_tg.
+        await write_file(
+            NSDPath.internal_default_workitem(
+                "MMK", "SM-A012U", "DRR", "HW PL", "hw_doc.pdf"),
+            _bytes(b"hw bytes"),
+        )
+        result = await route_unrouted_to_item(
+            file_hash=HASH_A,
+            target_delivery_item_id=item.item_id,
+            tpm_id="tpm@corp",
+        )
+        assert result.outcome == "routed", result.error
+
+    async def test_legacy_null_tg_still_routes_from_unknown_tg(self):
+        # Rows ingested before the resolver was wired keep NULL, so the
+        # source path must still resolve to _unknown_tg.
+        await add_document_index_row(
+            _mk_doc(file_hash=HASH_B, filename="legacy.pdf"))
+        item = _mk_item()
+        await create_delivery_item(item)
+        await write_file(
+            NSDPath.internal_default_workitem(
+                "MMK", "SM-A012U", "DRR", "_unknown_tg", "legacy.pdf"),
+            _bytes(b"legacy bytes"),
+        )
+        result = await route_unrouted_to_item(
+            file_hash=HASH_B,
+            target_delivery_item_id=item.item_id,
+            tpm_id="tpm@corp",
+        )
+        assert result.outcome == "routed", result.error

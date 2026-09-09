@@ -121,6 +121,12 @@ def bootstrap_task_deps(
     # values via null-guard. Eager load at startup so hot paths never hit disk.
     _bootstrap_template_lookup(result)
 
+    # -------- 0.6 Cross-milestone item mapping (DRRP1-1) --------
+    # Same eager-load rationale as template_lookup above: submit_to_carrier
+    # consults this per item, so it must not hit disk on the hot path. A carrier
+    # with no mapping file is normal and caches an empty list.
+    _bootstrap_milestone_item_mapping(result)
+
     # -------- 1. RuleEngine from YAML rules directory --------
     rule_engine = _build_rule_engine(rules_dir, result)
 
@@ -514,6 +520,36 @@ def _bootstrap_template_lookup(result: BootstrapResult) -> None:
     except Exception as exc:  # noqa: BLE001
         result.warnings.append(
             f"template_lookup_skip: {type(exc).__name__}: {str(exc)[:120]}"
+        )
+
+
+def _bootstrap_milestone_item_mapping(result: BootstrapResult) -> None:
+    """DRRP1-1 (2026-09-01): eager-load per-carrier cross-milestone mappings.
+
+    Best-effort, mirroring _bootstrap_template_lookup. Absence is the normal
+    case -- most carriers have no mapping file -- so an empty load is INFO, not
+    a warning. A file that exists but fails to parse IS surfaced as a warning,
+    because that silently disables delivery of every mapped document.
+    """
+    try:
+        from core.src.template_schema import milestone_item_mapping
+        loaded = milestone_item_mapping.load_all_mappings()
+        wired = [cid for cid, ok in loaded.items() if ok]
+        failed = [cid for cid, ok in loaded.items() if not ok]
+        if wired:
+            _log.warning("milestone_item_mapping wired: customers=%s", wired)
+        if failed:
+            result.warnings.append(
+                f"milestone_item_mapping_partial: failed customers={failed}"
+            )
+        if not loaded:
+            _log.info(
+                "milestone_item_mapping: no carrier mapping files found "
+                "(normal unless a carrier needs cross-milestone submission)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"milestone_item_mapping_skip: {type(exc).__name__}: {str(exc)[:120]}"
         )
 
 

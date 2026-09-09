@@ -106,7 +106,7 @@ class TestV2HeaderBlock:
         defaults = dict(
             items=[_item(1)],
             customer_id="MMK",
-            device_id="SM-F976U",
+            device_id="SM-DEVICE-001",
             milestone_id="DRR",
             section_grouping=[{
                 "section": "Product Documentation Review",
@@ -119,7 +119,7 @@ class TestV2HeaderBlock:
                 "target_date": date(2026, 4, 29),
             },
             project_headers={
-                "LE": date(2026, 6, 11),
+                "TA": date(2026, 6, 11),
                 "FFW": date(2026, 5, 13),
             },
         )
@@ -157,7 +157,7 @@ class TestV2HeaderBlock:
         ws = _open_ws(self._v2_call())
         # Row 6: Model Number -> device_id (plain string)
         assert ws.cell(row=6, column=2).value == "Model Number:"
-        assert ws.cell(row=6, column=3).value == "SM-F976U"
+        assert ws.cell(row=6, column=3).value == "SM-DEVICE-001"
         # Row 7: fld_lockdown_date now a native date + number_format,
         # NOT a pre-formatted string. openpyxl round-trips to datetime.
         assert ws.cell(row=7, column=2).value == "Compliance Matrix Lockdown On:"
@@ -171,7 +171,7 @@ class TestV2HeaderBlock:
         # Row 11: FFW -> native date
         v11 = ws.cell(row=11, column=3).value
         assert v11.year == 2026 and v11.month == 5 and v11.day == 13
-        # Row 12: LE -> native date
+        # Row 12: TA -> native date
         v12 = ws.cell(row=12, column=3).value
         assert v12.year == 2026 and v12.month == 6 and v12.day == 11
         # Every date cell must carry the mm/dd/yy number_format so Excel
@@ -254,7 +254,7 @@ class TestV2Body:
         ]
         ws = _open_ws(build_drr_report_excel(
             items=items,
-            customer_id="MMK", device_id="SM-F976U", milestone_id="DRR",
+            customer_id="MMK", device_id="SM-DEVICE-001", milestone_id="DRR",
             section_grouping=grouping,
             drr_version="5.7",
         ))
@@ -380,70 +380,71 @@ class TestV2Body:
 
 
 class TestOwnerColumnDisplay:
-    """Owner column (E) rules per OWNER-6/7:
-      1. owner_name (list post B-final-B) joined by "; "  (preferred)
-      2. tg_name                                          (empty/missing list)
+    """Owner column (E) rules per DRR-OWNER-TG-1 (2026-09-02):
+      1. tg_name                                          (preferred)
+      2. owner_name (list post B-final-B) joined by "; "  (tg_name blank)
+
+    This INVERTS OWNER-6/7, which preferred the individual. The workbook is
+    carrier-facing, so it names the accountable technology group rather than
+    publishing Samsung staff names to Verizon.
     """
 
-    def _item_with_owner(self, item_no, owner_name):
-        it = _item(item_no)
+    GROUPING = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+
+    def _build(self, it):
+        # Row 16 = first data row (row 15 is the section header).
+        return _open_ws(build_drr_report_excel(
+            items=[it],
+            customer_id="MMK", device_id="X", milestone_id="M",
+            section_grouping=self.GROUPING,
+        )).cell(row=16, column=5).value
+
+    def _item_with_owner(self, item_no, owner_name, tg_name="TPM"):
+        it = _item(item_no, tg_name=tg_name)
         it.owner_name = owner_name
         return it
 
-    def test_owner_column_joins_list_with_semicolon(self):
-        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
-        it = self._item_with_owner(1, ["Alice", "Bob", "Carol"])
-        ws = _open_ws(build_drr_report_excel(
-            items=[it],
-            customer_id="MMK", device_id="X", milestone_id="M",
-            section_grouping=grouping,
-        ))
-        # Row 16 = first data row (row 15 is section header)
-        assert ws.cell(row=16, column=5).value == "Alice; Bob; Carol"
+    def test_tg_name_wins_over_individual_owners(self):
+        # The change: previously rendered "Alice; Bob; Carol".
+        it = self._item_with_owner(1, ["Alice", "Bob", "Carol"], tg_name="MNO-ETM")
+        assert self._build(it) == "MNO-ETM"
 
-    def test_owner_column_single_list_entry(self):
-        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
-        it = self._item_with_owner(1, ["Alice"])
-        ws = _open_ws(build_drr_report_excel(
-            items=[it],
-            customer_id="MMK", device_id="X", milestone_id="M",
-            section_grouping=grouping,
-        ))
-        assert ws.cell(row=16, column=5).value == "Alice"
+    def test_tg_name_wins_over_a_single_owner(self):
+        it = self._item_with_owner(1, ["Alice"], tg_name="CPM")
+        assert self._build(it) == "CPM"
 
-    def test_owner_column_strips_and_drops_empty_list_entries(self):
-        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
-        it = self._item_with_owner(1, ["  Alice ", "", None, " Bob"])
-        ws = _open_ws(build_drr_report_excel(
-            items=[it],
-            customer_id="MMK", device_id="X", milestone_id="M",
-            section_grouping=grouping,
-        ))
-        assert ws.cell(row=16, column=5).value == "Alice; Bob"
+    def test_no_individual_name_leaks_when_tg_present(self):
+        it = self._item_with_owner(
+            1, ["Devi Siva Supriya Durai Pandian Ananthabai"], tg_name="MNO-UX")
+        rendered = self._build(it)
+        assert rendered == "MNO-UX"
+        assert "Devi" not in rendered
 
-    def test_owner_column_empty_list_falls_back_to_tg_name(self):
-        """OWNER-7: empty owner_name list -> tg_name fallback."""
-        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
-        it = self._item_with_owner(1, [])
-        it.tg_name = "CPM"
-        ws = _open_ws(build_drr_report_excel(
-            items=[it],
-            customer_id="MMK", device_id="X", milestone_id="M",
-            section_grouping=grouping,
-        ))
-        assert ws.cell(row=16, column=5).value == "CPM"
+    def test_falls_back_to_owner_names_when_tg_blank(self):
+        # tg_name is null on Default / unrouted items; a blank Owner column
+        # in a carrier deliverable is worse than a name.
+        it = self._item_with_owner(1, ["Alice", "Bob"], tg_name="")
+        assert self._build(it) == "Alice; Bob"
 
-    def test_owner_column_missing_owner_falls_back_to_tg_name(self):
-        """No owner_name attribute at all -> fallback to tg_name so the
-        column still reads meaningfully."""
-        grouping = [{"section": "Sec", "work_items": [{"item_no": 1, "item_name": "X"}]}]
+    def test_fallback_strips_and_drops_empty_entries(self):
+        it = self._item_with_owner(1, ["  Alice ", "", None, " Bob"], tg_name="")
+        assert self._build(it) == "Alice; Bob"
+
+    def test_tg_name_is_stripped(self):
+        it = self._item_with_owner(1, ["Alice"], tg_name="  MNO-ETM  ")
+        assert self._build(it) == "MNO-ETM"
+
+    def test_whitespace_only_tg_name_falls_back(self):
+        it = self._item_with_owner(1, ["Alice"], tg_name="   ")
+        assert self._build(it) == "Alice"
+
+    def test_blank_when_neither_tg_nor_owner(self):
+        it = self._item_with_owner(1, [], tg_name="")
+        assert self._build(it) in (None, "")
+
+    def test_tg_name_used_when_no_owner_attribute_at_all(self):
         it = _item(1, tg_name="CPM")  # _item fixture doesn't set owner_name
-        ws = _open_ws(build_drr_report_excel(
-            items=[it],
-            customer_id="MMK", device_id="X", milestone_id="M",
-            section_grouping=grouping,
-        ))
-        assert ws.cell(row=16, column=5).value == "CPM"
+        assert self._build(it) == "CPM"
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +537,7 @@ class TestV2FourTabWorkbook:
         defaults = dict(
             items=[_item(1)],
             customer_id="MMK",
-            device_id="SM-F976U",
+            device_id="SM-DEVICE-001",
             milestone_id="DRR",
             section_grouping=[{
                 "section": "Sec",
@@ -575,7 +576,7 @@ class TestV2FourTabWorkbook:
         wb = self._open_wb(self._v2_call())
         wv = wb["Waivers"]
         # Title has device_id interpolated
-        assert "SM-F976U" in (wv.cell(row=1, column=1).value or "")
+        assert "SM-DEVICE-001" in (wv.cell(row=1, column=1).value or "")
         # Row 2 = the 6 canonical headers
         assert wv.cell(row=2, column=1).value == "#"
         assert wv.cell(row=2, column=2).value == "Description"
@@ -638,16 +639,16 @@ class TestV2FourTabWorkbook:
             milestone_headers={"fld_lockdown_date": "2026-05-12",
                                 "req_version": "Feb 2026",
                                 "target_date": "2026-07-01"},
-            project_headers={"FFW": "2026-07-15", "LE": None},
+            project_headers={"FFW": "2026-07-15", "TA": None},
         ))
         apps = wb["Applications"]
         # Row 1 title
         assert apps.cell(row=1, column=1).value == "OEM Model"
         # Row 2 subtitle at col C (col A/B reserved for logo)
         assert apps.cell(row=2, column=3).value == "Device Readiness Review"
-        # Row 6 Model Number: | SM-F976U | ... DRR Date: | value
+        # Row 6 Model Number: | SM-DEVICE-001 | ... DRR Date: | value
         assert apps.cell(row=6, column=2).value == "Model Number:"
-        assert apps.cell(row=6, column=3).value == "SM-F976U"
+        assert apps.cell(row=6, column=3).value == "SM-DEVICE-001"
         assert apps.cell(row=6, column=7).value == "DRR Date:"
         # Row 7 Compliance Matrix Lockdown On + Phase 1 Date
         assert apps.cell(row=7, column=2).value == "Compliance Matrix Lockdown On:"
@@ -794,7 +795,7 @@ class TestV2FourTabWorkbook:
         apps = wb["Applications"]
 
         # Source values win in all 5 cells
-        assert apps.cell(row=6, column=3).value == "SM-SOURCE-999"       # not SM-F976U
+        assert apps.cell(row=6, column=3).value == "SM-SOURCE-999"       # not SM-DEVICE-001
         assert apps.cell(row=6, column=8).value == "July 4, 2026"         # not 2026-07-01
         assert apps.cell(row=7, column=3).value == "12/01/26"             # not 2026-05-12
         assert apps.cell(row=7, column=8).value == "Aug 1, 2026"          # not 2026-07-15
@@ -820,7 +821,7 @@ class TestV2FourTabWorkbook:
         ))
         apps = wb["Applications"]
         # Fallbacks: device_id + milestone_headers + project_headers
-        assert apps.cell(row=6, column=3).value == "SM-F976U"
+        assert apps.cell(row=6, column=3).value == "SM-DEVICE-001"
         assert apps.cell(row=8, column=3).value == "Feb 2026"
 
     def test_applications_error_note_on_missing_sheet_in_source(self):

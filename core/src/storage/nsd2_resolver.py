@@ -1,4 +1,4 @@
-"""NSD2 device-folder path resolver -- NSD2-1 (2026-08-08).
+r"""NSD2 device-folder path resolver -- NSD2-1 (2026-08-08).
 
 Given a DeliveryItem, compute the absolute NSD2 folder path where its
 documents live. Called by the NSD2 poller (nsd2_poll_task) before it
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -35,10 +36,15 @@ __all__ = [
     "strip_sm_prefix",
     "walk_nsd2_directory",
     "is_excluded_folder_name",
+    "is_allowed_root_folder",
+    "allowed_root_folders",
+    "find_carrier_anchors",
+    "NSD2_ANCHOR_SEARCH_MAX_DEPTH",
     "DEVICE_TYPE_FOLDER_MAP",
     "PHONE_MODEL_TYPE_FOLDER_MAP",
     "MMK_EXCLUDED_FOLDER_SUBSTRINGS",
     "EXCLUSION_CARRIERS",
+    "CARRIER_ALLOWED_ROOT_FOLDERS",
     "NSD2_DEFAULT_MAX_FILE_BYTES",
 ]
 
@@ -262,6 +268,50 @@ MMK_EXCLUDED_FOLDER_SUBSTRINGS: tuple[str, ...] = (
 
 EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
 
+
+# NSD2-VZW-1 (2026-09-01): carrier -> the ONLY top-level sub-folders of the
+# resolved device folder whose contents may be ingested. An entry here turns
+# ingestion from a denylist into an allowlist for that carrier, because a
+# denylist can only block what someone remembered to enumerate: before this,
+# sibling folders like 'ATT', 'TMO' or 'Sprint' passed the filter, and loose
+# files sitting directly in the device folder were ingested too (for
+# one device that meant a stray workbook plus a 338 MB 'M3 HW
+# Deliverables.zip', which the archive extractor then fanned out).
+#
+# Semantics when a carrier appears here:
+#   * depth 0 (direct children of the device folder) -- ONLY folders whose
+#     name matches this tuple are descended into. Every other folder, and
+#     every loose FILE at this level, is skipped.
+#   * depth >= 1 -- no filtering whatsoever. Every file under the allowed
+#     folder is yielded at any depth, per architect 2026-09-01: "all files
+#     under vzw/ folder are uploaded". The MMK_EXCLUDED_FOLDER_SUBSTRINGS
+#     denylist is deliberately NOT applied inside, both because the
+#     allowlist has already done its job at the boundary and because that
+#     substring match has false positives -- 'CHA' silently prunes
+#     'Charging', 'Mechanical', 'Exchange' and 'Chart'.
+#
+# Matching is case-insensitive and EXACT on the folder name (not substring),
+# so 'VZW SE' -- a genuinely different carrier scope -- does not qualify.
+CARRIER_ALLOWED_ROOT_FOLDERS: dict[str, tuple[str, ...]] = {
+    "MMK": ("VZW", "Verizon"),
+}
+
+
+def allowed_root_folders(customer_id: str) -> tuple[str, ...] | None:
+    """Allowed top-level folder names for `customer_id`, or None when the
+    carrier has no allowlist (in which case the legacy denylist applies)."""
+    return CARRIER_ALLOWED_ROOT_FOLDERS.get(customer_id)
+
+
+def is_allowed_root_folder(folder_name: str, customer_id: str) -> bool:
+    """True when `folder_name` is an allowed top-level folder for this
+    carrier. Carriers without an allowlist accept everything (True)."""
+    allowed = allowed_root_folders(customer_id)
+    if allowed is None:
+        return True
+    name = (folder_name or "").strip().lower()
+    return any(name == a.strip().lower() for a in allowed)
+
 # Per-file size cap. Files larger than this are skipped + WARN-logged
 # rather than pulled into memory. 500 MB matches the archive-extractor
 # total-decompressed cap; individual owner-uploaded documents this large
@@ -271,15 +321,114 @@ EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
 NSD2_DEFAULT_MAX_FILE_BYTES: int = 500 * 1024 * 1024   # 500 MB
 
 
+def _name_tokens(folder_name: str) -> set[str]:
+    """Split a folder name into lowercased alphanumeric tokens.
+    'Deliverables - DISH Config' -> {'deliverables', 'dish', 'config'}."""
+    return {t for t in re.split(r"[^a-z0-9]+", folder_name.lower()) if t}
+
+
 def is_excluded_folder_name(folder_name: str, customer_id: str) -> bool:
     """Return True when this folder should be skipped for the given
     customer_id. Only carriers in EXCLUSION_CARRIERS get filtered;
-    everyone else passes through. Case-insensitive substring match.
+    everyone else passes through. Case-insensitive.
+
+    NSD2-VZW-1 (2026-09-01): single-word needles match a WHOLE TOKEN, not a
+    bare substring. The old substring test made 'CHA' (Charter) silently
+    prune 'Charging', 'Mechanical', 'Exchange' and 'Chart' along with their
+    entire subtrees -- plausible HW-deliverable folder names, dropped with
+    no production trace. Multi-word needles ('VZW SE', 'Comcast Overrides'
+    shapes) still match as a substring of the full name, since a phrase
+    cannot be a single token.
     """
     if customer_id not in EXCLUSION_CARRIERS:
         return False
     lowered = folder_name.lower()
-    return any(needle.lower() in lowered for needle in MMK_EXCLUDED_FOLDER_SUBSTRINGS)
+    tokens = _name_tokens(folder_name)
+    for needle in MMK_EXCLUDED_FOLDER_SUBSTRINGS:
+        n = needle.strip().lower()
+        if not n:
+            continue
+        if _name_tokens(n) != {n}:      # phrase / punctuated -> substring
+            if n in lowered:
+                return True
+        elif n in tokens:               # single token -> whole-word match
+            return True
+    return False
+
+
+# How many levels below the device folder to search for a carrier partition
+# folder. Known layouts put it at depth 0 (S948U: VZW/) or depth 1 (F776U:
+# Deliverable/VZW/); 3 is architect-set (2026-09-01) as comfortably past
+# both without scanning deep trees.
+#
+# The cap bounds scan cost; it is not a safety mechanism, and it does not
+# fail safe -- exceeding it silently downgrades to ingesting the WHOLE
+# device folder. `find_carrier_anchors` therefore WARNs when the search is
+# truncated with folders still unexamined, so a layout that outgrows this
+# shows up in the log rather than as another carrier's files in Drive.
+NSD2_ANCHOR_SEARCH_MAX_DEPTH: int = 3
+
+
+def find_carrier_anchors(
+    root: Path,
+    customer_id: str,
+    *,
+    max_depth: int = NSD2_ANCHOR_SEARCH_MAX_DEPTH,
+) -> tuple[list[Path], bool]:
+    """Locate the carrier partition folder(s) under `root`.
+
+    Breadth-first, level by level, stopping at the SHALLOWEST level that
+    contains an allowlisted folder -- so a genuine 'VZW/' at depth 0 always
+    wins over anything deeper. Denylisted folders are never descended into,
+    so a 'VZW' nested inside 'STG/' can never become an anchor.
+
+    Returns `(anchors, saw_partition_marker)`:
+      * `anchors` -- every allowlisted folder at that shallowest level.
+        Empty when the carrier has no allowlist or nothing matched.
+      * `saw_partition_marker` -- True when a DENYLISTED folder was seen
+        during the search. This distinguishes "partitioned, but this device
+        has no VZW folder" (ingest nothing) from "flat device folder, no
+        carrier partitions anywhere" (ingest everything).
+    """
+    allowed = allowed_root_folders(customer_id)
+    if allowed is None:
+        return [], False
+
+    saw_marker = False
+    level: list[Path] = [root]
+    for _depth in range(max_depth + 1):
+        if not level:
+            break
+        anchors: list[Path] = []
+        next_level: list[Path] = []
+        for parent in level:
+            try:
+                children = [c for c in parent.iterdir() if c.is_dir()]
+            except (OSError, PermissionError):
+                continue
+            for child in children:
+                if is_allowed_root_folder(child.name, customer_id):
+                    anchors.append(child)
+                elif is_excluded_folder_name(child.name, customer_id):
+                    # A partition marker, and never descended into.
+                    saw_marker = True
+                else:
+                    next_level.append(child)
+        if anchors:
+            return sorted(anchors), True
+        level = next_level
+    if level:
+        # Ran out of depth with folders still unexamined. Distinguishes
+        # "this device folder genuinely has no carrier folder" from "we
+        # stopped looking too early" -- the latter silently downgrades to
+        # ingesting the whole device folder, so it must be visible.
+        _log.warning(
+            "NSD2_WALK: anchor search hit the depth cap (%d) under %s with "
+            "%d folder(s) still unexamined (customer=%s). If a %s folder "
+            "exists deeper, raise NSD2_ANCHOR_SEARCH_MAX_DEPTH.",
+            max_depth, root, len(level), customer_id, list(allowed),
+        )
+    return [], saw_marker
 
 
 def walk_nsd2_directory(
@@ -319,11 +468,56 @@ def walk_nsd2_directory(
     skipped_excluded = 0
     skipped_oversized = 0
     skipped_unreadable = 0
+
+    # NSD2-VZW-1: three real layouts exist under the same NSD2 tree --
+    #   S948U (M3)     -> VZW/ + STG/ + loose files      (partition at depth 0)
+    #   F776U (Filp8)  -> Deliverable/VZW/...            (partition at depth 1)
+    #   S731U (S25 FE) -> '1. HW Release notes(done)/'   (no partition at all)
+    # so the carrier folder is located by search, not assumed to be a direct
+    # child. When found, it becomes the ONLY ingest root and nothing below it
+    # is filtered. When the device folder has no carrier partition anywhere,
+    # gating on 'VZW' would ingest nothing, so we fall back to the legacy
+    # denylist walk -- loudly, because that fallback is a guess and the
+    # HW PL TG needs a worklist of folders to normalise.
+    allowed = allowed_root_folders(customer_id)
+    anchors: list[Path] = []
+    if allowed is not None:
+        anchors, saw_marker = find_carrier_anchors(root, customer_id)
+        if anchors:
+            _log.warning(
+                "NSD2_WALK: carrier anchor(s) for %s -> %s (customer=%s) -- "
+                "ingesting only these subtrees",
+                root, [a.relative_to(root).as_posix() for a in anchors],
+                customer_id,
+            )
+        else:
+            # No carrier folder anywhere in range. Fall back to the legacy
+            # denylist walk -- deliberately NOT "ingest nothing", even when a
+            # foreign-carrier folder was seen: that signal is weak (a stray
+            # 'DISH Config/' deep inside a deliverable folder does not make
+            # the device folder carrier-partitioned) and silently ingesting
+            # nothing is the worse failure. Known foreign-carrier folders are
+            # still pruned by the denylist on this path.
+            _log.warning(
+                "NSD2_WALK: NONCONFORMING LAYOUT -- %s has no %s folder within "
+                "%d levels (customer=%s foreign_carrier_folders_seen=%s). "
+                "Falling back to ingesting the whole device folder. Ask the "
+                "HW PL TG to place deliverables under a carrier folder.",
+                root, list(allowed), NSD2_ANCHOR_SEARCH_MAX_DEPTH,
+                customer_id, saw_marker,
+            )
+            allowed = None  # legacy denylist walk
+
+    gated = bool(anchors)
     # Use os.walk-style traversal via manual recursion so we can PRUNE
     # excluded subtrees before recursing into them (rglob doesn't prune).
-    stack: list[Path] = [root]
+    # In gated mode the walk is seeded from the anchors, so everything
+    # outside them is unreachable rather than filtered.
+    stack: list[tuple[Path, int]] = (
+        [(a, 1) for a in anchors] if gated else [(root, 0)]
+    )
     while stack:
-        current = stack.pop()
+        current, depth = stack.pop()
         try:
             children = list(current.iterdir())
         except (OSError, PermissionError) as exc:
@@ -335,16 +529,22 @@ def walk_nsd2_directory(
         for child in children:
             try:
                 if child.is_dir():
-                    if is_excluded_folder_name(child.name, customer_id):
-                        # Prune whole subtree
+                    # Inside an anchor nothing is filtered: architect
+                    # 2026-09-01, "all files under vzw/ folder are uploaded".
+                    if not gated and is_excluded_folder_name(
+                        child.name, customer_id
+                    ):
+                        # Prune whole subtree. WARNING not INFO: the deployed
+                        # containers run at WARNING, so an INFO line here made
+                        # dropped files invisible in production.
                         skipped_excluded += 1
-                        _log.info(
+                        _log.warning(
                             "NSD2_WALK: pruned excluded subfolder %s "
                             "(customer=%s)",
                             child, customer_id,
                         )
                         continue
-                    stack.append(child)
+                    stack.append((child, depth + 1))
                     continue
                 if not child.is_file():
                     continue  # symlink, socket, etc.
@@ -389,7 +589,10 @@ def walk_nsd2_directory(
 
     _log.warning(
         "NSD2_WALK: root=%s customer=%s summary yielded=%d "
-        "skipped_excluded=%d skipped_oversized=%d skipped_unreadable=%d",
+        "skipped_excluded=%d skipped_oversized=%d skipped_unreadable=%d "
+        "anchors=%s mode=%s",
         root, customer_id, yielded,
         skipped_excluded, skipped_oversized, skipped_unreadable,
+        [a.relative_to(root).as_posix() for a in anchors] if anchors else "-",
+        "anchored" if gated else "whole-device-folder",
     )

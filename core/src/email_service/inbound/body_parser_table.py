@@ -91,6 +91,59 @@ _HEADER_ALIASES = {
 }
 
 
+# OUTREACH-STATUS-HINT-1 (2026-09-02): header lookup was an exact match on
+# the lowercased cell text, so every cosmetic change to a header in
+# outreach_table.j2 silently broke reply parsing until an alias was added by
+# hand -- DRR-V2-8k needed two entries just for the date-format hint, and the
+# new "Current Status (Open/Closed/Blocked/Delayed)" hint would have needed
+# more. Worse, a missing `status` alias makes the table fail
+# _find_hilda_table_rows entirely, so the WHOLE reply stops parsing rather
+# than one column going blank.
+#
+# Resolution is now normalising, in three widening steps. Exact match is
+# tried first so existing behaviour and tests are untouched.
+_PAREN_HINT_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _squash(text: str) -> str:
+    """Lowercase and drop everything that is not alphanumeric.
+
+    Covers the `<br>` case: bs4's get_text(strip=True) renders
+    `Current Status<br>(Open/...)` as `Current Status(Open/...)` with no
+    space, so whitespace cannot be relied on.
+    """
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+_HEADER_ALIASES_SQUASHED = {
+    _squash(k): v for k, v in _HEADER_ALIASES.items()
+}
+
+
+def resolve_header_alias(header_text: str) -> str | None:
+    """Map an outreach-table header cell to its canonical field, or None.
+
+    1. exact match on the lowercased, stripped text (legacy behaviour)
+    2. same, with a trailing parenthetical hint removed -- so
+       "Current Status (Open/Closed/Blocked/Delayed)" and
+       "Completion Date (MM/DD/YYYY)" resolve without a per-hint alias
+    3. alphanumeric-squashed match, which absorbs `<br>`-joined text and
+       any stray punctuation an email client introduces
+    """
+    text = (header_text or "").strip().lower()
+    if not text:
+        return None
+    hit = _HEADER_ALIASES.get(text)
+    if hit is not None:
+        return hit
+    without_hint = _PAREN_HINT_RE.sub("", text).strip()
+    hit = _HEADER_ALIASES.get(without_hint)
+    if hit is not None:
+        return hit
+    return (_HEADER_ALIASES_SQUASHED.get(_squash(without_hint))
+            or _HEADER_ALIASES_SQUASHED.get(_squash(text)))
+
+
 # DRR-V2-3: date-cell parser. Owners will type freely; try common shapes.
 # All returned dates use `datetime.date`. Empty / unparseable → None
 # (never raises; we WARN-log for observability).
@@ -134,6 +187,13 @@ def _parse_completion_date_cell(raw: str) -> date | None:
 _STATUS_CELL_TO_SYMBOL = {
     "open":     "OPEN",
     "closed":   "OWNER_CLOSED",
+    # OUTREACH-STATUS-HINT-1 (2026-09-02): owners type "Close" as often as
+    # "Closed". Previously that fell through to the unknown-status branch,
+    # which uppercases the raw value ("CLOSE") and skips the state
+    # transition -- so the owner believed they had closed the item and HILDA
+    # left it Open. Accepting the variant is strictly safer than a template
+    # instruction nobody reads.
+    "close":    "OWNER_CLOSED",
     "blocked":  "BLOCKED",
     "delayed":  "DELAYED",
 }
@@ -268,7 +328,7 @@ def _find_hilda_table_rows(soup):
         header_texts = [c.get_text(strip=True).lower() for c in header_cells]
         header_map: dict[str, int] = {}
         for idx, text in enumerate(header_texts):
-            canonical = _HEADER_ALIASES.get(text)
+            canonical = resolve_header_alias(text)
             if canonical is not None and canonical not in header_map:
                 header_map[canonical] = idx
         # Required columns for a successful parse: item_no + status.

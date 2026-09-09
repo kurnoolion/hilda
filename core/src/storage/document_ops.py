@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from core.src.diagnostics.error_codes import PipelineError
 from core.src.storage.db import (
@@ -181,6 +181,27 @@ async def find_doc_id_slugs_for_item(delivery_item_id: str, doc_type: DocType) -
             .distinct()
         )
         return sorted(s for (s,) in result.all())
+
+
+async def get_max_rev_for_slug(milestone_id: str, doc_id_slug: str) -> int:
+    """REV-1 (2026-08-30): highest rev_number in a (milestone, doc_id_slug)
+    revision family, or 0 when the family has no resolved rows yet.
+
+    Callers add 1 to get the next revision. Cheaper than list_revisions when
+    only the tip is needed (the router's Step C hot path runs this per
+    classified attachment). Staged rows with NULL rev_number are excluded --
+    they aren't family members until their slug/rev resolve, matching
+    list_revisions' contract.
+    """
+    async with _session() as session:
+        result = await session.execute(
+            select(func.max(DocumentIndexTable.rev_number)).where(
+                DocumentIndexTable.milestone_id == milestone_id,
+                DocumentIndexTable.doc_id_slug == doc_id_slug,
+                DocumentIndexTable.rev_number.is_not(None),
+            )
+        )
+        return int(result.scalar() or 0)
 
 
 async def list_revisions(milestone_id: str, doc_id_slug: str) -> list[DocumentIndexRow]:

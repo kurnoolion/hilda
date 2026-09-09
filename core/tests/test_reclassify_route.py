@@ -60,7 +60,7 @@ async def env(tmp_path):
 
 @pytest.fixture
 def cfg():
-    return DashboardConfig(
+    return DashboardConfig(url_prefix="", 
         mock_auth=True, ph1_minimal=False,
         wopi_jwt_secret="test-secret-abcdef1234567890",
         onlyoffice_public_url="http://oo.test/office",

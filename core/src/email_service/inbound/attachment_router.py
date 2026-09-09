@@ -49,6 +49,8 @@ __all__ = [
     "TgResolverProtocol",
     "load_doc_type_rules",
     "_singleton_alignment_doc_type",
+    "keyword_fallback_doc_type",
+    "sole_tg_resolver",
 ]
 
 
@@ -73,6 +75,80 @@ def _singleton_alignment_doc_type(item_type: str) -> "DocType | None":
         return DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES
     return None
 
+
+# DOCTYPE-FALLBACK-1 (2026-09-02): keyword tie-breaker for the one item_type
+# that `_singleton_alignment_doc_type` cannot resolve.
+#
+# Maintaining doc_type_filename_rules.yaml by hand does not scale -- MMK
+# already carries 77 test_report patterns and 45 release-notes patterns, each
+# added after a document arrived UNRESOLVED and a TPM reclassified it. For
+# item_type=test_tech_waiver_report the three valid doc_types are separable by
+# a couple of filename keywords, so the ladder gets a third rung instead of
+# another 77 regexes.
+#
+# 'waiver' is checked FIRST and deliberately as a plain substring: it is the
+# one doc_type with an outward-facing consequence (waivers are never uploaded
+# on the P1 submit path), and per architect 2026-09-02 every waiver filename
+# carries the word from the template -- so this rung is both high-precision
+# and high-recall, which is what makes the test_report default below safe.
+_WAIVER_SUBSTRING = "waiver"
+
+
+def filename_says_waiver(filename: str) -> bool:
+    """True when the filename carries the template's 'waiver' marker.
+
+    Deliberately item_type-independent and used as a VETO, not just a rung:
+    per architect 2026-09-02 every waiver filename carries this word, so a
+    name containing it must never be auto-classified as something else. See
+    DOCTYPE-WAIVER-VETO-1 at the promotion site for why that matters.
+    """
+    return _WAIVER_SUBSTRING in (filename or "").lower()
+
+# 'technical report' / 'tech report' as a PHRASE, plus 'TR' as a whole token.
+# Bare 'report' is intentionally NOT a signal: nearly every *test* report
+# filename contains it (see the .*testreport.* and .*test_result.* rules
+# below), so keying on it would invert the two majority buckets.
+#
+# 'TR' must be delimited -- as a bare substring it matches Control, Central,
+# Extract, Transmit, Strategic, Country, Spectrum. Same failure mode as the
+# NSD2 denylist's 'CHA' matching 'Charging' (fixed 2026-09-01).
+_TECH_REPORT_RE = re.compile(
+    r"(?:tech(?:nical)?[_\-\s]*report)"      # technical report / tech_report
+    r"|(?:(?:^|[_\-\s(])TR(?:[_\-\s).]|$))",  # TR as its own segment
+    re.IGNORECASE,
+)
+
+
+def keyword_fallback_doc_type(
+    filename: str, item_type: str
+) -> "DocType | None":
+    """Last-rung doc_type guess from `filename`, scoped by `item_type`.
+
+    Returns None -- meaning "leave UNRESOLVED, let it stage for TPM" -- unless
+    `item_type` is the one whose FR-86-aligned set is
+    {test_report, tech_report, waiver}. Scoping matters: without it a
+    release-notes slot could be handed `test_report` and land misaligned.
+
+    Ladder, in order:
+      1. 'waiver' anywhere in the name -> WAIVER
+      2. 'technical report' / 'tech report' / 'TR' token -> TECH_REPORT
+      3. anything else -> TEST_REPORT
+
+    Rung 3 is a genuine default rather than a match, which is only sound
+    because rung 1 catches every waiver (see _WAIVER_SUBSTRING). If that
+    template convention ever changes, rung 3 must become opt-in per TG.
+    """
+    if item_type != ItemType.TEST_TECH_WAIVER_REPORT.value:
+        return None
+    name = (filename or "").strip()
+    if not name:
+        return None
+    if filename_says_waiver(name):
+        return DocType.WAIVER
+    if _TECH_REPORT_RE.search(name):
+        return DocType.TECH_REPORT
+    return DocType.TEST_REPORT
+
 logger = logging.getLogger(__name__)
 
 # RTRC-1 (Ph-2 2026-08-02): env-gated ROUTE_TRACE. Off by default; set
@@ -95,6 +171,7 @@ class StorageBackend(Protocol):
     async def add_document_index_row(self, row: Any) -> None: ...
     async def add_document_item_association(self, assoc: Any) -> None: ...
     async def find_doc_id_slugs_for_item(self, delivery_item_id: str, doc_type: Any) -> list[str]: ...
+    async def get_max_rev_for_slug(self, milestone_id: str, doc_id_slug: str) -> int: ...
     async def item_has_association(self, file_hash: str, delivery_item_id: str) -> bool: ...
     async def write_file(self, path: Any, content: Any) -> None: ...
     async def log_communication(self, row: Any) -> None: ...
@@ -110,6 +187,112 @@ class TgResolverProtocol(Protocol):
         to_addrs: tuple[str, ...],
         cc_addrs: tuple[str, ...],
     ) -> str | None: ...
+
+
+def sole_tg_resolver(
+    candidate_items: list[dict],
+    sender: str = "",
+    to_addrs: tuple[str, ...] = (),
+    cc_addrs: tuple[str, ...] = (),
+) -> str | None:
+    """UNROUTED-TG-SCOPE-1 (2026-09-03): channel-agnostic TG resolver.
+
+    Returns the single distinct `tg_name` across `candidate_items`, or None
+    when the candidates span more than one TG (or carry none).
+
+    Conforms to TgResolverProtocol, so it drops into the existing
+    `tg_resolver` slot -- which was wired to None for EVERY channel, meaning
+    `document_index.inferred_tg_name` was never populated at ingest despite
+    the column, FR-78 and [D-060] all existing for it.
+
+    Why this shape rather than per-channel plumbing: the candidate set is
+    already TG-scoped upstream on exactly the channels that need it.
+    _filter_hw_pl_nsd2_items gates NSD ingest to tg_name=='HW PL', and PLM
+    ingest runs inside _process_tg_group, one TG per ticket per [D-035]. So
+    "all candidates share one TG" is true by construction there, and the
+    single TG falls out without either path having to pass it down.
+
+    Email is the case that legitimately returns None: while one TPM owns
+    items across many TGs, an outreach batch spans TGs and there is no single
+    answer. That is the correct outcome -- the manual-route dropdown then
+    offers every item in the milestone rather than guessing a scope.
+
+    `sender` / `to_addrs` / `cc_addrs` are accepted for protocol conformance
+    and unused; email identity-based resolution lives in
+    tg_resolver.resolve_tg_from_email and is a separate lookup.
+    """
+    _ = (sender, to_addrs, cc_addrs)
+    tgs = {
+        (c.get("tg_name") or "").strip()
+        for c in (candidate_items or [])
+    }
+    tgs.discard("")
+    if len(tgs) == 1:
+        return next(iter(tgs))
+    return None
+
+
+# DOCTYPE-EXT-1 (2026-09-02): one canonical document-extension set, applied
+# to every rule at load time.
+#
+# The MMK rules file had THREE different trailing extension groups across its
+# 123 patterns, so a document's doc_type depended on which rule happened to
+# list its extension:
+#     90x  pdf|doc|docx|xlsx|pptx
+#     32x  pdf|doc|docx|xlsx|pptxi|html|htm     <- 'pptxi' is a typo for pptx,
+#                                                 so these 32 compliance rules
+#                                                 accepted a non-existent
+#                                                 extension and REJECTED real
+#                                                 .pptx files
+#      1x  pdf|doc|docx|xlsx|xlsm|pptx
+#
+# and `ppt` was absent from all three. Live consequence: three
+# '<device> Waiver Request_*.ppt' files matched NO rule, went UNRESOLVED,
+# and were then auto-promoted to compliance_certification_release_notes by
+# singleton alignment -- filed as delivered release notes at rev1, aligned,
+# with no TPM signal. Rewriting at load time rather than editing 123 YAML
+# lines keeps the config readable and makes the set impossible to skew again.
+_CANONICAL_DOC_EXTENSIONS: tuple[str, ...] = (
+    "pdf", "doc", "docx", "xls", "xlsx", "xlsm", "ppt", "pptx", "html", "htm",
+)
+_CANONICAL_EXT_GROUP = r"\.(" + "|".join(_CANONICAL_DOC_EXTENSIONS) + r")$"
+
+# Matches a trailing `\.(a|b|c)$` extension group. All 123 MMK patterns and
+# all default patterns end in exactly this shape; anything that doesn't is
+# left untouched and logged.
+_TRAILING_EXT_GROUP_RE = re.compile(r"\\\.\([^)]*\)\$$")
+
+
+# DOCTYPE-PRECEDENCE-1 (2026-09-02): explicit doc_type precedence, replacing
+# reliance on YAML key order.
+#
+# `_classify_doc_type` previously returned UNRESOLVED whenever more than one
+# doc_type matched, which sent the document to singleton auto-promotion and
+# could file a waiver as a compliance release note. Multi-match now resolves
+# by this order instead. Waiver is first because it is the only doc_type with
+# an outward-facing consequence: waivers are never uploaded on the P1 submit
+# path, so a waiver classified as anything else is SENT to the carrier.
+# Ordering lives in code, not in the YAML, so re-sorting the config file
+# cannot silently change classification behaviour.
+_DOC_TYPE_PRECEDENCE: tuple[str, ...] = (
+    DocType.WAIVER.value,
+    DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+    DocType.TECH_REPORT.value,
+    DocType.TEST_REPORT.value,
+)
+
+
+def _canonicalize_extension_group(regex: str) -> tuple[str, bool]:
+    """Replace a trailing extension group with the canonical set.
+
+    Returns `(regex, rewritten)`. Patterns without the expected trailing
+    shape are returned unchanged with rewritten=False.
+    """
+    if _TRAILING_EXT_GROUP_RE.search(regex):
+        return _TRAILING_EXT_GROUP_RE.sub(
+            _CANONICAL_EXT_GROUP.replace("\\", "\\\\"), regex
+        ), True
+    return regex, False
 
 
 def load_doc_type_rules(rules_path: Path) -> dict[str, list[re.Pattern[str]]]:
@@ -137,6 +320,8 @@ def load_doc_type_rules(rules_path: Path) -> dict[str, list[re.Pattern[str]]]:
         raw = yaml.safe_load(f) or {}
 
     compiled: dict[str, list[re.Pattern[str]]] = {}
+    rewritten = 0
+    left_alone: list[str] = []
     for doc_type, patterns in raw.items():
         compiled_list: list[re.Pattern[str]] = []
         for entry in patterns or []:
@@ -147,9 +332,23 @@ def load_doc_type_rules(rules_path: Path) -> dict[str, list[re.Pattern[str]]]:
             flags = 0
             if "IGNORECASE" in (flags_str or "").upper():
                 flags |= re.IGNORECASE
+            # DOCTYPE-EXT-1: normalise the extension group so classification
+            # never depends on which rule happened to list an extension.
+            regex, did = _canonicalize_extension_group(regex)
+            if did:
+                rewritten += 1
+            else:
+                left_alone.append(f"{doc_type}:{regex[:60]}")
             compiled_list.append(re.compile(regex, flags))
         if compiled_list:
             compiled[doc_type] = compiled_list
+    logger.warning(
+        "DOCTYPE_RULES: loaded %s doc_types from %s -- %d pattern(s) "
+        "extension-normalised to %s, %d left as-is%s",
+        sorted(compiled), rules_path, rewritten,
+        list(_CANONICAL_DOC_EXTENSIONS), len(left_alone),
+        f" ({left_alone[:3]})" if left_alone else "",
+    )
     return compiled
 
 
@@ -308,7 +507,32 @@ class Fr52AttachmentRouter:
             _singleton = _singleton_alignment_doc_type(
                 primary_item_dict.get("item_type") or ""
             )
-            if _singleton is not None:
+            # DOCTYPE-WAIVER-VETO-1 (2026-09-02): a filename carrying the
+            # template's 'waiver' marker must never be auto-promoted to
+            # another doc_type. Live case: three '..._Waiver Request_*.ppt'
+            # files missed Step 1 (extension gap, since fixed by
+            # DOCTYPE-EXT-1), routed onto a compliance item, and singleton
+            # alignment filed them as compliance_certification_release_notes
+            # -- aligned and CLASSIFIED at rev1. Classifying them WAIVER
+            # instead makes the pair misaligned, so they stage for TPM.
+            # Staging a waiver is recoverable; shipping one to the carrier
+            # because it was mislabelled is not.
+            if filename_says_waiver(attachment.filename):
+                logger.warning(
+                    "DOCTYPE_WAIVER_VETO: filename=%r says waiver -- "
+                    "declining auto-promotion to %s on item=%s "
+                    "(item_type=%s); classifying WAIVER file_hash=%s",
+                    attachment.filename,
+                    _singleton.value if _singleton else "keyword-fallback",
+                    primary_item.item_id,
+                    primary_item_dict.get("item_type"),
+                    attachment.file_hash[:12],
+                )
+                doc_type_value = DocType.WAIVER.value
+                cls_resolution = (
+                    ClassificationResolution.FILENAME_FALLBACK_KEYWORD
+                )
+            elif _singleton is not None:
                 logger.warning(
                     "AUTO_CLASSIFY_RELNOTES: promoting UNRESOLVED -> %s "
                     "for item=%s (item_type=%s) filename=%r file_hash=%s",
@@ -318,6 +542,28 @@ class Fr52AttachmentRouter:
                 )
                 doc_type_value = _singleton.value
                 cls_resolution = ClassificationResolution.FILENAME_REGEX
+            else:
+                # DOCTYPE-FALLBACK-1: no singleton alignment, so try the
+                # item_type-scoped keyword ladder. Returns None for every
+                # item_type except test_tech_waiver_report, leaving the doc
+                # UNRESOLVED to stage for TPM exactly as before.
+                _fallback = keyword_fallback_doc_type(
+                    attachment.filename,
+                    primary_item_dict.get("item_type") or "",
+                )
+                if _fallback is not None:
+                    logger.warning(
+                        "DOCTYPE_FALLBACK: promoting UNRESOLVED -> %s for "
+                        "item=%s (item_type=%s) filename=%r file_hash=%s "
+                        "-- keyword fallback, no YAML rule matched",
+                        _fallback.value, primary_item.item_id,
+                        primary_item_dict.get("item_type"),
+                        attachment.filename, attachment.file_hash[:12],
+                    )
+                    doc_type_value = _fallback.value
+                    cls_resolution = (
+                        ClassificationResolution.FILENAME_FALLBACK_KEYWORD
+                    )
 
         gate_passes = (
             doc_type_value != DocType.UNRESOLVED.value
@@ -325,30 +571,75 @@ class Fr52AttachmentRouter:
             and primary_item_dict.get("item_type") != ItemType.DEFAULT.value
         )
 
-        # Ph-1 first pass per architect 2026-06-29 -- corrected 2026-06-29
-        # (post live-test bug discovery):
-        # Step C MULTI-REVISION lookup (existing-slug resolution + LLM
-        # CLASSIFY_DOC) is Ph-2. Ph-1 always treats files as NEW_DOCUMENT,
-        # rev=1, slug derived from filename. The earlier impl forced
-        # gate_passes=False which suppressed the NEW_DOCUMENT slug assignment
-        # too, sending classified files into _staged_classification path.
-        # Bug was: 'no multi-revision handling in Ph-1' got misread as
-        # 'no slug + rev assignment in Ph-1'; the actual requirement is
-        # 'no slug LOOKUP across prior revisions in Ph-1'.
+        # Step C -- new-vs-revision determination per [D-039].
+        #
+        # REV-1 (2026-08-30, user design lock): the multi-revision lookup is no
+        # longer gated on ph1_first_pass_substring_only. That flag stays True
+        # in production and continues to gate Steps B2/B3/B4 (fuzzy / folder /
+        # LLM routing) and the TG_SINGLE_ITEM Stage 0 shortcut -- only THIS
+        # block was ungated, so enabling revision families does not re-open the
+        # 2026-07-25 TG_SINGLE_ITEM mis-routing regression.
+        #
+        # Prior behaviour: rev_number was ALWAYS 1 and the slug was the raw
+        # filename stem. A same-filename resend therefore produced a second
+        # index row colliding on uq_doc_slug_rev (milestone, slug, rev) and
+        # re-derived the SAME internal NSD path, overwriting revision 1's bytes
+        # on disk. A different-filename resend forked into an unrelated family.
+        #
+        # New behaviour: the version-stripped stem is matched against the
+        # item's existing slugs for this doc_type. A hit continues that family
+        # at max(rev)+1; a miss opens a new family at rev 1. Either way slug +
+        # rev are populated, so Step D dispatches CLASSIFIED rather than
+        # bouncing the file to _staged_revision.
         if gate_passes and primary_item is not None:
+            candidate_slug = self._slug_from_filename(attachment.filename)
             slugs: list = []
-            if not self._ph1_first_pass_substring_only:
-                # Ph-2: look up existing slugs for this (item, doc_type)
-                # to determine if this is a new revision of an existing doc.
+            try:
+                slugs = await self._storage.find_doc_id_slugs_for_item(
+                    primary_item.item_id, DocType(doc_type_value)
+                )
+            except Exception:
+                # Storage hiccup -- degrade to NEW_DOCUMENT rather than
+                # staging the file. Worst case is a fork into a fresh family,
+                # which the TPM can re-merge; staging would strand the file.
+                slugs = []
+
+            # Legacy rows carry un-stripped slugs (`report_v2`), so normalize
+            # BOTH sides before comparing and keep the STORED spelling as the
+            # family key -- rewriting it would orphan existing rows and the
+            # uq_doc_slug_rev index entries that reference them.
+            family_slug: str | None = None
+            for existing_slug in slugs:
+                if self._slug_from_filename(existing_slug) == candidate_slug:
+                    family_slug = existing_slug
+                    break
+
+            if family_slug is not None:
+                milestone_id = (primary_item_dict or {}).get("milestone_id") or ""
+                next_rev = 1
                 try:
-                    slugs = await self._storage.find_doc_id_slugs_for_item(
-                        primary_item.item_id, DocType(doc_type_value)
-                    )
+                    next_rev = await self._storage.get_max_rev_for_slug(
+                        milestone_id, family_slug
+                    ) + 1
                 except Exception:
-                    slugs = []
-            if not slugs:
-                # NEW_DOCUMENT short-circuit -- derive a slug from filename + rev1
-                doc_id_slug = self._slug_from_filename(attachment.filename)
+                    # Same rationale as above -- never strand the file. rev 1
+                    # may collide on the unique index, which surfaces loudly
+                    # rather than silently overwriting bytes.
+                    logger.warning(
+                        "REV-1: max-rev lookup failed for milestone=%s slug=%r "
+                        "-- falling back to rev 1",
+                        milestone_id, family_slug,
+                    )
+                doc_id_slug = family_slug
+                rev_number = next_rev
+                logger.info(
+                    "REV-1: revision %d of family %r (item=%s filename=%r)",
+                    rev_number, family_slug, primary_item.item_id,
+                    attachment.filename,
+                )
+            else:
+                # NEW_DOCUMENT -- fresh family at rev 1.
+                doc_id_slug = candidate_slug
                 rev_number = 1
 
         # ---- Step D: FR-86 storage matrix dispatch ------------------------
@@ -408,7 +699,35 @@ class Fr52AttachmentRouter:
                     break
         if len(matched_doc_types) == 1:
             return matched_doc_types[0], ClassificationResolution.FILENAME_REGEX
-        # Multi-match OR no-match -> Step 2 LLM (Ph-1 next pass) -> Ph-1 first cut
+        if len(matched_doc_types) > 1:
+            # DOCTYPE-PRECEDENCE-1 (2026-09-02): resolve by explicit
+            # precedence instead of returning UNRESOLVED.
+            #
+            # Returning UNRESOLVED here was actively harmful, not merely
+            # unhelpful: it handed the document to the singleton-alignment
+            # auto-promotion downstream, which would classify it from the
+            # ROUTED ITEM's item_type. A file named '..._Waiver Request_WPC
+            # Certi....' matching both the waiver rule and a compliance rule
+            # therefore got filed as a compliance release note -- aligned and
+            # CLASSIFIED at rev1, with no staging and no TPM signal.
+            for candidate in _DOC_TYPE_PRECEDENCE:
+                if candidate in matched_doc_types:
+                    logger.warning(
+                        "DOCTYPE_PRECEDENCE: filename=%r matched %s -- "
+                        "resolving to %s by precedence",
+                        filename, sorted(matched_doc_types), candidate,
+                    )
+                    return candidate, ClassificationResolution.FILENAME_REGEX
+            # Every match is outside the precedence list (a doc_type added to
+            # the YAML but not to _DOC_TYPE_PRECEDENCE). Stage rather than
+            # guess, and say so loudly.
+            logger.warning(
+                "DOCTYPE_PRECEDENCE: filename=%r matched %s, none of which "
+                "are in the precedence list %s -- leaving UNRESOLVED",
+                filename, sorted(matched_doc_types),
+                list(_DOC_TYPE_PRECEDENCE),
+            )
+        # No match -> Step 2 LLM (Ph-1 next pass) -> Ph-1 first cut
         # stub: skip LLM, return UNRESOLVED.
         return DocType.UNRESOLVED.value, ClassificationResolution.UNRESOLVED_LOW_CONFIDENCE
 
@@ -1051,9 +1370,37 @@ class Fr52AttachmentRouter:
 
     @staticmethod
     def _slug_from_filename(filename: str) -> str:
-        """Derive a stable doc_id_slug from a filename (Ph-1 simplification)."""
+        """Derive a stable doc_id_slug from a filename.
+
+        REV-1 (2026-08-30): trailing version tokens are stripped so that an
+        owner resending the same document under a decorated name lands in the
+        SAME revision family. `report.xlsx`, `report_v2.xlsx`, `report v3.xls`,
+        `report_rev2.docx` and `report (1).xlsx` all slug to `report`.
+
+        Deliberately conservative -- only the token shapes the user locked
+        2026-08-30 are stripped:
+          * a trailing `(N)` counter, removed from the RAW base name before
+            normalization (so it never collapses into the generic `_N` form)
+          * a trailing `_v<N>` or `_rev<N>` on the normalized slug, applied
+            repeatedly for stacked suffixes (`report_v2_rev3` -> `report`)
+
+        A bare trailing `_<digits>` is NOT stripped: real filenames carry
+        date-ish tails (`..._SWMK_V4_1104.docx`) where the digits are part of
+        the document's identity, and stripping them would merge unrelated
+        documents into one family. Those stay distinct families -- the safe
+        failure direction (a missed merge is visible; a wrong merge is not).
+        """
         base = filename.rsplit(".", 1)[0]
-        return re.sub(r"[^a-zA-Z0-9_-]+", "_", base).strip("_").lower() or "doc"
+        # `(N)` counter on the raw base, e.g. "report (1)" / "report(2)".
+        base = re.sub(r"\s*\(\d+\)\s*$", "", base)
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", base).strip("_").lower()
+        # Stacked `_v2` / `_rev3` tails; loop so `report_v2_rev3` collapses.
+        while True:
+            stripped = re.sub(r"[_-]?(?:rev|v)\d+$", "", slug)
+            if stripped == slug:
+                break
+            slug = stripped
+        return slug.strip("_-") or "doc"
 
     def _select_nsd_path_type(
         self,

@@ -11,14 +11,14 @@
      build takes ~5s (SP header reads + APPS TG xlsx merge). Restore on
      pageshow (user returns after download tray opens) or 20s timeout. #}
   <a id="drr-download-btn"
-     href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/drr-status.xlsx"
+     href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/drr-status.xlsx"
      data-original-label="Download DRR status"
      style="display:inline-block; background:#0b6e3f; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
             font-size:0.9em; margin-right:0.5em;"
      title="Download the DRR-V2 excel with items as-is (open/closed status current)"
      onclick="hildaPrepareDrr(this)">Download DRR status</a>
-  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+  <a href="{{ url_prefix }}/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
      style="display:inline-block; background:#1a3a6c; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
             font-size:0.9em;">Report issue / feedback</a>
@@ -56,6 +56,11 @@
   }
 </script>
 <h1>Documents — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
+<p style="margin:0.6em 0;">
+  {# UPLOAD-MANIFEST-1 (2026-09-06): check placement before submitting. #}
+  <a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/manifest">
+    Submission preview &mdash; where will these files land on Google Drive?</a>
+</p>
 
 <p>Choose a technology group (tg) to browse its documents. Every document
 received for items in this milestone under that tg_name lives inside — zip
@@ -76,7 +81,7 @@ archives are auto-extracted preserving folder structure.</p>
       {% for tg in tg_entries %}
       <tr>
         <td>
-          <a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg.tg_name }}/">
+          <a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg.tg_name }}/">
             {{ tg.tg_name }}
           </a>
         </td>
@@ -90,7 +95,7 @@ archives are auto-extracted preserving folder structure.</p>
             style="background:#fff5e6;"
           {% endif %}>
         <td>
-          <a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/_unknownTG/">
+          <a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/_unknownTG/">
             _unknownTG
           </a>
           {% if unrouted_count and unrouted_count > 0 %}

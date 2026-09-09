@@ -15,7 +15,7 @@ template (screenshots from architect 2026-08-04):
       row  9  blank
       row 10  "DRR Date:" | <target_date>
       row 11  "Ph1 Date:" | <FFW>
-      row 12  "Target TA Date:" | <LE>
+      row 12  "Target TA Date:" | <TA>
       row 13  yellow note "Yellow Highlighting indicates Phase 1
               Submission Gating items"
       row 14  body-column header row (red fill):
@@ -37,7 +37,7 @@ Header-field mapping (canonical → Verizon label):
     milestone.req_version       → VZW Requirements Version
     milestone.target_date       → DRR Date
     project.FFW                 → Ph1 Date
-    project.LE                  → Target TA Date
+    project.TA                  → Target TA Date
 
 Legacy flat shape (pre-DRR-V2) still works when the DRR-V2 args
 (section_grouping / drr_version / milestone_headers / project_headers
@@ -732,7 +732,7 @@ def _write_header_block(
         (_HEADER_ROW_REQ_VERSION,     "VZW Requirements Version:",      milestone_headers.get("req_version"), "req_version"),
         (_HEADER_ROW_DRR_DATE,        "DRR Date:",                      milestone_headers.get("target_date"), "target_date"),
         (_HEADER_ROW_PH1_DATE,        "Ph1 Date:",                      project_headers.get("FFW"), "FFW"),
-        (_HEADER_ROW_TARGET_TA_DATE,  "Target TA Date:",                project_headers.get("LE"), "LE"),
+        (_HEADER_ROW_TARGET_TA_DATE,  "Target TA Date:",                project_headers.get("TA"), "TA"),
     ]
     for row, label, raw, field_name in header_rows:
         lc = ws.cell(row=row, column=2, value=label)
@@ -953,22 +953,34 @@ _P1_YELLOW_HEX = "FFFF00"
 
 
 def _resolve_display_owner(delivery_item: Any) -> str:
-    """OWNER-6/7 (2026-08-16): resolve the Owner column display value.
+    """Resolve the Owner column display value.
 
-    Multi-owner rule: if `owner_name` has any non-empty entries, show them
-    joined by `"; "` (SP-convention -- matches how TPMs type them into the
-    SP column). `owner_name` is a list post B-final-B (OWNER-7). Falls
-    back to `tg_name` for items with no owner identity at all (test
-    fixtures, legacy rows) so the column still says something meaningful.
+    DRR-OWNER-TG-1 (2026-09-02, TPM ask): show the TECHNOLOGY GROUP, not the
+    individual. This inverts OWNER-6/7 (2026-08-16), which preferred
+    `owner_name` and used `tg_name` only as a fallback.
 
-    Empty-string entries in the list are dropped defensively; whole-list
-    empty (or missing) falls through to the tg_name fallback."""
+    Rationale: the DRR workbook is carrier-facing. Naming individuals in it
+    publishes Samsung staff names outside the company and dates badly --
+    owners change mid-milestone while the TG accountable for the item does
+    not. The TG is also the unit Verizon actually escalates to.
+
+    Order:
+      1. `tg_name`
+      2. `owner_name` entries joined by "; "  (list post OWNER-7 B-final-B;
+         SP-convention separator, matching how TPMs type the column)
+
+    The owner_name fallback is kept deliberately: `tg_name` is null on
+    Default / unrouted items, and a blank Owner column in a carrier
+    deliverable is worse than a name. Empty-string entries are dropped."""
+    tg = (getattr(delivery_item, "tg_name", None) or "").strip()
+    if tg:
+        return tg
     lst = getattr(delivery_item, "owner_name", None) or []
     if isinstance(lst, list):
         cleaned = [str(n).strip() for n in lst if n and str(n).strip()]
         if cleaned:
             return "; ".join(cleaned)
-    return (getattr(delivery_item, "tg_name", None) or "").strip()
+    return ""
 
 
 def _write_item_row(

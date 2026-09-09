@@ -176,6 +176,9 @@ class InMemoryStorage:
     written_files: list[Any] = field(default_factory=list)
     communications: list[Any] = field(default_factory=list)
     slugs_for_item: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    # REV-1 (2026-08-30): (milestone_id, doc_id_slug) -> highest rev_number
+    # already stored for that family. Absent key == no resolved revisions yet.
+    max_rev_for_slug: dict[tuple[str, str], int] = field(default_factory=dict)
 
     async def get_document_index_row_by_hash(self, file_hash: str) -> Any:
         return self.index.get(file_hash)
@@ -192,6 +195,9 @@ class InMemoryStorage:
     ) -> list[str]:
         key = (delivery_item_id, getattr(doc_type, "value", str(doc_type)))
         return list(self.slugs_for_item.get(key, []))
+
+    async def get_max_rev_for_slug(self, milestone_id: str, doc_id_slug: str) -> int:
+        return int(self.max_rev_for_slug.get((milestone_id, doc_id_slug), 0))
 
     async def write_file(self, path: Any, content: Any) -> None:
         self.written_files.append((path, content))

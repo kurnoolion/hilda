@@ -4,12 +4,12 @@
 
 {% block content %}
 <div style="float:right;">
-  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+  <a href="{{ url_prefix }}/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
      style="display:inline-block; background:#1a3a6c; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
             font-size:0.9em;">Report issue / feedback</a>
 </div>
-<p><a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
+<p><a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
 
 <h1>{{ tg_name }} — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
 
@@ -39,6 +39,22 @@ auto-extracted preserving folder structure; every save creates a new version.</p
   <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
     ✗ Reclassify partially failed: <code>{{ request.query_params.get('error') }}</code>
   </div>
+{% elif _outcome == 'folder_set' %}
+  <div style="background:#e6f7e6; border:1px solid #4a4; color:#141; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✓ Carrier folder set. Every revision of that document will go there on the next submit.
+  </div>
+{% elif _outcome == 'folder_reset' %}
+  <div style="background:#e6f7e6; border:1px solid #4a4; color:#141; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✓ Reset — the document will use its work item's own target folder again.
+  </div>
+{% elif _outcome == 'folder_invalid' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ That folder is not declared by any work item in this technology group, so it was not applied.
+  </div>
+{% elif _outcome == 'no_assoc' %}
+  <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
+    ✗ That document has no work-item association in this milestone.
+  </div>
 {% elif _outcome == 'misaligned' %}
   <div style="background:#fbe0e0; border:1px solid #a55; color:#611; padding:0.6em 1em; margin:0.5em 0; border-radius:3px;">
     ✗ Doc type not valid for this item: <code>{{ request.query_params.get('error') }}</code>
@@ -54,6 +70,9 @@ auto-extracted preserving folder structure; every save creates a new version.</p
       <tr>
         <th>Filename</th>
         <th>Doc Type</th>
+        {# UPLOAD-DEST-1 (2026-09-06): the TPM's actual question is where the
+           file lands on Google Drive, not which work item holds it. #}
+        <th>Carrier destination</th>
         <th>Size</th>
         <th>Versions</th>
         <th>Last saved</th>
@@ -72,12 +91,28 @@ auto-extracted preserving folder structure; every save creates a new version.</p
              Example: `docs/report.pdf` for extracted, `report.pdf` for direct. #}
           <code>{{ f.view_relative_path.split('/' + tg_name + '/', 1)[1] if ('/' + tg_name + '/') in f.view_relative_path else f.filename }}</code>
           {% if f.needs_merge %}
-            <span title="A fresh owner-authored version landed on top of your prior edits — manual merge required. Open the Versions link to compare and re-apply your edits."
+            <span title="You edited this document, and a newer owner-authored revision has since arrived without your changes — manual merge required. Open the latest revision, re-apply your edits there, and save."
                   style="color:#c00; font-weight:bold; margin-left:0.25em; font-size:1.1em;"
                   aria-label="merge required">*</span>
           {% endif %}
+          {# MERGE-2 (2026-08-30): older revision of a family. Read-only — only
+             the latest revision is uploaded to the carrier, so editing this one
+             would produce work that never ships. #}
+          {% if f.is_superseded %}
+            <span title="An older revision — a newer one has arrived. Read-only: only the latest revision is submitted to the carrier. Use this copy for reference while merging."
+                  style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #888; color:#666; border-radius:3px; font-size:0.85em;">superseded</span>
+          {% endif %}
           {% if f.is_drm_wrapped %}
             <span title="Wrapped by corp IRM (NASCA) in transit. In-browser edit unavailable — download and open locally in a NASCA-aware Office client." style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #a55; color:#a55; border-radius:3px; font-size:0.85em;">🔒 DRM</span>
+          {% endif %}
+          {# DOCTYPE-MISALIGN-UI-1 (2026-09-03): scannable badge for the
+             misaligned-but-classified case. The Doc Type column carries the
+             explanation and the Reclassify control; this makes the row
+             findable without reading across. Suppressed when f.is_staged,
+             because "Unresolved" already says it. #}
+          {% if f.is_staged_not_classified and not f.is_staged %}
+            <span title="Doc type does not match this work item's item_type (FR-86). The file is parked in _staged_classification and is EXCLUDED from carrier submission until a TPM reclassifies it or it is re-routed to a matching item."
+                  style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #c60; background:#fff4e5; color:#a04; border-radius:3px; font-size:0.85em;">⚠ not submitted</span>
           {% endif %}
         </td>
         {# RECLASS-3 (2026-08-24): Doc Type column. Show current doc_type
@@ -86,10 +121,19 @@ auto-extracted preserving folder structure; every save creates a new version.</p
            Unresolved to a concrete type (TestReport, TechReport, Waiver,
            CompCertRel). Post to /tg/{tg_name}/reclassify -- handler resolves
            the delivery_item_id + slug + TPM email itself. #}
+        {# DOCTYPE-MISALIGN-UI-1 (2026-09-03): offer Reclassify for BOTH
+           staged states, not just the unresolved one.
+             f.is_staged                  -> doc_type is ""/unresolved
+             f.is_staged_not_classified   -> doc_type is concrete but is NOT
+                                             FR-86-aligned with the routed
+                                             item's item_type
+           The second case previously rendered as a plain doc_type label with
+           no control and no warning, while list_upload_files_for_item silently
+           dropped it from the carrier submission. #}
         <td>
-          {% if f.is_staged %}
+          {% if f.is_staged or f.is_staged_not_classified %}
             <form method="post"
-                  action="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/reclassify"
+                  action="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/reclassify"
                   style="display:inline; margin:0;">
               <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
               {# RECLASS-UI-SCOPE-1 (2026-08-27): dropdown scoped to
@@ -118,18 +162,92 @@ auto-extracted preserving folder structure; every save creates a new version.</p
                       onclick="return confirm('Reclassify this doc as the selected type? File will move to the new doc-type folder + become carrier-eligible.');">
                 Reclassify
               </button>
-              <div style="font-size:0.75em; color:#900; margin-top:0.15em;">
-                Unresolved — pick a type to classify
-              </div>
+              {# Two different problems, two different messages. Wording avoids
+                 naming Google Drive: DRR documents are never uploaded at all
+                 (no_customer_upload), so "will not be uploaded" would read as
+                 true-but-for-the-wrong-reason there. "Excluded from
+                 submission" is accurate in both milestones. #}
+              {% if f.is_staged %}
+                <div style="font-size:0.75em; color:#900; margin-top:0.15em;">
+                  Unresolved — pick a type to classify
+                </div>
+              {% elif f.allowed_doc_types and f.doc_type not in f.allowed_doc_types %}
+                {# Confirmed misalignment: the doc_type is not in the routed
+                   item's FR-86-aligned set, so we can name the cause. #}
+                <div style="font-size:0.75em; color:#900; margin-top:0.15em;">
+                  <strong>{{ f.doc_type }}</strong> does not match this item's
+                  type{% if f.item_type %} (<code>{{ f.item_type }}</code>){% endif %}
+                  — staged, and <strong>excluded from submission</strong> until
+                  reclassified or re-routed.
+                </div>
+              {% else %}
+                {# Staged by path but the doc_type IS aligned -- e.g. a stale
+                   association left behind by a partial reclassify. Same
+                   consequence, so still flag it; don't claim a cause we
+                   haven't verified. #}
+                <div style="font-size:0.75em; color:#900; margin-top:0.15em;">
+                  Staged — <strong>excluded from submission</strong> until
+                  reclassified or re-routed.
+                </div>
+              {% endif %}
             </form>
           {% else %}
             {{ f.doc_type or '—' }}
           {% endif %}
         </td>
+        {# Exactly one of carrier_destination / upload_excluded_reason is set,
+           both computed through storage.upload_plan -- the same functions
+           submit_to_carrier calls, so what is shown here is what is
+           delivered. #}
+        <td style="font-size:0.85em;">
+          {% if f.carrier_destination %}
+            <code>{{ f.carrier_destination }}</code>
+            {% if f.target_folder_override %}
+              <span title="A TPM redirected this document to a folder other than its work item's target_folder. The whole revision family is redirected, so a later owner resend goes to the same place."
+                    style="margin-left:0.4em; padding:0.05em 0.35em; border:1px solid #46a; color:#24a; border-radius:3px; font-size:0.8em;">redirected</span>
+            {% endif %}
+            {# DRRP1-DEST-1 (2026-09-08): this milestone does not submit; the
+               path above is where the file lands when the MAPPED milestone
+               submits. Naming the mapping matters -- a TPM reading a P1 path
+               on a DRR page would otherwise reasonably assume DRR uploads. #}
+            {% if f.migrated_to %}
+              <div style="color:#666; margin-top:0.1em;">{{ f.migrated_to }}</div>
+            {% endif %}
+          {% else %}
+            <span style="color:#a04;">not uploaded</span>
+            <div style="color:#666; margin-top:0.1em;">{{ f.upload_excluded_reason }}</div>
+          {% endif %}
+          {# UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06): pick a DESTINATION, not a
+             work item. Options are the folders already declared by work items
+             in THIS TG, so a TPM cannot invent one; the handler re-validates
+             server-side. A folder owned by several items lists all their
+             item_no, because the choice says nothing about which was meant. #}
+          {% if folder_options and not f.upload_excluded_reason %}
+            <form method="post"
+                  action="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/set-folder"
+                  style="margin:0.3em 0 0 0;">
+              <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
+              <select name="target_folder"
+                      style="padding:0.1em 0.25em; font-size:0.9em; max-width:22em;">
+                <option value="">— use work item's folder —</option>
+                {% for o in folder_options %}
+                  <option value="{{ o.target_folder }}"
+                          {% if o.target_folder == f.target_folder_override %}selected{% endif %}>
+                    {{ o.label }}
+                  </option>
+                {% endfor %}
+              </select>
+              <button type="submit" style="font-size:0.85em;"
+                      onclick="return confirm('Send this document — and every revision of it — to the selected folder on the next submit?');">
+                Set folder
+              </button>
+            </form>
+          {% endif %}
+        </td>
         <td>{{ f.size_bytes }}</td>
         <td>
           {% if f.version_count > 1 %}
-            <a href="/browse/versions/{{ f.versions_token }}">{{ f.version_count }}</a>
+            <a href="{{ url_prefix }}/browse/versions/{{ f.versions_token }}">{{ f.version_count }}</a>
           {% else %}
             {{ f.version_count }}
           {% endif %}
@@ -138,18 +256,18 @@ auto-extracted preserving folder structure; every save creates a new version.</p
         <td>{{ f.last_saved_by_pretty }}</td>
         <td>
           {% if f.is_drm_wrapped %}
-            <a href="/browse/download/{{ f.download_token }}">Download</a>
+            <a href="{{ url_prefix }}/browse/download/{{ f.download_token }}">Download</a>
           {% else %}
             {% if f.open_mode == 'editor' %}
-              <a href="/browse/edit/{{ f.open_token }}">Edit</a>
+              <a href="{{ url_prefix }}/browse/edit/{{ f.open_token }}">Edit</a>
             {% elif f.open_mode == 'native' %}
-              <a href="/browse/view/{{ f.open_token }}">View</a>
+              <a href="{{ url_prefix }}/browse/view/{{ f.open_token }}">View</a>
             {% endif %}
-            <a href="/browse/download/{{ f.download_token or f.open_token }}">Download</a>
+            <a href="{{ url_prefix }}/browse/download/{{ f.download_token or f.open_token }}">Download</a>
           {% endif %}
         </td>
         <td>
-          <a href="/browse/history/{{ f.history_token }}">📜 History</a>
+          <a href="{{ url_prefix }}/browse/history/{{ f.history_token }}">📜 History</a>
         </td>
       </tr>
       {% endfor %}

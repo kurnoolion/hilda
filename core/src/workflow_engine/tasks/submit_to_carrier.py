@@ -157,6 +157,14 @@ def submit_to_carrier_task(
     # what actually hit the carrier.
     files_uploaded_total = 0
     files_failed_total   = 0
+    # DRRP1-1 chunk 3 (2026-09-01): files contributed by ANOTHER milestone's
+    # work-item per milestone_item_mapping. Counted separately so the tick log
+    # distinguishes "this milestone collected 5 documents" from "3 of these came
+    # from DRR" -- without that split, a migration failure looks like a quiet
+    # drop in the total rather than a broken mapping.
+    files_uploaded_migrated = 0
+    files_failed_migrated   = 0
+    items_with_migrated     = 0
 
     for item in items:
         item_id       = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
@@ -187,12 +195,33 @@ def submit_to_carrier_task(
             )
             continue
 
-        # -- Files: classified associations only ------------------------------
-        assocs = _list_classified(deps, item_id)
+        # -- Files: one per revision family, at its current version -----------
+        # UPLOAD-VIEW-1 (2026-08-30): was a raw walk of classified
+        # associations, which uploaded EVERY revision of a resent document
+        # (same filename, N times) and always shipped the as-received bytes,
+        # so a TPM's browser edit never reached the carrier. The resolver
+        # collapses each revision family to one winner and resolves it to the
+        # view-tree file, which IS the current version. Waivers and archive
+        # containers are filtered inside the resolver.
+        own_files = _list_upload_files(deps, item_id)
+
+        # DRRP1-1 chunk 3 (2026-09-01): documents collected against ANOTHER
+        # milestone's work-item that this item is responsible for submitting.
+        # For MMK, deliverables received during DRR are submitted as part of P1;
+        # every mapped DRR item is no_customer_upload=true, so this is the ONLY
+        # route those documents take to the carrier.
+        #
+        # They upload under THIS item's target_folder, and the source item is
+        # left completely alone -- no state transition, no SubmittedToCustomer.
+        migrated_files = _list_migrated_files(deps, item_id)
+        assocs = _merge_upload_sets(own_files, migrated_files, item_id)
+        if migrated_files:
+            items_with_migrated += 1
+
         if not assocs:
             skipped_no_files += 1
             _log.info(
-                "submit_to_carrier_skip_no_files: item=%s (no classified associations)",
+                "submit_to_carrier_skip_no_files: item=%s (no own or migrated files)",
                 item_id,
             )
             _audit(deps, "submit_to_carrier_no_files", item_id, {
@@ -210,39 +239,86 @@ def submit_to_carrier_task(
         customer_delivery_info = getattr(item, "customer_delivery_info", None) or ""
 
         for assoc in assocs:
-            local_path = getattr(assoc, "local_nsd_path", "") or ""
+            local_path = getattr(assoc, "relative_path", "") or ""
+            # DRRP1-1: non-empty when this file belongs to another milestone's
+            # work-item. Carried into every log line and audit row so a carrier
+            # folder holding a borrowed document is traceable to its source.
+            mig_milestone = getattr(assoc, "migrated_from_milestone", "") or ""
+            mig_item_no = int(getattr(assoc, "migrated_from_item_no", 0) or 0)
+            is_migrated = bool(mig_milestone)
+            source_label = f"{mig_milestone}#{mig_item_no}" if is_migrated else ""
+
             source_dir, filename = _resolve_source_dir_and_filename(nsd_prefix, local_path)
             if not filename:
                 _log.warning(
-                    "submit_to_carrier_skip_bad_path: item=%s local_nsd_path=%r",
-                    item_id, local_path[:200],
+                    "submit_to_carrier_skip_bad_path: item=%s relative_path=%r "
+                    "migrated_from=%s",
+                    item_id, local_path[:200], source_label or "-",
                 )
                 files_failed += 1
+                if is_migrated:
+                    files_failed_migrated += 1
                 all_ok = False
                 continue
 
-            # UPLOAD-SUBDIR-PLM-1 (2026-08-27): PLM zip ingest preserves the
-            # in-zip folder structure on carrier upload. Archive container
-            # segments (`.zip` / `.7z`) are stripped -- only the *inside-the-
-            # archive* folder structure survives to Google Drive. NSD ingest
-            # and PLM loose files remain flat (base behavior). Gating on
-            # document_index.ingest_source == CorporatePLM. See STATUS +
-            # DECISIONS UPLOAD-SUBDIR-PLM-1.
+            # Sub-folder structure under the carrier target folder.
+            #
+            # UPLOAD-VIEW-1 (2026-08-30): for view-tree files the folder
+            # structure is explicit in the path, because the view writer
+            # materialised it as real directories under the TG root.
+            #
+            # UPLOAD-FLAT-1 (2026-08-31): but only ARCHIVE-derived folders are
+            # carrier structure. NSD ingest passes the share-relative path as
+            # the filename, so an ordinary file sitting in an NSD folder (e.g.
+            # `2. DMDform (Done)/report.xlsx`) also carries segments -- and
+            # recreating those on the carrier is wrong: a standalone file
+            # uploads FLAT at target_folder. The path cannot distinguish the
+            # two cases on its own (NEST-1 only prefixes the archive name at
+            # depth >= 1, so a top-level zip's entries look identical to NSD
+            # folders), so we gate on document_index.from_zip, written at
+            # ingest by the archive path only.
+            #
+            # UPLOAD-SUBDIR-PLM-1 (2026-08-27) still governs the internal-tree
+            # FALLBACK, unchanged: derive the subdir from the internal path and
+            # keep it PLM-only, so items with no view-tree presence behave
+            # exactly as they did before this change.
             effective_target_dir = target_folder
             try:
-                file_hash = getattr(assoc, "file_hash", "") or ""
-                if file_hash:
-                    doc_ix = deps.storage.get_document_index_row_by_hash(file_hash)
-                    ingest_src = (
-                        getattr(doc_ix, "ingest_source", "") if doc_ix else ""
+                is_view = bool(getattr(assoc, "is_view", False))
+                ingest_src = ""
+                if not is_view:
+                    file_hash = getattr(assoc, "file_hash", "") or ""
+                    if file_hash:
+                        doc_ix = deps.storage.get_document_index_row_by_hash(file_hash)
+                        ingest_src = (
+                            getattr(doc_ix, "ingest_source", "") if doc_ix else ""
+                        )
+                # UPLOAD-PLAN-1 (2026-09-06): the subdir rule now lives in
+                # storage.upload_plan so the TG view and the download-all
+                # preview compute the identical destination. Behaviour is
+                # unchanged -- the branch simply moved.
+                subdir = _carrier_subdir(
+                    relative_path=local_path,
+                    is_view=is_view,
+                    from_zip=bool(getattr(assoc, "from_zip", False)),
+                    ingest_source=ingest_src,
+                )
+                # UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06): a TPM-chosen folder
+                # REPLACES the item's target_folder. The subdir still rides
+                # underneath, so archive structure survives a redirect.
+                override = (getattr(assoc, "target_folder_override", "") or "").strip()
+                if override:
+                    _log.warning(
+                        "submit_to_carrier: folder override in effect item=%s "
+                        "file=%s %r -> %r",
+                        item_id, filename, target_folder, override,
                     )
-                    if ingest_src == "CorporatePLM":
-                        subdir = _plm_subdir_prefix_from_local_path(local_path)
-                        if subdir:
-                            effective_target_dir = target_folder.rstrip("/") + "/" + subdir
+                effective_target_dir = _effective_target_dir(
+                    override or target_folder, subdir,
+                )
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
-                    "UPLOAD-SUBDIR-PLM-1: subdir compute failed item=%s: %s: %s -- "
+                    "submit_to_carrier: subdir compute failed item=%s: %s: %s -- "
                     "falling back to flat target",
                     item_id, type(exc).__name__, str(exc)[:120],
                 )
@@ -278,17 +354,36 @@ def submit_to_carrier_task(
 
             ok = bool(getattr(result, "success", False))
             error_code = getattr(result, "error_code", None)
+            # DRRP1-1: migrated files get their own action_type so the audit
+            # trail shows plainly that a P1 folder received a DRR document,
+            # and both carry migrated_from for provenance.
+            _mig_details = (
+                {"migrated_from_milestone": mig_milestone,
+                 "migrated_from_item_no": mig_item_no}
+                if is_migrated else {}
+            )
             if ok:
                 files_ok += 1
-                _audit(deps, "submit_to_carrier_file_ok", item_id, {
-                    "customer_id":    customer_id,
-                    "milestone_id":   milestone_id,
-                    "filename":       filename[:120],
-                    "target_dir":     effective_target_dir[:120],
-                    "correlation_id": correlation_id,
-                })
+                if is_migrated:
+                    files_uploaded_migrated += 1
+                _audit(
+                    deps,
+                    "submit_to_carrier_migrated_file_ok" if is_migrated
+                    else "submit_to_carrier_file_ok",
+                    item_id,
+                    {
+                        "customer_id":    customer_id,
+                        "milestone_id":   milestone_id,
+                        "filename":       filename[:120],
+                        "target_dir":     effective_target_dir[:120],
+                        "correlation_id": correlation_id,
+                        **_mig_details,
+                    },
+                )
             else:
                 files_failed += 1
+                if is_migrated:
+                    files_failed_migrated += 1
                 all_ok = False
                 _audit(deps, "submit_to_carrier_file_post_verify_failed", item_id, {
                     "customer_id":    customer_id,
@@ -297,6 +392,7 @@ def submit_to_carrier_task(
                     "target_dir":     effective_target_dir[:120],
                     "error_code":     error_code or "",
                     "correlation_id": correlation_id,
+                    **_mig_details,
                 })
 
         # SUBMIT-STATS-1: accumulate per-file counters into milestone totals
@@ -333,10 +429,12 @@ def submit_to_carrier_task(
         "submit_to_carrier: milestone=%s scanned=%d uploaded_items=%d "
         "partial_items=%d skipped_already=%d skipped_state=%d "
         "skipped_upload=%d skipped_no_files=%d files_uploaded=%d "
-        "files_failed=%d",
+        "files_failed=%d migrated_uploaded=%d migrated_failed=%d "
+        "items_with_migrated=%d",
         milestone_id, scanned, uploaded_items, partial_items,
         skipped_already, skipped_state, skipped_upload, skipped_no_files,
         files_uploaded_total, files_failed_total,
+        files_uploaded_migrated, files_failed_migrated, items_with_migrated,
     )
     return {
         "outcome":            "fired",
@@ -357,6 +455,13 @@ def submit_to_carrier_task(
         # files inside partial_items).
         "files_uploaded":     files_uploaded_total,
         "files_failed":       files_failed_total,
+        # DRRP1-1 chunk 3 (2026-09-01): the migrated subset of the above, so a
+        # broken mapping reads as "migrated_uploaded dropped to 0" rather than
+        # hiding inside a slightly smaller files_uploaded. Both are INCLUDED in
+        # files_uploaded / files_failed -- these are a breakdown, not an addend.
+        "files_uploaded_migrated": files_uploaded_migrated,
+        "files_failed_migrated":   files_failed_migrated,
+        "items_with_migrated":     items_with_migrated,
     }
 
 
@@ -381,75 +486,18 @@ def _resolve_nsd_volume_prefix(deps: Any) -> str:
     )
 
 
-# UPLOAD-SUBDIR-PLM-1 (2026-08-27) constants + helper -----------------------
-# Archive-container segments to strip from the PLM subdir prefix. Compared
-# lowercased against segment suffixes so `report.zip` / `data.7z` / `foo.RAR`
-# all trigger. Extend if new archive types get first-class ingest support.
-_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
-
-# Path-hostile characters replaced defensively before subdir goes to the
-# carrier binding. Backslashes get swapped to underscore so Windows-authored
-# archives don't cause the drive binding to mis-parse; control characters
-# stripped outright. Spaces + Unicode letters are preserved (user's example
-# "i am c" folder must survive intact).
-_SUBDIR_HOSTILE_CHARS = ("\\",)
-
-
-def _sanitize_subdir_segment(seg: str) -> str:
-    """Defensive per UPLOAD-SUBDIR-PLM-1 #3. Backslashes -> underscore
-    (Windows-authored archive names); control chars stripped; trailing dots
-    stripped (Windows filesystem hostile). Preserves spaces + everything
-    Unicode-printable so `i am c` survives verbatim."""
-    result = seg
-    for ch in _SUBDIR_HOSTILE_CHARS:
-        result = result.replace(ch, "_")
-    result = "".join(c for c in result if ord(c) >= 32)
-    return result.rstrip(". ")
-
-
-def _plm_subdir_prefix_from_local_path(local_nsd_path: str) -> str:
-    """UPLOAD-SUBDIR-PLM-1 (2026-08-27) -- derive the effective subdir prefix
-    that should ride under `target_folder` on Google Drive for a PLM-ingested
-    file.
-
-    Design (user 2026-08-27 confirm):
-      * Anchor at rev<N> or _staged_classification segment (whichever appears
-        in the path); take all subsequent segments EXCEPT the final basename.
-      * Strip archive-container segments (`.zip` / `.7z` / `.rar` suffix,
-        case-insensitive) -- outer + all nested zip names disappear.
-      * Sanitize surviving segments (backslash -> underscore, strip control
-        chars, strip trailing dot / space) via `_sanitize_subdir_segment`.
-      * Empty result = flat upload (loose file with no in-archive folder).
-
-    Examples:
-      internal/.../rev1/a.pdf                                      -> ''
-      internal/.../rev1/b.zip/i am c/d.pdf                         -> 'i am c'
-      internal/.../rev1/outer.zip/inner.zip/x/y.pdf                -> 'x'
-      internal/.../rev1/report.7z/folder/nested/file.pdf           -> 'folder/nested'
-      internal/.../_staged_classification/report.zip/folder/x.pdf  -> 'folder'
-    """
-    from pathlib import PurePosixPath as _P
-    parts = _P(local_nsd_path).parts
-    if not parts:
-        return ""
-    root_idx = -1
-    for i, seg in enumerate(parts):
-        if seg.startswith("rev") or seg == "_staged_classification":
-            root_idx = i
-            break
-    if root_idx < 0 or root_idx >= len(parts) - 1:
-        return ""
-    # Take segments between the anchor and the final basename.
-    subdir_parts = parts[root_idx + 1 : -1]
-    kept: list[str] = []
-    for seg in subdir_parts:
-        low = seg.lower()
-        if any(low.endswith(ext) for ext in _ARCHIVE_EXTS):
-            continue
-        clean = _sanitize_subdir_segment(seg)
-        if clean:
-            kept.append(clean)
-    return "/".join(kept)
+# UPLOAD-PLAN-1 (2026-09-06): the carrier-destination helpers moved to
+# core.src.storage.upload_plan so the dashboard can import them without pulling
+# Celery into the API container. Re-exported under their original private names
+# because tests reference them and the short names read better at the call site.
+from core.src.storage.upload_plan import (  # noqa: E402
+    ARCHIVE_EXTS as _ARCHIVE_EXTS,
+    carrier_subdir as _carrier_subdir,
+    effective_target_dir as _effective_target_dir,
+    plm_subdir_prefix_from_local_path as _plm_subdir_prefix_from_local_path,
+    sanitize_subdir_segment as _sanitize_subdir_segment,
+    view_subdir_prefix as _view_subdir_prefix,
+)
 
 
 def _resolve_source_dir_and_filename(
@@ -470,6 +518,97 @@ def _resolve_source_dir_and_filename(
         full = local_nsd_path
     p = Path(full)
     return str(p.parent), p.name
+
+
+def _list_upload_files(deps: Any, delivery_item_id: str) -> list[Any]:
+    """UPLOAD-VIEW-1 (2026-08-30): resolved upload set for one item -- one file
+    per revision family, at its current view-tree version.
+
+    Falls back to the pre-UPLOAD-VIEW-1 raw classified-association walk when
+    the resolver isn't wired (older storage impls, hand-built test doubles), so
+    nothing that uploads today stops uploading. The fallback keeps the old
+    every-revision behaviour; that is the known-imperfect path, not the target.
+    """
+    resolver = getattr(deps.storage, "list_upload_files_for_item", None)
+    if resolver is not None:
+        try:
+            return list(resolver(delivery_item_id) or [])
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "submit_to_carrier: list_upload_files_for_item failed for "
+                "item=%s: %s -- falling back to raw associations",
+                delivery_item_id, type(exc).__name__,
+            )
+    # Fallback shim: adapt DocumentItemAssociation rows to the ItemUploadFile
+    # surface the caller reads (relative_path / is_view / file_hash).
+    from pathlib import PurePosixPath as _P
+
+    class _AssocAsUploadFile:
+        __slots__ = ("relative_path", "filename", "file_hash", "is_view", "doc_type")
+
+        def __init__(self, assoc: Any) -> None:
+            self.relative_path = getattr(assoc, "local_nsd_path", "") or ""
+            self.filename = _P(self.relative_path).name
+            self.file_hash = getattr(assoc, "file_hash", "") or ""
+            self.is_view = False
+            self.doc_type = ""
+
+    return [_AssocAsUploadFile(a) for a in _list_classified(deps, delivery_item_id)]
+
+
+def _list_migrated_files(deps: Any, delivery_item_id: str) -> list[Any]:
+    """DRRP1-1 chunk 3 (2026-09-01): files another milestone's work-item
+    contributes to this item's submission, per milestone_item_mapping.
+
+    Absent resolver (older storage impl, hand-built test double) or any failure
+    yields [] -- migration must never break a submission that would otherwise
+    succeed with the item's OWN documents. Logged as a warning when the
+    resolver exists but raises, because a silent empty here means mapped
+    documents that never reach the carrier.
+    """
+    resolver = getattr(deps.storage, "list_migrated_upload_files_for_item", None)
+    if resolver is None:
+        return []
+    try:
+        return list(resolver(delivery_item_id) or [])
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "DRRP1-1: migrated-file lookup failed for item=%s: %s: %s -- "
+            "submitting this item's own documents only",
+            delivery_item_id, type(exc).__name__, str(exc)[:120],
+        )
+        return []
+
+
+def _merge_upload_sets(
+    own_files: list[Any], migrated_files: list[Any], item_id: str,
+) -> list[Any]:
+    """Own documents first, then migrated ones, de-duplicated by relative_path.
+
+    Per the user's 2026-09-01 clarification a document received in the target
+    milestone always differs in hash from the source milestone's versions, so
+    both legitimately ship and NO content-level dedup is wanted. The guard here
+    is narrower: the same PATH must not be uploaded twice, which could only
+    happen if a mapping pointed an item at itself or two resolvers returned the
+    same file. Cheap insurance against a duplicate landing on the carrier.
+
+    Own documents are ordered first so that if a carrier folder ends up with a
+    filename collision, the item's own document is the one uploaded first.
+    """
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for f in list(own_files) + list(migrated_files):
+        key = getattr(f, "relative_path", "") or ""
+        if key and key in seen:
+            _log.warning(
+                "DRRP1-1: duplicate upload path skipped for item=%s path=%r",
+                item_id, key[:160],
+            )
+            continue
+        if key:
+            seen.add(key)
+        merged.append(f)
+    return merged
 
 
 def _list_classified(deps: Any, delivery_item_id: str) -> list[Any]:

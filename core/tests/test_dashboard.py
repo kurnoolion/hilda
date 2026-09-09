@@ -88,13 +88,13 @@ def cfg_mock():
     Pre-2026-07-01 tests exercise the Ph-2 SP-READ code path -- explicit
     ph1_minimal=False so DashboardConfig's new Ph-1 default doesn't take
     over. Ph-1 code path has its own dedicated test class below."""
-    return DashboardConfig(mock_auth=True, ph1_minimal=False)
+    return DashboardConfig(url_prefix="", mock_auth=True, ph1_minimal=False)
 
 
 @pytest.fixture
 def cfg_prod():
     """Config with production auth (mock_auth=False)."""
-    return DashboardConfig(mock_auth=False, ph1_minimal=False)
+    return DashboardConfig(url_prefix="", mock_auth=False, ph1_minimal=False)
 
 
 @pytest.fixture
@@ -653,7 +653,7 @@ class TestErrorCodes:
 
 class TestConfig:
     def test_defaults(self):
-        cfg = DashboardConfig()
+        cfg = DashboardConfig(url_prefix="")
         assert cfg.bind_port == 8443
         assert cfg.refresh_rate_limit_seconds == 300
         assert cfg.token_ttl_seconds == 300
@@ -666,7 +666,7 @@ class TestConfig:
         assert cfg.bind_port == 9000
 
     def test_ph1_minimal_defaults_true(self):
-        cfg = DashboardConfig()
+        cfg = DashboardConfig(url_prefix="")
         assert cfg.ph1_minimal is True
 
 
@@ -710,7 +710,7 @@ def _ph1_item(item_id="MMK-SM-S671U1-P1-2", item_type="test_tech_waiver_report",
 
 @pytest.fixture
 def cfg_ph1():
-    return DashboardConfig(mock_auth=True, ph1_minimal=True)
+    return DashboardConfig(url_prefix="", mock_auth=True, ph1_minimal=True)
 
 
 class TestPh1DocSection:
@@ -867,3 +867,164 @@ class TestPh1DocSection:
         # We verify indirectly via a rendered page below; direct-filter access
         # would require reaching into private state.
         assert app is not None  # smoke -- filter registration didn't raise
+
+
+# ---------------------------------------------------------------------------
+# DRRP1-1 chunk 4 (2026-09-01) -- source-milestone documents on the target item
+# ---------------------------------------------------------------------------
+
+
+class TestPh1MigratedDocSection:
+    """Deliverables collected against a DRR work-item are submitted as part of
+    P1. A TPM looking at the P1 item must see what will actually ship —
+    otherwise the item reads as having no documents while submit_to_carrier is
+    about to upload several.
+
+    Read-only and labelled: the document belongs to the source item. These
+    tests use a per-item-id patch (unlike the shared `patched_storage` fixture,
+    which returns the same docs for every item) so own-vs-source documents are
+    actually distinguishable.
+    """
+
+    P1_ITEM = "MMK-SM-S671U1-P1-10"
+    DRR_ITEM = "MMK-SM-S671U1-DRR-50"
+
+    @pytest.fixture
+    def per_item(self, monkeypatch):
+        from datetime import datetime, timezone
+        state = {"docs": {}, "assocs": {}, "token_items": [], "src": None,
+                 "raise_src": False}
+
+        async def fake_docs(item_id):
+            return state["docs"].get(item_id, [])
+
+        async def fake_assocs(item_id):
+            return state["assocs"].get(item_id, [])
+
+        async def fake_token(file_hash, delivery_item_id, ttl_seconds=300):
+            state["token_items"].append((file_hash, delivery_item_id))
+            return f"tok-{file_hash}"
+
+        async def fake_src(target_item_id):
+            if state["raise_src"]:
+                raise RuntimeError("mapping lookup exploded")
+            return state["src"]
+
+        monkeypatch.setattr("core.src.dashboard.app.get_documents_for_item",
+                            fake_docs)
+        monkeypatch.setattr("core.src.dashboard.app.list_associations_for_item",
+                            fake_assocs)
+        monkeypatch.setattr("core.src.dashboard.app.make_download_token",
+                            fake_token)
+        monkeypatch.setattr("core.src.dashboard.app.resolve_migration_source",
+                            fake_src)
+        state["_now"] = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        return state
+
+    def _src(self):
+        return SimpleNamespace(
+            item_id=self.DRR_ITEM, milestone="DRR", item_no=50,
+            customer_id="MMK", device_id="SM-S671U1",
+            target_milestone="P1", target_item_no=10,
+        )
+
+    def _doc(self, fh, name, doc_type="test_tech_waiver_report"):
+        from datetime import datetime, timezone
+        return FakeDoc(file_hash=fh, doc_type=doc_type, doc_id_slug=fh,
+                       rev_number=1, original_filename=name,
+                       ingested_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+
+    def _client(self, cfg_ph1):
+        store = _MockStore()
+        store.register_item("MMK", 42, _ph1_item(item_id=self.P1_ITEM,
+                                                 item_no=10, tg_name="HW PL"))
+        return TestClient(build_app(cfg_ph1, storage=store))
+
+    def test_no_mapping_keeps_the_original_four_columns(self, cfg_ph1, per_item):
+        per_item["src"] = None
+        per_item["docs"][self.P1_ITEM] = [self._doc("hA", "Own-A.pdf")]
+        per_item["assocs"][self.P1_ITEM] = [FakeAssoc("hA", "classified")]
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        assert "Own-A.pdf" in body
+        assert "<th>Source</th>" not in body
+
+    def test_source_documents_are_listed_and_labelled(self, cfg_ph1, per_item):
+        per_item["src"] = self._src()
+        per_item["docs"][self.DRR_ITEM] = [self._doc("hD", "LTE-OTA-Report.pdf")]
+        per_item["assocs"][self.DRR_ITEM] = [FakeAssoc("hD", "classified")]
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        assert "LTE-OTA-Report.pdf" in body
+        assert "<th>Source</th>" in body
+        assert "from DRR #50" in body
+
+    def test_own_documents_show_no_source_label(self, cfg_ph1, per_item):
+        per_item["src"] = self._src()
+        per_item["docs"][self.P1_ITEM] = [self._doc("hA", "Own-A.pdf")]
+        per_item["assocs"][self.P1_ITEM] = [FakeAssoc("hA", "classified")]
+        per_item["docs"][self.DRR_ITEM] = [self._doc("hD", "From-DRR.pdf")]
+        per_item["assocs"][self.DRR_ITEM] = [FakeAssoc("hD", "classified")]
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        # Both present, Source column rendered, exactly one badge.
+        assert "Own-A.pdf" in body and "From-DRR.pdf" in body
+        assert body.count("from DRR #50") == 1
+
+    def test_download_token_is_minted_against_the_source_item(self, cfg_ph1, per_item):
+        """The association lives on the source item, so the token must be
+        scoped there or /dl resolution fails."""
+        per_item["src"] = self._src()
+        per_item["docs"][self.DRR_ITEM] = [self._doc("hD", "From-DRR.pdf")]
+        per_item["assocs"][self.DRR_ITEM] = [FakeAssoc("hD", "classified")]
+
+        self._client(cfg_ph1).get("/docs/MMK/42")
+        assert ("hD", self.DRR_ITEM) in per_item["token_items"]
+
+    def test_source_waivers_are_not_shown(self, cfg_ph1, per_item):
+        """Waivers are never submitted to the carrier for any milestone, so
+        listing one as 'will ship with this item' would be actively misleading.
+        Mirrors the exclusion in list_upload_files_for_item."""
+        per_item["src"] = self._src()
+        per_item["docs"][self.DRR_ITEM] = [
+            self._doc("hW", "Legal-Waiver.pdf", doc_type="waiver"),
+            self._doc("hD", "Real-Report.pdf"),
+        ]
+        per_item["assocs"][self.DRR_ITEM] = [
+            FakeAssoc("hW", "classified"), FakeAssoc("hD", "classified"),
+        ]
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        assert "Real-Report.pdf" in body
+        assert "Legal-Waiver.pdf" not in body
+
+    def test_orphan_source_index_row_is_skipped(self, cfg_ph1, per_item):
+        """No association means no NSD path, so no download token can be built
+        — same filter the own-documents branch applies."""
+        per_item["src"] = self._src()
+        per_item["docs"][self.DRR_ITEM] = [self._doc("hD", "Orphan.pdf")]
+        per_item["assocs"][self.DRR_ITEM] = []
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        assert "Orphan.pdf" not in body
+
+    def test_resolver_failure_does_not_break_the_page(self, cfg_ph1, per_item):
+        """A mapping lookup blowing up must not take down the document section
+        — the item's own documents still render."""
+        per_item["raise_src"] = True
+        per_item["docs"][self.P1_ITEM] = [self._doc("hA", "Own-A.pdf")]
+        per_item["assocs"][self.P1_ITEM] = [FakeAssoc("hA", "classified")]
+
+        r = self._client(cfg_ph1).get("/docs/MMK/42")
+        assert r.status_code == 200
+        assert "Own-A.pdf" in r.text
+        assert "<th>Source</th>" not in r.text
+
+    def test_mapping_with_no_source_documents_renders_normally(self, cfg_ph1, per_item):
+        per_item["src"] = self._src()
+        per_item["docs"][self.P1_ITEM] = [self._doc("hA", "Own-A.pdf")]
+        per_item["assocs"][self.P1_ITEM] = [FakeAssoc("hA", "classified")]
+
+        body = self._client(cfg_ph1).get("/docs/MMK/42").text
+        assert "Own-A.pdf" in body
+        assert "<th>Source</th>" not in body

@@ -7,7 +7,7 @@
 
 <h1>{{ filename }}</h1>
 <p><em>All versions.</em>
-<a href="/browse/history/{{ history_token }}">📜 History</a></p>
+<a href="{{ url_prefix }}/browse/history/{{ history_token }}">📜 History</a></p>
 
 <table>
   <thead>
@@ -34,11 +34,11 @@
       <td>{{ r.source }}</td>
       <td>
         {% if r.edit_token %}
-          <a href="/browse/edit/{{ r.edit_token }}">Edit</a>
+          <a href="{{ url_prefix }}/browse/edit/{{ r.edit_token }}">Edit</a>
         {% elif r.preview_token %}
-          <a href="/browse/preview/{{ r.preview_token }}" title="Open v{{ r.version_num }} in read-only view">View</a>
+          <a href="{{ url_prefix }}/browse/preview/{{ r.preview_token }}" title="Open v{{ r.version_num }} in read-only view">View</a>
         {% endif %}
-        <a href="/browse/download/{{ r.download_token }}">Download</a>
+        <a href="{{ url_prefix }}/browse/download/{{ r.download_token }}">Download</a>
       </td>
     </tr>
     {% endfor %}

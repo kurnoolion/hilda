@@ -24,6 +24,7 @@ Short-circuits with a specific outcome when:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -155,17 +156,30 @@ def _build_subject(total: int, scopes_over_threshold: int) -> str:
     )
 
 
+def _prefix() -> str:
+    """Public path prefix for links in this email. Env-read to keep
+    ops_digest free of a dashboard-config import."""
+    from core.src.dashboard.url_prefix import (
+        DEFAULT_URL_PREFIX, ENV_VAR, normalize,
+    )
+    return normalize(os.environ.get(ENV_VAR, DEFAULT_URL_PREFIX))
+
+
 def _build_body(scope_rows: list[dict[str, Any]], total: int) -> str:
     """Simple HTML table -- one row per scope over threshold, sorted by count
     desc so the loudest offenders sit at the top. The link goes to the UR-5
     /_unknownTG/ page for that scope; the dashboard host is templated at
     runtime by the receiving mail client (no cfg here to avoid circular
-    coupling with dashboard config)."""
+    coupling with dashboard config).
+
+    URLPFX-1: the path carries the public prefix, read straight from the
+    env var rather than DashboardConfig -- importing dashboard config here
+    is the circular coupling the paragraph above avoids."""
     rows_sorted = sorted(scope_rows, key=lambda r: r["unrouted"], reverse=True)
     row_html = "\n".join(
         f"<tr><td>{r['customer_id']}</td><td>{r['device_id']}</td>"
         f"<td>{r['milestone_id']}</td><td style='text-align:right'>{r['unrouted']}</td>"
-        f"<td><a href='/browse/{r['customer_id']}/{r['device_id']}/"
+        f"<td><a href='{_prefix()}/browse/{r['customer_id']}/{r['device_id']}/"
         f"{r['milestone_id']}/_unknownTG/'>triage</a></td></tr>"
         for r in rows_sorted
     )

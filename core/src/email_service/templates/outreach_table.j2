@@ -29,7 +29,23 @@
       <th align="left">Item No</th>
       <th align="left">Item Title</th>
       <th align="left">Tracking Modality</th>
-      <th align="left">Current Status</th>
+      {#
+        OUTREACH-STATUS-HINT-1 (2026-09-02, TPM ask): allowed values shown
+        inline in the header cell so an owner does not have to scroll to the
+        legend below the table. The <br> keeps it on a second line in the
+        SAME cell -- a separate column would shift every cell index after it,
+        and reply parsing is by column index.
+
+        Jinja comment, not an HTML one, so the rationale and the internal
+        ticket id are not shipped in owner-facing mail.
+
+        bs4's get_text(strip=True) renders this cell as
+        "Current Status(Open/Closed/Blocked/Delayed)" with NO space before
+        the paren. body_parser_table.resolve_header_alias strips a trailing
+        parenthetical before alias lookup, so this and the plain
+        "Current Status" both resolve; round-trip test pins it.
+      #}
+      <th align="left">Current Status<br>(Open/Closed/Blocked/Delayed)</th>
       <th align="left">Completion Date (MM/DD/YYYY)</th>
       <th align="left">Owner Comment</th>
     </tr>

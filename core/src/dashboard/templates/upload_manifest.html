@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block title %}HILDA — submission preview · {{ milestone_id }}{% endblock %}
+
+{% block content %}
+{#
+  UPLOAD-MANIFEST-1 (2026-09-06). Answers "where will these files land on
+  Google Drive" BEFORE the TPM clicks Submit in the SP UI. Every destination
+  here is computed by the same functions submit_to_carrier calls, so the
+  preview cannot disagree with the delivery.
+#}
+<p><a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
+
+<h1>Submission preview — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
+
+<p>What a <strong>Submit to Carrier</strong> would deliver for this milestone,
+and where each file would land. Files that will <em>not</em> be delivered are
+listed too, with the reason — those are usually the ones worth checking.</p>
+
+<p style="margin:0.8em 0;">
+  <strong>{{ manifest.total_included }}</strong> file(s) would upload ·
+  <strong>{{ manifest.total_excluded }}</strong> excluded ·
+  <a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/manifest.csv">Download as CSV</a>
+  {# UPLOAD-BUNDLE-1 (2026-09-06): the same tree, as real folders, so
+     placement can be checked by opening them rather than reading a list. #}
+  ·
+  <a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/download-all.zip">Download all files (zip)</a>
+</p>
+<p style="font-size:0.85em; color:#666; margin-top:-0.4em;">
+  The zip reproduces the exact folder structure these files would occupy on
+  Google Drive. Excluded files are not in it &mdash; that is the point.
+</p>
+
+{# The single most useful warning: files that are correct but blocked purely
+   by delivery_state. submit_to_carrier uploads ONLY items in
+   ReadyForSubmission, and before a submission most items are not there yet --
+   which is exactly when someone looks at this page. #}
+{% if manifest.items_not_ready %}
+  <div style="background:#fff3cd; border:1px solid #b90; color:#630; padding:0.6em 1em; margin:0.8em 0; border-radius:3px;">
+    ⚠ <strong>{{ manifest.items_not_ready | length }} work item(s)</strong> hold files that are
+    ready to deliver but whose state is not <code>ReadyForSubmission</code>, so a
+    Submit right now would skip them:
+    <ul style="margin:0.4em 0 0 1.2em;">
+      {% for it in manifest.items_not_ready %}
+        <li>#{{ it.item_no }} {{ it.tg_name }} —
+          <code>{{ it.delivery_state }}</code>,
+          {{ it.included_count }} file(s)</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% for it in manifest.items %}
+  {% if it.rows %}
+    <h2 style="font-size:1.05em; margin-top:1.4em;">
+      #{{ it.item_no }} · {{ it.tg_name }}
+      <span style="font-weight:normal; color:#666;">{{ it.item_name }}</span>
+    </h2>
+    <p style="margin:0.2em 0 0.5em 0; font-size:0.85em; color:#555;">
+      state <code>{{ it.delivery_state }}</code>
+      {% if not it.state_ready %}
+        <span style="color:#a60;">(not ReadyForSubmission — a Submit now would skip this item)</span>
+      {% endif %}
+      {% if it.target_folder %}
+        · target folder <code>{{ it.target_folder }}</code>
+      {% else %}
+        · <span style="color:#a04;">no target folder</span>
+      {% endif %}
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Doc Type</th>
+          <th>Carrier destination</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in it.rows %}
+        <tr>
+          <td>
+            <code>{{ r.filename }}</code>
+            {% if r.migrated_from %}
+              {# A borrowed document under a P1 item is otherwise
+                 indistinguishable from one that arrived there. #}
+              <span title="Collected against another milestone's work item and submitted on this item's behalf per milestone_item_mapping."
+                    style="margin-left:0.4em; padding:0.05em 0.35em; border:1px solid #46a; color:#24a; border-radius:3px; font-size:0.8em;">from {{ r.migrated_from }}</span>
+            {% endif %}
+          </td>
+          <td style="font-size:0.85em;">{{ r.doc_type or '—' }}</td>
+          <td style="font-size:0.85em;">
+            {% if r.carrier_destination %}
+              <code>{{ r.carrier_destination }}</code>
+            {% else %}
+              <span style="color:#a04;">not uploaded</span>
+              <div style="color:#666; margin-top:0.1em;">{{ r.excluded_reason }}</div>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% else %}
+  <p><em>No work items in this milestone.</em></p>
+{% endfor %}
+
+{% if manifest.total_included == 0 and manifest.total_excluded == 0 %}
+  <p><em>No documents resolved for submission in this milestone yet.</em></p>
+{% endif %}
+{% endblock %}

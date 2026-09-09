@@ -50,7 +50,7 @@ async def _fresh_db(tmp_path):
 @pytest.fixture
 def client():
     """FastAPI TestClient with feedback routes wired to the sqlite engine."""
-    cfg = DashboardConfig(mock_auth=True, ph1_minimal=False)
+    cfg = DashboardConfig(url_prefix="", mock_auth=True, ph1_minimal=False)
     app = build_app(cfg)
     return TestClient(app, follow_redirects=False)
 
@@ -317,7 +317,7 @@ class TestNotifyBot:
     """FB-5 best-effort email notification."""
 
     def _mk_client_with_sender(self, sender=None, cred_username="hilda-bot@corp"):
-        cfg = DashboardConfig(mock_auth=True, ph1_minimal=False,
+        cfg = DashboardConfig(url_prefix="", mock_auth=True, ph1_minimal=False,
                               reverse_proxy_origin="https://hilda.corp.test")
         from core.src.dashboard import build_app
         app = build_app(cfg)
@@ -411,7 +411,7 @@ class TestNotifyBot:
 
     def test_submit_succeeds_when_no_sender_wired(self):
         # No sender/credential -- notify branch is a silent no-op.
-        cfg = DashboardConfig(mock_auth=True, ph1_minimal=False)
+        cfg = DashboardConfig(url_prefix="", mock_auth=True, ph1_minimal=False)
         from core.src.dashboard import build_app
         app = build_app(cfg)
         app.state.email_sender = None

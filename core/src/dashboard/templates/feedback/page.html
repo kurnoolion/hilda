@@ -60,7 +60,7 @@
 </style>
 
 <div style="float:right;">
-  <a href="/browse/{{ customer }}/{{ device }}/{{ milestone }}/"
+  <a href="{{ url_prefix }}/browse/{{ customer }}/{{ device }}/{{ milestone }}/"
      style="display:inline-block; background:#1a3a6c; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
             font-size:0.9em;">← Back to documents</a>
@@ -79,7 +79,7 @@
 <h2>Submit</h2>
 <div class="form-card">
     <form method="post"
-          action="/feedback/{{ customer }}/{{ device }}/{{ milestone }}/submit"
+          action="{{ url_prefix }}/feedback/{{ customer }}/{{ device }}/{{ milestone }}/submit"
           enctype="multipart/form-data">
 
         <div class="form-row">
@@ -159,7 +159,7 @@
             <td class="description-cell">{{ t.description or '' }}</td>
             <td>
                 {% if t.attachment_filename %}
-                    {% set att_url = "/feedback/" ~ customer ~ "/" ~ device ~ "/" ~ milestone ~ "/attachment/" ~ t.ticket_pk %}
+                    {% set att_url = url_prefix ~ "/feedback/" ~ customer ~ "/" ~ device ~ "/" ~ milestone ~ "/attachment/" ~ t.ticket_pk %}
                     {% if t.attachment_content_type and t.attachment_content_type.startswith("image/") %}
                         <a href="{{ att_url }}" class="download-link" title="{{ t.attachment_filename }}">
                             <img src="{{ att_url }}" alt="{{ t.attachment_filename }}" class="attachment-thumb">

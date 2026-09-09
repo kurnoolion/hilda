@@ -54,6 +54,13 @@ class ClassificationResolution(str, Enum):
     FILENAME_REGEX = "FilenameRegex"
     LLM_CLASSIFIED = "LLMClassified"
     UNRESOLVED_LOW_CONFIDENCE = "UnresolvedLowConfidence"
+    # DOCTYPE-FALLBACK-1 (2026-09-02): doc_type came from the item_type-scoped
+    # keyword fallback, not from a rule in doc_type_filename_rules.yaml. Kept
+    # distinct from FILENAME_REGEX on purpose -- a fallback that always answers
+    # destroys the UNRESOLVED -> STAGED -> TPM-reclassify feedback loop that
+    # gets rules added to the YAML, so these docs must stay countable. Grep
+    # DOCTYPE_FALLBACK to measure hit rate before trusting the guess.
+    FILENAME_FALLBACK_KEYWORD = "FilenameFallbackKeyword"
 
 
 @dataclass(frozen=True)

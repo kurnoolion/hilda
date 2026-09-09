@@ -134,11 +134,17 @@ class TestNoOpPaths:
         assert mock_client.create_plm_ticket.call_count == 0
 
     def test_no_eligible_items_skips_group_processing(self, mock_client, ingest_recorder):
+        """PLMTG-1 (2026-08-31): eligibility is now gated on tracking_modality
+        ALONE -- the hardcoded tg_name allowlist is gone. So the no-op path is
+        "nothing opted into CorporatePLM", not "wrong TG name". (This test
+        previously used tg_name='HW PL' to force zero eligible items; under the
+        modality-only gate that item IS eligible.)"""
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()
-        # Only HW PL items (not MQL-FIT / MNO-SOLUTION) -- filter drops all
         deps = SimpleNamespace(
-            storage=_StubStorage(items=[_make_item(tg_name="HW PL")]),
+            storage=_StubStorage(items=[
+                _make_item(tg_name="HW PL", tracking_modality=["Email"]),
+            ]),
             sp_writer=None,
         )
         stats = poll_plm_once(deps)
@@ -204,6 +210,39 @@ class TestFilterAndGroup:
         assert stats["eligible_items"] == 2
         assert stats["tg_groups"] == 1     # collapsed
         assert stats["tickets_created"] == 1
+
+    def test_any_tg_with_corporate_plm_is_eligible(self, mock_client, ingest_recorder):
+        """PLMTG-1 (2026-08-31): a TG outside the old hardcoded allowlist
+        ({mql-fit, mno-solution}) is now eligible on modality alone.
+
+        Live trigger: a GPS item on MMK/SM-S671U1/P1 carried
+        tracking_modality=['CorporatePLM'] in template.yaml but was silently
+        filtered out here, so it never got a ticket and its plm_id stayed NULL.
+        Adding 'gps' to the set would have repeated the bug on the next TG."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(tg_name="GPS")]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 1
+        assert stats["tg_groups"] == 1
+        assert stats["tickets_created"] == 1
+
+    def test_empty_tg_name_still_dropped(self, mock_client, ingest_recorder):
+        """tg_name is the PLM grouping key ([D-035] one ticket per TG), so an
+        item with no TG has nothing to group under and stays excluded even
+        though the allowlist is gone."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(tg_name="")]),
+            sp_writer=None,
+        )
+        stats = poll_plm_once(deps)
+        assert stats["eligible_items"] == 0
+        assert stats["tg_groups"] == 0
 
     def test_terminal_state_dropped(self, mock_client, ingest_recorder):
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
@@ -492,8 +531,11 @@ class TestSpWriteback:
         }
 
     def test_sp_write_no_writes_on_reuse_path(self, mock_client, ingest_recorder):
-        """When plm_id already exists (reuse), no SP write happens -- the
-        write is only after fresh creates."""
+        """Reuse of a HEALTHY group (every item already carries the plm_id)
+        writes nothing -- there is no straggler to fill.
+
+        PLMBF-1 (2026-08-31) narrowed this: reuse now DOES write when some
+        items are missing the plm_id. See TestPlmIdBackfill."""
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         _seed_template_cache()
         sp_writer = MagicMock()
@@ -502,7 +544,101 @@ class TestSpWriteback:
         stats = poll_plm_once(deps)
         assert stats["tickets_reused"] == 1
         assert stats["sp_writes_ok"] == 0
+        assert stats["plm_ids_backfilled"] == 0
         sp_writer.update_item.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PLMBF-1 -- reuse-path backfill of stragglers
+# ---------------------------------------------------------------------------
+
+
+class TestPlmIdBackfill:
+    """PLMBF-1 (2026-08-31).
+
+    _check_plm_id_state only needs ONE item in a group to carry a plm_id, and
+    the reuse branch used to return without writing. So any item that missed
+    the original create-path write was never filled in -- every later tick
+    short-circuited on its populated sibling. Two routes in, both permanent:
+    the create-path SP write is best-effort per item (a missing SP row is
+    skipped with no retry), and items joining the group after creation were
+    never in the original write at all.
+
+    Live corp box 2026-08-31: 39 of 54 CorporatePLM items on MMK/SM-S671U1/P1
+    had NULL plm_id while their groups held tickets.
+    """
+
+    def test_backfills_only_the_items_missing_plm_id(self, mock_client, ingest_recorder):
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        sp_writer = MagicMock()
+        sp_writer.get_items.return_value = [{"_sp_id": "42", "plm_id": ""}]
+        items = [
+            _make_item(delivery_item_id="X-1", item_no=1, plm_id="P260831-08659"),
+            _make_item(delivery_item_id="X-2", item_no=2, plm_id=""),
+            _make_item(delivery_item_id="X-3", item_no=3, plm_id=""),
+        ]
+        deps = SimpleNamespace(storage=_StubStorage(items=items), sp_writer=sp_writer)
+        stats = poll_plm_once(deps)
+
+        assert stats["tickets_reused"] == 1
+        assert stats["tickets_created"] == 0        # no duplicate ticket
+        assert stats["plm_ids_backfilled"] == 2     # only the two blanks
+        assert sp_writer.update_item.call_count == 2
+
+    def test_backfill_writes_the_reused_plm_id(self, mock_client, ingest_recorder):
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        sp_writer = MagicMock()
+        sp_writer.get_items.return_value = [{"_sp_id": "42", "plm_id": ""}]
+        items = [
+            _make_item(delivery_item_id="X-1", item_no=1, plm_id="P260831-08659"),
+            _make_item(delivery_item_id="X-2", item_no=2, plm_id=""),
+        ]
+        deps = SimpleNamespace(storage=_StubStorage(items=items), sp_writer=sp_writer)
+        poll_plm_once(deps)
+
+        canonical = sp_writer.update_item.call_args_list[0].kwargs["canonical_fields"]
+        assert canonical["plm_id"] == "P260831-08659"
+
+    def test_backfill_does_not_blank_actual_item_info(self, mock_client, ingest_recorder):
+        """The PLM URL isn't recoverable on the reuse path (create_plm_ticket
+        returned it and it isn't stored on the item). Writing "" would erase
+        whatever a prior successful write had set, so actual_item_info must be
+        omitted from the payload entirely."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        sp_writer = MagicMock()
+        sp_writer.get_items.return_value = [{"_sp_id": "42", "plm_id": ""}]
+        items = [
+            _make_item(delivery_item_id="X-1", item_no=1, plm_id="P260831-08659"),
+            _make_item(delivery_item_id="X-2", item_no=2, plm_id=""),
+        ]
+        deps = SimpleNamespace(storage=_StubStorage(items=items), sp_writer=sp_writer)
+        poll_plm_once(deps)
+
+        canonical = sp_writer.update_item.call_args_list[0].kwargs["canonical_fields"]
+        assert "actual_item_info" not in canonical
+
+    def test_create_path_still_writes_both_fields(self, mock_client, ingest_recorder):
+        """Regression guard: the url-omission above must not leak into the
+        create path, which DOES have a URL and must still write it."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        sp_writer = MagicMock()
+        sp_writer.get_items.return_value = [{"_sp_id": "42", "plm_id": ""}]
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_make_item(plm_id="")]),
+            sp_writer=sp_writer,
+        )
+        stats = poll_plm_once(deps)
+
+        canonical = sp_writer.update_item.call_args_list[0].kwargs["canonical_fields"]
+        assert canonical["plm_id"] == "P20260814-99999"
+        assert canonical["actual_item_info"] == "https://plm.corp/detail/K12345678"
+        # Create, not backfill -- the counters must not conflate the two.
+        assert stats["tickets_created"] == 1
+        assert stats["plm_ids_backfilled"] == 0
 
 
 # ---------------------------------------------------------------------------

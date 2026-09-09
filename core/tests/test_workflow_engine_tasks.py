@@ -2476,6 +2476,325 @@ class TestSubmitToCarrier:
                           if w[0] == "state" and w[2] == "SubmittedToCustomer"]
         assert {w[1] for w in states_written} == {"I-A", "I-B"}
 
+    # -- UPLOAD-VIEW-1 (2026-08-30) ---------------------------------------
+    # The resolver collapses revision families and resolves each winner to its
+    # current view-tree version. These cover the WIRING (task prefers the
+    # resolver, applies view-derived subdirs, falls back safely); the
+    # resolution logic itself is tested in test_upload_view_resolution.py.
+
+    def test_prefers_resolver_over_raw_associations(self, deps):
+        """Both surfaces present -> the resolver wins. The raw-association walk
+        would have uploaded every revision of a resent document."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        # Raw associations still hold BOTH revisions of one document.
+        deps.storage.list_classified_associations_for_item = lambda _id: [
+            _mk_assoc("h1", "I-A", "internal/MMK/SM-S671U1/P1/CPM/item_2/f/rev1/r.pdf"),
+            _mk_assoc("h2", "I-A", "internal/MMK/SM-S671U1/P1/CPM/item_2/f/rev2/r.pdf"),
+        ]
+        # The resolver collapses them to the winner, at its view-tree path.
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            SimpleNamespace(
+                relative_path="view/MMK/SM-S671U1/P1/CPM/r.pdf",
+                filename="r.pdf", doc_type="test_report", is_view=True,
+            ),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["files_uploaded"] == 1          # not 2
+        assert len(adapter.calls) == 1
+        assert adapter.calls[0]["filename"] == "r.pdf"
+
+    def test_view_path_subdir_rides_under_target_folder(self, deps):
+        """In-archive folders are recreated under the carrier target folder --
+        for every ingest source now, not just PLM. Requires from_zip=True per
+        UPLOAD-FLAT-1."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            SimpleNamespace(
+                relative_path=(
+                    "view/MMK/SM-S671U1/P1/CPM/b.zip/i am c/d.pdf"
+                ),
+                filename="d.pdf", doc_type="test_report", is_view=True,
+                from_zip=True,
+            ),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        # `b.zip` is a container, not delivered structure; `i am c` survives.
+        assert adapter.calls[0]["target_dir"] == (
+            _mk_stc_item("ReadyForSubmission", "I-A").target_folder + "/i am c"
+        )
+
+    def test_nsd_folder_does_not_become_a_carrier_subfolder(self, deps):
+        """UPLOAD-FLAT-1 (2026-08-31): a standalone file that happened to sit in
+        an NSD folder uploads FLAT at target_folder. Its path segments are the
+        NSD tree, not carrier structure -- from_zip=False is what says so."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            SimpleNamespace(
+                relative_path=(
+                    "view/MMK/SM-S671U1/P1/CPM/2. DMDform (Done)/report.xlsx"
+                ),
+                filename="report.xlsx", doc_type="test_report", is_view=True,
+                from_zip=False,
+            ),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        # Flat: the target folder itself, with no "2. DMDform (Done)" appended.
+        assert adapter.calls[0]["target_dir"] == (
+            _mk_stc_item("ReadyForSubmission", "I-A").target_folder
+        )
+
+    # -- DRRP1-1 chunk 3 (2026-09-01) --------------------------------------
+    # Documents collected against another milestone's work-item are submitted
+    # by THIS item, under THIS item's target_folder. Mapped source items are
+    # no_customer_upload=true, so this is their only route to the carrier.
+
+    def _mig(self, path, filename, milestone="DRR", item_no=50):
+        return SimpleNamespace(
+            relative_path=path, filename=filename, doc_type="test_report",
+            is_view=True, from_zip=False,
+            migrated_from_milestone=milestone, migrated_from_item_no=item_no,
+        )
+
+    def _own(self, path, filename):
+        return SimpleNamespace(
+            relative_path=path, filename=filename, doc_type="test_report",
+            is_view=True, from_zip=False,
+            migrated_from_milestone="", migrated_from_item_no=0,
+        )
+
+    def test_migrated_files_upload_under_the_target_items_folder(self, deps):
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: []
+        deps.storage.list_migrated_upload_files_for_item = lambda _id: [
+            self._mig("view/MMK/SM-S671U1/DRR/HW PL/lte_ota.xlsx", "lte_ota.xlsx"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert len(adapter.calls) == 1
+        # The DRR document lands in the P1 item's folder, not DRR's.
+        assert adapter.calls[0]["target_dir"] == item.target_folder
+        assert result["files_uploaded"] == 1
+        assert result["files_uploaded_migrated"] == 1
+        assert result["items_with_migrated"] == 1
+
+    def test_item_with_only_migrated_files_still_uploads(self, deps):
+        """A P1 item that received nothing itself must still submit its mapped
+        DRR documents -- the old skip_no_files check looked at own files only."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: []
+        deps.storage.list_migrated_upload_files_for_item = lambda _id: [
+            self._mig("view/MMK/SM-S671U1/DRR/HW PL/a.pdf", "a.pdf"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["skipped_no_files"] == 0
+        assert result["uploaded_items"] == 1
+
+    def test_own_and_migrated_files_both_upload(self, deps):
+        """Per user 2026-09-01: a document received in P1 always differs in hash
+        from the DRR versions, so both legitimately ship."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            self._own("view/MMK/SM-S671U1/P1/HW PL/p1_native.xlsx", "p1_native.xlsx"),
+        ]
+        deps.storage.list_migrated_upload_files_for_item = lambda _id: [
+            self._mig("view/MMK/SM-S671U1/DRR/HW PL/drr_doc.xlsx", "drr_doc.xlsx"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["files_uploaded"] == 2
+        assert result["files_uploaded_migrated"] == 1      # subset, not addend
+        names = {c["filename"] for c in adapter.calls}
+        assert names == {"p1_native.xlsx", "drr_doc.xlsx"}
+
+    def test_duplicate_path_is_not_uploaded_twice(self, deps):
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        same = "view/MMK/SM-S671U1/DRR/HW PL/dup.xlsx"
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            self._own(same, "dup.xlsx"),
+        ]
+        deps.storage.list_migrated_upload_files_for_item = lambda _id: [
+            self._mig(same, "dup.xlsx"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert len(adapter.calls) == 1
+        assert result["files_uploaded"] == 1
+
+    def test_migrated_upload_is_audited_with_its_source(self, deps):
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: []
+        deps.storage.list_migrated_upload_files_for_item = lambda _id: [
+            self._mig("view/MMK/SM-S671U1/DRR/HW PL/a.pdf", "a.pdf",
+                      milestone="DRR", item_no=50),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        rows = [
+            (action, details) for action, _iid, _attr, details in deps.audit.logs
+            if action == "submit_to_carrier_migrated_file_ok"
+        ]
+        assert len(rows) == 1
+        assert rows[0][1]["migrated_from_milestone"] == "DRR"
+        assert rows[0][1]["migrated_from_item_no"] == 50
+
+    def test_migrated_resolver_failure_does_not_block_own_files(self, deps):
+        """Migration must never break a submission that would otherwise succeed
+        on the item's own documents."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            self._own("view/MMK/SM-S671U1/P1/HW PL/p1_native.xlsx", "p1_native.xlsx"),
+        ]
+
+        def _boom(_id):
+            raise RuntimeError("db down")
+
+        deps.storage.list_migrated_upload_files_for_item = _boom
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["files_uploaded"] == 1
+        assert result["files_uploaded_migrated"] == 0
+        assert adapter.calls[0]["filename"] == "p1_native.xlsx"
+
+    def test_absent_migrated_resolver_is_a_no_op(self, deps):
+        """Older storage impls / test doubles without the resolver behave
+        exactly as before DRRP1-1."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+        deps.storage.list_upload_files_for_item = lambda _id: [
+            self._own("view/MMK/SM-S671U1/P1/HW PL/p1_native.xlsx", "p1_native.xlsx"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(storage=deps.storage, sp_writer=deps.sp_writer,
+                     audit=deps.audit, customer_adapter=adapter)
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["files_uploaded"] == 1
+        assert result["files_uploaded_migrated"] == 0
+
+    def test_resolver_failure_falls_back_to_associations(self, deps):
+        """A resolver blowing up must not stop the milestone submitting --
+        degrade to the pre-UPLOAD-VIEW-1 behaviour."""
+        from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task
+
+        item = _mk_stc_item("ReadyForSubmission", "I-A")
+        deps.storage.items["I-A"] = item
+        deps.storage.list_items_response = [item]
+
+        def _boom(_id):
+            raise RuntimeError("db down")
+
+        deps.storage.list_upload_files_for_item = _boom
+        deps.storage.list_classified_associations_for_item = lambda _id: [
+            _mk_assoc("h1", "I-A", "internal/MMK/SM-S671U1/P1/CPM/item_2/f/rev1/a.pdf"),
+        ]
+
+        adapter = _RichFakeAdapter(default_kind="true")
+        d = TaskDeps(
+            storage=deps.storage, sp_writer=deps.sp_writer, audit=deps.audit,
+            customer_adapter=adapter,
+        )
+        with override_task_deps(d):
+            result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
+
+        assert result["files_uploaded"] == 1
+        assert adapter.calls[0]["filename"] == "a.pdf"
+
     def test_skip_already_submitted(self, deps):
         """Item already in SubmittedToCustomer state -> skipped (idempotency)."""
         from core.src.workflow_engine.tasks.submit_to_carrier import submit_to_carrier_task

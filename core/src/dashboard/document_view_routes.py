@@ -44,13 +44,14 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import (
     APIRouter, Body, Depends, FastAPI, Form, Header, HTTPException, Request,
     status,
 )
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import (
     HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse,
 )
@@ -268,6 +269,40 @@ def _open_mode_for(filename: str) -> str:
     return "download"
 
 
+def _effective_open_mode(
+    mode: str,
+    *,
+    is_drm_wrapped: bool = False,
+    is_superseded: bool = False,
+    pending_classification: bool = False,
+) -> str:
+    """Downgrade an extension-derived open mode to what the UI may offer.
+
+    `mode` is `_open_mode_for`'s answer; the flags are reasons to withhold
+    editing. Returned mode also decides which scoped token is minted, so the
+    token grants exactly what the UI shows.
+
+    - D-152: NASCA-wrapped files cannot be edited in-browser (OnlyOffice has
+      no NASCA agent).
+    - MERGE-2 (2026-08-30): a superseded revision is read-only -- editing a
+      stale revision produces work upload will never select, since selection
+      takes the family's winning revision.
+    - EDIT-GATE-1 (2026-09-08): an unclassified or misaligned file is not yet
+      a deliverable. Editing it writes a document_version with a fresh sha256
+      into the VIEW tree while the authoritative file still sits in
+      internal/.../_staged_classification/, which Reclassify then moves to
+      rev1/ -- two trees diverging on one document whose type is still in
+      question. Only EDIT is withheld: native View survives, because you
+      often have to open a file to decide its doc_type, and Download is
+      emitted separately by the caller regardless.
+    """
+    if is_drm_wrapped or is_superseded:
+        return "download"
+    if pending_classification and mode == "editor":
+        return "download"
+    return mode
+
+
 def _ext(filename: str) -> str:
     if "." not in filename:
         return ""
@@ -412,9 +447,16 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
     already configured by the caller.
     """
     from .auth import require_authenticated_principal
+    from .url_prefix import join as _url_join
 
     def _auth(request: Request):
         return require_authenticated_principal(request, cfg)
+
+    def _u(path: str) -> str:
+        """URLPFX-1: prefix an emitted url. Routes below stay unprefixed --
+        nginx strips /hilda before proxying -- so this applies only to
+        redirect targets and hrefs handed back to the browser."""
+        return _url_join(getattr(cfg, "url_prefix", ""), path)
 
     # ----- Chunk 4: browse landing + folder listing ------------------------
 
@@ -449,6 +491,130 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "tg_entries":     entries,
                 "unrouted_count": unrouted_count,
             },
+        )
+
+    # ----- UPLOAD-MANIFEST-1 (2026-09-06): submission preview ------------
+    #
+    # "Where will these files land on Google Drive?" answered BEFORE the TPM
+    # clicks Submit in the SP UI, for a whole milestone. Rows come from the
+    # same resolvers submit_to_carrier calls, so the preview cannot disagree
+    # with the delivery.
+
+    @app.get(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/manifest",
+        response_class=HTMLResponse,
+    )
+    async def upload_manifest(
+        customer_id: str, device_id: str, milestone_id: str,
+        request: Request,
+        principal=Depends(_auth),
+    ):
+        from core.src.storage import build_milestone_manifest
+        manifest = await build_milestone_manifest(
+            customer_id, device_id, milestone_id,
+        )
+        return templates.TemplateResponse(
+            request,
+            "upload_manifest.html",
+            {
+                "customer_id":  customer_id,
+                "device_id":    device_id,
+                "milestone_id": milestone_id,
+                "manifest":     manifest,
+            },
+        )
+
+    @app.get("/browse/{customer_id}/{device_id}/{milestone_id}/manifest.csv")
+    async def upload_manifest_csv(
+        customer_id: str, device_id: str, milestone_id: str,
+        principal=Depends(_auth),
+    ):
+        """Same data as the page, for TPMs who want to diff it against the
+        drive or attach it to a submission record."""
+        import csv, io
+        from fastapi.responses import StreamingResponse
+        from core.src.storage import build_milestone_manifest
+
+        manifest = await build_milestone_manifest(
+            customer_id, device_id, milestone_id,
+        )
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator=chr(10))
+        w.writerow([
+            "item_no", "tg_name", "delivery_state", "state_ready",
+            "filename", "doc_type", "migrated_from",
+            "carrier_destination", "excluded_reason", "source_path",
+        ])
+        for it in manifest.items:
+            for r in it.rows:
+                w.writerow([
+                    it.item_no, it.tg_name, it.delivery_state,
+                    "yes" if it.state_ready else "no",
+                    r.filename, r.doc_type, r.migrated_from,
+                    r.carrier_destination, r.excluded_reason, r.source_path,
+                ])
+        buf.seek(0)
+        fname = f"manifest_{customer_id}_{device_id}_{milestone_id}.csv"
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+
+    # ----- UPLOAD-BUNDLE-1 (2026-09-06): download the submission as a zip -
+    #
+    # Same tree a Submit-to-Carrier would create on Drive, on the TPM's own
+    # machine, so placement can be checked by opening folders. Entry paths ARE
+    # the manifest's carrier destinations -- nothing is recomputed here.
+
+    @app.get("/browse/{customer_id}/{device_id}/{milestone_id}/download-all.zip")
+    async def download_all_zip(
+        customer_id: str, device_id: str, milestone_id: str,
+        principal=Depends(_auth),
+    ):
+        import shutil
+        import tempfile
+        from fastapi.responses import FileResponse
+        from starlette.background import BackgroundTask
+
+        from core.src.storage import build_milestone_manifest
+        from core.src.storage.upload_bundle import build_manifest_zip
+
+        manifest = await build_milestone_manifest(
+            customer_id, device_id, milestone_id,
+        )
+        # Assembled on disk, not in memory: a milestone can hold gigabytes and
+        # buffering that would take the API container down.
+        tmpdir = tempfile.mkdtemp(prefix="hilda-bundle-")
+        zip_path = PurePosixPath(tmpdir) / (
+            f"submission_{customer_id}_{device_id}_{milestone_id}.zip"
+        )
+        result = await run_in_threadpool(
+            build_manifest_zip, manifest, Path(str(zip_path)),
+        )
+        if result.oversized:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"Submission bundle is {result.total_estimated_bytes:,} bytes, "
+                    "over the download cap. Use the Submission preview page, or "
+                    "download per technology group."
+                ),
+            )
+        _log.warning(
+            "DOWNLOAD_ALL_ZIP: scope=%s/%s/%s written=%d excluded=%d "
+            "missing=%d collisions=%d by=%s",
+            customer_id, device_id, milestone_id, result.files_written,
+            result.files_excluded, result.files_missing,
+            len(result.collisions), getattr(principal, "user_id", None),
+        )
+        return FileResponse(
+            str(zip_path),
+            media_type="application/zip",
+            filename=Path(str(zip_path)).name,
+            # Temp dir removed once the response has been streamed.
+            background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
         )
 
     # ----- DRR-DL-1 (2026-08-06): on-demand Download DRR status ---------
@@ -642,7 +808,19 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             # so the token itself grants only what the UI will show. Also emit
             # a separate download_token so the template can render a Download
             # link alongside a live Edit / native View when applicable.
-            effective_mode = "download" if f.is_drm_wrapped else mode
+            # MERGE-2 (2026-08-30): superseded revisions are read-only. Editing
+            # a stale revision produces work that upload will never select
+            # (selection takes the family's winning revision), so downgrade the
+            # same way DRM does -- the token then grants only what the UI shows,
+            # and /browse/edit enforces the rule server-side regardless.
+            effective_mode = _effective_open_mode(
+                mode,
+                is_drm_wrapped=f.is_drm_wrapped,
+                is_superseded=f.is_superseded,
+                pending_classification=bool(
+                    f.is_staged or f.is_staged_not_classified
+                ),
+            )
             tok_mode = ("edit" if effective_mode == "editor"
                         else "view" if effective_mode == "native"
                         else "download")
@@ -683,6 +861,9 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 # view_tree_tg.html when an owner-authored version landed on
                 # top of a prior TPM edit -- manual merge required.
                 "needs_merge":         f.needs_merge,
+                # MERGE-2 (2026-08-30): older revision of a family -- template
+                # badges it and shows Download only (no Edit link).
+                "is_superseded":       f.is_superseded,
                 # RECLASS-2 (2026-08-24): pass reclassify inputs to template
                 # so it can render Reclassify button + doc_type dropdown on
                 # is_staged rows. Template posts (file_hash, new_doc_type)
@@ -691,6 +872,17 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "doc_type":            f.doc_type,
                 "file_hash":           f.file_hash,
                 "is_staged":           f.is_staged,
+                # MISALIGN-PROJ-1 (2026-09-08): this key was missing from the
+                # projection while TgFileEntry and the template both carried
+                # it, so every template read resolved to Undefined -- falsy.
+                # Effect: DOCTYPE-MISALIGN-UI-1's warning badge and Reclassify
+                # control have NEVER rendered for a misaligned document in
+                # this deployment, while the carrier-destination cell (which
+                # reads the already-projected upload_excluded_reason) reported
+                # the file as staged. The two cells appeared to contradict
+                # each other; they were reading a present key and a missing
+                # one. Found live on MMK DRR MNO-ETM.
+                "is_staged_not_classified": f.is_staged_not_classified,
                 # RECLASS-UI-SCOPE-1 (2026-08-27): per-row Reclassify options
                 # scoped to the routed item's item_type (FR-86 alignment).
                 # Template renders one <option> per entry; when singleton +
@@ -699,7 +891,34 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 # back to legacy 4-option dropdown.
                 "item_type":           f.item_type,
                 "allowed_doc_types":   list(f.allowed_doc_types),
+                # UPLOAD-DEST-1 / UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06):
+                # where this file lands on the carrier, or why it will not be
+                # delivered, plus any TPM-chosen folder currently in force.
+                "migrated_to":            f.migrated_to,
+                "carrier_destination":    f.carrier_destination,
+                "upload_excluded_reason": f.upload_excluded_reason,
+                "target_folder_override": f.target_folder_override,
             })
+        from core.src.storage.upload_folder_override import (
+            list_folder_options_for_tg,
+        )
+        # DRRP1-DEST-1: on a source milestone (DRR) every item is
+        # no_customer_upload with target_folder NULL, so its own folder list
+        # is empty -- and DRR documents are not listed under P1 at all (the
+        # view tree is milestone-scoped; migration is a read-through at
+        # upload time). This page is therefore the ONLY place a TPM can set
+        # the override, so the options must be the TARGET milestone's
+        # folders. The override itself is stored on the source association
+        # and travels via list_migrated_upload_files_for_item.
+        from core.src.template_schema import milestone_item_mapping as _mim
+        _fwd = [
+            b for b in _mim.get_mapping_blocks(customer_id)
+            if b.source_milestone == milestone_id
+        ]
+        _folder_milestone = _fwd[0].target_milestone if _fwd else milestone_id
+        folder_options = await list_folder_options_for_tg(
+            customer_id, device_id, _folder_milestone, tg_name,
+        )
         return templates.TemplateResponse(
             request,
             "view_tree_tg.html",
@@ -709,6 +928,10 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "milestone_id": milestone_id,
                 "tg_name":      tg_name,
                 "files":        rendered,
+                # UPLOAD-FOLDER-OVERRIDE-1: folders declared by work items in
+                # THIS TG only. The TPM picks a destination that already
+                # exists, so the override cannot invent one.
+                "folder_options": folder_options,
             },
         )
 
@@ -752,34 +975,82 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             customer_id=customer_id, device_id=device_id,
             milestone_id=milestone_id,
         )
-        candidates = await list_route_candidates_for_scope(
+        def _shape(items):
+            # DeliveryItemTable primary key column is `item_id`; the UR-6
+            # POST expects target_delivery_item_id — pass it as that.
+            return [
+                {
+                    "delivery_item_id": c.item_id,
+                    "item_no":          c.item_no,
+                    "item_name":        c.item_name,
+                    "tg_name":          c.tg_name,
+                    "delivery_state":   c.delivery_state,
+                    # UNROUTED-ITEMTYPE-1 (2026-09-09): item_type in the
+                    # option label. The dropdown is deliberately NOT filtered
+                    # to FR-86-aligned items -- per [D-192] an empty dropdown
+                    # strands the TPM, and a resolved doc_type can itself be
+                    # the half that is wrong. But an unlabelled list gives no
+                    # way to see that a pick will misalign and land STAGED,
+                    # so show the item_type and let the TPM choose knowingly.
+                    "item_type":        c.item_type,
+                }
+                for c in items
+            ]
+
+        # UNROUTED-TG-SCOPE-1 (2026-09-03): the dropdown is now scoped PER
+        # ROW to the TG the document arrived for, not milestone-wide. A doc
+        # lives under exactly one TG folder per [D-153], so offering another
+        # TG's items invites a mis-route the TPM can only undo by hand.
+        #
+        # Cached per TG rather than queried per row -- an unrouted list is
+        # usually one or two TGs deep, so this is 1-2 queries regardless of
+        # row count. The unscoped list is fetched once and reused for rows
+        # with no resolvable TG (multi-TG email batch, or rows ingested
+        # before the resolver was wired), because an empty dropdown would
+        # leave the TPM unable to route at all.
+        candidates_all = _shape(await list_route_candidates_for_scope(
             customer_id=customer_id, device_id=device_id,
             milestone_id=milestone_id, excluded_item_names=excluded_arg,
-        )
-        # Shape candidates for the template: DeliveryItemTable rows carry
-        # attributes the Jinja template shouldn't reach into directly.
-        candidate_rows = [
-            {
-                # DeliveryItemTable primary key column is `item_id`; the UR-6
-                # POST expects target_delivery_item_id — pass it as that.
-                "delivery_item_id": c.item_id,
-                "item_no":          c.item_no,
-                "item_name":        c.item_name,
-                "tg_name":          c.tg_name,
-                "delivery_state":   c.delivery_state,
-            }
-            for c in candidates
-        ]
-        rows = [
-            {
+        ))
+        by_tg_cache: dict[str, list[dict]] = {}
+
+        async def _candidates_for(tg: str) -> tuple[list[dict], bool]:
+            """Returns (rows, is_scoped). Falls back to the milestone-wide
+            list when the TG is unknown or has no eligible items."""
+            tg = (tg or "").strip()
+            if not tg:
+                return candidates_all, False
+            if tg not in by_tg_cache:
+                by_tg_cache[tg] = _shape(await list_route_candidates_for_scope(
+                    customer_id=customer_id, device_id=device_id,
+                    milestone_id=milestone_id,
+                    excluded_item_names=excluded_arg, tg_name=tg,
+                ))
+            scoped = by_tg_cache[tg]
+            if not scoped:
+                _log.warning(
+                    "unrouted UI: TG %r has no eligible route targets in "
+                    "%s/%s/%s -- falling back to milestone-wide list",
+                    tg, customer_id, device_id, milestone_id,
+                )
+                return candidates_all, False
+            return scoped, True
+
+        # Kept for templates/tests that still read the page-level list.
+        candidate_rows = candidates_all
+        rows = []
+        for u in unrouted:
+            cands, is_scoped = await _candidates_for(u.inferred_tg_name)
+            rows.append({
                 "file_hash":             u.file_hash,
                 "original_filename":     u.original_filename,
                 "doc_type":              u.doc_type or "—",
                 "ingested_at_pretty":    _fmt_dt(u.ingested_at),
                 "is_dup_hash_elsewhere": u.is_dup_hash_elsewhere,
-            }
-            for u in unrouted
-        ]
+                "inferred_tg_name":      u.inferred_tg_name or "",
+                "candidates":            cands,
+                "candidates_scoped":     is_scoped,
+            })
         # UR-6 (Ph-2 2026-08-01): outcome flash from redirect (POST -> 303 GET)
         flash_outcome = request.query_params.get("outcome") or None
         flash_target  = request.query_params.get("target")  or None
@@ -856,7 +1127,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         if result.error:
             # Keep the flash short — full detail is in audit + logs.
             params["error"] = result.error[:200]
-        redirect_url = (
+        redirect_url = _u(
             f"/browse/{customer_id}/{device_id}/{milestone_id}/_unknownTG/"
             f"?{urlencode(params)}"
         )
@@ -871,6 +1142,98 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
     # tpm_resolve_doc_type storage helper (which moves the file to the new
     # doc_type path + upgrades nsd_path_type to CLASSIFIED). Ingest-source
     # agnostic -- works for NSD / PLM / Email docs equally.
+
+    # ----- UPLOAD-FOLDER-OVERRIDE-1 (2026-09-06): set/clear the carrier
+    # folder for one document. The TPM picks a DESTINATION, not a work item --
+    # a folder is often owned by several items, so the choice says nothing
+    # about which item was meant.
+
+    @app.post(
+        "/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/set-folder",
+        response_class=HTMLResponse, response_model=None,
+    )
+    async def browse_set_upload_folder(
+        customer_id: str, device_id: str, milestone_id: str, tg_name: str,
+        request: Request,
+        file_hash: str = Form(...),
+        target_folder: str = Form(""),
+        principal=Depends(_auth),
+    ):
+        """Redirect a document, and its whole revision family, to a folder
+        already declared by a work item in this TG. An empty target_folder
+        resets it to the item's own folder.
+
+        The submitted folder is re-validated against list_folder_options_for_tg
+        server-side. The form is not trusted: accepting an arbitrary string
+        would let a typo or a crafted POST deliver documents to a path no work
+        item declares, which is precisely the "cannot invent a destination"
+        property the override design rests on.
+        """
+        from core.src.storage.db import (
+            DocumentItemAssociationTable, session_scope,
+        )
+        from core.src.storage.upload_folder_override import (
+            clear_upload_folder_override,
+            list_folder_options_for_tg,
+            set_upload_folder_override,
+        )
+        from sqlalchemy import select as _select
+
+        tpm_id = getattr(principal, "user_id", None) or "tpm@unknown"
+        back = _u(
+            f"/browse/{customer_id}/{device_id}/{milestone_id}"
+            f"/tg/{tg_name}/?outcome="
+        )
+
+        # Resolve the association(s) this document has in scope. The template
+        # only knows the file_hash; the handler derives the item, exactly as
+        # the reclassify POST does.
+        async with session_scope() as session:
+            item_ids = [
+                r for (r,) in (await session.execute(
+                    _select(DocumentItemAssociationTable.delivery_item_id)
+                    .where(
+                        DocumentItemAssociationTable.file_hash == file_hash,
+                        DocumentItemAssociationTable.milestone_id == milestone_id,
+                    )
+                )).all()
+            ]
+        if not item_ids:
+            _log.warning(
+                "SET_UPLOAD_FOLDER: no association for file_hash=%s in %s",
+                file_hash[:12], milestone_id,
+            )
+            return RedirectResponse(back + "no_assoc", status_code=303)
+
+        folder = (target_folder or "").strip()
+        if not folder:
+            for item_id in item_ids:
+                await clear_upload_folder_override(
+                    file_hash=file_hash, delivery_item_id=item_id,
+                    tpm_id=tpm_id,
+                )
+            return RedirectResponse(back + "folder_reset", status_code=303)
+
+        allowed = {
+            o.target_folder
+            for o in await list_folder_options_for_tg(
+                customer_id, device_id, milestone_id, tg_name,
+            )
+        }
+        if folder not in allowed:
+            _log.warning(
+                "SET_UPLOAD_FOLDER: rejected folder=%r not declared by any "
+                "work item in tg=%s (%d option(s)) file_hash=%s by=%s",
+                folder, tg_name, len(allowed), file_hash[:12], tpm_id,
+            )
+            return RedirectResponse(back + "folder_invalid", status_code=303)
+
+        for item_id in item_ids:
+            await set_upload_folder_override(
+                file_hash=file_hash, delivery_item_id=item_id,
+                target_folder=folder, tpm_id=tpm_id,
+            )
+        return RedirectResponse(back + "folder_set", status_code=303)
 
     @app.post(
         "/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/reclassify",
@@ -918,7 +1281,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         except ValueError:
             params = {"outcome": "invalid_doc_type", "error": new_doc_type[:60]}
             return RedirectResponse(
-                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                url=_u(f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}"),
                 status_code=status.HTTP_303_SEE_OTHER,
             )
 
@@ -931,7 +1294,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             if di_row is None:
                 params = {"outcome": "no_doc_row", "error": file_hash[:12]}
                 return RedirectResponse(
-                    url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                    url=_u(f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}"),
                     status_code=status.HTTP_303_SEE_OTHER,
                 )
             assocs = (await session.execute(
@@ -946,7 +1309,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         if not item_ids:
             params = {"outcome": "not_staged", "error": file_hash[:12]}
             return RedirectResponse(
-                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                url=_u(f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}"),
                 status_code=status.HTTP_303_SEE_OTHER,
             )
 
@@ -984,7 +1347,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 file_hash[:12], new_doc_type_enum.value, _item_types,
             )
             return RedirectResponse(
-                url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+                url=_u(f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}"),
                 status_code=status.HTTP_303_SEE_OTHER,
             )
 
@@ -1048,7 +1411,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         if errors:
             params["error"] = "; ".join(errors)[:200]
         return RedirectResponse(
-            url=f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}",
+            url=_u(f"/browse/{customer_id}/{device_id}/{milestone_id}/tg/{tg_name}/?{urlencode(params)}"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
@@ -1157,6 +1520,8 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             "document_saved":             "Saved",
             "document_downloaded":        "Downloaded",
             "document_edit_blocked_drm":  "Edit blocked (DRM)",
+            "document_edit_blocked_superseded":
+                                          "Edit blocked (superseded revision)",
         }
         rows = []
         for e in events:
@@ -1273,10 +1638,38 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "<p>This file was wrapped by corp Information Rights Management "
                 "(NASCA) in transit. In-browser editing is not available for "
                 "wrapped files.</p>"
-                f"<p><a href=\"/browse/download/{dl_tok}\">Download</a> and open "
+                f"<p><a href=\"{_u(f'/browse/download/{dl_tok}')}\">Download</a> and open "
                 "in a NASCA-aware Office client on your workstation to edit.</p>"
                 "</body></html>",
                 status_code=415,
+            )
+
+        # MERGE-2 (2026-08-30) belt-and-suspenders, mirroring the DRM guard
+        # above: the TG view withholds the Edit link on superseded revisions,
+        # but a bookmarked token or a direct curl can still reach here. Editing
+        # a stale revision produces work carrier upload will never select, so
+        # refuse and point at the revision that WILL upload.
+        from core.src.storage import is_superseded_revision
+        if await is_superseded_revision(view_relative_path):
+            _audit(
+                request, "document_edit_blocked_superseded",
+                view_relative_path, user_id,
+            )
+            dl_tok = _make_scoped_token(
+                secret=cfg.wopi_jwt_secret, view_relative_path=view_relative_path,
+                mode="download", user_id=user_id,
+            )
+            return HTMLResponse(
+                "<html><body>"
+                "<h1>Superseded revision</h1>"
+                "<p>A newer revision of this document has since arrived, so this "
+                "one is read-only. Edits made here would not be submitted to the "
+                "carrier &mdash; only the latest revision is uploaded.</p>"
+                "<p>Open the latest revision from the TG view to make your edits, "
+                f"or <a href=\"{_u(f'/browse/download/{dl_tok}')}\">download</a> this one "
+                "for reference while merging.</p>"
+                "</body></html>",
+                status_code=409,
             )
 
         _audit(request, "document_edit_opened", view_relative_path, user_id)
@@ -1393,7 +1786,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             return HTMLResponse(
                 "<html><body><h1>🔒 DRM-protected version</h1>"
                 f"<p>v{version_num} is IRM-wrapped and cannot preview in-browser. "
-                f"<a href=\"/browse/download/{dl_tok}\">Download</a> to open locally.</p>"
+                f"<a href=\"{_u(f'/browse/download/{dl_tok}')}\">Download</a> to open locally.</p>"
                 "</body></html>",
                 status_code=415,
             )

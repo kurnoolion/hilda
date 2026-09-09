@@ -230,12 +230,20 @@ def _sp_writeback_field_updates(
         )
         return
 
-    sp_writer.update_item(
-        entity="delivery_items",
-        scope=scope,
-        item_id=str(sp_id_raw),
-        canonical_fields=sp_field_updates,
-    )
+    # SPWLOG-1: label this write so the SP_WRITE log line is greppable by a
+    # stable string rather than a line number that moves. State changes are
+    # the writes most often asked about after the fact. Imported locally to
+    # match the ListScope pattern above -- tracker keeps sharepoint_integration
+    # off its module-level surface so the SpWriter Protocol stays the seam.
+    from core.src.sharepoint_integration.write_audit import sp_write_origin
+
+    with sp_write_origin("transitions.update_delivery_state"):
+        sp_writer.update_item(
+            entity="delivery_items",
+            scope=scope,
+            item_id=str(sp_id_raw),
+            canonical_fields=sp_field_updates,
+        )
 
 
 def _build_field_updates(

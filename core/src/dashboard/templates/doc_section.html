@@ -45,6 +45,12 @@
             <th>#</th>
             <th>Filename</th>
             <th>Doc Type</th>
+            {# DRRP1-1 chunk 4: only render the Source column when at least one
+               document is contributed by another milestone's work-item, so
+               items with no mapping keep the original 4-column table. #}
+            {% if docs | selectattr("migrated_from") | list %}
+            <th>Source</th>
+            {% endif %}
             <th>Download</th>
             {% else %}
             <th>Doc Type</th>
@@ -64,6 +70,22 @@
                 <td>{{ loop.index }}</td>
                 <td>{{ doc.original_filename }}</td>
                 <td>{{ doc.doc_type | humanize_doc_type }}</td>
+                {% if docs | selectattr("migrated_from") | list %}
+                {# DRRP1-1 chunk 4: a document collected against another
+                   milestone's work-item, submitted as part of THIS item. It
+                   belongs to the source item -- read-only here, download only,
+                   no reclassify or edit affordance. #}
+                <td>
+                    {% if doc.migrated_from %}
+                    <span title="Collected against {{ doc.migrated_from }} and submitted to the carrier as part of this item. Read-only here — the document belongs to that work-item."
+                          style="padding:0.1em 0.45em; border:1px solid #7a5; color:#460;
+                                 background:#f4faf0; border-radius:3px; font-size:0.85em;
+                                 white-space:nowrap;">from {{ doc.migrated_from }}</span>
+                    {% else %}
+                    <span style="color:#999;">&mdash;</span>
+                    {% endif %}
+                </td>
+                {% endif %}
                 <td>
                     {% if doc.download_url %}
                     <a href="{{ doc.download_url }}"

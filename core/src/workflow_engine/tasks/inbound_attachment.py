@@ -247,8 +247,16 @@ async def _process_regular_attachment(
     batch_id: str,
     correlation_id: str,
     ingest_source: str | None = None,
+    from_zip: bool = False,
+    source_zip_filename: str | None = None,
 ) -> dict[str, Any]:
     """Route + persist + view-tree one non-archive attachment.
+
+    UPLOAD-FLAT-1 (2026-08-31): `from_zip` / `source_zip_filename` mark an
+    attachment that was synthesized from an archive entry rather than arriving
+    as a standalone file. Only the archive path sets them; every other caller
+    gets the default False. See _persist_routed_attachment for why upload needs
+    this.
 
     Returns telemetry deltas: processed, routed_with_match, routed_unrouted,
     duplicates, items_incremented (set), events_fired.
@@ -338,6 +346,8 @@ async def _process_regular_attachment(
         batch_id=batch_id,
         correlation_id=correlation_id,
         ingest_source=ingest_source,
+        from_zip=from_zip,                          # UPLOAD-FLAT-1
+        source_zip_filename=source_zip_filename,    # UPLOAD-FLAT-1
     )
     if counts["match_count"] > 0:
         stats["routed_with_match"] = 1
@@ -609,6 +619,15 @@ async def _process_archive_attachment(
                     batch_id=batch_id,
                     correlation_id=correlation_id,
                     ingest_source=ingest_source,        # PLMARCH-1: propagate
+                    # UPLOAD-FLAT-1 (2026-08-31): this leaf came out of an
+                    # archive, so its folder segments ARE the archive's internal
+                    # structure and must be recreated on the carrier. Files that
+                    # arrive standalone (NSD tree, loose email attachment) get
+                    # from_zip=False and upload flat.
+                    from_zip=True,
+                    source_zip_filename=(
+                        getattr(attachment, "filename", "") or None
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             stats["failed"] += 1
@@ -927,6 +946,12 @@ class _AsyncStorageShim:
         from core.src.storage.document_ops import find_doc_id_slugs_for_item as _f
         return await _f(delivery_item_id, doc_type)
 
+    async def get_max_rev_for_slug(self, milestone_id, doc_id_slug):
+        # REV-1 (2026-08-30): third router read path -- revision-family tip
+        # lookup for Step C.
+        from core.src.storage.document_ops import get_max_rev_for_slug as _m
+        return await _m(milestone_id, doc_id_slug)
+
     async def item_has_association(self, file_hash, delivery_item_id):
         # Added 2026-07-07 for cross-device shared-file fix. Router calls this
         # inside Step 0 to filter out items that already carry an association
@@ -980,7 +1005,9 @@ def _build_ph1_router(deps, *, customer_id: str = ""):
     which silently bypassed customer-specific classification rules.
     """
     try:
-        from core.src.email_service.inbound.attachment_router import Fr52AttachmentRouter
+        from core.src.email_service.inbound.attachment_router import (
+            Fr52AttachmentRouter, sole_tg_resolver,
+        )
         rules_path = _resolve_doc_type_rules_path(customer_id)
         _log.info(
             "process_inbound_attachments: doc_type_rules_path=%s customer=%s exists=%s",
@@ -989,7 +1016,13 @@ def _build_ph1_router(deps, *, customer_id: str = ""):
         return Fr52AttachmentRouter(
             storage=_AsyncStorageShim(),    # async-shim per 2026-06-29 fix
             llm=None,                       # Ph-1 no LLM ROUTE_ATTACHMENT
-            tg_resolver=None,
+            # UNROUTED-TG-SCOPE-1 (2026-09-03): was None for every channel,
+            # so document_index.inferred_tg_name never got populated at
+            # ingest. sole_tg_resolver returns the single TG when the
+            # candidate set has one (NSD -> HW PL, PLM -> the ticket's TG)
+            # and None when it spans TGs (multi-TG email batch), which is
+            # what scopes the manual-route dropdown downstream.
+            tg_resolver=sole_tg_resolver,
             doc_type_filename_rules_path=rules_path,
             plm_upload_enabled=False,
             review_required_enabled=False,
@@ -1012,6 +1045,8 @@ async def _persist_routed_attachment(
     batch_id: str,
     correlation_id: str,
     ingest_source: str | None = None,
+    from_zip: bool = False,
+    source_zip_filename: str | None = None,
 ) -> dict[str, Any]:
     """Steps E-H: write NSD bytes, insert DocumentIndexRow, insert N
     DocumentItemAssociation rows (FR-79 multi-item), increment doc_count_received
@@ -1140,6 +1175,16 @@ async def _persist_routed_attachment(
                 original_filename=getattr(attachment, "filename", ""),
                 first_page_excerpt="",
                 is_final=True,                            # Ph-1: all docs final by default
+                # UPLOAD-FLAT-1 (2026-08-31): FR-72 flags existed on the model
+                # and the table but were never written by any ingest path.
+                # submit_to_carrier needs them: a file's folder segments are
+                # only meaningful carrier structure when they came from INSIDE
+                # an archive. NSD tree folders must flatten. The path alone
+                # cannot tell the two apart -- NEST-1 only prefixes the archive
+                # name at depth >= 1, so a top-level zip's entries look exactly
+                # like NSD subfolders.
+                from_zip=from_zip,
+                source_zip_filename=source_zip_filename,
                 inferred_tg_name=routed.inferred_tg_name,
                 routing_resolution=routed.routing_resolution.value
                                     if hasattr(routed.routing_resolution, "value")

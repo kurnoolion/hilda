@@ -4,12 +4,12 @@
 
 {% block content %}
 <div style="float:right;">
-  <a href="/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
+  <a href="{{ url_prefix }}/feedback/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}"
      style="display:inline-block; background:#1a3a6c; color:#fff;
             padding:0.4em 0.9em; border-radius:3px; text-decoration:none;
             font-size:0.9em;">Report issue / feedback</a>
 </div>
-<p><a href="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
+<p><a href="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/">← All technology groups</a></p>
 
 <h1>Unrouted files — {{ customer_id }} · {{ device_id }} · {{ milestone_id }}</h1>
 
@@ -83,23 +83,46 @@ staged folder, associate it, and audit the assignment.</p>
         <td>{{ f.ingested_at_pretty }}</td>
         <td>
           <form method="post"
-                action="/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/_unknownTG/route"
+                action="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/_unknownTG/route"
                 style="margin:0; display:inline-block;">
             <input type="hidden" name="file_hash" value="{{ f.file_hash }}">
+            {# UNROUTED-TG-SCOPE-1 (2026-09-03): per-row candidate list,
+               scoped to the TG this document arrived for. f.candidates is
+               the scoped set when f.candidates_scoped is true, else the
+               milestone-wide list (multi-TG email batch, or no eligible
+               items in that TG -- an empty dropdown would leave the TPM
+               unable to route at all). #}
             <select name="target_delivery_item_id" required
-                    {% if candidates|length == 0 %}disabled{% endif %}>
+                    {% if f.candidates|length == 0 %}disabled{% endif %}>
               <option value="">— pick a work item —</option>
-              {% for c in candidates %}
+              {% for c in f.candidates %}
+                {# UNROUTED-ITEMTYPE-1 (2026-09-09): item_type is shown because
+                   routing and doc_type classification are independent -- the
+                   router never consults doc_type -- so a pick whose item_type
+                   does not FR-86-align with this document's doc_type lands it
+                   STAGED rather than delivered. The list stays unfiltered per
+                   [D-192] (an empty dropdown strands the TPM, and a resolved
+                   doc_type can itself be the wrong half), so the label has to
+                   carry enough to make a mismatch a choice, not an accident. #}
                 <option value="{{ c.delivery_item_id }}">
                   #{{ c.item_no }} · {{ c.tg_name }} · {{ c.item_name }}
-                  ({{ c.delivery_state }})
+                  ({{ c.delivery_state }} · {{ c.item_type }})
                 </option>
               {% endfor %}
             </select>
             <button type="submit"
-                    {% if candidates|length == 0 %}disabled{% endif %}>
+                    {% if f.candidates|length == 0 %}disabled{% endif %}>
               Route
             </button>
+            <div style="font-size:0.75em; color:#666; margin-top:0.15em;">
+              {% if f.candidates_scoped %}
+                Showing <strong>{{ f.inferred_tg_name }}</strong> work items
+                only — this document arrived for that technology group.
+              {% else %}
+                Showing all work items in this milestone — the technology
+                group could not be determined for this document.
+              {% endif %}
+            </div>
           </form>
         </td>
         <td>
