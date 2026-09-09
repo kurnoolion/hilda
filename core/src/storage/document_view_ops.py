@@ -702,9 +702,19 @@ async def list_files_in_tg(
     def _allowed_for_item_types(item_types: set[str]) -> tuple[str, ...]:
         """RECLASS-UI-SCOPE-1: intersection of FR-86-aligned doc_type sets
         across all routed items for this file. Mirrors
-        Fr52AttachmentRouter._fr86_aligned. Under D-155 one-doc-one-item the
-        set is a singleton; multi-item is rare N-way. Confirmation + default
-        item_types accept ANY doc_type -> all 4."""
+        Fr52AttachmentRouter._fr86_aligned. Confirmation + default item_types
+        accept ANY doc_type -> all 4.
+
+        WAIVER-UNIVERSAL-1 (2026-09-09): waiver is legit on ANY item_type
+        (waivers arrive over email during DRR and can attach to a
+        RELNOTES-typed item or a TTWR-typed item indifferently), so it stays
+        in every non-empty set below. Previous singleton-alignment for
+        RELNOTES is preserved for the AUTO-CLASSIFY path via
+        _singleton_alignment_doc_type -- that function is hardcoded and
+        deliberately does NOT include waiver, because auto-promoting an
+        UNRESOLVED filename to waiver would misclassify legitimate release
+        notes; only a TPM reclassify may pick waiver here.
+        """
         from core.src.template_schema.enums import DocType, ItemType
         ALL = (
             DocType.TEST_REPORT.value,
@@ -717,7 +727,10 @@ async def list_files_in_tg(
             DocType.TECH_REPORT.value,
             DocType.WAIVER.value,
         )
-        RELNOTES = (DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,)
+        RELNOTES = (
+            DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value,
+            DocType.WAIVER.value,
+        )
         per_item: list[tuple[str, ...]] = []
         for it in item_types:
             if it == ItemType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value:
@@ -1042,7 +1055,12 @@ def resolve_carrier_destination(
     from core.src.storage.upload_plan import carrier_subdir, effective_target_dir
 
     if doc_type == DocType.WAIVER.value:
-        return "", "waiver — never uploaded, any milestone"
+        # WAIVER-UNIVERSAL-1 (2026-09-09): waivers never upload to the carrier
+        # here; they submit as part of the DRR milestone workbook (received
+        # over email during DRR) rather than via P1's Submit-to-Carrier path.
+        # Message names the destination so a TPM can see WHY it's not going
+        # here, not just that it isn't.
+        return "", "waiver — not uploaded here; submits during DRR milestone"
     if doc_type == DocType.ARCHIVE_CONTAINER.value:
         return "", "archive container — the carrier gets its contents, not the container"
     if is_superseded:

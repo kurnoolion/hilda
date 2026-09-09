@@ -110,7 +110,13 @@ auto-extracted preserving folder structure; every save creates a new version.</p
              explanation and the Reclassify control; this makes the row
              findable without reading across. Suppressed when f.is_staged,
              because "Unresolved" already says it. #}
-          {% if f.is_staged_not_classified and not f.is_staged %}
+          {# WAIVER-UNIVERSAL-1 (2026-09-09): a waiver stored as
+             is_staged_not_classified from a pre-fix ingest is not actually
+             wrong -- waivers are legit on any item_type. The carrier
+             destination cell already says "waiver — not uploaded here",
+             which is the whole story; a second "⚠ not submitted" badge
+             here would falsely imply a TPM action is needed. #}
+          {% if f.is_staged_not_classified and not f.is_staged and f.doc_type != 'waiver' %}
             <span title="Doc type does not match this work item's item_type (FR-86). The file is parked in _staged_classification and is EXCLUDED from carrier submission until a TPM reclassifies it or it is re-routed to a matching item."
                   style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #c60; background:#fff4e5; color:#a04; border-radius:3px; font-size:0.85em;">⚠ not submitted</span>
           {% endif %}
@@ -131,7 +137,13 @@ auto-extracted preserving folder structure; every save creates a new version.</p
            no control and no warning, while list_upload_files_for_item silently
            dropped it from the carrier submission. #}
         <td>
-          {% if f.is_staged or f.is_staged_not_classified %}
+          {# WAIVER-UNIVERSAL-1 (2026-09-09): waivers are legit on any
+             item_type per user 2026-09-09, so a waiver-classified doc has
+             nothing to reclassify TO -- suppress the form even if the
+             stored is_staged_not_classified flag is still True from a
+             pre-fix ingest. Falls through to the plain-label branch which
+             renders 'waiver'. #}
+          {% if (f.is_staged or f.is_staged_not_classified) and f.doc_type != 'waiver' %}
             <form method="post"
                   action="{{ url_prefix }}/browse/{{ customer_id }}/{{ device_id }}/{{ milestone_id }}/tg/{{ tg_name }}/reclassify"
                   style="display:inline; margin:0;">

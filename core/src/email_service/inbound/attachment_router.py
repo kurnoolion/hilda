@@ -1444,6 +1444,15 @@ class Fr52AttachmentRouter:
         """FR-86 alignment invariant per MODULE.md Invariants.
 
         Aligned pairs:
+        - (*, waiver) -- WAIVER-UNIVERSAL-1 (2026-09-09): a waiver is legitimate
+          evidence on ANY item_type. Waivers arrive over email during DRR (and
+          occasionally other milestones); they never upload to the carrier (the
+          waiver early-return in resolve_carrier_destination enforces that), so
+          the only effect of "misaligned" here was to STAGE waivers on
+          compliance_certification_release_notes items and demand a bogus
+          reclassify. Per user 2026-09-09: waivers are always legit; skip the
+          item-type gate. Handled BEFORE the item_type table so it applies even
+          when item_type is None / unknown.
         - (test_tech_waiver_report, {test_report, tech_report, waiver})
         - (compliance_certification_release_notes, compliance_certification_release_notes)
         - (Confirmation, *) -- Confirmation items have item_type Confirmation;
@@ -1452,6 +1461,8 @@ class Fr52AttachmentRouter:
 
         Misaligned pairs land on STAGED_NOT_CLASSIFIED per FR-86.
         """
+        if doc_type_value == DocType.WAIVER.value:
+            return True
         if not item_type:
             return False
         if item_type == ItemType.DEFAULT.value:
