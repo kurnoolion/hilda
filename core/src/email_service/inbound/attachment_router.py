@@ -101,8 +101,19 @@ def filename_says_waiver(filename: str) -> bool:
     per architect 2026-09-02 every waiver filename carries this word, so a
     name containing it must never be auto-classified as something else. See
     DOCTYPE-WAIVER-VETO-1 at the promotion site for why that matters.
+
+    CLASSIFY-BASENAME-1 (2026-09-09): the substring check runs against the
+    BASENAME only, same rule as _classify_doc_type. NSD ingest passes the
+    share-relative path here (e.g.
+    `VZW/7. FCC (Waiver)/Test reports/A3LSMS948U WPT RF Exposure Test Report revD.pdf`);
+    without the strip the folder `(Waiver)` triggered a VETO that flipped
+    the router's own TG_DEFAULT_NOMATCH-routed doc into a WAIVER
+    classification -- exact reverse of the intended semantics (folder =
+    routing, filename = classification).
     """
-    return _WAIVER_SUBSTRING in (filename or "").lower()
+    from pathlib import PurePosixPath
+    basename = PurePosixPath(filename or "").name
+    return _WAIVER_SUBSTRING in basename.lower()
 
 # 'technical report' / 'tech report' as a PHRASE, plus 'TR' as a whole token.
 # Bare 'report' is intentionally NOT a signal: nearly every *test* report
@@ -140,7 +151,15 @@ def keyword_fallback_doc_type(
     """
     if item_type != ItemType.TEST_TECH_WAIVER_REPORT.value:
         return None
-    name = (filename or "").strip()
+    # CLASSIFY-BASENAME-1 (2026-09-09): fold every keyword check onto the
+    # basename, same rule as _classify_doc_type + filename_says_waiver.
+    # NSD ingest passes the share-relative path; without the strip a folder
+    # named 'Technical Reports/foo.pdf' would promote foo.pdf to TECH_REPORT
+    # from the folder, not the filename. Rung 3's TEST_REPORT default is
+    # unaffected (any non-empty basename lands there), but rungs 1 and 2 must
+    # be filename-only.
+    from pathlib import PurePosixPath
+    name = PurePosixPath((filename or "").strip()).name
     if not name:
         return None
     if filename_says_waiver(name):

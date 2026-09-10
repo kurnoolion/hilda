@@ -33,7 +33,7 @@ from core.src.email_service.inbound.attachment_router import (
     _canonicalize_extension_group,
     load_doc_type_rules,
 )
-from core.src.template_schema.enums import DocType
+from core.src.template_schema.enums import DocType, ItemType
 
 MMK_RULES = Path("customizations/template_schemas/MMK/doc_type_filename_rules.yaml")
 DEFAULT_RULES = Path("core/src/email_service/default_doc_type_rules.yaml")
@@ -332,6 +332,57 @@ class TestClassifyDocTypeUsesBasenameOnly:
             "VZW/Test Report Folder/SM-anonymous-file.pdf"
         )
         assert doc_type == DocType.UNRESOLVED.value
+
+    def test_filename_says_waiver_uses_basename(self) -> None:
+        # The reported failure: an NSD file whose FILENAME says nothing about
+        # waivers -- 'A3LSMS948U WPT RF Exposure Test Report revD.pdf' --
+        # sits inside a folder called '7. FCC (Waiver)/Test reports/'. The
+        # DOCTYPE-WAIVER-VETO promotion guard called filename_says_waiver on
+        # the FULL PATH and force-classified the doc as WAIVER, exactly the
+        # reverse of CLASSIFY-BASENAME-1's intent (folder = routing,
+        # filename = classification). filename_says_waiver must now strip
+        # the path first.
+        from core.src.email_service.inbound.attachment_router import (
+            filename_says_waiver,
+        )
+        # Folder says waiver, filename does not -> no veto.
+        assert filename_says_waiver(
+            "VZW/7. FCC (Waiver)/Test reports/"
+            "A3LSMS948U WPT RF Exposure Test Report revD.pdf"
+        ) is False
+        # Filename itself says waiver -> veto fires.
+        assert filename_says_waiver(
+            "VZW/anything/SM-DEVICE-001 Waiver Request.ppt"
+        ) is True
+        # Bare basename still works (email ingest path).
+        assert filename_says_waiver("SM-DEVICE-001 Waiver Request.ppt") is True
+        assert filename_says_waiver("A3LSMS948U WPT RF Test.pdf") is False
+        # Edge cases: empty / None-ish.
+        assert filename_says_waiver("") is False
+        assert filename_says_waiver(None) is False  # type: ignore[arg-type]
+
+    def test_keyword_fallback_uses_basename(self) -> None:
+        # keyword_fallback_doc_type also folded onto the basename so a
+        # 'Technical Reports/foo.pdf' folder cannot promote a foo.pdf to
+        # TECH_REPORT from the folder name alone.
+        from core.src.email_service.inbound.attachment_router import (
+            keyword_fallback_doc_type,
+        )
+        ttwr = ItemType.TEST_TECH_WAIVER_REPORT.value
+        # Folder says "Technical Reports"; basename is neutral.
+        # Rung 3 defaults to TEST_REPORT for any non-empty name; the check
+        # here is that TECH_REPORT is NOT emitted from a folder-only signal.
+        assert keyword_fallback_doc_type(
+            "VZW/Technical Reports Folder/SM-anon-file.pdf", ttwr,
+        ) == DocType.TEST_REPORT
+        # Folder says "waiver"; basename does not -> no waiver from folder.
+        assert keyword_fallback_doc_type(
+            "VZW/(Waiver)/SM-anon-file.pdf", ttwr,
+        ) == DocType.TEST_REPORT
+        # Basename says waiver -> WAIVER, path notwithstanding.
+        assert keyword_fallback_doc_type(
+            "some/deep/path/SM-DEVICE-001 Waiver Request.ppt", ttwr,
+        ) == DocType.WAIVER
 
     def test_precedence_log_shows_basename_not_full_path(self, caplog) -> None:  # noqa: ANN001
         # Precedence-log diagnostics stay useful when the input is a path:
