@@ -475,20 +475,23 @@ def _ingest_new_nsd2_file(
     delivery_item_ids = [i for i in (_item_id(it) for it in items) if i]
     batch_id = f"NSD2-{file_hash[:12]}"
 
-    # NSDMATCH-3 (2026-08-24): pass immediate parent folder name as
-    # match_hint so the router uses folder-name for tag substring match
-    # (item_description) while keeping filename for doc-type regex
-    # classification. Empty parent (file at device-folder root) -> None
-    # -> router falls back to filename for both, preserving pre-NSDMATCH
-    # behavior for that edge case.
-    from pathlib import PurePosixPath as _PP
-    _parent = _PP(filename).parent.name or None
+    # NSDMATCH-3 (2026-08-24) + NSDMATCH-CARRIER-1 (2026-09-09):
+    # match_hint is a folder name the router substring-matches against
+    # `item_description` tags. For carrier-allowlist customers (D-189:
+    # MMK -> VZW/Verizon) the hint is the FIRST folder segment AFTER
+    # the carrier anchor, regardless of file depth below that -- so
+    # `VZW/7. FCC (Waiver)/Grants/foo.pdf` hits FCC-tagged items even
+    # though the immediate parent is 'Grants'. For non-carrier
+    # customers the hint stays as the immediate parent (NSDMATCH-3).
+    # See nsd2_resolver.match_hint_for_ingest for the full rule.
+    from core.src.storage.nsd2_resolver import match_hint_for_ingest
+    _hint = match_hint_for_ingest(filename, customer_id)
     attachment = InboundAttachment(
         filename=filename,
         content=content,
         content_type="application/octet-stream",
         file_hash=file_hash,
-        match_hint=_parent,
+        match_hint=_hint,
     )
 
     async def _run() -> dict[str, Any]:

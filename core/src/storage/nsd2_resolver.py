@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "is_allowed_root_folder",
     "allowed_root_folders",
     "find_carrier_anchors",
+    "match_hint_for_ingest",
     "NSD2_ANCHOR_SEARCH_MAX_DEPTH",
     "DEVICE_TYPE_FOLDER_MAP",
     "PHONE_MODEL_TYPE_FOLDER_MAP",
@@ -311,6 +312,66 @@ def is_allowed_root_folder(folder_name: str, customer_id: str) -> bool:
         return True
     name = (folder_name or "").strip().lower()
     return any(name == a.strip().lower() for a in allowed)
+
+
+def match_hint_for_ingest(
+    relative_path: str, customer_id: str,
+) -> str | None:
+    """NSDMATCH-CARRIER-1 (2026-09-09): the folder-name match_hint the NSD
+    ingest passes to the attachment router for item-description tag matching.
+
+    Carrier-allowlist customers (D-189: MMK -> VZW/Verizon): the walk is
+    anchored at the carrier folder, and template.yaml item_description tags
+    describe TOP-LEVEL sub-folder categories under that anchor ('FCC',
+    'PTCRB', 'Audio', 'LTE', 'WIFI', ...), not deep sub-folder names
+    ('Grants', 'Certi', 'Test reports'). Returns the FIRST folder segment
+    after the carrier anchor regardless of file depth below that, so both
+    layouts route to the same item:
+        VZW/13. LTE OTA (Done)/foo.pdf              -> '13. LTE OTA (Done)'
+        VZW/7. FCC (Waiver)/Grants/foo.pdf          -> '7. FCC (Waiver)'
+        VZW/7. FCC (Waiver)/Certi/deeper/x/y.pdf    -> '7. FCC (Waiver)'
+    Pre-fix (NSDMATCH-3, immediate parent) the second case saw 'Grants',
+    matched nothing in template.yaml, and fell to the TG default item -- the
+    reported FCC bug.
+
+    Nested carrier layout is handled -- the SHALLOWEST carrier occurrence
+    wins (matches find_carrier_anchors' BFS-level choice), so a deeper
+    'VZW' inside content is not treated as a re-anchor:
+        some_folder/VZW/PTCRB/foo.pdf               -> 'PTCRB'
+
+    Files sitting DIRECTLY under the carrier anchor return None (no
+    sub-folder to name), which lets the router fall back to its
+    filename-based ladder:
+        VZW/foo.pdf                                 -> None
+
+    A carrier-allowlist customer's walk may fall back to legacy
+    whole-device-folder mode (walk_nsd2_directory: 'NONCONFORMING LAYOUT'
+    when no carrier folder is found within max_depth). Paths from that
+    fallback have no carrier segment; use immediate-parent semantics for
+    them, matching pre-fix behavior for that anomaly.
+
+    Non-carrier customers (denylist walk, no allowlist): no carrier anchor
+    concept applies. Returns the immediate parent folder name (or None
+    when the file is at the root), preserving NSDMATCH-3 semantics.
+    """
+    parts = PurePosixPath(relative_path or "").parts
+    if not parts:
+        return None
+    allowed = allowed_root_folders(customer_id)
+    if allowed is not None:
+        lowered_allowed = {a.strip().lower() for a in allowed}
+        for i, seg in enumerate(parts):
+            if seg.lower() in lowered_allowed:
+                # Carrier segment found. First folder after it wins,
+                # provided there IS a folder after it (last segment is
+                # the basename, so we need at least two more segments).
+                if i + 2 <= len(parts) - 1:
+                    return parts[i + 1]
+                # File sits directly under the carrier -- no sub-folder.
+                return None
+        # Fall through: allowlist set but no carrier in path -> legacy
+        # fallback walk yielded this. Use immediate-parent semantics.
+    return PurePosixPath(relative_path).parent.name or None
 
 # Per-file size cap. Files larger than this are skipped + WARN-logged
 # rather than pulled into memory. 500 MB matches the archive-extractor

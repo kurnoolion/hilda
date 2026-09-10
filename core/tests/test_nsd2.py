@@ -1071,3 +1071,134 @@ class TestWalkSkipsDrmWrappedArchives:
         (tmp_path / "VZW" / "Audio" / "report_decrypt.zip").write_bytes(b"d")
         rels = sorted(r[0] for r in walk_nsd2_directory(tmp_path, "MMK"))
         assert rels == ["VZW/Audio/report_decrypt.zip"]
+
+
+# ===========================================================================
+# NSDMATCH-CARRIER-1 (2026-09-09): match_hint = first folder AFTER carrier
+# anchor for carrier-allowlist customers, so nested layouts like
+# `VZW/7. FCC (Waiver)/Grants/foo.pdf` route via the category ('7. FCC
+# (Waiver)') instead of the leaf sub-folder ('Grants').
+# ===========================================================================
+
+
+class TestMatchHintForIngest:
+    """Pure-function tests for match_hint_for_ingest."""
+
+    # -- Carrier-allowlist customer (MMK) --------------------------------------
+
+    def test_one_level_file_returns_category_folder(self):
+        # The pre-fix WORKING case: file directly under a category folder.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/13. LTE OTA (Done)/CTIA_A-GPS_Test_Report.pdf", "MMK",
+        ) == "13. LTE OTA (Done)"
+
+    def test_two_level_nested_returns_category_folder(self):
+        # The reported FCC bug: file lives inside a sub-folder of the
+        # category. Pre-fix match_hint was 'Grants' (didn't match FCC tag);
+        # post-fix it's the category folder itself.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/7. FCC (Waiver)/Grants/A3LSMS948U FCC Grant_UWB.pdf", "MMK",
+        ) == "7. FCC (Waiver)"
+
+    def test_three_level_deep_still_returns_category(self):
+        # Any depth below the category collapses to the category name --
+        # deep sub-folders are organisational, not routing signals.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/7. FCC (Waiver)/Certi/deeper/nested/x.pdf", "MMK",
+        ) == "7. FCC (Waiver)"
+
+    def test_ptcrb_certi_routes_via_ptcrb(self):
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/14. PTCRB (Waiver)/Certi/SM-S948U1.pdf", "MMK",
+        ) == "14. PTCRB (Waiver)"
+
+    def test_file_directly_under_carrier_returns_none(self):
+        # No sub-folder to name -- router falls back to filename ladder.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest("VZW/foo.pdf", "MMK") is None
+
+    def test_verizon_spelling_is_also_a_carrier_anchor(self):
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "Verizon/PTCRB/foo.pdf", "MMK",
+        ) == "PTCRB"
+
+    def test_carrier_match_is_case_insensitive(self):
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest("vzw/Audio/foo.pdf", "MMK") == "Audio"
+        assert match_hint_for_ingest("VERIZON/Audio/foo.pdf", "MMK") == "Audio"
+
+    def test_nested_carrier_layout(self):
+        # `some_folder/VZW/PTCRB/foo.pdf` is the F776U-style nested layout;
+        # the carrier folder sits at depth 1 rather than at the root.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "some_folder/VZW/PTCRB/foo.pdf", "MMK",
+        ) == "PTCRB"
+
+    def test_shallowest_carrier_wins_when_carrier_name_recurses(self):
+        # A deeper 'VZW' inside content is not a re-anchor. Shallowest wins,
+        # matching find_carrier_anchors' BFS-level choice.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/VZW/inner/foo.pdf", "MMK",
+        ) == "VZW"
+
+    def test_no_carrier_in_path_falls_back_to_immediate_parent(self):
+        # Walk downgraded to whole-device fallback (NONCONFORMING LAYOUT):
+        # no carrier segment. Preserve pre-fix immediate-parent behaviour.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "STG/deeper/foo.pdf", "MMK",
+        ) == "deeper"
+
+    def test_dynamic_folder_returns_dynamic_name(self):
+        # Skylo NTN etc. -- category name that has no template.yaml tag.
+        # Router will find no match and route via the ["default"] catch-all,
+        # which is what the user wants (NSD-STRICT-CARRIER-SHORTCIRCUIT-1
+        # already lets these through).
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/Skylo NTN (For Solution team)/5387707_x.pdf", "MMK",
+        ) == "Skylo NTN (For Solution team)"
+
+    # -- Non-carrier customer -------------------------------------------------
+
+    def test_non_carrier_customer_uses_immediate_parent(self):
+        # OTHER has no allowlist -> walk uses denylist mode -> no carrier
+        # anchor concept. Fall back to NSDMATCH-3 immediate-parent rule so
+        # existing non-MMK deployments are unaffected.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "sub1/sub2/foo.pdf", "OTHER",
+        ) == "sub2"
+
+    def test_non_carrier_root_file_returns_none(self):
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest("foo.pdf", "OTHER") is None
+
+    def test_non_carrier_customer_ignores_vzw_folder_name(self):
+        # 'VZW' in a non-carrier customer's path is just a folder name;
+        # immediate-parent rule applies.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "VZW/Audio/foo.pdf", "OTHER",
+        ) == "Audio"
+
+    # -- Edge cases -----------------------------------------------------------
+
+    def test_empty_path_returns_none(self):
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest("", "MMK") is None
+
+    def test_unknown_customer_falls_through_immediate_parent(self):
+        # allowed_root_folders returns None for unknown customers -> same
+        # code path as non-carrier fallback.
+        from core.src.storage.nsd2_resolver import match_hint_for_ingest
+        assert match_hint_for_ingest(
+            "a/b/c/foo.pdf", "totally_unknown",
+        ) == "c"
