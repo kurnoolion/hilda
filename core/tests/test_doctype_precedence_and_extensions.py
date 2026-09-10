@@ -231,3 +231,132 @@ class TestClassifyDocTypePrecedence:
         blob = "\n".join(r.getMessage() for r in caplog.records)
         assert "DOCTYPE_PRECEDENCE" in blob
         assert "resolving to waiver by precedence" in blob
+
+
+# ---------------------------------------------------------------------------
+# CLASSIFY-BASENAME-1 (2026-09-09): classification uses ONLY the basename;
+# folder segments never leak into doc_type. NSD ingest passes the full
+# share-relative path here as the filename, and pre-fix the doc_type regex
+# saw "Waiver" in "VZW/14. PTCRB (Waiver)/Certi/..." and auto-classified as
+# waiver -- even when the actual filename said nothing about waivers. Now
+# folder = ROUTING (via match_hint / item_description tags), filename =
+# CLASSIFICATION.
+# ---------------------------------------------------------------------------
+
+
+def _classifier_with_inline_rules() -> object:
+    """A classifier with a small in-memory ruleset -- independent of the
+    checked-in MMK yaml, which is a sanitized placeholder in public github
+    (D-125) and loads 0 patterns on machines without the corp copy. Every
+    CLASSIFY-BASENAME-1 test drives this so it passes anywhere."""
+    import re
+    from core.src.email_service.inbound.attachment_router import (
+        Fr52AttachmentRouter,
+    )
+    inline_rules: dict[str, list[re.Pattern[str]]] = {
+        DocType.WAIVER.value: [re.compile(r"waiver", re.IGNORECASE)],
+        DocType.TEST_REPORT.value: [re.compile(r"test.*report", re.IGNORECASE)],
+    }
+    r = Fr52AttachmentRouter.__new__(Fr52AttachmentRouter)
+    r._rules = lambda: inline_rules            # type: ignore[method-assign]
+    return r
+
+
+class TestClassifyDocTypeUsesBasenameOnly:
+
+    def test_folder_segment_containing_waiver_does_not_leak(self) -> None:
+        # The reported failure: filename has no doc-type token; a folder in
+        # the path does. Pre-fix: classified as waiver. Post-fix: UNRESOLVED
+        # -> stages, TPM reclassifies via WAIVER-UNIVERSAL-1 one-click.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "VZW/14. PTCRB (Waiver)/Certi/"
+            "SM-S948U1_REV1.0_0_S948U1.001(S948U1UEU8YKG)_SVN01.pdf"
+        )
+        assert doc_type == DocType.UNRESOLVED.value
+
+    def test_folder_named_test_report_does_not_leak(self) -> None:
+        # Same rule for other doc types: a folder named after a doc-type
+        # pattern must not carry through to a nothing-matching filename.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "VZW/Test Report Folder/SM-anonymous.pdf"
+        )
+        assert doc_type == DocType.UNRESOLVED.value
+
+    def test_basename_match_still_wins_over_folder(self) -> None:
+        # A real waiver .ppt in ANY folder still classifies as waiver -- the
+        # pattern lives in the basename now.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "some/deep/random/path/SM-DEVICE-001 Waiver Request.ppt"
+        )
+        assert doc_type == DocType.WAIVER.value
+
+    def test_bare_basename_still_classifies(self) -> None:
+        # Regression: email ingest passes a bare basename (no path); strip
+        # must be a no-op there.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "SM-DEVICE-001 Waiver Request.ppt"
+        )
+        assert doc_type == DocType.WAIVER.value
+
+    def test_windows_style_path_separators_are_stripped(self) -> None:
+        # Defensive: PurePosixPath treats backslashes as filename characters,
+        # not separators. The router accepts forward-slash paths (NSD walk
+        # yields those; NEST-1 zip inner paths are forward-slash; PLM
+        # normalises to forward-slash). If a backslash ever arrives, the
+        # basename is the whole string -- and if that whole string contains
+        # a doc-type token in a folder segment, it still leaks. Document
+        # that expectation here so a future backslash path is investigated
+        # rather than assumed to work.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            r"VZW\14. PTCRB (Waiver)\SM-anonymous.pdf"
+        )
+        # Backslash IS a filename character on POSIX -> whole string is the
+        # basename -> "(Waiver)" leaks. Callers must normalise separators
+        # BEFORE reaching the classifier (NSD walk uses .as_posix()).
+        assert doc_type == DocType.WAIVER.value
+
+    def test_no_extension_no_folder_still_unresolved(self) -> None:
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "totally_unknown_thing"
+        )
+        assert doc_type == DocType.UNRESOLVED.value
+
+    def test_empty_string_unresolved(self) -> None:
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type("")
+        assert doc_type == DocType.UNRESOLVED.value
+
+    def test_folder_named_test_report_does_not_promote_test_report(self) -> None:
+        # A folder called 'Test Report Folder' would have matched the
+        # test.*report pattern pre-fix. Post-fix the filename decides.
+        doc_type, _ = _classifier_with_inline_rules()._classify_doc_type(
+            "VZW/Test Report Folder/SM-anonymous-file.pdf"
+        )
+        assert doc_type == DocType.UNRESOLVED.value
+
+    def test_precedence_log_shows_basename_not_full_path(self, caplog) -> None:  # noqa: ANN001
+        # Precedence-log diagnostics stay useful when the input is a path:
+        # log the basename that actually drove the classification, not the
+        # folder chain that could mislead a reader. Uses inline rules that
+        # produce a multi-match on the BASENAME so the precedence log fires.
+        import logging
+        import re
+        from core.src.email_service.inbound.attachment_router import (
+            Fr52AttachmentRouter,
+        )
+        multi_match_rules: dict[str, list[re.Pattern[str]]] = {
+            DocType.WAIVER.value: [re.compile(r"waiver", re.IGNORECASE)],
+            DocType.COMPLIANCE_CERTIFICATION_RELEASE_NOTES.value: [
+                re.compile(r"certi", re.IGNORECASE),
+            ],
+        }
+        c = Fr52AttachmentRouter.__new__(Fr52AttachmentRouter)
+        c._rules = lambda: multi_match_rules   # type: ignore[method-assign]
+        with caplog.at_level(logging.WARNING):
+            c._classify_doc_type(
+                "VZW/Any Folder/SM-DEVICE-001 Waiver Request_WPC Certi.ppt"
+            )
+        blob = "\n".join(r.getMessage() for r in caplog.records)
+        assert "DOCTYPE_PRECEDENCE" in blob
+        assert "SM-DEVICE-001 Waiver Request_WPC Certi.ppt" in blob
+        # The folder prefix must not appear in the log line.
+        assert "VZW/Any Folder" not in blob

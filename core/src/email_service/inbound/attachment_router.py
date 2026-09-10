@@ -689,12 +689,31 @@ class Fr52AttachmentRouter:
     ) -> tuple[str, ClassificationResolution]:
         """Branch A: FR-85 2-step ladder. Ph-1 first cut runs Step 1 only;
         Step 2 (LLM CLASSIFY_DOC_TYPE) is Ph-1 next pass -- stub-with-skip
-        to UNRESOLVED on regex miss."""
+        to UNRESOLVED on regex miss.
+
+        CLASSIFY-BASENAME-1 (2026-09-09): classification is filename-only.
+        NSD ingest passes the share-relative path here (e.g.
+        `VZW/14. PTCRB (Waiver)/Certi/SM-<...>.pdf`); PLM does something
+        similar; email hands a bare basename. Running the doc-type regexes
+        against the whole string let folder segments leak into
+        classification -- a document sitting under a folder named
+        `PTCRB (Waiver)` matched the waiver pattern from the FOLDER, not
+        the file. Per user 2026-09-09: folder names drive ROUTING (via
+        match_hint / item_description tags), filename drives
+        CLASSIFICATION; keep them separate. Doing the strip inside the
+        classifier means every current and future caller benefits without
+        having to remember. When the resulting basename matches no
+        pattern the classifier stays UNRESOLVED -- the doc STAGES and a
+        TPM reclassifies, which under WAIVER-UNIVERSAL-1 is a one-click
+        operation regardless of the routed item's item_type.
+        """
+        from pathlib import PurePosixPath
+        basename = PurePosixPath(filename or "").name
         rules = self._rules()
         matched_doc_types: list[str] = []
         for doc_type_value, patterns in rules.items():
             for pat in patterns:
-                if pat.search(filename or ""):
+                if pat.search(basename):
                     matched_doc_types.append(doc_type_value)
                     break
         if len(matched_doc_types) == 1:
@@ -715,7 +734,7 @@ class Fr52AttachmentRouter:
                     logger.warning(
                         "DOCTYPE_PRECEDENCE: filename=%r matched %s -- "
                         "resolving to %s by precedence",
-                        filename, sorted(matched_doc_types), candidate,
+                        basename, sorted(matched_doc_types), candidate,
                     )
                     return candidate, ClassificationResolution.FILENAME_REGEX
             # Every match is outside the precedence list (a doc_type added to
@@ -724,7 +743,7 @@ class Fr52AttachmentRouter:
             logger.warning(
                 "DOCTYPE_PRECEDENCE: filename=%r matched %s, none of which "
                 "are in the precedence list %s -- leaving UNRESOLVED",
-                filename, sorted(matched_doc_types),
+                basename, sorted(matched_doc_types),
                 list(_DOC_TYPE_PRECEDENCE),
             )
         # No match -> Step 2 LLM (Ph-1 next pass) -> Ph-1 first cut
