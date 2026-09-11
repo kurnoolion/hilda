@@ -103,6 +103,9 @@ def reconcile_all_task(
         "sync_7_multi_match":         0,   # SYNC7-1 ambiguous (skipped)
         "sync_7_no_match":            0,   # SYNC7-1 no candidate matched (skipped)
         "sync_7_skipped":             0,
+        "sync_8_promoted":            0,   # DRRP1-STATE-1 phase 3 target promoted
+        "sync_8_skipped_ineligible":  0,   # target already final / UnderPMReview / no mapping
+        "sync_8_skipped":             0,   # sync-8 disabled or no source rfs items
     }
 
     correlation_id = f"reconcile-{uuid.uuid4().hex[:12]}"
@@ -168,6 +171,14 @@ def reconcile_all_task(
         except Exception as exc:  # noqa: BLE001
             _log.warning("sync_7_error: milestone=%s: %s", milestone_id, type(exc).__name__)
             stats["sync_7_skipped"] += 1
+        try:
+            _sync_8_drr_mapping_promote(
+                deps, cfg, stats, correlation_id,
+                customer_id, device_id, milestone_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync_8_error: milestone=%s: %s", milestone_id, type(exc).__name__)
+            stats["sync_8_skipped"] += 1
 
     _log.info("reconcile_all: %s", stats)
     return {"outcome": "fired", "correlation_id": correlation_id, **stats}
@@ -1108,4 +1119,111 @@ def _sync_7_retry_unrouted(
                     "parent_folder":     parent,
                     "trigger_source":    "sync_backfill_retry_unrouted",
                 },
+            )
+
+
+# ---------------------------------------------------------------------------
+# sync-8: DRRP1-STATE-1 phase 3 (2026-09-10) -- DRR mapping promote sweep
+# ---------------------------------------------------------------------------
+
+
+def _sync_8_drr_mapping_promote(
+    deps: Any, cfg: ReconcileConfig, stats: dict[str, int], correlation_id: str,
+    customer_id: str, device_id: str, milestone_id: str,
+) -> None:
+    """DRRP1-STATE-1 phase 3 sweep. Belt-and-suspenders for the event-driven
+    reconcile hook inside apply_pm_approval_task -- catches DRR items that
+    reached ReadyForSubmission but whose mapped target items were not
+    promoted (worker crash mid-task, code deploy race, exception before the
+    hook, out-of-order alert ingest).
+
+    For every Postgres item in this scope whose delivery_state ==
+    ReadyForSubmission AND whose (customer, milestone, item_no) matches
+    the source side of ANY block in milestone_item_mapping.yaml, invoke
+    reconcile_target_items_on_source_rfs. The helper is idempotent:
+    already-final targets are audited no-ops; UnderPMReview targets are
+    skipped per user 2026-09-09 #3.
+
+    No-op when:
+      * sync-8 disabled in config
+      * customer has no milestone_item_mapping.yaml
+      * this milestone is not the source_milestone of any mapping block
+      * no items in this scope are at RFS
+    """
+    sync_cfg = cfg.sync_8_drr_mapping_promote
+    if not sync_cfg.enabled:
+        stats["sync_8_skipped"] += 1
+        return
+
+    # Quick check: is this milestone a source of any mapping for this customer?
+    try:
+        from core.src.template_schema.milestone_item_mapping import (
+            get_mapping_blocks,
+        )
+        blocks = get_mapping_blocks(customer_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_8_get_mapping_blocks_error: customer=%s: %s",
+            customer_id, type(exc).__name__,
+        )
+        stats["sync_8_skipped"] += 1
+        return
+
+    source_milestones = {
+        (b.source_milestone or "").strip() for b in (blocks or [])
+    }
+    if (milestone_id or "").strip() not in source_milestones:
+        # This milestone is not a mapping source (e.g. we're iterating P1
+        # while only DRR is a source). Skip cleanly.
+        return
+
+    try:
+        pg_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_8_list_items_error: milestone=%s: %s",
+            milestone_id, type(exc).__name__,
+        )
+        stats["sync_8_skipped"] += 1
+        return
+
+    from core.src.tracker.drr_mapping_reconcile import (
+        reconcile_target_items_on_source_rfs,
+    )
+
+    for it in pg_items:
+        # Scope filter -- list_items_for_milestone doesn't take device_id.
+        if (getattr(it, "device_id", None) or "") != device_id:
+            continue
+        state = (getattr(it, "delivery_state", None) or "")
+        if state != _STATE_READY_FOR_SUBMISSION:
+            continue
+        item_no = getattr(it, "item_no", None)
+        if item_no is None:
+            continue
+        try:
+            item_no_int = int(item_no)
+        except (TypeError, ValueError):
+            continue
+
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps,
+            source_customer_id=customer_id,
+            source_device_id=device_id,
+            source_milestone_id=milestone_id,
+            source_item_no=item_no_int,
+            correlation_id=correlation_id,
+            pm_id="system:reconcile_sync_8",
+        )
+        stats["sync_8_promoted"] += len(summary.get("promoted") or [])
+        stats["sync_8_skipped_ineligible"] += (
+            len(summary.get("skipped_under_pm_review") or [])
+            + len(summary.get("skipped_already_final") or [])
+            + len(summary.get("skipped_no_target_item") or [])
+        )
+        if summary.get("promoted"):
+            _log.warning(
+                "sync_8_promoted: source=%s/%s/%s item_no=%s targets=%s",
+                customer_id, device_id, milestone_id, item_no_int,
+                summary["promoted"],
             )

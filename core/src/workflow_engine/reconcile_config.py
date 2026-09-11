@@ -96,6 +96,19 @@ class ReconcileConfig(BaseModel):
     sync_7_retry_unrouted: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=0
     )
+    # DRRP1-STATE-1 phase 3 (2026-09-10): belt-and-suspenders sweep for the
+    # event-driven drr_mapping_promote hook in apply_pm_approval_task. If
+    # the event-driven promote is missed (worker crash mid-task, code
+    # deploy race, exception before the hook, etc.), this periodic sweep
+    # catches DRR items already at RFS whose mapped target items are not
+    # yet at RFS/final. Reuses reconcile_target_items_on_source_rfs which
+    # is idempotent (skips already-final targets, skips UnderPMReview per
+    # user 2026-09-09 #3). elapsed_threshold_sec=0 -- there's no timing
+    # race concern; if the DRR side is already RFS and a target isn't,
+    # firing is unambiguously correct.
+    sync_8_drr_mapping_promote: SyncTypeConfig = SyncTypeConfig(
+        enabled=True, elapsed_threshold_sec=0
+    )
 
     @classmethod
     def from_sources(
