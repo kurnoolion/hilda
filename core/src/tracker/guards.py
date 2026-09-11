@@ -37,7 +37,20 @@ __all__ = [
 ]
 
 
-TriggerSource = Literal["automated", "manual_tpm_override", "tpm_button"]
+TriggerSource = Literal[
+    "automated",
+    "manual_tpm_override",
+    "tpm_button",
+    # DRRP1-STATE-1 (2026-09-10): the reconcile hook that promotes a P1
+    # container item to RFS when its mapped DRR source hits RFS. Guard 10
+    # is the sole gate for this trigger; no other transition may use it.
+    "drr_mapping_promote",
+    # DRRP1-STATE-1 (2026-09-10): a new own doc arrived on an item that had
+    # reached RFS. Guard 11 pulls the item back to UnderPMReview so PM
+    # re-approves before the doc ships. Universal -- applies to any RFS
+    # item regardless of how it got there.
+    "doc_received_after_rfs",
+]
 
 
 @dataclass(frozen=True)
@@ -267,6 +280,64 @@ def check_transition_guards(
                 # Non-blocking: the structural matrix permits resume to any active
                 # state; the warning surfaces a likely-misconfigured automated rule.
                 # TPM override (trigger_source != 'automated') bypasses this entirely.
+
+    # ---------- Guard 10 (DRRP1-STATE-1 2026-09-10): drr_mapping_promote ----------
+    # Cross-milestone promotion: mapped DRR item hit RFS, promote the P1
+    # container item to RFS too. The DRR item carries the authoritative PM
+    # approval, so P1 skips its own outreach ladder entirely. Two hard rules:
+    #   - trigger_source='drr_mapping_promote' MAY ONLY target RFS
+    #   - MUST NOT bypass an in-flight PM review on the P1 side (per user
+    #     2026-09-09 #3: UnderPMReview on P1 requires explicit TPM approval,
+    #     never reconcile-driven)
+    # The reconcile task must not use this trigger for anything else.
+    if trigger_source == "drr_mapping_promote":
+        if target_state != DeliveryState.READY_FOR_SUBMISSION:
+            return GuardResult(
+                allowed=False,
+                reason="drr_mapping_promote_wrong_target",
+                blocking_conditions=[
+                    f"drr_mapping_promote_only_targets_RFS_not_{target_state.value}",
+                ],
+            )
+        if from_state == DeliveryState.UNDER_PM_REVIEW:
+            return GuardResult(
+                allowed=False,
+                reason="drr_mapping_promote_blocked_by_under_pm_review",
+                blocking_conditions=[
+                    "under_pm_review_requires_explicit_tpm_approval",
+                ],
+            )
+        # Guard 3's PMApproval gate does NOT apply here -- Guard 3 keys on
+        # from_state == UNDER_PM_REVIEW, which we just rejected above. Every
+        # other from_state (Open / OutreachSent / DocumentReceived /
+        # OwnerClosed / Delayed / Blocked) is fine: PM approval happened on
+        # the DRR source item, not the P1 container.
+
+    # ---------- Guard 11 (DRRP1-STATE-1 2026-09-10): doc_received_after_rfs ----------
+    # A new own doc arrived on an item that had reached RFS; pull it back to
+    # UnderPMReview so PM re-approves before the doc ships. Universal --
+    # applies to ANY item in RFS regardless of how it got there (standard
+    # PMApproval path or Guard 10 drr_mapping_promote). Excludes:
+    # reclassify, revision-family merge via TPM edit, DRR migration
+    # passthrough -- caller is responsible for not dispatching the trigger
+    # in those cases.
+    if trigger_source == "doc_received_after_rfs":
+        if from_state != DeliveryState.READY_FOR_SUBMISSION:
+            return GuardResult(
+                allowed=False,
+                reason="doc_received_after_rfs_wrong_from_state",
+                blocking_conditions=[
+                    f"doc_received_after_rfs_only_fires_from_RFS_not_{from_state.value}",
+                ],
+            )
+        if target_state != DeliveryState.UNDER_PM_REVIEW:
+            return GuardResult(
+                allowed=False,
+                reason="doc_received_after_rfs_wrong_target",
+                blocking_conditions=[
+                    f"doc_received_after_rfs_only_targets_UnderPMReview_not_{target_state.value}",
+                ],
+            )
 
     if blocking:
         return GuardResult(

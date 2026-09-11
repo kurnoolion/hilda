@@ -221,10 +221,13 @@ class TestStateMachine:
         # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting
         # the transient auto-advance to UnderPMReview.
         # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
+        # DRRP1-STATE-1 (2026-09-10): + READY_FOR_SUBMISSION for the DRR
+        # mapping promote path (gated by Guard 10 drr_mapping_promote).
         assert LEGAL_TRANSITIONS[DeliveryState.OWNER_CLOSED] == frozenset({
             DeliveryState.UNDER_PM_REVIEW,
             DeliveryState.CLOSED,
             DeliveryState.CLOSE_IN_PROGRESS,
+            DeliveryState.READY_FOR_SUBMISSION,
         })
 
     def test_close_in_progress_only_reaches_closed(self):
@@ -285,8 +288,12 @@ class TestStateMachine:
         #     Per-item TPM close serialization -- SP UI writes CloseInProgress
         #     immediately for Start-Collection visibility, HILDA 2-hop
         #     advances to Closed.)
+        # 53 (DRRP1-STATE-1 2026-09-10: +RFS edge from OPEN, OUTREACH_SENT,
+        #     DOCUMENT_RECEIVED, OWNER_CLOSED for DRR mapping promote path
+        #     [4 edges], + RFS -> UNDER_PM_REVIEW reverse when a new own doc
+        #     lands on an approved item [1 edge]. Guards 10 + 11 gate policy.)
         total = sum(len(targets) for targets in LEGAL_TRANSITIONS.values())
-        assert total == 48
+        assert total == 53
 
 
 # ---------------------------------------------------------------------------

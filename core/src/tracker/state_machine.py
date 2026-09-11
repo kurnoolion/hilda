@@ -74,11 +74,16 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # already gates SubmittedToCustomer on trigger_source in
     # ('submit_to_carrier_task', 'tpm_drr_final_deliverable') so no other
     # trigger source can accidentally exploit this new legal edge.
+    # DRRP1-STATE-1 (2026-09-10): + READY_FOR_SUBMISSION for the cross-milestone
+    # promotion. When the mapped DRR item hits ReadyForSubmission its PM
+    # approval is authoritative for the P1 container item too, so P1 skips its
+    # own outreach ladder. Guard 10 (drr_mapping_promote) is the only path in.
     DeliveryState.OPEN: frozenset({
         DeliveryState.OUTREACH_SENT,
         DeliveryState.CLOSED,
         DeliveryState.SUBMITTED_TO_CUSTOMER,   # STATE-1 2026-07-28: D-148 final-deliverable path
         DeliveryState.CLOSE_IN_PROGRESS,        # CIP-1 2026-07-28
+        DeliveryState.READY_FOR_SUBMISSION,     # DRRP1-STATE-1
     }),
 
     # OutreachSent: owner can now report status (Delayed/Blocked) or send docs
@@ -90,6 +95,8 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # ('manual_tpm_override', 'tpm_button') allowed; automated close from this
     # state remains rejected as policy violation. Legality broadens, policy
     # unchanged.
+    # DRRP1-STATE-1 (2026-09-10): + READY_FOR_SUBMISSION for the cross-milestone
+    # promotion (see DeliveryState.OPEN row).
     DeliveryState.OUTREACH_SENT: frozenset({
         DeliveryState.DOCUMENT_RECEIVED,
         DeliveryState.OWNER_CLOSED,
@@ -97,18 +104,21 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
         DeliveryState.BLOCKED,
         DeliveryState.CLOSED,               # CLOSE-1
         DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
+        DeliveryState.READY_FOR_SUBMISSION, # DRRP1-STATE-1
     }),
 
     # DocumentReceived: docs have arrived; close gates (doc_count + reviews)
     # checked by OwnerClosed 2-condition guard. Owner can still report status.
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close (see OUTREACH_SENT).
     # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
+    # DRRP1-STATE-1 (2026-09-10): + READY_FOR_SUBMISSION (see OPEN row).
     DeliveryState.DOCUMENT_RECEIVED: frozenset({
         DeliveryState.OWNER_CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
         DeliveryState.CLOSED,               # CLOSE-1
         DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
+        DeliveryState.READY_FOR_SUBMISSION, # DRRP1-STATE-1
     }),
 
     # OwnerClosed: transient — auto-advances to UnderPMReview within same task
@@ -117,10 +127,12 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # CLOSE-1 (2026-07-28): + CLOSED for TPM force-close short-circuiting the
     # transient auto-advance (accepted per architect 2026-07-28: TPM final word).
     # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
+    # DRRP1-STATE-1 (2026-09-10): + READY_FOR_SUBMISSION (see OPEN row).
     DeliveryState.OWNER_CLOSED: frozenset({
         DeliveryState.UNDER_PM_REVIEW,
         DeliveryState.CLOSED,               # CLOSE-1
         DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
+        DeliveryState.READY_FOR_SUBMISSION, # DRRP1-STATE-1
     }),
 
     # UnderPMReview: PM evaluates; PMApproval gate fires READY_FOR_SUBMISSION.
@@ -139,12 +151,20 @@ LEGAL_TRANSITIONS: dict[DeliveryState, frozenset[DeliveryState]] = {
     # CLOSED allowed only for no_customer_upload=True items (skip carrier
     # upload entirely) per FR-7 + DEF-20 carve-out; guard enforces.
     # CIP-1 (2026-07-28): + CLOSE_IN_PROGRESS for per-item TPM close via SP UI.
+    # DRRP1-STATE-1 (2026-09-10): + UNDER_PM_REVIEW so that any new own doc
+    # arriving on an RFS item kicks the item back to PM review. New evidence
+    # after an approval MUST re-enter the PM ladder; without this edge a doc
+    # landing post-approval either ships silently (never PM-reviewed) or the
+    # state truthfulness breaks. Guard 11 (doc_received_after_rfs) restricts
+    # this edge to the doc-arrival trigger so a routine automated tick can
+    # never pull an approved item backward.
     DeliveryState.READY_FOR_SUBMISSION: frozenset({
         DeliveryState.SUBMITTED_TO_CUSTOMER,
         DeliveryState.CLOSED,
         DeliveryState.DELAYED,
         DeliveryState.BLOCKED,
         DeliveryState.CLOSE_IN_PROGRESS,    # CIP-1
+        DeliveryState.UNDER_PM_REVIEW,      # DRRP1-STATE-1
     }),
 
     # SubmittedToCustomer: dispatched. CLOSED via TPM Mark Closed (FR-7 +
