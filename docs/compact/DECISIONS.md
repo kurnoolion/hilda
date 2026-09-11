@@ -5865,3 +5865,398 @@ matching revision ids. `0003` is already 29 characters, so the margin is thin
 enough to be worth a test rather than a comment.
 
 **Anchors**: `[D-025]` / `[D-038]` (config precedence), `UPLOAD-FOLDER-OVERRIDE-1`.
+
+## D-200: Carrier-allowlist customers trust the whole carrier subtree at ingest and preserve its shape on upload
+
+**Status**: Active — **Date**: 2026-09-09
+
+**Context**: The MMK/VZW ingest was silently discarding every file whose
+immediate-parent folder didn't substring-hit a template.yaml
+item_description tag — `NSD_SKIP_NO_ITEM` warnings for `Skylo NTN`,
+`Power Management`, `Test reports`. NSD-STRICT-1 (2026-08-27) was
+designed to protect against wrong-milestone leaks, but it double-vetoed
+dynamic sub-folder names that can never be enumerated in a static
+template.yaml — the carrier-anchor walk (D-189) had already established
+trust in the whole `VZW/` subtree; strict tag-hit gating on top of that
+was contradictory. Two adjacent problems fell in the same review: files
+that DID ingest lost their carrier-sub-folder path on Google Drive
+upload (`carrier_subdir()` returned empty for NSD view-tree files under
+UPLOAD-FLAT-1), and NASCA DRM-protected archives were being pulled in
+alongside their `_decrypt` siblings.
+
+**Decision**: Three linked rules for carrier-allowlist customers, one
+for all customers:
+
+1. `NSD-STRICT-CARRIER-SHORTCIRCUIT-1` — the NSD-STRICT-1 folder-tag
+   pre-check is skipped when `allowed_root_folders(customer_id) is
+   not None`. Unmatched folder names route to the `["default"]`-tagged
+   catch-all item via TG_DEFAULT_MULTIMATCH / TDN-1.
+
+2. `UPLOAD-NSD-SUBDIR-1` — new `nsd_subdir_prefix_from_relative_path`
+   in `storage/upload_plan.py`. For NSD-ingested files
+   (`ingest_source == 'NetworkSharedDrive'`), strip everything up to
+   and including the carrier folder in the walk path, then apply a
+   matched-vs-unmatched rule to the FIRST folder-after-carrier: strip
+   it iff it substring-hits the routed item's real (non-default)
+   `item_description` tag groups (item's `target_folder` already
+   represents it); keep it otherwise (routed via default fallback,
+   folder is dynamic content the carrier must see). Deeper segments
+   are always kept. Archive-container segments (from an inner zip)
+   are dropped by `_join_clean`. New optional kwargs
+   `allowed_carrier_folders`, `item_description` on `carrier_subdir`;
+   `submit_to_carrier` wires them from `nsd2_resolver.allowed_root_folders`
+   and the routed item.
+
+3. `NSD-DRM-DECRYPT-1` — walk-level filter in
+   `nsd2_resolver.walk_nsd2_directory` skips any `.zip / .7z / .rar`
+   whose stem does NOT contain `decrypt` (case-insensitive). Applies
+   to ALL customers — DRM is not customer-scoped.
+
+**Why (short-circuit vs template.yaml expansion)**: template.yaml
+tag-sets describe fixed evidence categories (`Audio`, `LTE`, `FCC`),
+not dynamic sub-folder names carriers create ad-hoc (`Skylo NTN (For
+Solution team)`, `Power Management`, `Test reports`). Enumerating
+every possible sub-folder is impossible; TDN-1's `["default"]`
+catch-all is the correct target for these.
+
+**Why (matched-vs-unmatched folder strip)**: `VZW/Audio(Done)/foo.pdf`
+was matched → item's `target_folder` already says "Audio", so the
+sub-folder is redundant and gets stripped (destination
+`<target>/foo.pdf`, not `<target>/Audio(Done)/foo.pdf`).
+`VZW/Skylo NTN/foo.pdf` was unmatched → the router routed via a
+`["default"]` catch-all whose `target_folder` says nothing about
+Skylo; the sub-folder is dynamic content that must survive on Drive.
+The check uses the same AND-of-OR substring predicate the router
+applied at `_tg_scoped_route` stage 1 — matched-vs-unmatched here is
+"did the router route via this folder-tag hit, or via default?"
+
+**Why (DRM decrypt filter at all customers)**: DRM is a Samsung/NASCA
+concern, not a per-carrier one. A plain `.zip` under any customer's
+subtree that is DRM-wrapped upstream will be encrypted garbage;
+downstream the decrypt step emits a `_decrypt` sibling. Filtering by
+stem marker at the walk is cheaper than reading the archive body and
+finding it undecryptable, and safer than trusting a per-customer flag.
+
+**Consequences**:
+
+- Preview divergence carve-out: `document_view_ops.resolve_carrier_destination`
+  and `upload_manifest.build_milestone_manifest` continue to call
+  `carrier_subdir` without the new NSD kwargs. On carrier-allowlist
+  customers this makes the preview show flat destinations for files
+  that actual upload lands nested. Documented as a follow-up cascade;
+  divergence set is small (files where router matched a real tag on
+  the folder — those weren't being ingested before at all, so no
+  regression).
+
+- Plain `.zip` archives without a `decrypt` marker are now filtered
+  for ALL customers. If a non-DRM customer legitimately delivers a
+  plain zip that never goes through a NASCA decrypt step, that zip
+  will be skipped; those customers must adopt the `_decrypt.<ext>`
+  naming or a per-customer flag will need to gate the filter.
+
+- The `NSD_SKIP_NO_ITEM` alert for MMK/VZW is now silent by design;
+  the log rate for that message on carrier-allowlist customers is
+  now zero.
+
+**Anchors**: `[D-189]` (NSD2-VZW-1 carrier allowlist), `NSDMATCH-3`,
+`UPLOAD-FLAT-1`, `UPLOAD-VIEW-1`, `NSD-STRICT-1`, `DRM-1`, `TDN-1`.
+
+## D-201: A waiver is legitimate evidence on any item_type
+
+**Status**: Active — **Date**: 2026-09-09
+
+**Context**: FR-86 alignment (`_fr86_aligned` in `attachment_router.py`)
+rejected `waiver` on a `compliance_certification_release_notes` item —
+waiver was legal only on `test_tech_waiver_report`. Live evidence from
+MMK/VZW: PTCRB/WPC/FCC waiver .pdf files landed on RELNOTES-typed items
+via NSDMATCH folder-tag routing, then FR-86 flagged them
+`is_staged_not_classified=True`. The UI dashboard rendered a
+Reclassify dropdown pointing at RELNOTES doc-types — but there was
+nothing to reclassify TO; the doc really was a waiver. The pair
+`(waiver-doc, RELNOTES-item)` had no legal move.
+
+**Decision**: `_fr86_aligned` short-circuits `doc_type == WAIVER →
+return True` before the item_type table. Waivers align with every
+item_type, including when `item_type` is None/unknown. Three follow-on
+edits keep the invariant consistent:
+
+1. `document_view_ops._allowed_for_item_types` adds WAIVER to the
+   RELNOTES tuple so the Reclassify dropdown on a RELNOTES-typed
+   item offers waiver as a legit target (TTWR already had it).
+
+2. `resolve_carrier_destination` waiver message reworded from
+   `"waiver — never uploaded, any milestone"` to `"waiver — not
+   uploaded here; submits during DRR milestone"` — names the
+   destination so a TPM reads WHY the file isn't going here, not
+   just that it isn't.
+
+3. `view_tree_tg.html` suppresses the Reclassify form and the
+   `⚠ not submitted` badge whenever `f.doc_type == 'waiver'`, even
+   when the stored `is_staged_not_classified=True` flag is still True
+   from a pre-fix ingest. Fix-forward; no backfill.
+
+**Why (universal vs narrow)**: Waivers arrive over email during DRR
+and can attach to a RELNOTES-typed item or a TTWR-typed item
+indifferently — the alignment rule was too narrow, not the item_type
+enumeration. Keeping the rule narrow would leave every existing PTCRB
+/ WPC / FCC waiver marked as reclassify-required until re-ingested,
+and would burden the TPM with a bogus click.
+
+**Why (auto-classify NOT changed for waiver)**:
+`_singleton_alignment_doc_type` is deliberately not touched. It
+hardcodes RELNOTES → `compliance_certification_release_notes` for the
+UNRESOLVED → auto-promote path. Auto-promoting an UNRESOLVED
+filename to WAIVER on a RELNOTES item would misclassify legitimate
+release notes; only a TPM reclassify may pick waiver here.
+
+**Consequences**: 4 files changed; 16 new tests (`test_waiver_universal.py`).
+Existing pre-fix rows with `is_staged_not_classified=True` on
+waiver-classified docs stay flagged in Postgres but the UI hides the
+staleness (defensive template guard). Next re-ingest clears them
+naturally. No migration.
+
+**Anchors**: `FR-86`, `WAIVER-VETO-1` (still enforced at auto-promote),
+`AUTO-CLASSIFY-RELNOTES-1` (unchanged).
+
+## D-202: Doc-type classification is filename-only; folder segments never leak into doc_type
+
+**Status**: Active — **Date**: 2026-09-09
+
+**Context**: NSD ingest passes the walk-relative path as the
+`InboundAttachment.filename` (e.g.
+`VZW/14. PTCRB (Waiver)/Certi/SM-<...>.pdf`). Three doc-type helpers
+were substring-matching against that whole string:
+
+1. `_classify_doc_type` — Step 1 regex ladder. The MMK yaml has a
+   `.*waiver.*\.(pdf|ppt|...)$` pattern; `(Waiver)` in the folder
+   segment matched it and the doc classified as `waiver` even when
+   the actual basename said nothing about waivers.
+
+2. `filename_says_waiver` — the DOCTYPE-WAIVER-VETO guard. Substring-
+   matched `'waiver'` against the whole path, so
+   `VZW/7. FCC (Waiver)/Test reports/...pdf` force-promoted the
+   router's TG_DEFAULT_NOMATCH-routed doc to WAIVER purely from the
+   folder name.
+
+3. `keyword_fallback_doc_type` — rungs 1-2 (waiver / tech report)
+   same trap. A `Technical Reports Folder/foo.pdf` would have
+   promoted foo.pdf to TECH_REPORT on TTWR items from the folder
+   alone.
+
+Live evidence: the FCC Grant PDF trace showed `DOCTYPE_WAIVER_VETO`
+firing on the full path and classifying the doc as waiver — exact
+reverse of the intent.
+
+**Decision**: All three helpers strip via `PurePosixPath(...).name`
+at the top and run their regex/substring checks only against the
+basename. `classify_doc_type` also emits the basename in the
+`DOCTYPE_PRECEDENCE` log lines instead of the full path.
+
+**Why (option A pure strip vs option B folder-hint fallback vs option
+C narrow filename heuristic)**: Semantic separation is the whole
+point — folder = ROUTING (via `match_hint` and `item_description`
+tag matching), filename = CLASSIFICATION (via `doc_type_filename_rules.yaml`
+regex ladder). Any folder-fallback would re-introduce the very
+trap the fix removes.
+
+**Trade-off explicitly named**: Waivers whose filename lacks the
+`waiver` token but sit under a `(Waiver)` folder now go UNRESOLVED
+at ingest and stage for a TPM Reclassify. Under D-201 the reclassify
+is a one-click operation regardless of the routed item's item_type,
+so this is a UX regression only for those specific waiver files.
+Callers who need this recovered should either rename the files to
+include a doc-type token or rely on the TPM reclassify workflow.
+
+**Windows backslash caveat**: `PurePosixPath` treats backslashes as
+filename characters, not separators. NSD walk uses `.as_posix()` and
+NEST-1 zip-inner paths are forward-slash; PLM normalises. If a
+backslash path ever reaches the classifier, the folder tokens will
+still leak — documented in the tests as an expectation.
+
+**Consequences**: 2 source files, 9 new tests. Tests use an inline
+in-memory ruleset (D-125: the checked-in MMK yaml is a sanitized
+placeholder on public github; the corp yaml is where the 125 real
+patterns live).
+
+**Anchors**: `DOCTYPE-EXT-1` (canonical extension set — separately),
+`DOCTYPE-PRECEDENCE-1`, `WAIVER-VETO-1` (semantics preserved but
+scoped to basename), `DOCTYPE-FALLBACK-1`.
+
+## D-203: Carrier-allowlist NSD ingest routes on the first folder AFTER the carrier anchor, not the immediate parent
+
+**Status**: Active — **Date**: 2026-09-10
+
+**Context**: NSDMATCH-3 (2026-08-24) set `attachment.match_hint` to
+the immediate parent folder of the file. Two folder shapes exist under
+VZW:
+
+- 1-level: `VZW/13. LTE OTA (Done)/file.pdf` — file directly under the
+  category folder. Immediate parent IS the category name; router
+  substring-matches `item_description` tags correctly.
+- 2-level: `VZW/7. FCC (Waiver)/Grants/file.pdf` — file inside a
+  sub-folder of the category. Immediate parent is `Grants` /
+  `Certi` / `Test reports`, none of which are template.yaml tags,
+  so the router fell through to TG_DEFAULT_NOMATCH → item 10
+  (the default catch-all).
+
+Live evidence: FCC Grant_UWB.pdf trace showed
+`stage=within_tg filename='grants' items=22 matches=[]` → item 10,
+never reaching the FCC-tagged item 20.
+
+**Decision**: New helper
+`nsd2_resolver.match_hint_for_ingest(relative_path, customer_id)`.
+For carrier-allowlist customers (D-189: MMK → VZW / Verizon), the
+match_hint is the FIRST folder segment AFTER the carrier anchor
+regardless of file depth below that:
+
+```
+VZW/13. LTE OTA (Done)/foo.pdf              → '13. LTE OTA (Done)'
+VZW/7. FCC (Waiver)/Grants/foo.pdf          → '7. FCC (Waiver)'
+VZW/7. FCC (Waiver)/Certi/deeper/x/y.pdf    → '7. FCC (Waiver)'
+VZW/foo.pdf                                 → None
+some_folder/VZW/PTCRB/foo.pdf               → 'PTCRB'
+```
+
+Non-carrier customers keep the NSDMATCH-3 immediate-parent semantic —
+no carrier-anchor concept applies to them.
+
+**Why (top-level rather than pattern-match all depths)**: template.yaml
+`item_description` tags describe categories (`FCC`, `PTCRB`, `Audio`,
+`LTE`), not sub-categories (`Grants`, `Certi`, `Test reports`).
+Collapsing to the category is uniformly correct for the current
+customer base. If a future setup introduces real per-sub-category
+routing semantics, the rule needs revisiting.
+
+**Consequences**: `NSD-STRICT-CARRIER-SHORTCIRCUIT-1` (D-200) covered
+the discard case; D-203 fixes the routing when it doesn't discard.
+The two together mean carrier-allowlist NSD ingest lands EVERY file
+on the RIGHT item (either the folder-mapped one or the
+`["default"]`-tagged catch-all) with subfolder path preserved on
+upload. Nested carrier layout (F776U-style
+`some_folder/VZW/PTCRB/...`) is handled — shallowest carrier
+occurrence wins, matching `find_carrier_anchors`' BFS choice. When
+the walk falls back to whole-device denylist mode (nonconforming
+layout), match_hint gracefully falls back to immediate-parent
+semantics for those paths.
+
+**Anchors**: `NSDMATCH-3` (previous immediate-parent semantic),
+`[D-189]` (carrier allowlist), `find_carrier_anchors`.
+
+## D-204: Cross-milestone RFS promotion via drr_mapping_promote; universal reverse via doc_received_after_rfs; belt-and-suspenders sync-8
+
+**Status**: Active — **Date**: 2026-09-10
+
+**Context**: DRR items are `no_customer_upload=True` — DRR itself never
+submits. DRR-collected documents reach the carrier only when a mapped
+P1 item's `submit_to_carrier` fires. But `submit_to_carrier` gates
+per-item on `delivery_state == ReadyForSubmission`, and P1 container
+items that only ever carried DRR-migrated docs (no outreach, no own
+docs) stayed in Open forever. Migrated files sat undeliverable while
+the DRR side was already PM-approved. The gate was on the wrong
+entity.
+
+**Decision**: A three-phase state-machine + orchestration cascade,
+gated by two new trigger sources.
+
+**Phase 1 — state machine + guards** (`36551db`):
+
+1. `LEGAL_TRANSITIONS` extended:
+   - `{Open, OutreachSent, DocumentReceived, OwnerClosed}` → RFS (new
+     edges; DRR-mapping promote lands here bypassing the outreach
+     ladder)
+   - `RFS` → `UnderPMReview` (new edge for the universal reverse when
+     a new own doc lands on an already-approved item)
+
+2. `TriggerSource` Literal extended with:
+   - `drr_mapping_promote` — Guard 10 restricts to `target=RFS` and
+     REJECTS `from=UnderPMReview` (per user rule: TPM must explicitly
+     approve P1 items already under PM review; reconcile can't override)
+   - `doc_received_after_rfs` — Guard 11 restricts to
+     `from=RFS, target=UnderPMReview`. Universal by user's Q1=(b):
+     applies to ANY item in RFS regardless of how it reached RFS
+     (normal PMApproval or DRR-mapping promote).
+
+**Phase 2 — orchestration** (`1d113e2`):
+
+1. New helper module `tracker/drr_mapping_reconcile.py` —
+   `reconcile_target_items_on_source_rfs(source_customer, device,
+   milestone, item_no, ...)`. Walks `milestone_item_mapping.yaml`
+   blocks whose `source_milestone` matches; resolves each mapped
+   target via `list_items_for_milestone`; dispatches
+   drr_mapping_promote transitions. Multi-source (`35:23 + 60:23`)
+   is idempotent: first source hitting RFS promotes P1 23, the
+   second lands as `skipped_already_final`.
+
+2. New helper `tracker/doc_received_bounce.py` —
+   `bounce_to_under_pm_review_if_rfs(delivery_item_id, ...)`.
+   Idempotent no-op unless the item is currently at RFS. Both
+   helpers never raise — belt-and-suspenders exception guard around
+   every dispatch.
+
+3. Wire-in: `apply_pm_approval_task` fires the reconcile helper
+   right after the item's own RFS transition succeeds.
+   `_persist_routed_attachment` (email/PLM/NSD common persist point)
+   fires the bounce helper right after
+   `add_document_item_association` + `increment_doc_count_received`.
+   `/_unknownTG/route` handler fires the bounce helper when the
+   manual TPM route lands with `outcome='ok'`.
+
+**Phase 3 — periodic sweep** (`9513f4c`):
+
+1. New `sync_8_drr_mapping_promote` in the reconcile beat task, along
+   the existing sync-1..7 pattern. Belt-and-suspenders for the event-
+   driven hook (catches worker-crash-mid-task / code-deploy-race /
+   exception-before-hook). Sweeps every DRR item in RFS whose
+   `(customer, milestone, item_no)` matches a `source_milestone`
+   block, invokes the reconcile helper. Reuses phase-2 idempotency:
+   already-final targets are no-ops, UnderPMReview targets skip.
+   Configurable per `sync_8_drr_mapping_promote` in
+   `reconcile_config.py`; enabled by default;
+   `elapsed_threshold_sec=0` — no timing race to protect against.
+
+**Hotfix** (`ac446ab`): `_resolve_target_item` was calling
+`list_items_for_milestone(customer_id=..., device_id=...,
+milestone_id=...)` but the actual signature is
+`(milestone_id, states)`. Every call raised TypeError, swallowed to
+None → `target item not found` for every source. Fixed to call with
+the real signature and scope by customer/device in Python. The bare
+`except: return None` now logs the failure.
+
+**Why (Option B over A or C)**: User picked Option B (auto-promote
+the P1 item) over Option A (per-source-state gate — leave P1 in
+Open, sub-gate migrated files) and Option C (declare P1 items as
+`is_drr_container`). B keeps the state field truthful post-promote
+(everything downstream sees P1 as ready), doesn't require a
+data-model addition, and matches the domain semantic (PM approval
+elsewhere carries over).
+
+**Why universal reverse over narrow reverse**: A new own doc arriving
+on any RFS item is genuinely new PM-worthy evidence, regardless of
+how RFS was reached. Narrow (only DRR-promoted RFS bounces back)
+would leave the "late doc slips through on standard-path RFS items"
+hazard on the table.
+
+**Why UnderPMReview blocks the promote**: An in-flight P1 PM review
+is the local authority; a source-side approval shouldn't override
+it. TPM must approve the P1 item explicitly to move it to RFS from
+UnderPMReview.
+
+**"New own doc" scope** (caller responsibility per user 2026-09-10):
+- Fires: email attachment routed, PLM poll new revision, NSD poll
+  new file, manual TPM route from _unrouted.
+- Does NOT fire: doc-type reclassify (same doc), revision-family
+  merge / TPM edit (same doc gets new rev), DRR migration
+  passthrough (P1 item receiving a mapped DRR doc's link — the DRR
+  side has the approval; migrated files ride under the P1 item's
+  target_folder without further approval).
+
+**Consequences**: 6 source files + 4 test files across three commits
++ one hotfix. 43 new tests. Legal transitions total goes 48 → 53.
+Two operational log families a TPM can grep for: `DRRP1_RECONCILE:`
+(promote outcomes) and `DRRP1_BOUNCE:` (reverse fires). No schema
+change, no migration. Outreach cascade side-effect (accepted): once
+P1 promoted to RFS, no future outreach for that item (outreach
+requires state=Open).
+
+**Anchors**: `DRRP1-1` (milestone_item_mapping cascade),
+`DRRP1-DEST-1`, `[D-189]` (carrier allowlist context), `AUTO-CLASSIFY-RELNOTES-1` (PMApproval gate shape), `CIP-1..5` (per-item transient-state precedent).
