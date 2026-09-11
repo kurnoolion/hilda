@@ -212,18 +212,30 @@ def _resolve_target_item(
     customer_id: str, device_id: str, milestone_id: str, item_no: int,
 ) -> Any:
     """Look up a DeliveryItem by (customer_id, device_id, milestone_id,
-    item_no). Uses storage.list_items_for_milestone + linear filter --
-    item counts per milestone are bounded (~20-100), so a targeted query
-    isn't warranted. Returns None on any failure (caller logs)."""
+    item_no). Uses storage.list_items_for_milestone -- its signature is
+    (milestone_id, states) with no customer/device filter, so we scope
+    the returned rows in Python (item counts per milestone are bounded
+    ~20-100, cheap to walk). Returns None on any failure; logs the
+    failure so a bug like the initial kwargs-mismatch surfaces instead
+    of silently reporting `target item not found` for every source.
+    """
     try:
-        items = deps.storage.list_items_for_milestone(
-            customer_id=customer_id,
-            device_id=device_id,
-            milestone_id=milestone_id,
+        items = deps.storage.list_items_for_milestone(milestone_id, None)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "DRRP1_RECONCILE: list_items_for_milestone failed "
+            "milestone=%s customer=%s device=%s: %s: %s",
+            milestone_id, customer_id, device_id,
+            type(exc).__name__, str(exc)[:160],
         )
-    except Exception:  # noqa: BLE001
         return None
     for it in items or []:
+        # Scope filter -- storage helper returns items across all
+        # customers + devices for the given milestone.
+        if (getattr(it, "customer_id", None) or "") != customer_id:
+            continue
+        if (getattr(it, "device_id", None) or "") != device_id:
+            continue
         try:
             if int(getattr(it, "item_no", -1)) == int(item_no):
                 return it

@@ -22,17 +22,25 @@ import pytest
 
 
 class _StubStorage:
-    """Minimal storage stub -- returns items keyed by (customer, device,
-    milestone) tuple. Each item is a SimpleNamespace with the fields the
-    reconcile helper reads."""
+    """Minimal storage stub. Real signature is
+    `list_items_for_milestone(milestone_id, states)` -- positional, no
+    customer/device filter. The helper scopes returned rows in Python.
+    Tests use the same shape so a kwargs-mismatch bug like the initial
+    2026-09-11 slip (helper called with kwargs; storage raised TypeError
+    swallowed to None; every source logged 'target item not found') is
+    caught here rather than only in production."""
 
     def __init__(self, items_by_scope: dict):
         self._items_by_scope = items_by_scope
 
-    def list_items_for_milestone(self, *, customer_id, device_id, milestone_id):
-        return self._items_by_scope.get(
-            (customer_id, device_id, milestone_id), [],
-        )
+    def list_items_for_milestone(self, milestone_id, states=None):
+        # Flatten every scope whose milestone matches; helper filters
+        # by customer_id + device_id in Python.
+        out: list = []
+        for (_c, _d, m), items in self._items_by_scope.items():
+            if m == milestone_id:
+                out.extend(items)
+        return out
 
 
 def _make_p1_item(item_no: int, state: str) -> SimpleNamespace:
@@ -217,6 +225,50 @@ class TestReconcileTargetItems:
             source_item_no=50,
         )
         assert summary["outcome"] == "no_mapping"
+
+    def test_ignores_items_from_wrong_customer_or_device(self, monkeypatch):
+        # Regression for the 2026-09-11 bug: storage returns items across
+        # all customers + devices for the milestone, helper must scope in
+        # Python. A wrong-customer or wrong-device item at the mapped
+        # item_no must NOT be treated as the target.
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        wrong_customer_p1_10 = SimpleNamespace(
+            item_id="OTHER-SM-Y-P1-10",
+            delivery_item_id="OTHER-SM-Y-P1-10",
+            item_no=10, customer_id="OTHER", device_id="SM-Y",
+            milestone_id="P1", delivery_state="Open",
+        )
+        wrong_device_p1_10 = SimpleNamespace(
+            item_id="MMK-SM-OTHER-P1-10",
+            delivery_item_id="MMK-SM-OTHER-P1-10",
+            item_no=10, customer_id="MMK", device_id="SM-OTHER",
+            milestone_id="P1", delivery_state="Open",
+        )
+        right_p1_10 = _make_p1_item(10, "Open")
+        # Storage returns EVERYTHING for milestone=P1 across scopes.
+        storage = _StubStorage({
+            ("OTHER", "SM-Y", "P1"):       [wrong_customer_p1_10],
+            ("MMK", "SM-OTHER", "P1"):     [wrong_device_p1_10],
+            ("MMK", "SM-S671U1", "P1"):    [right_p1_10],
+        })
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps,
+            source_customer_id="MMK",
+            source_device_id="SM-S671U1",
+            source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["promoted"] == ["MMK-SM-S671U1-P1-10"]
+        assert len(dispatched) == 1
+        # Verify the RIGHT item id got the dispatch, not one of the
+        # wrong-scope shadows.
+        assert dispatched[0]["delivery_item_id"] == "MMK-SM-S671U1-P1-10"
 
     def test_target_item_row_missing_recorded(self, monkeypatch):
         # Mapping says P1 20 should exist, but list_items_for_milestone
