@@ -1268,6 +1268,32 @@ async def _persist_routed_attachment(
             )
             new_count = 0
 
+        # DRRP1-STATE-1 phase 2 (2026-09-10): a new own doc just landed on
+        # this item; if the item is already in RFS (whether via normal
+        # PMApproval or via drr_mapping_promote), pull it back to
+        # UnderPMReview so PM re-approves before the doc ships. Excludes:
+        # reclassify (existing doc; no add_document_item_association call
+        # here), revision-family merge via TPM edit (different code path),
+        # DRR migration passthrough (submit_to_carrier reads directly from
+        # the source item -- no new association here). Idempotent no-op
+        # when the item isn't in RFS. Never raises. See
+        # tracker.doc_received_bounce for details.
+        try:
+            from core.src.tracker.doc_received_bounce import (
+                bounce_to_under_pm_review_if_rfs,
+            )
+            bounce_to_under_pm_review_if_rfs(
+                deps=deps,
+                delivery_item_id=match.item_id,
+                correlation_id=correlation_id,
+                source_marker="inbound_attachment_persist",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "DRRP1_BOUNCE: hook unexpected exception item=%s: %s: %s",
+                match.item_id, type(exc).__name__, str(exc)[:160],
+            )
+
         # Per-item audit
         await _audit(deps, "attachment_received", match.item_id, {
             "batch_id":       batch_id,

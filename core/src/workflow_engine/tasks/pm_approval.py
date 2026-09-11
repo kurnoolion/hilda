@@ -287,6 +287,44 @@ def apply_pm_approval_task(
     # at RFS from legacy SP 3-field write).
     _run_transition(_DS.READY_FOR_SUBMISSION, "rfs")
 
+    # DRRP1-STATE-1 phase 2 (2026-09-10): after this item hits RFS, sweep
+    # milestone_item_mapping and promote every mapped target item (P1
+    # container items) to RFS too. Migrated docs on those P1 items become
+    # deliverable in the next submit_to_carrier tick. Guard 10
+    # (drr_mapping_promote) enforces the "not from UnderPMReview" rule per
+    # user 2026-09-09 #3. The helper is defensive -- catches per-target
+    # failures internally and never raises. See tracker.drr_mapping_reconcile.
+    try:
+        _drr_src = deps.storage.get_delivery_item(delivery_item_id)
+    except Exception:  # noqa: BLE001
+        _drr_src = None
+    if _drr_src is not None:
+        try:
+            from core.src.tracker.drr_mapping_reconcile import (
+                reconcile_target_items_on_source_rfs,
+            )
+            _reconcile_summary = reconcile_target_items_on_source_rfs(
+                deps=deps,
+                source_customer_id=getattr(_drr_src, "customer_id", "") or "",
+                source_device_id=getattr(_drr_src, "device_id", "") or "",
+                source_milestone_id=getattr(_drr_src, "milestone_id", "") or "",
+                source_item_no=int(getattr(_drr_src, "item_no", 0) or 0),
+                correlation_id=event_context.get("correlation_id", "?"),
+                pm_id=pm_id_email,
+            )
+            _log.warning(
+                "DRRP1_RECONCILE: source=%s summary=%s",
+                delivery_item_id, _reconcile_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Belt-and-suspenders -- the reconcile helper does not raise,
+            # but a bug or an unexpected environment issue must not fail
+            # the PM approval flow. Log and move on.
+            _log.warning(
+                "DRRP1_RECONCILE: hook unexpected exception source=%s: %s: %s",
+                delivery_item_id, type(exc).__name__, str(exc)[:160],
+            )
+
     # Hop 2 -- Confirmation items only: RFS -> Closed. Guard requires
     # no_customer_upload=True OR tpm_button attribution; PM approval on
     # Confirmation carries tpm_button semantically.

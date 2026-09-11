@@ -1120,6 +1120,32 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             (result.error or "-")[:120],
         )
 
+        # DRRP1-STATE-1 phase 2 (2026-09-10): a manual TPM route from
+        # _unrouted lands a new association on the target item. Universal
+        # per user Q1=(b): if the target item is currently in RFS, pull
+        # it back to UnderPMReview so PM re-approves before the doc ships.
+        # Only fires when the route actually landed (outcome == 'ok');
+        # idempotent no-op otherwise. See tracker.doc_received_bounce.
+        if result.outcome == "ok":
+            try:
+                _deps = getattr(request.app.state, "task_deps", None)
+                if _deps is not None:
+                    from core.src.tracker.doc_received_bounce import (
+                        bounce_to_under_pm_review_if_rfs,
+                    )
+                    bounce_to_under_pm_review_if_rfs(
+                        deps=_deps,
+                        delivery_item_id=target_delivery_item_id,
+                        correlation_id=f"manual_route:{file_hash[:12]}",
+                        source_marker="manual_route_from_unrouted",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "DRRP1_BOUNCE: manual-route hook unexpected exception "
+                    "item=%s: %s: %s",
+                    target_delivery_item_id, type(exc).__name__, str(exc)[:160],
+                )
+
         from urllib.parse import urlencode
         params: dict[str, str] = {"outcome": result.outcome}
         if result.target_delivery_item_id:
