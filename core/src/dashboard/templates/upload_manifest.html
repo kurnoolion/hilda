@@ -41,7 +41,7 @@ listed too, with the reason — those are usually the ones worth checking.</p>
     ready to deliver but whose state is not <code>ReadyForSubmission</code>, so a
     Submit right now would skip them:
     <ul style="margin:0.4em 0 0 1.2em;">
-      {% for it in manifest.items_not_ready %}
+      {% for it in manifest.items_not_ready | sort(attribute='item_no') %}
         <li>#{{ it.item_no }} {{ it.tg_name }} —
           <code>{{ it.delivery_state }}</code>,
           {{ it.included_count }} file(s)</li>
@@ -50,7 +50,11 @@ listed too, with the reason — those are usually the ones worth checking.</p>
   </div>
 {% endif %}
 
-{% for it in manifest.items %}
+{# PREVIEW-SORT-1 (2026-09-12): render per-item sections in item_no
+   ascending order (matches the TPM's mental model / SP list order).
+   Upstream build_milestone_manifest returns items in whatever order
+   list_items_for_milestone yields, which has no ORDER BY item_no. #}
+{% for it in manifest.items | sort(attribute='item_no') %}
   {% if it.rows %}
     {# PREVIEW-COUNT-1 (2026-09-12): show the per-work-item document count
        next to the title so the TPM can see "how many files does this
