@@ -158,7 +158,9 @@ def test_full_chain_import_then_kickoff(tmp_path, monkeypatch):
     assert kickoff_result["items_transitioned"] == 1
     # One batch email recorded, addressed to the imported tracker's owner.
     assert len(sent_batches) == 1
-    assert sent_batches[0]["recipient"] == "owner.usa@corp.example"
+    # OUTREACH-TG-GROUP-1 (2026-09-12): recipient is a list per multi-owner
+    # semantics, even for single-owner TGs.
+    assert sent_batches[0]["recipient"] == ["owner.usa@corp.example"]
     assert sent_batches[0]["n_items"] == 1
 
     _restore_task_deps_to_none()

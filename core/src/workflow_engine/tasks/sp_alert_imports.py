@@ -95,6 +95,40 @@ def _split_owner_list(value: str | None) -> list[str]:
     return out
 
 
+def _owner_list_from_info(value: Any) -> list[str]:
+    """OUTREACH-TG-GROUP-1 (2026-09-12): normalize an SP owner-email
+    field into a clean list[str] regardless of upstream storage shape.
+
+    SP returns owner_corp_usa_email / owner_corp_email in three shapes,
+    all of which reach this helper via `owner_map`:
+      * `["alice@corp.com", "bob@corp.com"]`   -- already list-typed
+      * `"alice@corp.com; bob@corp.com"`         -- SP text column with `;`
+      * `None` / `""`                            -- no owner recorded
+
+    Returns [] on any empty / missing input. Dedups + strips per
+    `_split_owner_list`. Callers use `[]` as the "route to no-owner
+    silent bucket" signal (state transitions still run; no email sent).
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        seen: set[str] = set()
+        out: list[str] = []
+        for entry in value:
+            s = str(entry or "").strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(s)
+        return out
+    if isinstance(value, str):
+        return _split_owner_list(value)
+    return []
+
+
 def _parse_item_description(raw: Any) -> list | None:
     """Parse FR-82 item_description value into list-of-lists (AND-of-OR groups).
 
@@ -790,19 +824,32 @@ def kickoff_collection_task(
             backfilled, len(eligible),
         )
 
-    # Group eligible items by owner_corp_usa_email (preferred per [D-080]).
-    # Items with no resolvable owner go into a __no_owner__ group -- they
-    # still get state-transitioned but no email is sent for that group.
-    owner_groups: dict[str, list[Any]] = {}
+    # OUTREACH-TG-GROUP-1 (2026-09-12): group by tg_name, not by
+    # owner-email string. Architect invariant: within a TG, the owner
+    # list is guaranteed identical across items -- so ONE outreach
+    # email per TG, TO the TG's owner list, with EVERY TG item in the
+    # table (matches OWNER-5's PLM-grouping decision -- same rationale,
+    # different downstream).
+    #
+    # The prior owner-email-string keying broke as soon as one TG's
+    # owner_corp_email held a multi-owner list ("p1@x; p2@x") while
+    # other TGs held the singular ("p1@x") -- the two owner_key values
+    # were different strings, so items landed in different groups and
+    # the multi-owner TG's email either went to a joined-string
+    # address that no MTA could route, or the send silently succeeded
+    # to a bogus recipient. Either way, the singular-owner TG's email
+    # to p1 had NO row for the multi-owner TG's items -- what the TPM
+    # observed as "item_no=X is missing from the outreach email".
+    #
+    # tg_name is lowercased for grouping so casing variants (MNO-FIT /
+    # mno-fit / MNO-Fit) collapse into ONE bucket -- mirrors PLMCASE-1
+    # / _group_by_tg. Items with empty tg_name land in __no_tg__ and
+    # still get state-transitioned but no email is sent.
+    tg_groups: dict[str, list[Any]] = {}
     for item in eligible:
-        item_id = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
-        owner_info = owner_map.get(item_id) or {}
-        owner_key = (
-            owner_info.get("owner_corp_usa_email")
-            or owner_info.get("owner_corp_email")
-            or "__no_owner__"
-        )
-        owner_groups.setdefault(owner_key, []).append(item)
+        tg_raw = (getattr(item, "tg_name", None) or "").strip()
+        tg_key = tg_raw.lower() or "__no_tg__"
+        tg_groups.setdefault(tg_key, []).append(item)
 
     emails_sent = 0
     items_transitioned = 0
@@ -840,15 +887,41 @@ def kickoff_collection_task(
         )
         plm_ids_by_item_id = {}
 
-    for owner_key, group_items in owner_groups.items():
-        # Build identity dict for the template (owner_name from SP).
+    for tg_key, group_items in tg_groups.items():
+        # OUTREACH-SORT-1 (2026-09-12): render items in item_no ascending
+        # order so the outreach table matches the TPM's mental model
+        # (item_no 1..N walks top-to-bottom, no jumping). Upstream
+        # `list_items_for_milestone` has no ORDER BY item_no, so without
+        # this sort rows landed in whatever order Postgres returned --
+        # often insertion order, but that broke as soon as one item was
+        # re-created after a mid-milestone edit. Sort key is a coerced int
+        # with a None-safe fallback so a malformed row (missing item_no)
+        # trails the group rather than crashing the send.
+        group_items = sorted(
+            group_items,
+            key=lambda it: (
+                0 if getattr(it, "item_no", None) is not None else 1,
+                int(getattr(it, "item_no", 0) or 0),
+            ),
+        )
+        # OUTREACH-TG-GROUP-1 (2026-09-12): resolve the TG's owner list
+        # from the sample item's SP owner_info -- invariant per architect
+        # (identical across all items in a TG). Prefer owner_corp_usa_email
+        # list, fall back to owner_corp_email list. `_owner_list_from_info`
+        # normalizes to list[str] regardless of SP storage shape (raw list,
+        # ';'-delimited string, or None). Empty list -> __no_owner__ email
+        # behavior: state still transitions, no email sent.
         sample_owner_info = owner_map.get(
             getattr(group_items[0], "item_id", "")
             or getattr(group_items[0], "delivery_item_id", ""),
             {},
         )
+        recipients: list[str] = (
+            _owner_list_from_info(sample_owner_info.get("owner_corp_usa_email"))
+            or _owner_list_from_info(sample_owner_info.get("owner_corp_email"))
+        )
         owner_identity = {
-            "owner_corp_usa_email": sample_owner_info.get("owner_corp_usa_email") or owner_key,
+            "owner_corp_usa_email": sample_owner_info.get("owner_corp_usa_email"),
             "owner_corp_email":     sample_owner_info.get("owner_corp_email"),
             "owner_corp_id":        sample_owner_info.get("owner_corp_id"),
             "owner_name":           sample_owner_info.get("owner_name"),
@@ -883,8 +956,9 @@ def kickoff_collection_task(
                 "tracking_modality": getattr(it, "tracking_modality", None),
                 "plm_id":            resolved_plm_id,
             })
-        # Deterministic batch_id from (correlation_id, owner_key) prefix.
-        batch_seed = f"{correlation_id}-{owner_key}"
+        # Deterministic batch_id from (correlation_id, tg_key) prefix so
+        # inbound owner-reply parsing can still resolve BATCH -> group.
+        batch_seed = f"{correlation_id}-{tg_key}"
         batch_id = f"BATCH-{_uuid.uuid5(_uuid.NAMESPACE_URL, batch_seed).hex[:10]}"
 
         # Step 1: transition each item NS -> Open.
@@ -914,23 +988,24 @@ def kickoff_collection_task(
                 )
                 items_failed += 1
 
-        # Step 2: send the batch email (skipped when owner is unresolved).
+        # Step 2: send the batch email (skipped when owner list is empty).
         message_id: str | None = None
-        if owner_key != "__no_owner__" and deps.email_sender is not None:
+        if recipients and deps.email_sender is not None:
             try:
                 message_id = _send_batch_outreach_email(
                     deps=deps,
                     owner_identity=owner_identity,
                     items=item_dicts,
                     batch_id=batch_id,
-                    recipient=owner_key,
+                    recipient=recipients,
                 )
                 if message_id:
                     emails_sent += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "kickoff_collection: batch outreach send failed for owner=%s: %s: %s",
-                    owner_key, type(exc).__name__, str(exc)[:120],
+                    "kickoff_collection: batch outreach send failed for tg=%s "
+                    "recipients=%s: %s: %s",
+                    tg_key, recipients, type(exc).__name__, str(exc)[:120],
                 )
 
         # Step 3: audit each item with send_initial_outreach (recipient + batch_id +
@@ -948,7 +1023,8 @@ def kickoff_collection_task(
                 details={
                     "template":     "outreach_table",
                     "channel":      "email",
-                    "recipient":    owner_key if owner_key != "__no_owner__" else None,
+                    "recipient":    (";".join(recipients) if recipients else None),
+                    "tg_name":      tg_key if tg_key != "__no_tg__" else None,
                     "batch_id":     batch_id,
                     "batch_size":   len(group_items),
                     "milestone_id": milestone_id,
@@ -1000,7 +1076,7 @@ def kickoff_collection_task(
             "milestone_id":      milestone_id,
             "items_scanned":     str(len(items)),
             "items_eligible":    str(len(eligible)),
-            "owner_groups":      str(len(owner_groups)),
+            "owner_groups":      str(len(tg_groups)),
             "emails_sent":       str(emails_sent),
             "items_transitioned": str(items_transitioned),
             "items_failed":      str(items_failed),
@@ -1011,14 +1087,14 @@ def kickoff_collection_task(
         "kickoff_collection_fired: customer_id=%s milestone_id=%s "
         "items_scanned=%d eligible=%d owner_groups=%d emails_sent=%d "
         "items_transitioned=%d items_failed=%d",
-        customer_id, milestone_id, len(items), len(eligible), len(owner_groups),
+        customer_id, milestone_id, len(items), len(eligible), len(tg_groups),
         emails_sent, items_transitioned, items_failed,
     )
     return {
         "outcome":            "fired",
         "items_scanned":      len(items),
         "items_eligible":     len(eligible),
-        "owner_groups":       len(owner_groups),
+        "owner_groups":       len(tg_groups),
         "emails_sent":        emails_sent,
         "items_transitioned": items_transitioned,
         "items_failed":       items_failed,

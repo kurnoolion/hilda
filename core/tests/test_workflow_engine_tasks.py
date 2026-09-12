@@ -1537,28 +1537,36 @@ class TestKickoffCollection:
         from core.src.workflow_engine.tasks.sp_alert_imports import (
             kickoff_collection_task,
         )
-        # Eligibility requires delivery_state == "Not Started" + force_tracking=True.
+        # OUTREACH-TG-GROUP-1 (2026-09-12): grouping is now by tg_name, not
+        # owner-email. Per architect invariant, a TG's owner list is
+        # identical across all items -- so items belonging to different
+        # owners must live in different TGs. Update fixture accordingly:
+        # alice owns TG "MNO-ETM" (items 1, 2, 5), bob owns TG "APPS"
+        # (item 7). Eligibility rules are unchanged.
         trackers = [
-            _mk_tracker(1,  "Confirmation",                          delivery_state="Not Started"),
-            _mk_tracker(2,  "compliance_certification_release_notes", delivery_state="Not Started"),
-            _mk_tracker(5,  "test_tech_waiver_report",                delivery_state="Not Started"),
-            _mk_tracker(7,  "test_tech_waiver_report",                delivery_state="Not Started"),
+            _mk_tracker(1,  "Confirmation",                           delivery_state="Not Started", tg_name="MNO-ETM"),
+            _mk_tracker(2,  "compliance_certification_release_notes", delivery_state="Not Started", tg_name="MNO-ETM"),
+            _mk_tracker(5,  "test_tech_waiver_report",                delivery_state="Not Started", tg_name="MNO-ETM"),
+            _mk_tracker(7,  "test_tech_waiver_report",                delivery_state="Not Started", tg_name="APPS"),
             _mk_tracker(8,  "test_tech_waiver_report",                delivery_state="Not Started",
-                        force_tracking_enabled=False),                  # excluded
+                        force_tracking_enabled=False, tg_name="APPS"),  # excluded
             _mk_tracker(11, "Default",                                delivery_state="Not Started",
-                        force_tracking_enabled=False),                  # excluded
+                        force_tracking_enabled=False, tg_name="APPS"),  # excluded
         ]
         # Pre-seed all trackers into storage so update_delivery_state can read
         # their snapshot (NS -> Open requires from_state to be an enum value).
         for t in trackers:
             deps.storage.items[t.item_id] = t
 
-        # Owner map: items 1+2+5 -> alice, items 7+8 -> bob (only eligible ones used).
+        # Owner map: MNO-ETM -> alice (items 1, 2, 5), APPS -> bob (item 7).
+        # Multi-owner list form on item_no=1 exercises the SP-list shape that
+        # motivated the tg_name refactor (item was previously dropped when its
+        # owner-string differed from siblings').
         owner_map = {
-            trackers[0].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
-            trackers[1].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
-            trackers[2].item_id: {"owner_corp_usa_email": "alice@corp.example", "owner_name": "Alice"},
-            trackers[3].item_id: {"owner_corp_usa_email": "bob@corp.example",   "owner_name": "Bob"},
+            trackers[0].item_id: {"owner_corp_usa_email": ["alice@corp.example", "alice2@corp.example"], "owner_name": "Alice"},
+            trackers[1].item_id: {"owner_corp_usa_email": ["alice@corp.example"], "owner_name": "Alice"},
+            trackers[2].item_id: {"owner_corp_usa_email": ["alice@corp.example"], "owner_name": "Alice"},
+            trackers[3].item_id: {"owner_corp_usa_email": ["bob@corp.example"],   "owner_name": "Bob"},
         }
         recorder = self._patch_kickoff_helpers(monkeypatch, owner_map=owner_map)
         deps.storage.list_items_response = trackers
@@ -1575,17 +1583,23 @@ class TestKickoffCollection:
         assert result["outcome"] == "fired"
         assert result["items_scanned"] == 6
         assert result["items_eligible"] == 4         # items 1, 2, 5, 7 (Confirmation included)
-        assert result["owner_groups"] == 2           # alice + bob
+        # `owner_groups` counter now counts tg_groups (key name preserved for
+        # downstream analytics).
+        assert result["owner_groups"] == 2           # MNO-ETM + APPS
         assert result["emails_sent"] == 2
         assert result["items_transitioned"] == 4     # all eligible reach OutreachSent
         assert result["items_failed"] == 0
-        # Each batch email recorded once with the right recipient + size.
-        recipients_sorted = sorted(r["recipient"] for r in recorder)
-        assert recipients_sorted == ["alice@corp.example", "bob@corp.example"]
-        alice_batch = next(r for r in recorder if r["recipient"] == "alice@corp.example")
-        assert len(alice_batch["items"]) == 3
-        bob_batch = next(r for r in recorder if r["recipient"] == "bob@corp.example")
-        assert len(bob_batch["items"]) == 1
+        # Each batch email recorded once, with the TG's full owner list as
+        # recipient. MNO-ETM sample-item is item_no=1 which carries the
+        # multi-owner list; APPS carries a single-owner list.
+        batches_by_size = {len(r["items"]): r for r in recorder}
+        assert set(batches_by_size.keys()) == {1, 3}
+        mno_batch = batches_by_size[3]
+        assert sorted(mno_batch["recipient"]) == ["alice2@corp.example", "alice@corp.example"]
+        apps_batch = batches_by_size[1]
+        assert apps_batch["recipient"] == ["bob@corp.example"]
+        # OUTREACH-SORT-1 (2026-09-12): rendered items are item_no ascending.
+        assert [it["item_no"] for it in mno_batch["items"]] == [1, 2, 5]
         # Aggregate kickoff audit row written exactly once.
         kickoff_logs = [a for a in deps.audit.logs if a[0] == "collection_kickoff_dispatched"]
         assert len(kickoff_logs) == 1
