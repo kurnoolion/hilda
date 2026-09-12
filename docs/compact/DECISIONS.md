@@ -6338,3 +6338,20 @@ recovers.
 **Anchors**: `NASCA-CARRIER-1`, `NASCA-PLM-1`, `[D-189]` (carrier
 allowlist), `[D-200]` (walk-level `_decrypt` filter), `DRM-1` (existing
 NSD subprocess wrapper), `PLM-3` (PLM poll task shape).
+
+### D-205 addendum: PLMDRM-1 (2026-09-11) — DRM filter applies to PLM download path too
+
+Same rule (`_decrypt`-stem archive filter), widened scope. The PLM
+download loop in `plm_poll._download_and_ingest` walked
+`downloads_dir.rglob("*")` with no DRM filter, so a PLM ticket carrying
+both the encrypted `foo.zip` and the NASCA-produced `foo_decrypt.zip`
+twin (the actual production shape) ingested BOTH — the encrypted
+original landed as opaque bytes on the associated item.
+
+Promoted `_is_drm_wrapped_archive` → `is_drm_wrapped_archive` in
+`nsd2_resolver.__all__` and reused at the PLM loop. Legacy alias kept
+for any in-flight caller. New stats counter `files_skipped_drm_wrapped`
+on plm_poll. 2 new tests (both/only-decrypt case + case-insensitive
+match). Decision itself unchanged — DRM policy is HILDA-wide, not
+NSD-only, so the predicate now lives at the public boundary of its
+own module and both ingest paths call it.

@@ -38,6 +38,7 @@ __all__ = [
     "is_excluded_folder_name",
     "is_allowed_root_folder",
     "allowed_root_folders",
+    "is_drm_wrapped_archive",
     "find_carrier_anchors",
     "match_hint_for_ingest",
     "NSD2_ANCHOR_SEARCH_MAX_DEPTH",
@@ -398,16 +399,28 @@ _DRM_DECRYPT_STEM_MARKER: str = "decrypt"
 _DRM_ARCHIVE_EXTS: tuple[str, ...] = (".zip", ".7z", ".rar")
 
 
-def _is_drm_wrapped_archive(filename: str) -> bool:
-    """Return True when `filename` is an NSD-share archive whose stem does
-    NOT contain 'decrypt' (case-insensitive) -- i.e. the pre-decrypt DRM
-    original, whose contents are encrypted. See NSD-DRM-DECRYPT-1 above."""
+def is_drm_wrapped_archive(filename: str) -> bool:
+    """Return True when `filename` is an archive whose stem does NOT
+    contain 'decrypt' (case-insensitive) -- i.e. the pre-decrypt DRM
+    original, whose contents are encrypted. See NSD-DRM-DECRYPT-1 above.
+
+    PLMDRM-1 (2026-09-11): promoted from `_is_drm_wrapped_archive` so
+    the PLM download path (plm_poll._download_and_ingest) can reuse
+    the same predicate. DRM policy is a HILDA-wide invariant, not an
+    NSD-only walk detail, so the check now applies wherever we walk
+    a corp-sourced folder tree of downloaded files -- NSD share AND
+    PLM ticket attachments."""
     lowered = (filename or "").lower()
     if not any(lowered.endswith(ext) for ext in _DRM_ARCHIVE_EXTS):
         return False
     dot = lowered.rfind(".")
     stem = lowered[:dot] if dot > 0 else lowered
     return _DRM_DECRYPT_STEM_MARKER not in stem
+
+
+# Legacy alias so any in-flight caller still importing the underscore
+# name keeps working. Prefer the unprefixed public name in new code.
+_is_drm_wrapped_archive = is_drm_wrapped_archive
 
 
 def _name_tokens(folder_name: str) -> set[str]:
@@ -643,7 +656,7 @@ def walk_nsd2_directory(
                 # worth pulling into memory even to reject it. WARN so the
                 # skip is visible in production (WARNING is the deployed
                 # containers' root level; INFO would be silent).
-                if _is_drm_wrapped_archive(child.name):
+                if is_drm_wrapped_archive(child.name):
                     _log.warning(
                         "NSD2_WALK: skipped DRM-wrapped archive %s "
                         "(stem lacks 'decrypt' marker; expecting sibling "

@@ -701,6 +701,44 @@ class TestDownloadAndIngest:
         # Ticket create still ran; only download was gated.
         mock_client.list_and_download_all.assert_not_called()
 
+    def test_drm_wrapped_archive_skipped_only_decrypt_twin_ingested(
+        self, mock_client, ingest_recorder,
+    ):
+        """PLMDRM-1 (2026-09-11): PLM tickets carry both `foo.zip`
+        (encrypted) and `foo_decrypt.zip` (NASCA-produced plaintext
+        twin). Only the `_decrypt` twin should ingest; the encrypted
+        original is skipped at the walk with a WARN + counter."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        _stub_download_writes_files(mock_client, {
+            "foo.zip":         b"encrypted-bytes",
+            "foo_decrypt.zip": b"plaintext-zip-bytes",
+            "sibling.pdf":     b"non-archive-unaffected",
+        })
+        deps = SimpleNamespace(storage=_StubStorage(items=[_make_item()]), sp_writer=None)
+        stats = poll_plm_once(deps)
+        assert stats["files_skipped_drm_wrapped"] == 1
+        assert stats["files_yielded"] == 2         # decrypt twin + pdf
+        assert stats["files_ingested"] == 2
+        filenames = sorted(c["filename"] for c in ingest_recorder)
+        assert filenames == ["foo_decrypt.zip", "sibling.pdf"]
+
+    def test_drm_filter_case_insensitive(self, mock_client, ingest_recorder):
+        """PLMDRM-1: the 'decrypt' marker match must be case-insensitive
+        (same as the NSD walk predicate) so a `FOO_DECRYPT.ZIP` twin
+        also passes."""
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        _stub_download_writes_files(mock_client, {
+            "FOO.ZIP":         b"enc",
+            "FOO_DECRYPT.ZIP": b"plain",
+        })
+        deps = SimpleNamespace(storage=_StubStorage(items=[_make_item()]), sp_writer=None)
+        stats = poll_plm_once(deps)
+        assert stats["files_skipped_drm_wrapped"] == 1
+        assert stats["files_ingested"] == 1
+        assert ingest_recorder[0]["filename"] == "FOO_DECRYPT.ZIP"
+
     def test_dedup_by_hash(self, mock_client, ingest_recorder):
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
         import hashlib

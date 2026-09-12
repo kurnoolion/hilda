@@ -126,6 +126,7 @@ def poll_plm_once(deps: Any) -> dict[str, Any]:
         "downloads_ok":            0,
         "downloads_failed":        0,
         "files_yielded":           0,
+        "files_skipped_drm_wrapped": 0,   # PLMDRM-1: pre-decrypt archive twin
         "files_dedup_skipped":     0,
         "files_ingested":          0,
         "files_ingest_failed":     0,
@@ -755,8 +756,27 @@ def _download_and_ingest(
             )
             return
 
+        from core.src.storage.nsd2_resolver import is_drm_wrapped_archive
+
         for file_path in sorted(downloads_dir.rglob("*")):
             if not file_path.is_file():
+                continue
+            # PLMDRM-1 (2026-09-11): skip DRM-wrapped archives whose stem
+            # lacks 'decrypt' -- the encrypted twin. Same policy the NSD
+            # walk applies (D-200 / NSD-DRM-DECRYPT-1); PLM tickets carry
+            # both files today (encrypted `foo.zip` sits next to the
+            # decrypted `foo_decrypt.zip` produced by NASCA), so without
+            # this filter HILDA ingests the encrypted body as opaque bytes.
+            if is_drm_wrapped_archive(file_path.name):
+                stats["files_skipped_drm_wrapped"] = (
+                    stats.get("files_skipped_drm_wrapped", 0) + 1
+                )
+                _log.warning(
+                    "PLM_POLL: skipped DRM-wrapped archive plm_id=%s file=%s "
+                    "(stem lacks 'decrypt' marker; expecting sibling "
+                    "`<stem>_decrypt.<ext>`)",
+                    plm_id, file_path.name,
+                )
                 continue
             stats["files_yielded"] += 1
             try:
