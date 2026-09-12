@@ -354,6 +354,21 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
                     )
         elif outcome == "illegal_transition":
             illegal += 1
+            # OWNER-NOTE-ON-ILLEGAL-1 (2026-09-12): the state machine
+            # rejected the transition (typical case per user 2026-09-12:
+            # owner replies "Closed" on a P1 item already promoted to
+            # RFS via drr_mapping_promote; OWNER_CLOSED not in
+            # LEGAL_TRANSITIONS[RFS] so the state stays put). Persist
+            # the note-only fallback so the TPM still sees what the
+            # owner wrote -- without this, the reply is silently
+            # discarded and the PM has no record of the intent. State
+            # is unchanged either way.
+            if upd.owner_status_note:
+                await _write_note_only(
+                    deps, delivery_item_id, upd.owner_status_note,
+                    correlation_id=correlation_id, common=common,
+                )
+                notes_written += 1
         # no_op_idempotent counts as success-equivalent for telemetry purposes
 
     _log.info(
