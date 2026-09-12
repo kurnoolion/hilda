@@ -52,9 +52,24 @@ listed too, with the reason — those are usually the ones worth checking.</p>
 
 {% for it in manifest.items %}
   {% if it.rows %}
+    {# PREVIEW-COUNT-1 (2026-09-12): show the per-work-item document count
+       next to the title so the TPM can see "how many files does this
+       work-item hold?" without counting table rows. When some files are
+       excluded, break it down into "uploading of total"; otherwise show a
+       single number. `rows|length` matches what the table renders. #}
+    {% set _n_total = it.rows | length %}
+    {% set _n_uploading = it.included_count if it.included_count is defined else _n_total %}
     <h2 style="font-size:1.05em; margin-top:1.4em;">
       #{{ it.item_no }} · {{ it.tg_name }}
       <span style="font-weight:normal; color:#666;">{{ it.item_name }}</span>
+      <span style="font-weight:normal; color:#333; font-size:0.9em; margin-left:0.4em;">
+        —
+        {% if _n_uploading == _n_total %}
+          {{ _n_total }} file{{ 's' if _n_total != 1 else '' }}
+        {% else %}
+          {{ _n_uploading }} uploading / {{ _n_total }} file{{ 's' if _n_total != 1 else '' }}
+        {% endif %}
+      </span>
     </h2>
     <p style="margin:0.2em 0 0.5em 0; font-size:0.85em; color:#555;">
       state <code>{{ it.delivery_state }}</code>
