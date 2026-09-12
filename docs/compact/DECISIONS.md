@@ -6260,3 +6260,81 @@ requires state=Open).
 
 **Anchors**: `DRRP1-1` (milestone_item_mapping cascade),
 `DRRP1-DEST-1`, `[D-189]` (carrier allowlist context), `AUTO-CLASSIFY-RELNOTES-1` (PMApproval gate shape), `CIP-1..5` (per-item transient-state precedent).
+
+
+## D-205: NASCA decrypt gate — NSD carrier-scoped subdir + async PLM HTTP client
+
+**Date**: 2026-09-11 (NASCA-CARRIER-1 + NASCA-PLM-1)
+**Status**: Accepted
+
+**Context**: The corp NASCA API produces decrypted twins of encrypted
+archives (`foo.zip` → `foo_decrypt.zip`); non-archive files it decrypts in
+place. HILDA already gated NSD walks on `drm_client.decrypt_folder` and
+filtered the walk to `_decrypt`-stem archives (D-200). Two extensions were
+outstanding:
+
+1. **NSD path scope**: the existing NSD decrypt call passed the whole
+   device folder (`.../S671U1/`), which for allowlist customers (MMK, D-189)
+   would sweep both `VZW/` and `Verizon/` trees when the operator only
+   wants the carrier-scoped subtree processed. Architect ask 2026-09-11:
+   pass the specific carrier subdir instead.
+2. **PLM decrypt**: PLM-poll's download step ran against raw corp files
+   with no NASCA pre-decrypt, so encrypted payloads landed in HILDA and
+   failed downstream. NASCA exposes a PLM-specific async endpoint
+   (`POST /process-plm-documents` + `/status` polling) that produces
+   `<name>_decrypt.<ext>` twins on the PLM side.
+
+**Decision**:
+
+1. **NSD side (`nsd2_poll._resolve_decrypt_target`)**: for carrier-
+   allowlist customers, pick the first subdir in the allowlist tuple that
+   exists on disk (`("VZW", "Verizon")` → VZW preferred over Verizon per
+   tuple order); if none exist → WARN + skip walk this tick. For non-
+   allowlist customers → keep passing `device_folder` (legacy behavior;
+   no regression). Existing `drm_client.decrypt_folder` (subprocess
+   wrapper for `drm_decrypt.py`) is reused unchanged — the on-prem
+   script handles any path translation the corp API needs.
+2. **PLM side (new `issue_tracker/corp_plm/nasca_decrypt_client.py`)**:
+   direct HTTP transport (no subprocess); async kickoff-then-poll pattern.
+   Config seams: `HILDA_NASCA_PLM_BASE_URL` (default
+   `http://105.52.91.178:5050`), `HILDA_NASCA_PLM_POLL_SEC` (30),
+   `HILDA_NASCA_PLM_TIMEOUT_SEC` (900 = 15 min),
+   `HILDA_NASCA_PLM_ENABLED` (opt-out for dev/CI). Hook lives at the
+   top of `plm_poll._download_and_ingest`; on `False` → WARN + skip
+   download this tick + retry next tick (API is idempotent, so re-POST
+   on a decrypted PLM ID is a no-op).
+
+**Why reuse `drm_client` for NSD (subprocess) but write a fresh HTTP
+client for PLM**:
+- NSD's existing transport is a subprocess script (`drm_decrypt.py`) that
+  wraps the corp DRM POST + translates HILDA-mount paths to
+  corp-visible paths. Only the path passed to that script changes.
+- PLM's contract is a direct HTTP async job with a documented status
+  endpoint, no path translation, and no need for a subprocess seam.
+  A stdlib-only HTTP client keeps the dep surface small and testable.
+
+**Why WARN + skip on failure (vs raise/retry with backoff)**: matches
+the existing DRM-1 policy across the codebase — every layer of the NSD/
+PLM tick swallows exceptions to WARN so a single upstream hiccup does
+not lose the whole tick. Corp API idempotency (confirmed 2026-08-28 for
+DRM, 2026-09-11 for PLM) makes retry-next-tick safe.
+
+**Why VZW preferred over Verizon** (7 of 8 review questions): matches
+the `CARRIER_ALLOWED_ROOT_FOLDERS["MMK"] = ("VZW", "Verizon")` tuple
+order from D-189; the allowlist tuple order is treated as preference
+order across the codebase.
+
+**Consequences**: 2 source-file edits (`nsd2_poll.py`, `plm_poll.py`),
+1 new source file (`nasca_decrypt_client.py`), 3 new test files (23
+new cases) + 1 new test case wired into `test_plm_poll.py`, updated
+`test_nsd2.py` fixtures (7 tests now build files under `VZW/` per the
+new invariant). New stats counters: `devices_decrypt_no_carrier_subdir`
+(NSD), `nasca_decrypt_failed` (PLM). No schema change, no migration.
+Ops signal: WARN log families `NSD2_POLL: no carrier subdir` (missing
+tree) and `NASCA_PLM: decrypt failed` (server-side failure) — both
+fire retry-next-tick, so they self-heal once the tree lands / server
+recovers.
+
+**Anchors**: `NASCA-CARRIER-1`, `NASCA-PLM-1`, `[D-189]` (carrier
+allowlist), `[D-200]` (walk-level `_decrypt` filter), `DRM-1` (existing
+NSD subprocess wrapper), `PLM-3` (PLM poll task shape).

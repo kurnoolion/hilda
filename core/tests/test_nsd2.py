@@ -694,12 +694,15 @@ class TestPollNsd2OnceEndToEnd:
     def test_happy_path_ingests_new_files(self, tmp_path, monkeypatch):
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
-        # Build the tree
+        # NASCA-CARRIER-1 (2026-09-11): MMK requires VZW/Verizon subdir on
+        # disk for the pre-walk decrypt call to fire + for the walker's
+        # anchor-gated mode. Build the tree accordingly.
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "report_a.pdf").write_bytes(b"content-A")
-        (device_folder / "sub").mkdir()
-        (device_folder / "sub" / "report_b.pdf").write_bytes(b"content-B")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "report_a.pdf").write_bytes(b"content-A")
+        (vzw / "sub").mkdir()
+        (vzw / "sub" / "report_b.pdf").write_bytes(b"content-B")
 
         _seed_template_cache()
         calls = _make_ingest_recorder(monkeypatch)
@@ -715,18 +718,20 @@ class TestPollNsd2OnceEndToEnd:
         assert stats["files_yielded"] == 2
         assert stats["files_dedup_skipped"] == 0
         assert stats["files_ingested"] == 2
-        # Both files handed to ingest
+        # Both files handed to ingest -- paths carry the VZW anchor prefix
+        # since the walker seeds from anchor in gated mode.
         assert len(calls) == 2
         filenames = sorted(c["filename"] for c in calls)
-        assert filenames == ["report_a.pdf", "sub/report_b.pdf"]
+        assert filenames == ["VZW/report_a.pdf", "VZW/sub/report_b.pdf"]
 
     def test_dedup_skips_files_already_in_document_index(self, tmp_path, monkeypatch):
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "already_seen.pdf").write_bytes(b"content-A")
-        (device_folder / "new_one.pdf").write_bytes(b"content-B")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "already_seen.pdf").write_bytes(b"content-A")
+        (vzw / "new_one.pdf").write_bytes(b"content-B")
 
         existing_hash = hashlib.sha256(b"content-A").hexdigest()
         _seed_template_cache()
@@ -743,7 +748,7 @@ class TestPollNsd2OnceEndToEnd:
         assert stats["files_dedup_skipped"] == 1
         assert stats["files_ingested"] == 1
         assert len(calls) == 1
-        assert calls[0]["filename"] == "new_one.pdf"
+        assert calls[0]["filename"] == "VZW/new_one.pdf"
 
     def test_no_deps_short_circuits(self):
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
@@ -764,8 +769,9 @@ class TestPollNsd2OnceEndToEnd:
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "x.pdf").write_bytes(b"x")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "x.pdf").write_bytes(b"x")
 
         # 3 items: 1 HW PL (would match), 2 other TGs (should be filtered)
         hw_pl = _build_hw_pl_item(str(tmp_path))
@@ -827,8 +833,9 @@ class TestPollNsd2OnceEndToEnd:
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "x.pdf").write_bytes(b"x")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "x.pdf").write_bytes(b"x")
 
         item = _build_hw_pl_item(
             tracking_modality=["Email", "NetworkSharedDrive", "CorporatePLM"],
@@ -850,8 +857,9 @@ class TestPollNsd2OnceEndToEnd:
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "x.pdf").write_bytes(b"x")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "x.pdf").write_bytes(b"x")
 
         # Bogus / empty ingress_folder should NOT matter -- gate is on modality now
         item = _build_hw_pl_item(
@@ -894,8 +902,9 @@ class TestPollNsd2OnceEndToEnd:
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "p1_report.pdf").write_bytes(b"content-P1")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "p1_report.pdf").write_bytes(b"content-P1")
 
         # Template exposes BOTH milestones; poller must pick P1 only.
         _seed_template_cache({
@@ -948,8 +957,9 @@ class TestPollNsd2OnceEndToEnd:
         from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
 
         device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
-        device_folder.mkdir(parents=True)
-        (device_folder / "shared.pdf").write_bytes(b"content-shared")
+        vzw = device_folder / "VZW"
+        vzw.mkdir(parents=True)
+        (vzw / "shared.pdf").write_bytes(b"content-shared")
 
         item1 = _build_hw_pl_item(str(tmp_path), delivery_item_id="MMK-SM-A015V-P1-1")
         item2 = _build_hw_pl_item(str(tmp_path), delivery_item_id="MMK-SM-A015V-P1-2")
@@ -970,6 +980,32 @@ class TestPollNsd2OnceEndToEnd:
         assert len(candidate_items) == 2
         candidate_ids = {getattr(it, "delivery_item_id", None) for it in candidate_items}
         assert candidate_ids == {"MMK-SM-A015V-P1-1", "MMK-SM-A015V-P1-2"}
+
+    def test_carrier_allowlist_no_subdir_skips_walk(self, tmp_path, monkeypatch):
+        """NASCA-CARRIER-1 (2026-09-11): for MMK, when neither VZW nor
+        Verizon subdir exists under the device folder, the decrypt call
+        is skipped and the walk is short-circuited (WARN + retry next
+        tick). Files sitting bare under device_folder are NOT ingested
+        this tick."""
+        from core.src.workflow_engine.tasks.nsd2_poll import poll_nsd2_once
+
+        device_folder = tmp_path / "Deliverables - Phone" / "A" / "A015V (A01)"
+        device_folder.mkdir(parents=True)
+        # Bare file, no VZW/Verizon parent -- new invariant says skip.
+        (device_folder / "orphan.pdf").write_bytes(b"x")
+
+        _seed_template_cache()
+        calls = _make_ingest_recorder(monkeypatch)
+        deps = SimpleNamespace(
+            storage=_StubStorage(items=[_build_hw_pl_item(str(tmp_path))]),
+            nsd2_roots=[tmp_path],
+        )
+        stats = poll_nsd2_once(deps)
+        assert stats["devices_decrypt_no_carrier_subdir"] == 1
+        assert stats["devices_walked"] == 1   # counted before the gate
+        assert stats["files_yielded"] == 0
+        assert stats["files_ingested"] == 0
+        assert len(calls) == 0
 
 
 # ===========================================================================

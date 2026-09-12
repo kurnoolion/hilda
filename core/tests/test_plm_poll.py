@@ -67,10 +67,15 @@ def _make_item(**overrides):
 def mock_client(monkeypatch):
     """Monkey-patch on_prem_client's public functions at the source module.
     plm_poll imports `on_prem_client` inside each function call, so patching
-    the source module's attributes wins regardless of import site."""
+    the source module's attributes wins regardless of import site.
+
+    NASCA-PLM-1 (2026-09-11): also patch nasca_decrypt_client.decrypt_plm_id
+    to a no-op True so tests don't hit the real corp NASCA endpoint. Tests
+    that want to assert the gate specifically can re-patch it locally."""
     client = MagicMock()
     client.create_plm_ticket.return_value = ("P20260814-99999", "https://plm.corp/detail/K12345678")
     client.list_and_download_all.return_value = 0
+    client.decrypt_plm_id.return_value = True
     monkeypatch.setattr(
         "core.src.issue_tracker.corp_plm.on_prem_client.create_plm_ticket",
         client.create_plm_ticket,
@@ -78,6 +83,10 @@ def mock_client(monkeypatch):
     monkeypatch.setattr(
         "core.src.issue_tracker.corp_plm.on_prem_client.list_and_download_all",
         client.list_and_download_all,
+    )
+    monkeypatch.setattr(
+        "core.src.issue_tracker.corp_plm.nasca_decrypt_client.decrypt_plm_id",
+        client.decrypt_plm_id,
     )
     return client
 
@@ -673,6 +682,24 @@ class TestDownloadAndIngest:
         assert stats["downloads_failed"] == 1
         assert stats["files_yielded"] == 0
         assert len(ingest_recorder) == 0
+
+    def test_nasca_decrypt_failure_skips_download(self, mock_client, ingest_recorder):
+        # NASCA-PLM-1 (2026-09-11): decrypt gate short-circuits download +
+        # ingest for this tick; next tick retries. mock_client.decrypt_plm_id
+        # returns True by default, so flip it to False for this case.
+        from core.src.workflow_engine.tasks.plm_poll import poll_plm_once
+        _seed_template_cache()
+        mock_client.decrypt_plm_id.return_value = False
+        _stub_download_writes_files(mock_client, {"never_downloaded.pdf": b"x"})
+        deps = SimpleNamespace(storage=_StubStorage(items=[_make_item()]), sp_writer=None)
+        stats = poll_plm_once(deps)
+        assert stats["nasca_decrypt_failed"] == 1
+        assert stats["downloads_ok"] == 0
+        assert stats["downloads_failed"] == 0
+        assert stats["files_yielded"] == 0
+        assert len(ingest_recorder) == 0
+        # Ticket create still ran; only download was gated.
+        mock_client.list_and_download_all.assert_not_called()
 
     def test_dedup_by_hash(self, mock_client, ingest_recorder):
         from core.src.workflow_engine.tasks.plm_poll import poll_plm_once

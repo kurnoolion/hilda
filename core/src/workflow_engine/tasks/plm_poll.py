@@ -122,6 +122,7 @@ def poll_plm_once(deps: Any) -> dict[str, Any]:
         "tickets_create_failed":   0,
         "sp_writes_ok":            0,
         "sp_writes_failed":        0,
+        "nasca_decrypt_failed":    0,   # NASCA-PLM-1: pre-download decrypt gate
         "downloads_ok":            0,
         "downloads_failed":        0,
         "files_yielded":           0,
@@ -715,8 +716,23 @@ def _download_and_ingest(
 ) -> None:
     """Download all files for `plm_id` into a fresh tmpdir; walk
     downloads/ subtree; dedup by hash; ingest through router with `items`
-    as candidates. Always cleans up tmpdir."""
-    from core.src.issue_tracker.corp_plm import on_prem_client
+    as candidates. Always cleans up tmpdir.
+
+    NASCA-PLM-1 (2026-09-11): decrypt via the corp NASCA PLM API BEFORE
+    download. If decrypt fails / times out, skip this download this
+    tick + retry next tick -- API is idempotent on the corp side so
+    the retry is safe. Same failure policy as NSD-side drm_client
+    (WARN + skip, no exception)."""
+    from core.src.issue_tracker.corp_plm import nasca_decrypt_client, on_prem_client
+
+    if not nasca_decrypt_client.decrypt_plm_id(plm_id):
+        stats["nasca_decrypt_failed"] = stats.get("nasca_decrypt_failed", 0) + 1
+        _log.warning(
+            "PLM_POLL: NASCA decrypt failed for plm_id=%s -- skipping "
+            "download this tick; retry next tick",
+            plm_id,
+        )
+        return
 
     work_dir = Path(tempfile.mkdtemp(prefix=f"plm-{plm_id}-"))
     try:

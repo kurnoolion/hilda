@@ -285,22 +285,40 @@ def _poll_one_device(
         device_id, milestone_id, device_folder, len(items),
     )
 
-    # DRM-1 (2026-08-28): force-decrypt DRM-wrapped files under device_folder
-    # BEFORE the walk reads bytes. On-prem script POSTs to corp DRM endpoint
-    # (folder-only payload -> API decrypts every file in folder AND
-    # recursively into subfolders per corp API confirm 2026-08-28;
-    # idempotent). On failure -> skip this device this tick per architect
-    # ask; next tick retries. Wrapped bytes would ingest as opaque blobs
-    # and be useless downstream, so gating is correct.
-    # One call at device_folder root covers the entire walk_fn traversal
-    # (recursion happens on the API side).
+    # DRM-1 (2026-08-28): force-decrypt DRM-wrapped files BEFORE the walk
+    # reads bytes. On-prem script POSTs to corp DRM endpoint; API walks the
+    # folder tree, finds encrypted zip files, creates <stem>_decrypt.<ext>
+    # twins for them; non-archive files are decrypted in place (no twin).
+    # Wrapped bytes would ingest as opaque blobs, so gating on decrypt is
+    # correct. Failure -> skip walk this tick; API idempotency (already-
+    # decrypted files are no-ops) makes retry safe next tick.
+    #
+    # NASCA-CARRIER-1 (2026-09-11): for carrier-allowlist customers (D-189,
+    # e.g. MMK: ("VZW", "Verizon")) pass the specific carrier subdir --
+    # first entry of the tuple that exists on disk (VZW preferred over
+    # Verizon per tuple order). For non-allowlist customers, keep the
+    # device-root behavior. If NO carrier subdir exists -> WARN + skip walk
+    # (nothing to ingest anyway; carriers land subdirs before files).
     from core.src.storage.drm_client import decrypt_folder as _drm_decrypt_folder
-    if not _drm_decrypt_folder(str(device_folder)):
+
+    decrypt_target = _resolve_decrypt_target(device_folder, customer_id)
+    if decrypt_target is None:
+        stats["devices_decrypt_no_carrier_subdir"] = (
+            stats.get("devices_decrypt_no_carrier_subdir", 0) + 1
+        )
+        _log.warning(
+            "NSD2_POLL: no carrier subdir exists under device_folder=%s "
+            "customer=%s allowed=%s -- skipping walk this tick",
+            device_folder, customer_id, _carrier_allowlist_repr(customer_id),
+        )
+        return
+
+    if not _drm_decrypt_folder(str(decrypt_target)):
         stats["devices_decrypt_failed"] = stats.get("devices_decrypt_failed", 0) + 1
         _log.warning(
-            "NSD2_POLL: DRM decrypt failed for device=%s folder=%s -- "
+            "NSD2_POLL: DRM decrypt failed for device=%s target=%s -- "
             "skipping walk this tick; retry next tick",
-            device_id, device_folder,
+            device_id, decrypt_target,
         )
         return
 
@@ -344,6 +362,47 @@ def _poll_one_device(
                 type(exc).__name__, str(exc)[:200],
             )
             stats["files_ingest_failed"] += 1
+
+
+# ---------------------------------------------------------------------------
+# NASCA-CARRIER-1 (2026-09-11) helpers -- pick the carrier subdir to hand
+# to the DRM decrypt API instead of the device root, so carrier-scoped
+# ingests decrypt only their own subtree.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_decrypt_target(device_folder: Path, customer_id: str) -> Path | None:
+    """Return the folder to pass to drm_client.decrypt_folder.
+
+    Carrier-allowlist customers (D-189) -> first carrier subdir in the
+    allowlist tuple that exists on disk (tuple order == preference, so
+    MMK's ("VZW", "Verizon") prefers VZW when both exist). Returns None
+    when the allowlist is non-empty but none of its subdirs exist -- the
+    caller WARNs + skips this device's walk this tick.
+
+    Non-allowlist customers -> return `device_folder` unchanged; the
+    legacy behavior (decrypt at device root) still applies.
+
+    Existence check is against the local mount; the on-prem decrypt
+    script translates the path to what the corp API expects (confirmed
+    with architect 2026-09-11)."""
+    from core.src.storage.nsd2_resolver import allowed_root_folders
+
+    carriers = allowed_root_folders(customer_id)
+    if not carriers:
+        return device_folder
+    for name in carriers:
+        candidate = device_folder / name
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _carrier_allowlist_repr(customer_id: str) -> str:
+    """Compact allowlist tuple for log lines; "" when no allowlist."""
+    from core.src.storage.nsd2_resolver import allowed_root_folders
+
+    return ",".join(allowed_root_folders(customer_id) or ())
 
 
 # ---------------------------------------------------------------------------
