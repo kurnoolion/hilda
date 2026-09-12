@@ -618,6 +618,38 @@ async def _maybe_send_unparseable_auto_reply(
         )
         return
 
+    # BOUNCE-LOOP-STOP-1 (2026-09-12): belt-and-suspenders gate. The
+    # classifier now filters bounces upstream (EmailKind.OTHER), so this
+    # branch should never fire in practice -- but a legacy caller or a
+    # future refactor might dispatch here directly, and 12 hours of
+    # incident recovery is expensive enough to warrant the redundant
+    # check. Refuse to auto-reply when the inbound message itself looks
+    # like a bounce / DSN / auto-response: the reply would just bounce
+    # back into HILDA's inbox and re-fire the cascade.
+    try:
+        from core.src.email_service.inbound.classifier import (
+            is_bounce_message,
+        )
+        if is_bounce_message(msg):
+            _log.warning(
+                "unparseable_auto_reply: skip -- inbound looks like a "
+                "bounce / DSN (sender=%s subject=%r batch_id=%s). Upstream "
+                "classifier should have short-circuited this; investigate.",
+                sender, subject, batch_id,
+            )
+            return
+    except Exception as exc:  # noqa: BLE001 -- belt-and-suspenders check
+        # Import / logic failure here must not resurrect the loop: fail
+        # SAFE (skip the auto-reply). Legit unparseable replies from
+        # real owners will still get their auto-reply once ops fixes
+        # whatever broke the import.
+        _log.warning(
+            "unparseable_auto_reply: bounce-detect probe raised %s: %s -- "
+            "skipping send defensively (batch_id=%s)",
+            type(exc).__name__, str(exc)[:120], batch_id,
+        )
+        return
+
     # Idempotency probe.
     query_fn = getattr(deps.audit, "query_communications", None)
     if query_fn is not None and message_id:
