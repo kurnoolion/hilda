@@ -1548,6 +1548,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             "document_edit_blocked_drm":  "Edit blocked (DRM)",
             "document_edit_blocked_superseded":
                                           "Edit blocked (superseded revision)",
+            "document_received":          "Received from owner",
         }
         rows = []
         for e in events:
@@ -1559,6 +1560,13 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 note_bits.append(f"v{v}")
             if e.details and e.details.get("onlyoffice_status"):
                 note_bits.append(f"oo_status={e.details['onlyoffice_status']}")
+            # HIST-INGEST-1 (2026-09-12): surface the ingest source on the
+            # first-row "Received" event so TPM sees whether the owner sent
+            # it via email / PLM ticket / NSD share / manual TPM route.
+            if e.action_type == "document_received" and e.details:
+                src = e.details.get("ingest_source") or e.details.get("source")
+                if src:
+                    note_bits.append(f"via {src}")
             rows.append({
                 "timestamp_pretty": _fmt_dt(e.timestamp),
                 "event":            _humanize.get(e.action_type, e.action_type),

@@ -1419,6 +1419,12 @@ _DOCUMENT_VIEW_ACTION_TYPES = (
     "document_saved",
     "document_downloaded",
     "document_edit_blocked_drm",  # D-152
+    "document_received",          # HIST-INGEST-1 (2026-09-12): first-row
+                                  # audit written by ingest paths (email
+                                  # router / PLM poll / NSD poll / manual
+                                  # route) so the History timeline shows
+                                  # the owner-delivered event, not just
+                                  # subsequent view/edit/save/download.
 )
 
 

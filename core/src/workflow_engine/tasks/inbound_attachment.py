@@ -358,9 +358,12 @@ async def _process_regular_attachment(
 
     try:
         await _write_matches_to_view_tree(
+            deps=deps,
             attachment=attachment,
             matched_item_ids=counts.get("item_ids", set()),
             candidate_items=candidate_items,
+            correlation_id=correlation_id,
+            ingest_source=ingest_source,
         )
     except Exception as exc:  # noqa: BLE001
         _log.warning(
@@ -1481,9 +1484,12 @@ def _fire_attachment_received_event(
 
 async def _write_matches_to_view_tree(
     *,
+    deps,                                 # HIST-INGEST-1: for audit write
     attachment,
     matched_item_ids: set,
     candidate_items: list[dict],
+    correlation_id: str = "",             # HIST-INGEST-1: audit provenance
+    ingest_source: str = "",              # HIST-INGEST-1: email / plm / nsd / manual
 ) -> None:
     """D-150 Chunk 3 hook: persist attachment bytes to the HILDA-side documents
     view tree, one write per DISTINCT (customer, device, milestone, tg_name)
@@ -1520,11 +1526,31 @@ async def _write_matches_to_view_tree(
         if key in seen:
             continue
         seen.add(key)
-        await write_attachment_to_view_tree(
+        # HIST-INGEST-1 (2026-09-12): capture returned view_relative_paths
+        # so the "document_received" audit row lands with the same key the
+        # /browse/history/{token} query uses.
+        written_paths = await write_attachment_to_view_tree(
             customer_id=cust, device_id=dev, milestone_id=mil, tg_name=tg,
             item_type=item_type, filename=filename, content=bytes(content),
             saved_by="auto",
         )
+        for vrp in written_paths or []:
+            await _audit(
+                deps,
+                "document_received",
+                None,
+                {
+                    "view_relative_path": vrp,
+                    "correlation_id":     vrp,   # keys the history query
+                    "ingest_source":      ingest_source or "email",
+                    "customer_id":        cust,
+                    "device_id":          dev,
+                    "milestone_id":       mil,
+                    "tg_name":            tg,
+                    "batch_correlation":  correlation_id,
+                    "original_filename":  filename,
+                },
+            )
 
 
 def _row_field(row, key: str):

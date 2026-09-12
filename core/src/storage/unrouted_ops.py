@@ -494,6 +494,51 @@ async def route_unrouted_to_item(
                     "MANUAL_ROUTE: view-tree write done wrote=%d path(s)=%r",
                     len(view_paths or []), view_paths,
                 )
+                # HIST-INGEST-1 (2026-09-12): write a "document_received"
+                # audit row keyed on view_relative_path so the History
+                # timeline (/browse/history/{token}) surfaces the manual-
+                # route landing event -- otherwise the TPM sees only later
+                # views/edits and no "how did this file get here" line.
+                for _vrp in view_paths or []:
+                    try:
+                        import json as _json
+                        from datetime import datetime as _dt, timezone as _tz
+                        import uuid as _uuid
+                        from core.src.storage.models import (
+                            Channel as _Chan, CommunicationLogRow as _CLR,
+                            Direction as _Dir,
+                        )
+                        await audit_ops.log_communication(_CLR(
+                            log_id=str(_uuid.uuid4()),
+                            channel=_Chan.SHAREPOINT,
+                            direction=_Dir.OUTBOUND,
+                            timestamp=_dt.now(_tz.utc),
+                            delivery_item_id=target_delivery_item_id,
+                            sender=tpm_id or "tpm",
+                            summary=_json.dumps({
+                                "attribution": {
+                                    "trigger_source": "manual_route",
+                                    "correlation_id": _vrp,
+                                    "modified_by":    tpm_id or "tpm",
+                                },
+                                "details": {
+                                    "view_relative_path": _vrp,
+                                    "ingest_source":      "manual",
+                                    "source_file_hash":   file_hash[:12],
+                                    "target_tg":          target_tg,
+                                    "original_filename":  doc.original_filename,
+                                },
+                            }, default=str, separators=(",", ":"))[:4096],
+                            external_message_id=_vrp,
+                            action_type="document_received",
+                            attachments=[],
+                        ))
+                    except Exception as _exc:  # noqa: BLE001
+                        _log.warning(
+                            "MANUAL_ROUTE: document_received audit failed "
+                            "vrp=%r: %s: %s",
+                            _vrp, type(_exc).__name__, str(_exc)[:120],
+                        )
                 if not view_paths:
                     _log.warning(
                         "MANUAL_ROUTE: VIEW_WRITE_EMPTY tg=%s item_type=%s -- "
