@@ -198,6 +198,35 @@ def reconcile_target_items_on_source_rfs(
                 target_item_id, current_state,
                 source_milestone_id, source_item_no,
             )
+            # HWPL-SIBLING-1 (2026-09-13): the P1 target we just promoted
+            # may be a sibling-group anchor; cascade to its siblings so
+            # they land in RFS alongside. Best-effort -- helper catches
+            # per-sibling failures, never raises. Non-anchor targets
+            # short-circuit in the helper (outcome=no_group).
+            try:
+                from core.src.tracker.hwpl_sibling_reconcile import (
+                    reconcile_siblings_on_anchor_rfs,
+                )
+                _sibling_summary = reconcile_siblings_on_anchor_rfs(
+                    deps=deps,
+                    anchor_customer_id=source_customer_id,
+                    anchor_device_id=source_device_id,
+                    anchor_milestone_id=block.target_milestone,
+                    anchor_tg_name=getattr(target_item, "tg_name", "") or "",
+                    anchor_item_no=int(target_item_no),
+                    correlation_id=correlation_id,
+                    pm_id=pm_id,
+                )
+                _log.warning(
+                    "HWPL_SIBLING_RFS: anchor=%s (via drr_mapping) summary=%s",
+                    target_item_id, _sibling_summary,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "HWPL_SIBLING_RFS: hook unexpected exception via "
+                    "drr_mapping anchor=%s: %s: %s",
+                    target_item_id, type(exc).__name__, str(exc)[:160],
+                )
         except Exception as exc:  # noqa: BLE001
             summary["failed"].append((target_item_id, type(exc).__name__))
             _log.warning(

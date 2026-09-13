@@ -325,6 +325,37 @@ def apply_pm_approval_task(
                 delivery_item_id, type(exc).__name__, str(exc)[:160],
             )
 
+    # HWPL-SIBLING-1 (2026-09-13): this item just hit RFS -- if it is the
+    # anchor of a sibling-group (yaml config), promote its siblings to
+    # RFS too. Skips terminal siblings (TPM-authoritative). Anchor-only
+    # cascade: non-anchors dispatched here yield no_group + return.
+    # Helper is defense-in-depth -- catches per-sibling failures, never
+    # raises. See tracker.hwpl_sibling_reconcile.
+    if _drr_src is not None:
+        try:
+            from core.src.tracker.hwpl_sibling_reconcile import (
+                reconcile_siblings_on_anchor_rfs,
+            )
+            _sibling_summary = reconcile_siblings_on_anchor_rfs(
+                deps=deps,
+                anchor_customer_id=getattr(_drr_src, "customer_id", "") or "",
+                anchor_device_id=getattr(_drr_src, "device_id", "") or "",
+                anchor_milestone_id=getattr(_drr_src, "milestone_id", "") or "",
+                anchor_tg_name=getattr(_drr_src, "tg_name", "") or "",
+                anchor_item_no=int(getattr(_drr_src, "item_no", 0) or 0),
+                correlation_id=event_context.get("correlation_id", "?"),
+                pm_id=pm_id_email,
+            )
+            _log.warning(
+                "HWPL_SIBLING_RFS: anchor=%s summary=%s",
+                delivery_item_id, _sibling_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "HWPL_SIBLING_RFS: hook unexpected exception anchor=%s: %s: %s",
+                delivery_item_id, type(exc).__name__, str(exc)[:160],
+            )
+
     # Hop 2 -- Confirmation items only: RFS -> Closed. Guard requires
     # no_customer_upload=True OR tpm_button attribution; PM approval on
     # Confirmation carries tpm_button semantically.

@@ -50,6 +50,17 @@ TriggerSource = Literal[
     # re-approves before the doc ships. Universal -- applies to any RFS
     # item regardless of how it got there.
     "doc_received_after_rfs",
+    # HWPL-SIBLING-1 (2026-09-13): anchor of a sibling-group hit RFS in
+    # the target milestone; cascade siblings to RFS. Guard 12 is the
+    # sole gate (target=RFS only, from must be non-terminal). Never
+    # bypasses TPM-closed / CIP / Cancelled / Submitted -- those states
+    # short-circuit at the caller before dispatch.
+    "hwpl_sibling_promote",
+    # HWPL-SIBLING-1 (2026-09-13): anchor of a sibling-group reached
+    # SubmittedToCustomer; cascade siblings to Submitted. Guard 13
+    # gates (target=Submitted only, from=RFS). Callers do the 2-hop
+    # (sibling promote-to-RFS then submit) internally.
+    "hwpl_sibling_submit",
 ]
 
 
@@ -336,6 +347,64 @@ def check_transition_guards(
                 reason="doc_received_after_rfs_wrong_target",
                 blocking_conditions=[
                     f"doc_received_after_rfs_only_targets_UnderPMReview_not_{target_state.value}",
+                ],
+            )
+
+    # ---------- Guard 12 (HWPL-SIBLING-1 2026-09-13): hwpl_sibling_promote ----------
+    # Sibling cascade to RFS: anchor of a sibling-group just reached RFS in
+    # the target milestone; caller promotes each non-terminal sibling to RFS.
+    # Rules:
+    #   - trigger_source='hwpl_sibling_promote' MAY ONLY target RFS
+    #   - from_state MUST be a non-terminal, non-CIP work state; caller
+    #     is responsible for skipping siblings already Closed / CIP /
+    #     Submitted / Cancelled before dispatching, but this guard is
+    #     defense-in-depth if a stale item slips through.
+    _SIBLING_PROMOTE_LEGAL_FROM = frozenset({
+        DeliveryState.OPEN,
+        DeliveryState.OUTREACH_SENT,
+        DeliveryState.DOCUMENT_RECEIVED,
+        DeliveryState.OWNER_CLOSED,
+        DeliveryState.UNDER_PM_REVIEW,
+        DeliveryState.DELAYED,
+        DeliveryState.BLOCKED,
+    })
+    if trigger_source == "hwpl_sibling_promote":
+        if target_state != DeliveryState.READY_FOR_SUBMISSION:
+            return GuardResult(
+                allowed=False,
+                reason="hwpl_sibling_promote_wrong_target",
+                blocking_conditions=[
+                    f"hwpl_sibling_promote_only_targets_RFS_not_{target_state}",
+                ],
+            )
+        if from_state not in _SIBLING_PROMOTE_LEGAL_FROM:
+            return GuardResult(
+                allowed=False,
+                reason="hwpl_sibling_promote_wrong_from_state",
+                blocking_conditions=[
+                    f"hwpl_sibling_promote_from_{from_state}_not_allowed",
+                ],
+            )
+
+    # ---------- Guard 13 (HWPL-SIBLING-1 2026-09-13): hwpl_sibling_submit ----------
+    # Sibling cascade to SubmittedToCustomer: anchor reached Submitted; the
+    # caller has (if needed) already 2-hopped this sibling to RFS via
+    # hwpl_sibling_promote, so from_state=RFS is the only path in.
+    if trigger_source == "hwpl_sibling_submit":
+        if target_state != DeliveryState.SUBMITTED_TO_CUSTOMER:
+            return GuardResult(
+                allowed=False,
+                reason="hwpl_sibling_submit_wrong_target",
+                blocking_conditions=[
+                    f"hwpl_sibling_submit_only_targets_Submitted_not_{target_state}",
+                ],
+            )
+        if from_state != DeliveryState.READY_FOR_SUBMISSION:
+            return GuardResult(
+                allowed=False,
+                reason="hwpl_sibling_submit_wrong_from_state",
+                blocking_conditions=[
+                    f"hwpl_sibling_submit_from_{from_state}_not_RFS",
                 ],
             )
 

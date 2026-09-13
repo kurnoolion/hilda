@@ -1,0 +1,34 @@
+# HWPL-SIBLING-1 (2026-09-13): sibling work-item cascade for HW PL + MQL-FIT.
+#
+# Background: a doc landing at NSD for a group like {10 (default), 11, 12}
+# is routed by HILDA to a SINGLE work item (usually the default anchor).
+# The anchor's state ladder walks Open -> ... -> RFS -> SubmittedToCustomer;
+# siblings that never received their own doc stay stuck at Open / OutreachSent.
+# TPM had to manually mark each sibling Closed to unblock the milestone.
+#
+# This mapping cascades the anchor's terminal transitions to its siblings:
+#   * anchor -> RFS         => promote siblings to RFS  (Guard 12)
+#   * anchor -> Submitted   => 2-hop siblings to SubmittedToCustomer (Guard 13)
+#
+# TPM-authoritative override: if a sibling is already Closed / CloseInProgress
+# / SubmittedToCustomer / Cancelled at cascade time, we skip it. Once
+# promoted, we NEVER walk siblings back if the anchor is reverted (per
+# architect 2026-09-13: keep it simple, no reverse cascade).
+#
+# Multi-source (two anchors sharing a sibling) is not a production shape
+# and is not supported. Loader treats the FIRST group that mentions the
+# item as authoritative; a WARN is logged if a second is encountered.
+target_milestone: P1
+groups:
+  # HW PL work items — anchor is the "default" catch-all; siblings are
+  # the tag-scoped items that the router routes to when the doc's tag
+  # matches, otherwise the doc lands on the anchor.
+  - tg_name: "HW PL"
+    anchor: 10
+    siblings: [11, 12]
+  - tg_name: "HW PL"
+    anchor: 14
+    siblings: [19, 21]
+  # MQL-FIT — TPM to add group(s) here after confirming anchor/sibling
+  # numbers with the live template.yaml. Placeholder left in place so
+  # the loader test picks up an empty MQL-FIT bucket cleanly.

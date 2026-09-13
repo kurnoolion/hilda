@@ -768,6 +768,43 @@ def _transition_to_submitted(
             "correlation_id": correlation_id,
         })
         return False
+
+    # HWPL-SIBLING-1 (2026-09-13): item just reached SubmittedToCustomer.
+    # If it is the anchor of a sibling-group (yaml config), cascade its
+    # siblings to SubmittedToCustomer too, 2-hopping through RFS when
+    # needed. Terminal siblings (Closed / CIP / Cancelled / already
+    # Submitted) are preserved. Best-effort -- the helper catches per-
+    # sibling failures and never raises. Non-anchor items short-circuit
+    # in the helper (outcome=no_group).
+    try:
+        _anchor_item = deps.storage.get_delivery_item(item_id)
+    except Exception:  # noqa: BLE001
+        _anchor_item = None
+    if _anchor_item is not None:
+        try:
+            from core.src.tracker.hwpl_sibling_reconcile import (
+                reconcile_siblings_on_anchor_submitted,
+            )
+            _sib_summary = reconcile_siblings_on_anchor_submitted(
+                deps=deps,
+                anchor_customer_id=getattr(_anchor_item, "customer_id", "") or "",
+                anchor_device_id=getattr(_anchor_item, "device_id", "") or "",
+                anchor_milestone_id=getattr(_anchor_item, "milestone_id", "") or "",
+                anchor_tg_name=getattr(_anchor_item, "tg_name", "") or "",
+                anchor_item_no=int(getattr(_anchor_item, "item_no", 0) or 0),
+                correlation_id=correlation_id,
+                pm_id="system:submit_to_carrier",
+            )
+            _log.warning(
+                "HWPL_SIBLING_SUB: anchor=%s summary=%s",
+                item_id, _sib_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "HWPL_SIBLING_SUB: hook unexpected exception anchor=%s: %s: %s",
+                item_id, type(exc).__name__, str(exc)[:160],
+            )
+
     return True
 
 
