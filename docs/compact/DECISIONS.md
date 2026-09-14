@@ -6355,3 +6355,264 @@ on plm_poll. 2 new tests (both/only-decrypt case + case-insensitive
 match). Decision itself unchanged — DRM policy is HILDA-wide, not
 NSD-only, so the predicate now lives at the public boundary of its
 own module and both ingest paths call it.
+
+## D-206: Outreach kickoff grouping keyed on tg_name, not owner-email
+
+**Date**: 2026-09-12 (OUTREACH-TG-GROUP-1)
+**Status**: Accepted
+
+**Context**: Pre-fix, `kickoff_collection_task` grouped eligible items by
+`owner_corp_usa_email` as a raw dict key. OWNER-3 (2026-08-14) turned
+the owner-email field into a list; SP TPMs can also type
+`"alice@corp; bob@corp"` in the text column. When one item in a TG had
+the multi-owner value and its siblings had the singular, the two
+`owner_key` strings differed → items landed in different groups →
+sibling items went to the singular owner without the multi-owner row,
+and the multi-owner group was sent to a joined-string recipient no MTA
+could route (root cause of the 2026-09-12 BOUNCE-LOOP-STOP-1 incident).
+
+Meanwhile Step 3 transitioned every item to OutreachSent unconditionally,
+so the missing item silently reached OutreachSent state with no email
+row -- TPM observed `item_no=1 present in Postgres/SP as OutreachSent,
+absent from outreach email`.
+
+**Decision**:
+
+- Grouping key = **`tg_name`** (lowercased). Mirrors OWNER-5's PLM-side
+  invariant (architect 2026-08-16: "owners are never shared across TGs;
+  all items in a TG have the same owner list"). TG-name is the semantic
+  root of the "one email per owner group" property.
+
+- Recipient resolved from any item's SP owner_info via new
+  `_owner_list_from_info` -- normalizes list-typed AND `;`-joined-string
+  shapes to `list[str]`. Empty list → silent `__no_tg__`-style bucket
+  (state still transitions, no email).
+
+- Item render order within the email = **`item_no` ascending**
+  (OUTREACH-SORT-1 companion, was insertion order).
+
+- Audit log recipient serialized as `;`-joined string; new `tg_name`
+  field added.
+
+**Why TG and not "canonical owner-set"** (option B in the review): a TG's
+owner list is INVARIANT across its items by design (architect); the
+canonical-set path would work but adds a hash step for a case that
+cannot legitimately vary. TG-name is the simpler, TPM-visible key.
+
+**Why not fan out per single owner** (option A): would send N emails
+per TG with the same table repeated -- noisy for owners who share
+multiple TGs, breaks the "one BATCH-id per owner reply" reconciliation
+that OWNER-4 depends on.
+
+**Consequences**: kickoff produces one email per TG for the eligible
+items, addressed to the TG's owner list. Test fixtures updated
+(`TestKickoffCollection.test_happy_path`: bob's item now in a
+different TG than alice's; item_no=1 carries a multi-owner list to
+exercise the previously-lost path). Legacy `owner_groups` result-dict
+key preserved (now counts tg_groups) so downstream telemetry
+consumers don't break. No schema change, no migration.
+
+**Anchors**: `OUTREACH-TG-GROUP-1`, `OUTREACH-SORT-1`, `[D-080]`
+(owner-email precedence, superseded here -- TG replaces owner-email as
+the group key), OWNER-3 (multi-owner list shape), OWNER-5 (PLM-side
+same-shape decision), BOUNCE-LOOP-STOP-1 (loop-defense against the
+downstream NDR that this bug produced live).
+
+
+## D-207: Preserve owner_status_note on illegal-transition owner replies
+
+**Date**: 2026-09-12 (OWNER-NOTE-ON-ILLEGAL-1)
+**Status**: Accepted
+
+**Context**: `apply_owner_reply` maps the reply's status column to a
+`target_state` and calls `tracker.update_delivery_state`. When the
+state machine rejects the transition as illegal per LEGAL_TRANSITIONS
+(outcome `illegal_transition`), the pre-fix branch only bumped a counter
+and dropped the reply. Typical case (post-D-204): owner replies "Closed"
+on a P1 item already promoted to RFS via `drr_mapping_promote`;
+`OWNER_CLOSED ∉ LEGAL_TRANSITIONS[RFS]` → illegal. The state was
+correctly preserved (RFS stayed put per the state machine), but the
+note text the owner typed ("closed on 9/12, see attached") was silently
+discarded -- TPM had no record of what the owner said, and the
+"why is this item in RFS but the owner claims closed?" question was
+unanswerable from HILDA data alone.
+
+**Decision**: When `outcome == "illegal_transition"` AND the reply
+carries a note, still fire `_write_note_only` to persist
+`owner_status_note` on the delivery item (Postgres + SP writeback +
+dashboard). State transition remains rejected -- the state machine is
+unchanged.
+
+**Why not widen LEGAL_TRANSITIONS or bypass_guards**: preserving the
+state machine's authority over transitions is the whole point of
+D-204's DRRP1-STATE-1 phase 1 gating. A note is not a state change.
+
+**Why not add a new "OwnerClosedIntent" persistent field**: symmetric
+to how the OwnerClosed 2-condition guard already persists
+`owner_intent_closed_at` for the `guard_denied` branch (architect
+2026-06-29 race-resolution). The illegal-transition branch is
+analogous but never had the note-persist symmetry.
+
+**Consequences**: TPM now sees the owner's note in the delivery item
+row + on the dashboard even when the state stayed put. State machine
+behavior is unchanged. One-line addition, no new counters, no new
+audit rows, no schema change. Existing 11 owner_reply tests pass.
+
+**Anchors**: `OWNER-NOTE-ON-ILLEGAL-1`, `[D-204]` (DRRP1-STATE-1
+phase 1 -- the state machine change that made this branch fire in
+practice), UNP-1 (adjacent -- unparseable-reply auto-reply also
+preserves the message context, not the note).
+
+
+## D-208: HW PL / MQL-FIT sibling-work-item cascade (HWPL-SIBLING-1)
+
+**Date**: 2026-09-13 (HWPL-SIBLING-1)
+**Status**: Accepted
+
+**Context**: NSD-ingested docs for HW PL / MQL-FIT groups like
+{10 anchor, 11, 12} get routed by HILDA's Fr52 router to a SINGLE work
+item -- usually the anchor (the item_type=`default` catch-all). The
+anchor walks Open → OutreachSent → DocumentReceived → UnderPMReview →
+RFS → SubmittedToCustomer; sibling items (non-default in the group)
+never receive their own doc, so they stay stuck at Open or
+OutreachSent. TPM had to manually mark each sibling Closed to unblock
+the milestone.
+
+Semantically parallel to DRRP1-STATE-1 (D-204): a state-cascade rule
+that follows a config-declared many-to-many map. Different config,
+different guard, same shape.
+
+**Decision**:
+
+- **YAML config**: new file
+  `customizations/template_schemas/<CUSTOMER>/sibling_work_item_groups.yaml`
+  declares `(tg_name, anchor, siblings)` triples per customer. MMK
+  pre-seeded with HW PL `10:{11,12}` and `14:{19,21}`; MQL-FIT
+  placeholder for TPM to fill in.
+
+- **Two cascades**:
+  * anchor → RFS promotes each non-terminal sibling to RFS via new
+    trigger `hwpl_sibling_promote` (Guard 12: target=RFS only, from ∈
+    {Open, OutreachSent, DocumentReceived, OwnerClosed, UnderPMReview,
+    Delayed, Blocked}). Siblings already Closed / CloseInProgress /
+    SubmittedToCustomer / Cancelled are preserved (TPM decision
+    authoritative). Siblings already in RFS are idempotent no-op.
+  * anchor → SubmittedToCustomer 2-hops each non-terminal sibling
+    through RFS (promote hop reuses `hwpl_sibling_promote`, then a
+    `hwpl_sibling_submit` transition via Guard 13: target=Submitted,
+    from=RFS). Same terminal-preservation rule.
+
+- **Hook sites** (three): `apply_pm_approval_task` after anchor RFS
+  (covers PM-approval-driven RFS), `drr_mapping_reconcile` after
+  DRR→P1 anchor RFS (so DRR-driven anchor RFS also cascades), and
+  `submit_to_carrier_task` after anchor SubmittedToCustomer.
+
+- **No reverse cascade**: if anchor is later kicked back to
+  UnderPMReview via `doc_received_after_rfs` (D-204 phase 1), siblings
+  stay in RFS. Per user 2026-09-13: keep it simple.
+
+- **Multi-source rejected at loader**: if the same sibling appears in
+  two blocks, the second is dropped with WARN. Not a production
+  shape per architect.
+
+**Why not add anchor/sibling logic to MNO-Solution too**: that TG's
+mapping is genuine many-to-many (one file → N items, see 2026-09-13
+screenshot); MNO-Solution needs multi-association at the router
+(next cascade, see MNO-Solution flag), not a state cascade. This one
+is for TGs whose docs collapse onto a single anchor.
+
+**Why not add legal edges Open/OS/DR/OC/UPM → Submitted directly**:
+2-hop via RFS keeps the state machine surface small and reuses
+DRRP1-STATE-1's edges. Audit trail is more informative (promote →
+submit two rows per sibling) at the cost of an extra transition row
+per sibling per cascade.
+
+**Consequences**: 3 hook sites, 2 new triggers, 2 new guards, 1 new
+module (`tracker/hwpl_sibling_reconcile.py`), 1 new yaml loader
+(`template_schema/sibling_work_item_groups.py`, process-cached), no
+state-machine legal-edge additions (reuses D-204's edges), no schema
+change. 13 new tests. Two operational log families to grep:
+`HWPL_SIBLING_RFS:` and `HWPL_SIBLING_SUB:`. Yaml is customer-scoped
+so a customer without a config file gets `outcome=no_group` and no
+cascade fires -- feature is opt-in per customer.
+
+**Anchors**: `HWPL-SIBLING-1`, `[D-204]` (DRRP1-STATE-1 -- architectural
+parent; siblings reuse phase 1's legal edges), `[D-189]` (carrier
+allowlist context), `[D-035]` (one-TG-one-owner-list invariant that
+underlies the "anchor + siblings share a TG" precondition).
+
+
+## D-209: Skip drr_mapping_promote when DRR source has no docs, or only waivers
+
+**Date**: 2026-09-13 (DRRP1-DOCGATE-1)
+**Status**: Accepted
+
+**Context**: D-204's `drr_mapping_promote` cascades DRR RFS to the
+mapped P1 target unconditionally. That was correct when the DRR item
+carries docs -- the docs migrate to the P1 target via `target_folder`
+per DRRP1-DEST-1 (D-195), and the P1 submit uploads them.
+
+Two failure cases surfaced in the wild:
+
+1. Some TGs let the owner reply status=Closed in the DRR outreach
+   without sending the actual docs to the TPM. The TPM approves the
+   DRR item "in faith" (trusting the owner's word). The cascade fires,
+   P1 target hits RFS with nothing to submit -- carrier upload runs
+   empty for that item, and the owner never gets a P1 outreach to send
+   the real reports.
+
+2. For MMK, waivers submit at DRR (D-201). If the ONLY docs the DRR
+   item received are waivers (not the actual test reports), the same
+   empty-P1-submit problem: waivers ship at DRR, and the reports the
+   P1 upload needs never arrive.
+
+**Decision**: Gate `reconcile_target_items_on_source_rfs` at entry on
+the DRR source's doc state. Skip the entire cascade when either:
+
+- **`doc_count > 0 AND doc_count_received == 0`** → outcome
+  `skipped_source_no_docs`.
+  Confirmation items (`doc_count = 0` by design) short-circuit
+  before this check -- they cascade normally.
+
+- **`doc_count_received > 0 AND every received doc's doc_type is
+  "waiver"`** → outcome `skipped_source_only_waivers`.
+  New helper `_all_received_docs_are_waivers` reuses
+  `storage.list_documents_for_item_display` (CLASSIFIED-only, so it
+  reflects docs that would have actually reached the carrier).
+
+Partial-doc case (any non-waiver present) promotes normally -- "some
+docs to migrate" is enough per user 2026-09-13.
+
+**Why generalize `doc_count > 0 AND received == 0` instead of hardcoding
+item_type in a fixed list** (test_tech_waiver_report,
+compliance_certification_release_notes): same intent, no hardcoded
+list. Confirmation items (doc_count = 0 by design) unaffected -- the
+gate short-circuits on the doc_count > 0 check. Future item_types
+that also expect docs are automatically covered without a code touch.
+
+**Why fail-safe on storage exception**: `list_documents_for_item_display`
+lives on the same async engine as the reconcile task; a transient DB
+hiccup should not block the whole cascade. The check returns False
+(non-waiver present) so the promote proceeds -- worst case, we
+promote a legit case rather than blocking it.
+
+**Why not backfill existing corp state**: TPM decisions already
+recorded stay -- no auto-revert of P1 items that were promoted with
+zero or waiver-only docs. New DRR approvals from deploy forward will
+honor the gate. Per user 2026-09-13: don't touch existing state.
+
+**Consequences**: 1 file (`drr_mapping_reconcile.py`), ~50 lines
+(gate + helper). Two new outcome buckets on the summary
+(`skipped_source_no_docs`, `skipped_source_only_waivers`) surface in
+`DRRP1_RECONCILE:` log lines. 5 new tests: zero-docs skip,
+Confirmation shape (doc_count=0) still promotes, partial docs promote,
+all-waiver skip, waiver + report promotes. State machine unchanged,
+no schema change, no migration.
+
+**Anchors**: `DRRP1-DOCGATE-1`, `[D-204]` (DRRP1-STATE-1 --
+architectural parent; this gate is a policy addition to phase 2's
+reconcile helper), `[D-201]` (waiver submits at DRR, motivating the
+waiver-only skip), `[D-195]` (DRRP1-DEST-1 -- the migration mechanism
+this gate protects against being triggered emptily), FR-28
+(OwnerStatusConfirmed doc_count invariant -- the doc_count field this
+gate reads).
