@@ -291,6 +291,205 @@ class TestReconcileTargetItems:
 
 
 # ---------------------------------------------------------------------------
+# DRRP1-DOCGATE-1 (2026-09-13): skip promote when DRR source has no docs
+# (or only waivers). Owner will send actual reports via P1 outreach cycle.
+# ---------------------------------------------------------------------------
+
+
+class _StubStorageWithDocs(_StubStorage):
+    """Extends _StubStorage with the sync `list_documents_for_item_display`
+    surface the DOCGATE waiver-check reads. Returns tuples
+    (original_filename, doc_type, ingested_at)."""
+
+    def __init__(self, items_by_scope, docs_by_item_id=None):
+        super().__init__(items_by_scope)
+        self._docs = docs_by_item_id or {}
+
+    def list_documents_for_item_display(self, delivery_item_id):
+        return list(self._docs.get(delivery_item_id, []))
+
+
+def _make_drr_item(item_no: int, *, doc_count: int, doc_count_received: int,
+                   state: str = "ReadyForSubmission"):
+    return SimpleNamespace(
+        item_id=f"MMK-SM-S671U1-DRR-{item_no}",
+        delivery_item_id=f"MMK-SM-S671U1-DRR-{item_no}",
+        item_no=item_no,
+        customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+        delivery_state=state,
+        doc_count=doc_count,
+        doc_count_received=doc_count_received,
+    )
+
+
+class TestDocGate:
+    """Gate on DRR source's doc state at reconcile entry."""
+
+    def _patched_uds(self, monkeypatch, dispatched):
+        def _fake_uds(**kwargs):
+            dispatched.append(kwargs)
+        monkeypatch.setattr(
+            "core.src.tracker.transitions.update_delivery_state", _fake_uds,
+        )
+        return dispatched
+
+    def _patched_mapping(self, monkeypatch, pairs):
+        from core.src.template_schema.milestone_item_mapping import MappingBlock
+        block = MappingBlock(source_milestone="DRR", target_milestone="P1",
+                             pairs=pairs)
+        monkeypatch.setattr(
+            "core.src.template_schema.milestone_item_mapping.get_mapping_blocks",
+            lambda customer_id: [block],
+        )
+
+    def test_zero_docs_received_skips_promote(self, monkeypatch):
+        # DRR item expects 5 docs, received 0 (TPM approved in faith).
+        # P1 target must NOT be promoted; owner will send docs via P1
+        # outreach cycle.
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        storage = _StubStorageWithDocs({
+            ("MMK", "SM-S671U1", "DRR"): [
+                _make_drr_item(50, doc_count=5, doc_count_received=0),
+            ],
+            ("MMK", "SM-S671U1", "P1"): [_make_p1_item(10, "Open")],
+        })
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps, source_customer_id="MMK",
+            source_device_id="SM-S671U1", source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["outcome"] == "skipped_source_no_docs"
+        assert summary["promoted"] == []
+        assert dispatched == []
+
+    def test_confirmation_shape_docount_zero_still_promotes(self, monkeypatch):
+        # doc_count=0 (Confirmation item) -- gate must NOT fire. Promote
+        # proceeds normally so DRR confirmation cascades to P1.
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        storage = _StubStorageWithDocs({
+            ("MMK", "SM-S671U1", "DRR"): [
+                _make_drr_item(50, doc_count=0, doc_count_received=0),
+            ],
+            ("MMK", "SM-S671U1", "P1"): [_make_p1_item(10, "Open")],
+        })
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps, source_customer_id="MMK",
+            source_device_id="SM-S671U1", source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["outcome"] == "reconciled"
+        assert summary["promoted"] == ["MMK-SM-S671U1-P1-10"]
+        assert len(dispatched) == 1
+
+    def test_partial_docs_promote_fires(self, monkeypatch):
+        # doc_count=5, received=1 (partial) -- promote fires (any non-zero
+        # count of docs means "something to migrate").
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        drr = _make_drr_item(50, doc_count=5, doc_count_received=1)
+        storage = _StubStorageWithDocs(
+            items_by_scope={
+                ("MMK", "SM-S671U1", "DRR"): [drr],
+                ("MMK", "SM-S671U1", "P1"): [_make_p1_item(10, "Open")],
+            },
+            docs_by_item_id={
+                drr.item_id: [
+                    ("report.pdf", "test_tech_report", "2026-09-13T10:00:00"),
+                ],
+            },
+        )
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps, source_customer_id="MMK",
+            source_device_id="SM-S671U1", source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["outcome"] == "reconciled"
+        assert summary["promoted"] == ["MMK-SM-S671U1-P1-10"]
+
+    def test_only_waiver_docs_skip_promote(self, monkeypatch):
+        # DRR received 2 docs but BOTH are waivers -- actual reports still
+        # owed. Skip promote so owner sends reports via P1 outreach.
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        drr = _make_drr_item(50, doc_count=5, doc_count_received=2)
+        storage = _StubStorageWithDocs(
+            items_by_scope={
+                ("MMK", "SM-S671U1", "DRR"): [drr],
+                ("MMK", "SM-S671U1", "P1"): [_make_p1_item(10, "Open")],
+            },
+            docs_by_item_id={
+                drr.item_id: [
+                    ("PTCRB_waiver.pdf", "waiver", "2026-09-13T10:00:00"),
+                    ("WPC_waiver.pdf",   "waiver", "2026-09-13T11:00:00"),
+                ],
+            },
+        )
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps, source_customer_id="MMK",
+            source_device_id="SM-S671U1", source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["outcome"] == "skipped_source_only_waivers"
+        assert summary["promoted"] == []
+        assert dispatched == []
+
+    def test_mixed_waiver_and_report_promotes(self, monkeypatch):
+        # DRR received 2 docs: one waiver + one test report -- promote
+        # fires because a non-waiver doc is present.
+        dispatched = self._patched_uds(monkeypatch, [])
+        self._patched_mapping(monkeypatch, {50: 10})
+        drr = _make_drr_item(50, doc_count=5, doc_count_received=2)
+        storage = _StubStorageWithDocs(
+            items_by_scope={
+                ("MMK", "SM-S671U1", "DRR"): [drr],
+                ("MMK", "SM-S671U1", "P1"): [_make_p1_item(10, "Open")],
+            },
+            docs_by_item_id={
+                drr.item_id: [
+                    ("PTCRB_waiver.pdf",     "waiver", "2026-09-13T10:00:00"),
+                    ("compliance_report.pdf",
+                     "compliance_certification_release_notes",
+                     "2026-09-13T11:00:00"),
+                ],
+            },
+        )
+        deps = SimpleNamespace(storage=storage, sp_writer=None, audit=None)
+
+        from core.src.tracker.drr_mapping_reconcile import (
+            reconcile_target_items_on_source_rfs,
+        )
+        summary = reconcile_target_items_on_source_rfs(
+            deps=deps, source_customer_id="MMK",
+            source_device_id="SM-S671U1", source_milestone_id="DRR",
+            source_item_no=50,
+        )
+        assert summary["outcome"] == "reconciled"
+        assert summary["promoted"] == ["MMK-SM-S671U1-P1-10"]
+
+
+# ---------------------------------------------------------------------------
 # bounce_to_under_pm_review_if_rfs
 # ---------------------------------------------------------------------------
 

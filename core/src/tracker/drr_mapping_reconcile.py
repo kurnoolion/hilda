@@ -82,6 +82,51 @@ def reconcile_target_items_on_source_rfs(
         "failed": [],
     }
 
+    # DRRP1-DOCGATE-1 (2026-09-13): Guard the promote on the DRR source's
+    # doc state. Owner sometimes claims closure in the DRR outreach reply
+    # without sending the actual reports; TPM approves in faith. If we
+    # cascade to P1 blindly, P1 hits RFS with nothing to submit -- the
+    # carrier upload runs empty, and the owner never gets a P1 outreach
+    # to send the real docs. Two skip cases:
+    #   (a) DRR item expects docs (doc_count > 0) but received zero
+    #   (b) DRR item received docs but every one is a waiver -- actual
+    #       reports still owed; waivers migrate independently at DRR
+    # Confirmation items (doc_count=0) are unaffected -- gate short-
+    # circuits on the doc_count>0 check.
+    source_item = _resolve_target_item(
+        deps,
+        customer_id=source_customer_id,
+        device_id=source_device_id,
+        milestone_id=source_milestone_id,
+        item_no=int(source_item_no),
+    )
+    if source_item is not None:
+        src_doc_count = int(getattr(source_item, "doc_count", 0) or 0)
+        src_doc_received = int(getattr(source_item, "doc_count_received", 0) or 0)
+        if src_doc_count > 0 and src_doc_received == 0:
+            summary["outcome"] = "skipped_source_no_docs"
+            _log.warning(
+                "DRRP1_RECONCILE: source item_no=%s doc_count=%d received=0 "
+                "-- skip promote; P1 target(s) will collect docs via own "
+                "outreach cycle",
+                source_item_no, src_doc_count,
+            )
+            return summary
+        if src_doc_received > 0:
+            src_id = (
+                getattr(source_item, "item_id", None)
+                or getattr(source_item, "delivery_item_id", None)
+            )
+            if src_id and _all_received_docs_are_waivers(deps, src_id):
+                summary["outcome"] = "skipped_source_only_waivers"
+                _log.warning(
+                    "DRRP1_RECONCILE: source item_no=%s received=%d docs but "
+                    "ALL are waivers -- skip promote; actual reports owed via "
+                    "P1 outreach cycle",
+                    source_item_no, src_doc_received,
+                )
+                return summary
+
     try:
         blocks = get_mapping_blocks(source_customer_id)
     except Exception as exc:  # noqa: BLE001
@@ -271,3 +316,42 @@ def _resolve_target_item(
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _all_received_docs_are_waivers(deps: Any, item_id: str) -> bool:
+    """DRRP1-DOCGATE-1 (2026-09-13): return True iff the item has at
+    least one received doc AND every received doc's doc_type is
+    'waiver'. Returns False on any storage error (fail SAFE: promote
+    proceeds rather than block on a transient DB hiccup) and False on
+    empty results (caller's doc_count_received==0 branch handles that
+    already; empty here means the counter says >0 but no CLASSIFIED
+    associations exist, which is a legit non-waiver situation to
+    let through).
+
+    Uses `list_documents_for_item_display` which returns tuples of
+    (original_filename, doc_type, ingested_at) filtered to
+    nsd_path_type=CLASSIFIED (the docs that actually count toward
+    submission scope per architect 2026-06-30).
+    """
+    try:
+        rows = deps.storage.list_documents_for_item_display(item_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "DRRP1_RECONCILE: list_documents_for_item_display failed "
+            "item=%s: %s: %s -- treating as 'non-waiver docs present' "
+            "(fail SAFE: promote proceeds)",
+            item_id, type(exc).__name__, str(exc)[:160],
+        )
+        return False
+    if not rows:
+        return False
+    for row in rows:
+        # tuple shape: (original_filename, doc_type, ingested_at)
+        try:
+            _fn, doc_type, _ts = row
+        except (TypeError, ValueError):
+            # Unexpected shape -- fail SAFE.
+            return False
+        if (str(doc_type or "")).strip().lower() != "waiver":
+            return False
+    return True
