@@ -139,7 +139,7 @@ def bootstrap_task_deps(
     # -------- 3.5 CustomerAdapter -- Ph-1 architect 2026-07-01 wire-up --------
     # If caller pre-injected a customer_adapter, honor it (tests / special
     # deploys). Otherwise auto-discover via HILDA_CUSTOMER_ID env var
-    # (defaults to "MMK"; single-customer Ph-1 lock -- multi-customer is Ph-2).
+    # (defaults to "VZW"; single-customer Ph-1 lock -- multi-customer is Ph-2).
     #
     # Pre-emptively force the adapter loggers to INFO BEFORE building the
     # adapter so the mmk_adapter.py DBG_MMK factory / bootstrap_directories /
@@ -388,7 +388,7 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
     manual injection.
 
     Discovery convention:
-      1. HILDA_CUSTOMER_ID env var (default "MMK") -> lowercase customer id
+      1. HILDA_CUSTOMER_ID env var (default "VZW") -> lowercase customer id
       2. Import `customizations.customer_adapter.<customer_id_lower>_adapter`
       3. Call module.ADAPTER_FACTORY(audit_writer=audit) -> adapter instance
 
@@ -406,7 +406,7 @@ def _build_customer_adapter(result: BootstrapResult, *, audit: Any = None) -> An
     """
     import os
 
-    customer_id = os.environ.get("HILDA_CUSTOMER_ID", "MMK")
+    customer_id = os.environ.get("HILDA_CUSTOMER_ID", "VZW")
     module_name = (
         f"customizations.customer_adapter.{customer_id.lower()}_adapter"
     )
