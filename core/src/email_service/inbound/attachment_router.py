@@ -424,12 +424,24 @@ class Fr52AttachmentRouter:
         attachment: InboundAttachment,
         batch_id: str,
         candidate_items: list[dict],
+        *,
+        pre_routed_item_ids: list[str] | None = None,
     ) -> RoutedAttachment:
         """Run the full per-attachment pipeline (Step 0 .. Step F).
 
         Returns RoutedAttachment with the routing + classification + NSD-path
         decisions; the file write + index-row write + associations are
         performed against the injected storage.
+
+        MNO-MULTIASSOC-1 (2026-09-14): when `pre_routed_item_ids` is supplied,
+        Branch B (FR-52 template.yaml pattern match, `_route_to_items`) is
+        skipped. `matches` is synthesized from the caller's list at
+        confidence=1.0 with RoutingResolution.MNO_YAML_DIRECT. Every other
+        step -- Step 0/0b dedup, Branch A doc_type classification, Step C
+        new-vs-revision, Step D NSD path selection, and the persist work --
+        runs unchanged. Intended for MNO-Solution PLM downloads where a
+        per-batch YAML is authoritative for doc→item routing. See
+        `template_schema.mno_solution_doc_map` for the loader.
         """
         # ---- Step 0: file_hash lookup ([D-039] Step 0) --------------------
         # Split into 0a (file-bytes-existence check for storage skip) and 0b
@@ -456,9 +468,23 @@ class Fr52AttachmentRouter:
             doc_type_value, cls_resolution = self._classify_doc_type(attachment.filename)
 
         # ---- Branch B: FR-52 item routing ---------------------------------
-        matches, routing_resolution = await self._route_to_items(
-            attachment, candidate_items
-        )
+        # MNO-MULTIASSOC-1: caller-supplied item ids bypass FR-52 pattern
+        # matching. All other pipeline steps (Step 0/0b dedup filter,
+        # Branch A doc_type, Step C/D revision + path) still run.
+        if pre_routed_item_ids:
+            matches = [
+                AttachmentItemMatch(
+                    item_id=iid,
+                    confidence=1.0,
+                    source=RoutingResolution.MNO_YAML_DIRECT,
+                )
+                for iid in pre_routed_item_ids
+            ]
+            routing_resolution = RoutingResolution.MNO_YAML_DIRECT
+        else:
+            matches, routing_resolution = await self._route_to_items(
+                attachment, candidate_items
+            )
 
         # ---- Step 0b: filter out items that already carry this file -------
         # (per cross-device fix 2026-07-07): duplicate-bytes only means "the

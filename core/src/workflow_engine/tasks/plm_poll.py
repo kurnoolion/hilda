@@ -128,6 +128,7 @@ def poll_plm_once(deps: Any) -> dict[str, Any]:
         "files_yielded":           0,
         "files_skipped_drm_wrapped": 0,   # PLMDRM-1: pre-decrypt archive twin
         "files_dedup_skipped":     0,
+        "files_mno_yaml_routed":   0,     # MNO-MULTIASSOC-1: routed via mno_solution_doc_map.yaml
         "files_ingested":          0,
         "files_ingest_failed":     0,
     }
@@ -757,6 +758,20 @@ def _download_and_ingest(
             return
 
         from core.src.storage.nsd2_resolver import is_drm_wrapped_archive
+        from core.src.template_schema.mno_solution_doc_map import (
+            load_mno_solution_doc_map,
+        )
+
+        # MNO-MULTIASSOC-1 (2026-09-14): on-prem plm_file_download.py writes
+        # a per-batch mno_solution_doc_map.yaml at <cwd> (sibling of
+        # downloads/) when the ticket is MNO-Solution scope. Loader returns
+        # None for every non-MNO-Solution PLM ticket -- the yaml is simply
+        # absent -- and the walker falls through to normal FR-52 template
+        # routing. When present, matching filenames bypass FR-52 Branch B
+        # and route to the yaml's item_ids (one file body -> N associations).
+        doc_map = load_mno_solution_doc_map(
+            work_dir, items, expected_plm_id=plm_id,
+        )
 
         for file_path in sorted(downloads_dir.rglob("*")):
             if not file_path.is_file():
@@ -791,22 +806,37 @@ def _download_and_ingest(
             import hashlib
             file_hash = hashlib.sha256(content).hexdigest()
 
-            try:
-                existing = deps.storage.get_document_index_row_by_hash(file_hash)
-            except Exception:  # noqa: BLE001
-                existing = None
-            if existing is not None:
-                stats["files_dedup_skipped"] += 1
-                continue
-
             rel_path = str(file_path.relative_to(downloads_dir)).replace("\\", "/")
+
+            # MNO-MULTIASSOC-1: when the yaml has this filename, ALWAYS run
+            # ingest even on hash-dedup hit. Fr52's Step 0/0b already handles
+            # the "file bytes exist but item needs its own association" case;
+            # skipping the walker's own early dedup lets Fr52 add associations
+            # to items newly listed by a later-tick yaml edit.
+            pre_routed = (
+                doc_map.item_ids_for(file_path.name) if doc_map else None
+            )
+            if not pre_routed:
+                try:
+                    existing = deps.storage.get_document_index_row_by_hash(file_hash)
+                except Exception:  # noqa: BLE001
+                    existing = None
+                if existing is not None:
+                    stats["files_dedup_skipped"] += 1
+                    continue
+
             try:
                 _ingest_new_plm_file(
                     deps=deps, items=items,
                     customer_id=customer_id, milestone_id=milestone_id,
                     filename=rel_path, content=content, file_hash=file_hash,
                     correlation_id=correlation_id, plm_id=plm_id,
+                    pre_routed_item_ids=pre_routed,
                 )
+                if pre_routed:
+                    stats["files_mno_yaml_routed"] = (
+                        stats.get("files_mno_yaml_routed", 0) + 1
+                    )
                 stats["files_ingested"] += 1
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
@@ -834,10 +864,17 @@ def _ingest_new_plm_file(
     file_hash: str,
     correlation_id: str,
     plm_id: str,
+    pre_routed_item_ids: list[str] | None = None,
 ) -> None:
     """Feed one downloaded PLM file through the existing Fr52 router with
     the owner's items as candidates. batch_id encodes plm_id for
-    audit/log correlation."""
+    audit/log correlation.
+
+    MNO-MULTIASSOC-1 (2026-09-14): when `pre_routed_item_ids` is supplied
+    (from `mno_solution_doc_map.yaml`), Fr52's Branch B (FR-52 template.yaml
+    pattern match) is bypassed; the yaml's item_ids become the routing
+    matches at confidence=1.0. Every other Fr52 step (dedup, doc_type
+    classification, revision numbering, persist, view-tree) runs unchanged."""
     import asyncio
 
     from core.src.email_service.protocol import InboundAttachment
@@ -883,6 +920,21 @@ def _ingest_new_plm_file(
         # behavior from D-155 / NEST-1). Non-archives go through the
         # regular attachment path as before.
         if _is_archive_attachment(attachment):
+            # MNO-MULTIASSOC-1: mno_solution_doc_map.yaml is keyed on
+            # concrete doc filenames, not archive names, so pre_routed_item_ids
+            # doesn't apply to the archive dispatch. Inner-file yaml lookups
+            # would require plumbing the doc_map through the archive path,
+            # which today's data model doesn't need (MNO-Solution PLM ships
+            # flat files). Bail with an assertion if we ever do see this
+            # combination so we notice and plumb it explicitly.
+            if pre_routed_item_ids:
+                _log.warning(
+                    "PLM_POLL_INGEST: mno_solution yaml hit on ARCHIVE "
+                    "filename=%r plm_id=%s -- yaml applies to inner files, "
+                    "not the archive; ignoring pre_routed for the archive "
+                    "container",
+                    filename, plm_id,
+                )
             return await _process_archive_attachment(
                 deps=deps, router=router, attachment=attachment,
                 candidate_items=candidate_items,
@@ -894,6 +946,7 @@ def _ingest_new_plm_file(
             candidate_items=candidate_items,
             batch_id=batch_id, correlation_id=correlation_id,
             ingest_source=IngestSource.CORPORATE_PLM.value,
+            pre_routed_item_ids=pre_routed_item_ids,
         )
 
     # Sync bridge to the async router pipeline. Same asyncio-loop-lifecycle

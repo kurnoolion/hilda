@@ -111,6 +111,13 @@ class RoutingResolution(str, Enum):
     # substring match, no doc_type classification, no associations). Inner
     # files are extracted and each routed independently.
     ARCHIVE_CONTAINER = "ArchiveContainer"
+    # MNO-MULTIASSOC-1 — the caller supplied `pre_routed_item_ids` to
+    # Fr52AttachmentRouter.route(...), typically from the per-batch
+    # mno_solution_doc_map.yaml written by on-prem plm_file_download.py for
+    # MNO-Solution TG downloads. Branch B (FR-52 template.yaml pattern
+    # match) is bypassed; the yaml is authoritative. Dedup, doc_type
+    # classification, revision numbering, and persist all still run.
+    MNO_YAML_DIRECT = "MnoYamlDirect"
 
 
 class DocumentIndexRow(BaseModel):

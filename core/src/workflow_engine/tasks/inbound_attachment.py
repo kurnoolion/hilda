@@ -249,6 +249,7 @@ async def _process_regular_attachment(
     ingest_source: str | None = None,
     from_zip: bool = False,
     source_zip_filename: str | None = None,
+    pre_routed_item_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Route + persist + view-tree one non-archive attachment.
 
@@ -292,7 +293,10 @@ async def _process_regular_attachment(
                 len(desc) if isinstance(desc, list) else 0,
             )
 
-    routed = await router.route(attachment, batch_id, candidate_items)
+    routed = await router.route(
+        attachment, batch_id, candidate_items,
+        pre_routed_item_ids=pre_routed_item_ids,
+    )
 
     if _ROUTE_TRACE:
         fname = getattr(attachment, "filename", "") or ""
