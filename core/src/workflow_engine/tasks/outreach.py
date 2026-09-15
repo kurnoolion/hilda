@@ -346,16 +346,24 @@ def send_initial_outreach_task(
             # opening the email. All values sourced from event_context populated
             # by the dispatcher (customer_id/milestone_id) or the fetched item
             # for template (device_id).
+            #
+            # SUBJECT-TG-1 (2026-09-15): append tg_name so per-TG batches are
+            # visually distinguishable in an owner's inbox when they receive
+            # simultaneous outreach for multiple TGs on the same milestone.
+            # tg_name sourced from item_for_template (kickoff groups by tg_name
+            # so items in a batch share it; per-item sends see the same one).
             _cust = event_context.get("customer_id") or ""
             _mile = event_context.get("milestone_id") or ""
             _dev = ""
+            _tg = ""
             if item_for_template:
                 _dev = (
                     item_for_template.get("device_id")
                     or item_for_template.get("project_model")
                     or ""
                 )
-            _ctx = " / ".join(p for p in (_cust, _dev, _mile) if p)
+                _tg = item_for_template.get("tg_name") or ""
+            _ctx = " / ".join(p for p in (_cust, _dev, _mile, _tg) if p)
             _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
             message_id = _send_email(
                 deps,
@@ -552,11 +560,18 @@ def _send_batch_outreach_email(
     # customer / device / milestone taken from items[0]. All items in the batch
     # share (customer, device, milestone) by construction -- kickoff groups by
     # owner AND (implicitly) by device+milestone since it iterates the milestone.
+    #
+    # SUBJECT-TG-1 (2026-09-15): append tg_name to the subject prefix so
+    # per-TG batches are visually distinguishable in an owner's inbox when they
+    # receive simultaneous outreach for multiple TGs on the same milestone.
+    # kickoff regrouping by tg_name (D-206) already guarantees items in a
+    # single batch share tg_name, so items[0].tg_name represents the whole batch.
     _first = items[0] if items else {}
     _cust = _first.get("customer_id") or ""
     _dev = _first.get("device_id") or _first.get("project_model") or ""
     _mile = _first.get("milestone_id") or ""
-    _ctx = " / ".join(p for p in (_cust, _dev, _mile) if p)
+    _tg = _first.get("tg_name") or ""
+    _ctx = " / ".join(p for p in (_cust, _dev, _mile, _tg) if p)
     _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
     try:
         return _send_email(
