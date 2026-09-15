@@ -142,7 +142,7 @@ def bootstrap_task_deps(
     # (defaults to "VZW"; single-customer Ph-1 lock -- multi-customer is Ph-2).
     #
     # Pre-emptively force the adapter loggers to INFO BEFORE building the
-    # adapter so the mmk_adapter.py DBG_MMK factory / bootstrap_directories /
+    # adapter so the vzw_adapter.py DBG_VZW factory / bootstrap_directories /
     # create_folder / upload trace lands in stdout. Setting these AFTER the
     # build (as the earlier fix did) missed all logs emitted during the build
     # itself.
@@ -151,14 +151,21 @@ def bootstrap_task_deps(
     # finished applying --loglevel=INFO to root yet, so root defaults to
     # WARNING and filters child INFO messages during propagation regardless
     # of what we set on the child loggers. Live smoke 2026-07-01: customer_adapter
-    # wired (WARNING) was visible, DBG_MMK factory.BEGIN (INFO) was not until
+    # wired (WARNING) was visible, DBG_VZW factory.BEGIN (INFO) was not until
     # this root-level setLevel landed.
+    #
+    # ADAPTER-LOGGER-RENAME-1 (2026-09-15): mmk_adapter -> vzw_adapter on the
+    # corp box; the per-module logger name follows __name__ so the tuple
+    # entry rebalances accordingly. When multi-carrier lands, this static
+    # tuple is a good candidate to be replaced by
+    # `customizations.customer_adapter.{customer_id.lower()}_adapter`
+    # threaded from _build_customer_adapter's own env-derived id.
     import logging as _logging
     _logging.getLogger().setLevel(_logging.INFO)   # root
     for _name in (
         "customizations",
         "customizations.customer_adapter",
-        "customizations.customer_adapter.mmk_adapter",
+        "customizations.customer_adapter.vzw_adapter",
         "core.src.customer_adapter",
     ):
         _logging.getLogger(_name).setLevel(_logging.INFO)
@@ -187,13 +194,16 @@ def bootstrap_task_deps(
     for w in result.warnings:
         _log.warning("BOOTSTRAP_WARNING %s", w)
     # Also force customizations.* + customer_adapter.* loggers to INFO so
-    # the mmk_adapter.py DBG_MMK trace (INFO-level in the mockup) reaches
+    # the vzw_adapter.py DBG_VZW trace (INFO-level in the mockup) reaches
     # stdout. Idempotent -- setting the same level twice is a no-op.
+    # ADAPTER-LOGGER-RENAME-1 (2026-09-15): mirror of the pre-build tuple
+    # above; kept in sync so the post-build re-promotion (idempotent) covers
+    # the same names.
     import logging as _logging
     for _name in (
         "customizations",
         "customizations.customer_adapter",
-        "customizations.customer_adapter.mmk_adapter",
+        "customizations.customer_adapter.vzw_adapter",
         "core.src.customer_adapter",
     ):
         _logging.getLogger(_name).setLevel(_logging.INFO)
