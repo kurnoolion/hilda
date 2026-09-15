@@ -44,7 +44,7 @@ __all__ = [
     "NSD2_ANCHOR_SEARCH_MAX_DEPTH",
     "DEVICE_TYPE_FOLDER_MAP",
     "PHONE_MODEL_TYPE_FOLDER_MAP",
-    "MMK_EXCLUDED_FOLDER_SUBSTRINGS",
+    "VZW_EXCLUDED_FOLDER_SUBSTRINGS",
     "EXCLUSION_CARRIERS",
     "CARRIER_ALLOWED_ROOT_FOLDERS",
     "NSD2_DEFAULT_MAX_FILE_BYTES",
@@ -260,15 +260,16 @@ def resolve_nsd2_device_folder(item: Any, nsd2_root: Path) -> Path | None:
 # Carrier-specific excluded subfolder substrings. Applied when the poller's
 # customer_id is in EXCLUSION_CARRIERS. Substring match on the folder NAME
 # (not full path); case-insensitive; matches at ANY depth in the tree.
-# Motivating rule (architect 2026-08-08): under MMK (Verizon), NSD2 tree
-# also holds folders for other carriers/customers that HILDA must not
-# ingest. Names carry the tell-tale carrier codes.
-MMK_EXCLUDED_FOLDER_SUBSTRINGS: tuple[str, ...] = (
+# Motivating rule (architect 2026-08-08): under the Verizon customer (was
+# customer_id=MMK pre-2026-09-15, now VZW after CARRIER-KEY-VZW-1), NSD2
+# tree also holds folders for other carriers/customers that HILDA must
+# not ingest. Names carry the tell-tale carrier codes.
+VZW_EXCLUDED_FOLDER_SUBSTRINGS: tuple[str, ...] = (
     "CCT", "CHA", "DISH", "DSH", "TFN", "STG",
     "Comcast", "Charter", "Tracfone", "VZW SE", "Strategic",
 )
 
-EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
+EXCLUSION_CARRIERS: frozenset[str] = frozenset({"VZW"})
 
 
 # NSD2-VZW-1 (2026-09-01): carrier -> the ONLY top-level sub-folders of the
@@ -286,7 +287,7 @@ EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
 #     every loose FILE at this level, is skipped.
 #   * depth >= 1 -- no filtering whatsoever. Every file under the allowed
 #     folder is yielded at any depth, per architect 2026-09-01: "all files
-#     under vzw/ folder are uploaded". The MMK_EXCLUDED_FOLDER_SUBSTRINGS
+#     under vzw/ folder are uploaded". The VZW_EXCLUDED_FOLDER_SUBSTRINGS
 #     denylist is deliberately NOT applied inside, both because the
 #     allowlist has already done its job at the boundary and because that
 #     substring match has false positives -- 'CHA' silently prunes
@@ -295,7 +296,7 @@ EXCLUSION_CARRIERS: frozenset[str] = frozenset({"MMK"})
 # Matching is case-insensitive and EXACT on the folder name (not substring),
 # so 'VZW SE' -- a genuinely different carrier scope -- does not qualify.
 CARRIER_ALLOWED_ROOT_FOLDERS: dict[str, tuple[str, ...]] = {
-    "MMK": ("VZW", "Verizon"),
+    "VZW": ("VZW", "Verizon"),
 }
 
 
@@ -321,7 +322,8 @@ def match_hint_for_ingest(
     """NSDMATCH-CARRIER-1 (2026-09-09): the folder-name match_hint the NSD
     ingest passes to the attachment router for item-description tag matching.
 
-    Carrier-allowlist customers (D-189: MMK -> VZW/Verizon): the walk is
+    Carrier-allowlist customers (D-189, rekeyed by CARRIER-KEY-VZW-1
+    2026-09-15: VZW -> VZW/Verizon): the walk is
     anchored at the carrier folder, and template.yaml item_description tags
     describe TOP-LEVEL sub-folder categories under that anchor ('FCC',
     'PTCRB', 'Audio', 'LTE', 'WIFI', ...), not deep sub-folder names
@@ -446,7 +448,7 @@ def is_excluded_folder_name(folder_name: str, customer_id: str) -> bool:
         return False
     lowered = folder_name.lower()
     tokens = _name_tokens(folder_name)
-    for needle in MMK_EXCLUDED_FOLDER_SUBSTRINGS:
+    for needle in VZW_EXCLUDED_FOLDER_SUBSTRINGS:
         n = needle.strip().lower()
         if not n:
             continue

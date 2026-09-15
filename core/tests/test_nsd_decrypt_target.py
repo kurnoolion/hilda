@@ -2,7 +2,7 @@
 the pre-walk DRM decrypt call.
 
 Contract:
-  * carrier-allowlist customer (e.g. MMK: ("VZW", "Verizon"))
+  * carrier-allowlist customer (e.g. VZW: ("VZW", "Verizon"))
     -> first subdir in tuple order that exists on disk (VZW preferred).
   * carrier-allowlist customer, no subdir exists -> None.
   * non-allowlist customer -> device_folder unchanged.
@@ -30,23 +30,23 @@ class TestAllowlistCustomer:
     def test_vzw_preferred_over_verizon_when_both_exist(self, device_folder):
         (device_folder / "VZW").mkdir()
         (device_folder / "Verizon").mkdir()
-        target = _resolve_decrypt_target(device_folder, "MMK")
+        target = _resolve_decrypt_target(device_folder, "VZW")
         assert target == device_folder / "VZW"
 
     def test_verizon_used_when_only_verizon_exists(self, device_folder):
         (device_folder / "Verizon").mkdir()
-        target = _resolve_decrypt_target(device_folder, "MMK")
+        target = _resolve_decrypt_target(device_folder, "VZW")
         assert target == device_folder / "Verizon"
 
     def test_vzw_used_when_only_vzw_exists(self, device_folder):
         (device_folder / "VZW").mkdir()
-        target = _resolve_decrypt_target(device_folder, "MMK")
+        target = _resolve_decrypt_target(device_folder, "VZW")
         assert target == device_folder / "VZW"
 
     def test_none_when_neither_subdir_exists(self, device_folder):
         # An unrelated subdir doesn't count.
         (device_folder / "Audio(Done)").mkdir()
-        target = _resolve_decrypt_target(device_folder, "MMK")
+        target = _resolve_decrypt_target(device_folder, "VZW")
         assert target is None
 
     def test_file_not_dir_treated_as_missing(self, device_folder):
@@ -54,7 +54,7 @@ class TestAllowlistCustomer:
         # through to Verizon -- is_dir must be True.
         (device_folder / "VZW").write_text("not a dir")
         (device_folder / "Verizon").mkdir()
-        target = _resolve_decrypt_target(device_folder, "MMK")
+        target = _resolve_decrypt_target(device_folder, "VZW")
         assert target == device_folder / "Verizon"
 
 
@@ -74,7 +74,7 @@ class TestNonAllowlistCustomer:
 
 class TestAllowlistRepr:
     def test_mmk_repr(self):
-        assert _carrier_allowlist_repr("MMK") == "VZW,Verizon"
+        assert _carrier_allowlist_repr("VZW") == "VZW,Verizon"
 
     def test_non_allowlist_repr_is_empty(self):
         assert _carrier_allowlist_repr("OTHER") == ""
