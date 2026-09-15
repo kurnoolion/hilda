@@ -51,7 +51,7 @@ def build_credential_service(cfg: CustomerAdapterConfig):
     (customizations/customer_adapter/<customer_id>_adapter.py):
 
         cfg = CustomerAdapterConfig.from_sources()
-        adapter = MMKGoogleDriveAdapter(
+        adapter = VZWGoogleDriveAdapter(
             config=cfg,
             credential_service=build_credential_service(cfg),
             audit_writer=<sink>,
