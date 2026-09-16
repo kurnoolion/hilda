@@ -489,9 +489,18 @@ def _fetch_template_inputs(
     # Always populate item shape from storage snapshot (cheap, no SP call).
     # MOD-1 (2026-08-17): also carry tracking_modality + plm_id so the
     # outreach template's Tracking Modality column renders per-row.
+    # SUBJECT-TG-1 (2026-09-15): also carry device_id + tg_name so the
+    # per-item send_initial_outreach subject enrichment can surface them.
+    # Prior shape omitted device_id (the caller's event_context has
+    # milestone_id + customer_id but not device_id), so the pre-SUBJECT-TG-1
+    # subject already fell back to blank on this path; tg_name added to
+    # match the batch path (_send_batch_outreach_email item_dicts).
     item_for_template = {
         "item_no":           getattr(item, "item_no", None),
         "item_name":         getattr(item, "item_name", None) or f"Item {getattr(item, 'item_no', '?')}",
+        "device_id":         getattr(item, "device_id", None)
+                             or getattr(item, "project_model", None),
+        "tg_name":           getattr(item, "tg_name", None) or "",
         "tracking_modality": getattr(item, "tracking_modality", None),
         "plm_id":            getattr(item, "plm_id", None) or "",
     }

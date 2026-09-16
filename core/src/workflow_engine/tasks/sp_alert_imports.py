@@ -945,6 +945,11 @@ def kickoff_collection_task(
             iid = getattr(it, "item_id", None) or getattr(it, "delivery_item_id", None)
             live_plm_id = getattr(it, "plm_id", "") or ""
             resolved_plm_id = plm_ids_by_item_id.get(iid) or live_plm_id
+            # SUBJECT-TG-1 (2026-09-15): propagate tg_name per row so
+            # _send_batch_outreach_email can append it to the subject prefix.
+            # OWNER-5 kickoff regrouping (D-206) makes tg_name identical
+            # across every item in a batch, so items[0].tg_name represents
+            # the whole batch.
             item_dicts.append({
                 "item_no":           getattr(it, "item_no", None),
                 "item_name":         getattr(it, "item_name", None) or f"Item {getattr(it, 'item_no', '?')}",
@@ -953,6 +958,7 @@ def kickoff_collection_task(
                                      or getattr(it, "device_id", None)
                                      or getattr(it, "project_model", None),
                 "milestone_id":      milestone_id,
+                "tg_name":           getattr(it, "tg_name", None) or "",
                 "tracking_modality": getattr(it, "tracking_modality", None),
                 "plm_id":            resolved_plm_id,
             })
