@@ -179,19 +179,37 @@ def setup_complete_notification_tick_task(
 
 def _list_scopes(deps: Any) -> list[tuple[str, str, str]]:
     """Enumerate distinct (customer_id, device_id, milestone_id) tuples present
-    in delivery_item. Storage helper preferred; fall back to querying via a
+    in delivery_item, filtered to devices listed in the customer's template.yaml
+    `devices:` block. Storage helper preferred; fall back to querying via a
     milestone-id-first scan if the helper isn't wired.
 
     Returns list of triples, deduplicated. Empty list on any read failure
     (safer than crashing the tick).
+
+    DEV-FILTER-3 (2026-09-16): applies list_known_devices() to drop scopes
+    whose device_id isn't declared in the customer's template.yaml, matching
+    the DEV-FILTER-1 / DEV-FILTER-2 pattern used by email_polling and
+    tpm_notification. Motivation: post-VZW-migration, Postgres still carries
+    leftover MMK-shaped rows (from pre-migration state or SP-UI-engineer
+    test-device alerts landing before DEV-FILTER-1 shipped). The tick would
+    iterate them and log SHP-E002 per scope because Deliverables_MMK no
+    longer exists. Fallback semantics per list_known_devices():
+      * None (template not cached) -> pass-through (safer than dropping
+        real scopes during a config-load race).
+      * []   (template loaded but devices block empty) -> pass-through
+        (config-migration windows).
+      * list -> filter to the whitelist.
     """
+    from core.src.template_schema.template_lookup import list_known_devices
+
+    raw: list[tuple[str, str, str]] = []
     fn = getattr(deps.storage, "list_scopes", None) or getattr(
         deps.storage, "list_all_scopes", None
     )
     if fn is not None:
         try:
             rows = fn() or []
-            return [
+            raw = [
                 (r["customer_id"], r["device_id"], r["milestone_id"])
                 if isinstance(r, dict) else (r[0], r[1], r[2])
                 for r in rows
@@ -202,35 +220,60 @@ def _list_scopes(deps: Any) -> list[tuple[str, str, str]]:
                 type(exc).__name__, str(exc)[:120],
             )
 
-    # Fallback: raw SQL via storage engine. Uses the SAME async session
-    # pattern the rest of the storage layer uses.
-    try:
-        import asyncio
-        from sqlalchemy import select, distinct
-        from core.src.storage.db import DeliveryItemTable, get_engine
-        from sqlalchemy.ext.asyncio import AsyncSession
+    if not raw:
+        # Fallback: raw SQL via storage engine. Uses the SAME async session
+        # pattern the rest of the storage layer uses.
+        try:
+            import asyncio
+            from sqlalchemy import select, distinct
+            from core.src.storage.db import DeliveryItemTable, get_engine
+            from sqlalchemy.ext.asyncio import AsyncSession
 
-        async def _scan():
-            engine = get_engine()
-            async with AsyncSession(engine) as session:
-                stmt = select(
-                    distinct(DeliveryItemTable.customer_id),
-                    DeliveryItemTable.device_id,
-                    DeliveryItemTable.milestone_id,
-                )
-                rows = (await session.execute(stmt)).all()
-                return [
-                    (r[0], r[1], r[2]) for r in rows
-                    if r[0] and r[1] and r[2]
-                ]
+            async def _scan():
+                engine = get_engine()
+                async with AsyncSession(engine) as session:
+                    stmt = select(
+                        distinct(DeliveryItemTable.customer_id),
+                        DeliveryItemTable.device_id,
+                        DeliveryItemTable.milestone_id,
+                    )
+                    rows = (await session.execute(stmt)).all()
+                    return [
+                        (r[0], r[1], r[2]) for r in rows
+                        if r[0] and r[1] and r[2]
+                    ]
 
-        return asyncio.run(_scan())
-    except Exception as exc:  # noqa: BLE001
-        _log.warning(
-            "setup_complete_notification: fallback scope scan failed: %s: %s",
-            type(exc).__name__, str(exc)[:120],
+            raw = asyncio.run(_scan())
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "setup_complete_notification: fallback scope scan failed: %s: %s",
+                type(exc).__name__, str(exc)[:120],
+            )
+            return []
+
+    # DEV-FILTER-3: drop scopes whose device_id isn't in the customer's
+    # template.yaml devices whitelist.
+    filtered: list[tuple[str, str, str]] = []
+    dropped_by_customer: dict[str, int] = {}
+    for customer_id, device_id, milestone_id in raw:
+        whitelist = list_known_devices(customer_id)
+        if whitelist is None or not whitelist:
+            # Template not cached or empty devices block: pass through.
+            filtered.append((customer_id, device_id, milestone_id))
+            continue
+        if device_id in whitelist:
+            filtered.append((customer_id, device_id, milestone_id))
+        else:
+            dropped_by_customer[customer_id] = (
+                dropped_by_customer.get(customer_id, 0) + 1
+            )
+    if dropped_by_customer:
+        _log.info(
+            "setup_complete_notification: DEV-FILTER-3 dropped %d scope(s) "
+            "not in template.yaml devices: %s",
+            sum(dropped_by_customer.values()), dropped_by_customer,
         )
-        return []
+    return filtered
 
 
 # ---------------------------------------------------------------------------
