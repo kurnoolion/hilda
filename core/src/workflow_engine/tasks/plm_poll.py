@@ -698,6 +698,35 @@ def _write_plm_fields_to_sp(
                     canonical_fields=canonical_fields,
                 )
             stats["sp_writes_ok"] += 1
+
+            # PLMBF-PG-1 (2026-09-16): also write Postgres directly so
+            # _check_plm_id_state finds plm_id on next tick and the reuse
+            # branch doesn't re-fire the backfill. Prior design relied on
+            # the SP write triggering a Deliverables-CHANGED alert that
+            # sp_alert_parser would sync to Postgres -- but that round trip
+            # is best-effort and can break silently (alert not fired,
+            # column not in the sync allowlist, DEV-FILTER edge case).
+            # Result: every 15-min tick re-issues the same N SP writes
+            # against the same items forever (live corp box observation).
+            # Writing Postgres directly here breaks the loop; the alert
+            # round trip stays as belt-and-suspenders.
+            #
+            # Best-effort: a Postgres write failure doesn't fail the tick.
+            # Only writes fields we just wrote to SP (plm_id, optionally
+            # actual_item_info) so canonical_fields shape is unchanged.
+            item_id = getattr(it, "item_id", None) or getattr(
+                it, "delivery_item_id", None
+            )
+            if item_id:
+                try:
+                    deps.storage.update_delivery_item(
+                        item_id, canonical_fields,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning(
+                        "PLM_POLL: PG-write failed item=%s: %s: %s",
+                        item_id, type(exc).__name__, str(exc)[:200],
+                    )
         except Exception as exc:  # noqa: BLE001
             _log.warning(
                 "PLM_POLL: SP-write failed item_no=%s device=%s: %s: %s",
