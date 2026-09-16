@@ -6616,3 +6616,455 @@ waiver-only skip), `[D-195]` (DRRP1-DEST-1 -- the migration mechanism
 this gate protects against being triggered emptily), FR-28
 (OwnerStatusConfirmed doc_count invariant -- the doc_count field this
 gate reads).
+
+## D-210: MMK → VZW customer_id migration (CUSTOMER-DEFAULT-1 + adapter/logger + carrier-key rekey cascade)
+
+**Date**: 2026-09-15 (CUSTOMER-DEFAULT-1 + ADAPTER-LOGGER-RENAME-1 + CARRIER-KEY-VZW-1)
+**Status**: Accepted
+
+**Context**: HILDA's data-side customer_id was `MMK` since Ph-1 launch — a
+placeholder name chosen because the real carrier identity (Verizon) was
+never appropriate as an in-code literal. TPM (2026-09-15) asked to
+consolidate on the actual carrier code `VZW` so SP list names, template
+directories, credential JSON keys, delivery_item_id prefix for new
+imports, and the corp SharePoint public schema all read cleanly to a
+Verizon audience. The mmk-adapter Google Drive uploader identity was
+scoped as an implementation detail and NOT renamed (see D-210
+alternatives); everything else migrated.
+
+**Decision**: Cascade the customer_id `MMK → VZW` across every place the
+data-side identity is keyed. Adapter file / class / factory names stay
+`mmk_*` on the corp box (single-carrier Ph-1; renaming buys nothing
+until a second adapter lands and the discovery convention is revisited).
+
+**Public github (this ADR's commits):**
+
+1. **`bootstrap.py:409`** — `HILDA_CUSTOMER_ID` env var default flipped
+   `"MMK" → "VZW"` (comments at :142, :391 refreshed). Adapter
+   auto-discovery module path becomes
+   `customizations.customer_adapter.vzw_adapter` when the env var is
+   unset (production case). Commit `d06cfb3` CUSTOMER-DEFAULT-1.
+2. **`bootstrap.py:161, :196`** — hardcoded logger names in the
+   pre-build + post-build INFO-promotion tuples flipped
+   `customizations.customer_adapter.mmk_adapter` →
+   `customizations.customer_adapter.vzw_adapter` so `DBG_VZW ...` INFO
+   traces from the renamed adapter reach stdout despite worker_init
+   firing before celery's --loglevel=INFO applies to root. Commit
+   `1641957` ADAPTER-LOGGER-RENAME-1.
+3. **`nsd2_resolver.py`** — `EXCLUSION_CARRIERS = frozenset({"VZW"})`
+   (was `{"MMK"}`) and `CARRIER_ALLOWED_ROOT_FOLDERS = {"VZW": ("VZW",
+   "Verizon")}` (was `{"MMK": ("VZW", "Verizon")}`). Both dicts are
+   customer_id-keyed at runtime — wrong key silently disables the D-189
+   allowlist (walk anchored at device root instead of `VZW/` /
+   `Verizon/` subdir) and the D-189 exclusion-substring denylist
+   (Comcast / Charter / Tracfone / VZW SE / Strategic / CCT / CHA /
+   DISH / DSH / TFN / STG). Constant renamed
+   `MMK_EXCLUDED_FOLDER_SUBSTRINGS → VZW_EXCLUDED_FOLDER_SUBSTRINGS`;
+   `__all__` + one internal ref updated; test fixtures + comments swept.
+   Commit `9d76861` CARRIER-KEY-VZW-1.
+4. **`customer_adapter/__init__.py`** — docstring example
+   `MMKGoogleDriveAdapter → VZWGoogleDriveAdapter`. Cosmetic. Commit
+   `ff5001d` (CUSTOMER-DEFAULT-1 addendum).
+
+**Corp-side (never on github per D-027):**
+
+- `customizations/customer_adapter/mmk_adapter.py → vzw_adapter.py`
+  (renamed, class → `VZWGoogleDriveAdapter`, factory →
+  `build_vzw_adapter`, `ADAPTER_FACTORY = build_vzw_adapter`, log tags
+  `DBG_MMK → DBG_VZW`).
+- `customizations/customer_adapter/mmk_binding.py → binding.py` (renamed
+  generic so future carrier adapters — `att_adapter`, etc. — reuse the
+  same binding module).
+- `customizations/sharepoint_config/customers/MMK.yaml → VZW.yaml`
+  (renamed, inner `customer_id: MMK → VZW`; list names
+  `Deliverables_MMK / Projects_MMK → _VZW`; global `Milestones` list
+  unchanged).
+- `customizations/template_schemas/MMK/ → VZW/` (whole directory
+  renamed via `git mv`; inner `template.yaml customer_id: MMK → VZW`;
+  the 5 other files inside — `sibling_work_item_groups.yaml`,
+  `doc_type_filename_rules.yaml`, `milestone_item_mapping.yaml`,
+  `compliance_candidates.yaml`, `test_report_candidates.yaml` — carry
+  over unchanged; the directory name IS the customer_id per
+  `template_lookup._CACHE` key).
+- `config/customer_adapter.json` — `customers.MMK → customers.VZW`
+  entry (same credentials, renamed key). Consumed by
+  `JsonFileCredentialService`.
+- Corp SP tenant — `Deliverables_MMK`, `Projects_MMK` renamed to `_VZW`
+  by SP admin; global `Milestones` list unchanged; Postgres
+  `delivery_items` wiped of MMK data + fresh VZW import; NSD tree kept
+  at `MMK/VZW/` on disk (not renamed — the allowlist entry above still
+  anchors correctly since the tree's top folder still matches VZW /
+  Verizon after the walk).
+
+**Alternatives rejected:**
+
+- **Rename mmk_adapter.py → vzw_adapter.py + class/factory** — user
+  decided to keep. Rationale (user 2026-09-15): "mmk_adapter internal
+  logic is generic Google Drive uploader; the identity is now
+  implementation detail". When a second carrier adapter joins (e.g.
+  `att_adapter.py`), the discovery convention naturally forces a rename
+  or a lookup-table refactor at that time.
+- **Rename mmk_binding.py to att_binding.py** — same reasoning; user
+  chose the carrier-neutral name `binding.py` so any future
+  `<carrier>_adapter.py` can import the shared session/upload code
+  without a rename.
+- **Backfill existing Postgres `MMK-*` delivery_item_id prefixes to
+  `VZW-*`** — user chose to wipe MMK data + fresh import instead; no
+  history to preserve at Ph-1 test-scale.
+- **Change `HILDA_CUSTOMER_ID` env var name** — kept env var name; only
+  the default value moved. Multi-carrier future re-visits the whole
+  discovery convention.
+
+**Consequences**:
+
+- Public github commit trail traces 4 D-210 commits above; corp box
+  cherry-picks all four onto its private branch.
+- One inconsistency retained: `HILDA_CUSTOMER_ID` default is `"VZW"`
+  but the adapter module it resolves to is `vzw_adapter` (renamed
+  corp-side only). If someone bootstraps on a fresh box without doing
+  the corp adapter rename, they hit `customer_adapter_no_module:
+  vzw_adapter` at bootstrap and `submit_to_carrier_task` audits
+  `skipped_no_adapter`. Documented in the ADR body above.
+- DEV-FILTER-3 (D-213) needed because leftover MMK-shaped rows in
+  Postgres would otherwise loop the setup_complete_notification tick;
+  see there.
+- Any doc referring to the old adapter class name (`MMKGoogleDriveAdapter`)
+  reads corp-only now; github's `__init__.py` docstring reflects VZW.
+
+**Anchors**: `CUSTOMER-DEFAULT-1`, `ADAPTER-LOGGER-RENAME-1`,
+`CARRIER-KEY-VZW-1`, `[D-027]` (Teacher/Student split — corp adapter
+files never land on github), `[D-189]` (carrier allowlist — the dict
+this ADR rekeys), `[D-091]` (template.yaml devices block — where the
+new VZW directory's devices list drives DEV-FILTER-*).
+
+---
+
+## D-211: MNO-Solution PLM doc → multi-item association via Fr52 `pre_routed_item_ids` kwarg (MNO-MULTIASSOC-1)
+
+**Date**: 2026-09-14 (MNO-MULTIASSOC-1)
+**Status**: Accepted
+
+**Context**: MNO-Solution TG uploads to PLM produce docs whose file
+names legitimately map to MULTIPLE work items — the same
+`Panel Spec.pdf` file body is delivered against items 40 and 41 (or
+same-tg reasons). Unlike HW PL / MQL-FIT (D-208 sibling cascade, which
+is anchor + N stuck-open siblings), MNO-Solution is genuine
+many-to-many: one doc, N `document_item_association` rows, no
+"anchor" concept. Existing router (Fr52 template.yaml pattern-match) is
+single-item; extending it with per-yaml pattern rules per TG would
+overload the yaml with hundreds of specific-filename entries. Cleaner:
+let the on-prem `plm_file_download.py` publish a per-batch mapping
+alongside the docs it downloads, then have HILDA honor it.
+
+**Decision**: New per-tempdir YAML written by on-prem
+`plm_file_download.py` at `<work_dir>/mno_solution_doc_map.yaml`
+(sibling of `downloads/`); HILDA loads it once per `_download_and_ingest`
+call, builds a reverse index `normalized_basename → [delivery_item_id,
+...]`, and passes matching filenames' item_ids into
+`Fr52AttachmentRouter.route()` via a new `pre_routed_item_ids` kwarg.
+When the kwarg is non-empty, Fr52 skips Branch B (`_route_to_items`,
+the FR-52 template.yaml pattern match) and synthesizes matches at
+`confidence=1.0` with new `RoutingResolution.MNO_YAML_DIRECT`; every
+other Fr52 pipeline step — Step 0/0b dedup, Branch A doc_type
+classification, Step C revision numbering, persist, view-tree writes —
+runs unchanged. Dedup-hit path in the walker at
+`plm_poll._download_and_ingest` is bypassed for yaml-matched filenames
+so Fr52's own Step 0/0b handles cross-tick "yaml added new item for a
+doc already ingested" case correctly.
+
+**YAML shape (produced on-prem, never authored by HILDA)**:
+
+```yaml
+plm_id: "CQ12345"
+mappings:
+  - item_no: 40
+    documents: ["Panel Spec.pdf", "SAR Report.docx"]
+  - item_no: 41
+    documents: ["Panel Spec.pdf"]
+  - item_no: 42
+    documents: []
+```
+
+TG name implicit (always MNO-Solution). device_id / milestone_id not
+carried in the YAML — the caller scopes them by passing only that
+batch's items to `load_mno_solution_doc_map`.
+
+**Failure policy** (all fall through to normal FR-52 template.yaml
+routing):
+
+- YAML file missing → `None`, silent (most PLM downloads have no yaml).
+- YAML unreadable / malformed → `None`, WARN.
+- YAML `plm_id` mismatches batch's plm_id → `None`, WARN.
+- `item_no` present in yaml but absent in provided items → skip that
+  entry with WARN, remaining entries proceed.
+- `documents: []` per item → valid; item contributes nothing to the
+  reverse index.
+- Archive containers (`.zip`, `.7z`) never receive `pre_routed_item_ids`
+  even if yaml has a matching filename; archives are dispatched to
+  `_process_archive_attachment`, which never uses the pre-routed kwarg.
+  WARN logged if pre_routed and archive coincide.
+
+**Filename normalization**: `basename(f).strip().lower()`; extension
+kept (`Panel Spec.pdf` distinct from `Panel Spec.docx`).
+
+**Alternatives rejected:**
+
+- **Anchor/sibling pattern (like D-208 HW PL)** — not applicable to
+  MNO-Solution's many-to-many shape; a doc doesn't route to a "lead
+  item then cascade", it legitimately lands on N items at ingest time.
+- **Extend Fr52 template.yaml with per-doc-filename tag rules** — would
+  bloat the yaml with hundreds of literal filename entries per TG;
+  MNO-Solution's mapping is dynamic per PLM batch, not static template
+  config. YAML sidecar per download batch is a better fit.
+- **Bypass Fr52 entirely for MNO-Solution files, write associations
+  directly** — considered and rejected: Fr52's Branch A (doc_type
+  classification), Step C (revision numbering + slug), Step D (NSD path
+  type selection), and the storage persist all matter for MNO-Solution
+  docs the same as for other PLM docs. Only Branch B (the item routing)
+  differs. Cleaner to override just Branch B via kwarg.
+
+**Consequences**:
+
+- One doc → N `document_item_association` rows via existing many-to-many
+  storage; downstream `doc_count_received`, view-tree write, PMApproval
+  gate, submit_to_carrier gate, UPLOAD-BUNDLE-1 collision detection,
+  and HIST-INGEST-1 audit all already many-to-many-safe (verified
+  during design review 2026-09-13).
+- Same file body arriving under multiple item_no mappings creates ONE
+  document_index row + N associations. Fr52's Step 0/0b filter handles
+  the cross-tick case where the yaml adds a new item to an
+  already-ingested doc: skip walker's early dedup for yaml-matched
+  filenames, Fr52's own Step 0b sees the file is already indexed,
+  writes only the missing associations, no duplicate `sp_writes` or
+  `files_ingested` counts.
+- New RoutingResolution enum value + new counter `files_mno_yaml_routed`
+  in plm_poll stats.
+- 19 new tests in `test_mno_solution_doc_map.py` (loader edge cases +
+  plm_poll integration + Fr52 branch-B bypass regression guard).
+- No schema change, no migration, no email path impact.
+- Six clarifications from the 2026-09-13 design review all locked into
+  code; STATUS.md's MNO-Solution [IN-PROGRESS] flag becomes [RESOLVED].
+
+**Anchors**: `MNO-MULTIASSOC-1`, `[D-155]` (Fr52 pipeline surface —
+the router this ADR extends), `FR-52` (per-attachment routing pipeline),
+`FR-79` (multi-item association per attachment — the many-to-many
+storage this ADR's routing feeds), `CLASSIFY-BASENAME-1` (basename +
+lowercase + strip whitespace normalization, reused for yaml key
+lookup).
+
+---
+
+## D-212: Outreach email subject prefix appends `tg_name` for per-TG inbox scan (SUBJECT-TG-1)
+
+**Date**: 2026-09-15 (SUBJECT-TG-1 + follow-up fix)
+**Status**: Accepted
+
+**Context**: Owners frequently receive simultaneous outreach for multiple
+TGs on the same milestone (common: APPS + MQL-FIT + HW PL + MNO-Solution
+all kicking off together). Since D-138 the subject already carried
+`customer_id / device_id / milestone_id`, but the four emails had
+identical prefixes — owners had to open each to see which TG's items it
+covered. Post-D-206 kickoff regrouping (2026-09-12), each batch is
+guaranteed single-TG, so a `tg_name` suffix carries the discriminator
+authoritatively without needing per-item resolution.
+
+**Decision**: Append `tg_name` to the outreach subject prefix at both
+send sites. New shape:
+`[HILDA] <customer_id> / <device_id> / <milestone_id> / <tg_name> --
+Status request -- <BATCH-id>`. Since kickoff regrouping (D-206)
+guarantees a batch is single-TG, `items[0].tg_name` is authoritative
+for the whole batch and the per-item send reads the same field from
+`item_for_template.tg_name`. Item-dict builders on both sides —
+`sp_alert_imports.kickoff_collection` at line 948 (batch path) and
+`outreach._fetch_template_inputs` at line 492 (per-item path) —
+propagate `tg_name` (and `device_id` on the per-item path, which was
+silently missing pre-SUBJECT-TG-1 so the prefix rendered device-less on
+that path).
+
+**Alternatives rejected:**
+
+- **Per-batch subject with all TG names joined** — batches ARE single-TG
+  after D-206, so a join would be single-element. Simpler to append the
+  one name.
+- **Rely on the `_owners` mailbox client-side rule to color-code by TG**
+  — Outlook rules exist but are per-user setup; the prefix is
+  server-side and universal.
+
+**Consequences**:
+
+- `parse_subject` at `subject_parser.py:24` only extracts `BATCH-<id>` +
+  optional `ITEM-<n>` + STATUS token — the additional `/`-separated
+  prefix segment is cosmetic to parsing; owner reply path continues to
+  find the batch id. Verified via `test_bounce_loop_stop` (subjects
+  used as inputs to bounce classification) — no regression.
+- Cross-cascade: BOUNCE-LOOP-STOP-1's Undeliverable-subject detection is
+  based on subject PREFIX (`Undeliverable:`, `Delivery Status
+  Notification`), not on the outbound prefix shape, so no interaction.
+- 43/43 outreach + bounce tests pass (initial SUBJECT-TG-1) + 152/152
+  after the item-dict propagation fix.
+
+**Anchors**: `SUBJECT-TG-1`, `[D-138]` (customer/device/milestone
+subject prefix — the pattern this ADR extends), `[D-206]` (kickoff
+regrouping by tg_name — the invariant that makes `items[0].tg_name`
+authoritative for the whole batch), `FR-24` (subject-parser BATCH-id
+extraction — verified unaffected).
+
+---
+
+## D-213: All periodic tick tasks now respect template.yaml devices whitelist (DEV-FILTER-3 extends DEV-FILTER-1/2)
+
+**Date**: 2026-09-16 (DEV-FILTER-3)
+**Status**: Accepted
+
+**Context**: Post-MMK→VZW migration (D-210), Postgres carried leftover
+MMK-shaped `delivery_items` rows for SM-R777U (LE-1/4/6/8 milestones)
+from the pre-migration cutover. Six such (customer, device, milestone)
+tuples remained. Every `setup_complete_notification` beat tick
+(`scopes_scanned=6`) iterated them, tried `Deliverables_MMK` for each,
+and logged `SHP-E002: No list mapping found for entity delivery_items
+in scope customer='MMK'` (Deliverables_MMK no longer exists on SP).
+Six WARN lines + six INFO "skipping this tick" per beat cycle,
+indefinitely. Root cause: `setup_complete_notification._list_scopes`
+enumerated scopes from **Postgres** `delivery_items` (unfiltered),
+while every other periodic tick task already anchors on template.yaml
+via either direct source (nsd2_poll, plm_poll, reconcile use
+`template_lookup._CACHE`) or an existing filter (email_polling
+DEV-FILTER-1 since 2026-08-06, tpm_notification DEV-FILTER-2 since
+2026-08-24). setup_complete_notification was the last hold-out.
+
+**Decision**: `setup_complete_notification._list_scopes` now applies
+`template_lookup.list_known_devices(customer_id)` as a whitelist AFTER
+enumerating (whether via the storage helper or the SQL fallback). One
+INFO log per tick summarizing per-customer dropped counts (not per
+scope, to avoid noise-shift). Fallback semantics mirror DEV-FILTER-1
+exactly:
+
+- `list_known_devices() → None` (template not cached) → pass-through
+  (safer than dropping real scopes during a config-load race at first
+  tick after worker restart).
+- `list_known_devices() → []` (template loaded, `devices:` block
+  empty) → pass-through (config-migration windows).
+- `list_known_devices() → list` (populated) → keep only scopes whose
+  `device_id` is in the whitelist.
+
+Applies AFTER scope enumeration, not before — the storage read is
+identical, the filter is a post-processing pass on the returned tuples.
+
+**Alternatives rejected:**
+
+- **Delete leftover MMK rows from Postgres** — user chose defer:
+  "clean it separately, no rush". Leaving the rows in place means any
+  future rebranding or multi-carrier deploy where MMK really does
+  become live again doesn't need a data restore. The tick-filter
+  isolates the noise regardless.
+- **Apply the filter at scope enumeration (skip rows in the SQL WHERE
+  clause)** — pushes template.yaml knowledge into a storage read.
+  Filter-after-enumerate keeps storage generic; the filter is a
+  workflow_engine concern.
+- **Extend list_known_devices' None-fallback to defensively drop
+  unknown scopes instead of passing through** — dangerous at first
+  tick after worker restart when template_lookup cache hasn't loaded
+  yet; a scope-drop then would look identical to a "device really
+  isn't in the template" drop but for a completely different reason.
+  Pass-through with the fallback is safer.
+
+**Consequences**:
+
+- Every periodic tick task now uniformly respects template.yaml
+  `devices:` as the single source of truth for what HILDA processes:
+  nsd2_poll (native), plm_poll (native), reconcile (native from
+  `template_lookup._CACHE`), tpm_notification (DEV-FILTER-2),
+  email_polling (DEV-FILTER-1), setup_complete_notification (this
+  ADR).
+- SP-alert-noise inbox delivered per-tick from the SP UI engineer's
+  test devices was already muted by DEV-FILTER-1; this ADR closes the
+  Postgres-side leftover noise.
+- No new counters or configurable knobs — the filter is
+  transparent to the tick's outcome stats (`scopes_scanned` still
+  reports what actually got processed; nothing counts what was
+  filtered).
+- 20/20 setup_complete_notification tests pass; fallback + storage
+  helper paths both re-exercised.
+- Postgres cleanup of the leftover MMK-shaped rows becomes optional
+  (surfaced in STATUS.md Flags — safe to defer).
+
+**Anchors**: `DEV-FILTER-3`, `[D-091]` (template.yaml `devices:` block
+— the source of truth), `DEV-FILTER-1` (email_polling — the pattern
+this ADR follows), `DEV-FILTER-2` (tpm_notification — same pattern),
+`SETUP-3` (expected-count gate that setup_complete_notification also
+protects — this ADR reduces the scopes that path even considers).
+
+---
+
+## D-214: PLM plm_id backfill writes Postgres directly to break the SP-alert-round-trip perpetual loop (PLMBF-PG-1)
+
+**Date**: 2026-09-16 (PLMBF-PG-1)
+**Status**: Accepted
+
+**Context**: Live corp-box observation 2026-09-16. `plm_poll`'s
+`_check_plm_id_state` reads Postgres to see whether a group already has
+a plm_id; on empty (all items NULL), falls back to SP-side lookup.
+When SP has a plm_id but Postgres is NULL (either the create-path SP
+write already ran and Postgres never got the round-trip, or the
+Deliverables-CHANGED alert wasn't fired / wasn't in the sync allowlist
+/ was filtered out), PLMBF-1 (2026-08-31) fires the reuse branch:
+writes plm_id to SP for the 9 stragglers. But `_write_plm_fields_to_sp`
+only writes SP, relying on the Deliverables-CHANGED alert path to sync
+plm_id back to Postgres. When that alert path is broken (the specific
+scenario surfaced: alerts either not configured for the plm_id column,
+or the sync allowlist for that column blocks it, or the alert delivery
+drop happens silently), Postgres remains NULL. Next tick: same 9
+stragglers, same 9 SP writes, another failed Postgres sync, forever.
+~100 SP writes every 15 minutes on the same items.
+
+**Decision**: `_write_plm_fields_to_sp` now writes Postgres directly
+after every successful `sp_writer.update_item` — same `canonical_fields`
+dict passed to both writes. Best-effort: a Postgres update failure
+logs WARN (matching the surrounding pattern for SP writes) and does
+not fail the tick. The SP-alert-to-Postgres round trip stays wired for
+other columns as belt-and-suspenders; this ADR just doesn't make plm_id
+depend on it.
+
+**Alternatives rejected:**
+
+- **Extend `_check_plm_id_state` to prefer SP-side lookup so the same
+  tick doesn't re-fire the backfill** — masks the underlying issue and
+  changes correctness (Postgres becomes non-authoritative on plm_id
+  reads, which downstream code assumes).
+- **Fix the Deliverables-CHANGED alert path so plm_id syncs
+  correctly** — could be alert-config, sync-allowlist, or delivery
+  drop; investigating each requires SP-admin coordination and doesn't
+  fix HILDA's dependency on a fragile round trip.
+- **Cache the found plm_id in the poll process so
+  `_check_plm_id_state` sees it next call** — process-local cache
+  wouldn't survive worker restart; would produce the same loop after
+  every reboot.
+- **Add a `plm_ids_backfilled` upper bound (e.g. skip after 3
+  consecutive same-item backfills)** — bandaid; loop still fires
+  briefly and the underlying data drift persists.
+
+**Consequences**:
+
+- Both PLM code paths benefit: create-path items that missed the
+  initial SP write, and reuse-path stragglers that joined after ticket
+  creation. Every item written to SP is now also written to Postgres
+  in the same tick.
+- Storage write is idempotent (matches existing pattern for
+  `update_delivery_item`); repeat calls with the same fields are a
+  no-op.
+- One extra Postgres write per successful SP write. Ph-1 volume: 9 SP
+  writes → 9 Postgres writes on a fresh reuse backfill; steady state
+  after backfill: 0 SP writes, 0 Postgres writes for that group.
+- No schema change, no migration.
+- 47/47 plm_poll tests pass (existing tests mock `deps.storage` so the
+  new call is exercised).
+- Belt-and-suspenders: the Deliverables-CHANGED path still delivers
+  other column syncs; plm_id specifically no longer depends on it.
+
+**Anchors**: `PLMBF-PG-1`, `PLMBF-1` (2026-08-31 — the backfill this
+ADR unblocks from perpetual re-firing), `[D-164]` (Pattern A: HILDA
+writes SP first, alert-round-trip syncs Postgres — this ADR narrows
+that pattern to "write both, in parallel, for plm_id specifically"
+rather than reversing it globally), `PLM-2` (SP field sync +
+IngestSource — the field sync path that this ADR sidesteps for the
+specific plm_id backfill loop).
