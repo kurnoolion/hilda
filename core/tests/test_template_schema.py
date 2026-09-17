@@ -682,11 +682,13 @@ class TestEnums:
             "NetworkSharedDrive", "CustomerJIRA", "SPUI",
         }
 
-    def test_ingest_source_4_values_per_fr13(self) -> None:
-        """Per FR-13 + [D-039] — recorded in document index."""
-        assert len(IngestSource) == 4
+    def test_ingest_source_5_values_per_fr13_drm_up_1(self) -> None:
+        """Per FR-13 + [D-039] — recorded in document index. DRM-UP-1
+        (2026-09-17) adds DashboardUpload for TPM manual re-uploads."""
+        assert len(IngestSource) == 5
         assert {s.value for s in IngestSource} == {
             "Email", "CorporatePLM", "NetworkSharedDrive", "SharePointUI",
+            "DashboardUpload",
         }
 
     def test_doc_type_6_values_per_d053_plus_doctype1(self) -> None:

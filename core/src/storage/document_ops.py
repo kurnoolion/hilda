@@ -35,6 +35,7 @@ from core.src.template_schema import DocType, IngestSource
 __all__ = [
     "add_document_index_row",
     "add_document_item_association",
+    "copy_item_associations_for_upgrade",
     "delete_document_item_association",
     "fan_out_plm_associations",
     "find_doc_id_slugs_for_item",
@@ -51,6 +52,7 @@ __all__ = [
     "list_revisions",
     "make_download_token",
     "reassign_document_to_workitem",
+    "register_upgraded_index_row",
     "resolve_download_token",
     "set_is_final",
     "tpm_resolve_doc_type",
@@ -904,3 +906,151 @@ async def resolve_download_token(token: str) -> tuple[str, str, NSDPath]:
         if assoc is None:
             raise PipelineError("STR-E007")
         return file_hash, item_id, NSDPath.from_relative(assoc.local_nsd_path)
+
+
+# ---------------------------------------------------------------------------
+# DRM-UP-1 (2026-09-17): TPM manual re-upload helpers
+# ---------------------------------------------------------------------------
+
+
+async def register_upgraded_index_row(
+    *,
+    new_file_hash: str,
+    old_file_hash: str,
+    new_filename: str,
+    ingested_at: datetime,
+) -> DocumentIndexRow:
+    """Register a document_index row for a TPM-uploaded replacement of an
+    existing file.
+
+    Carries the OLD row's revision family (milestone_id, doc_id_slug, doc_type,
+    carrier scope) forward; assigns rev_number = max(family) + 1 so
+    submit-to-carrier's REV-1 winner-selection naturally ships the new file
+    and leaves the old file as prior-revision audit.
+
+    ingest_source=DASHBOARD_UPLOAD and routing_resolution=DASHBOARD_UPLOAD
+    document the manual channel; Fr52 pipeline is bypassed for this ingest.
+
+    Preconditions the caller must enforce before calling:
+      * OLD row exists (STR-E002 raised otherwise).
+      * OLD row's doc_id_slug is non-NULL (revision family resolved).
+      * _slug_from_filename(new_filename) equals OLD row's doc_id_slug —
+        this is the DRM-UP slug-equality guard; without it we would either
+        overwrite an unrelated family or split identity.
+      * new_file_hash != old_file_hash (bytes-identical re-upload is a no-op
+        upstream; caller should short-circuit rather than call here).
+
+    Returns the newly-inserted DocumentIndexRow. Idempotent on new_file_hash:
+    if a row already exists for new_file_hash, returns the existing model
+    without re-inserting.
+    """
+    async with _session() as session:
+        existing = await session.get(DocumentIndexTable, new_file_hash)
+        if existing is not None:
+            return _row_to_model(existing)
+        old = await session.get(DocumentIndexTable, old_file_hash)
+        if old is None:
+            raise PipelineError(
+                "STR-E002",
+                context={"entity": "DocumentIndexRow", "key": old_file_hash},
+            )
+        if old.doc_id_slug is None:
+            raise PipelineError(
+                "STR-W005",
+                context={
+                    "reason": "cannot register upgraded row from a staged parent",
+                    "old_file_hash": old_file_hash,
+                },
+            )
+        max_rev_result = await session.execute(
+            select(func.max(DocumentIndexTable.rev_number)).where(
+                DocumentIndexTable.milestone_id == old.milestone_id,
+                DocumentIndexTable.doc_id_slug == old.doc_id_slug,
+                DocumentIndexTable.rev_number.is_not(None),
+            )
+        )
+        new_rev = int(max_rev_result.scalar() or 0) + 1
+        new_row = DocumentIndexTable(
+            file_hash=new_file_hash,
+            milestone_id=old.milestone_id,
+            customer_id=old.customer_id,
+            device_id=old.device_id,
+            doc_type=old.doc_type,
+            doc_id_slug=old.doc_id_slug,
+            rev_number=new_rev,
+            ingest_source=IngestSource.DASHBOARD_UPLOAD.value,
+            original_filename=new_filename,
+            first_page_excerpt="",
+            is_final=False,
+            parser_result=None,
+            llm_review_findings=None,
+            from_zip=False,
+            source_zip_filename=None,
+            inferred_tg_name=old.inferred_tg_name,
+            routing_resolution=RoutingResolution.DASHBOARD_UPLOAD.value,
+            ingested_at=ingested_at,
+        )
+        session.add(new_row)
+        await session.commit()
+        refreshed = await session.get(DocumentIndexTable, new_file_hash)
+        assert refreshed is not None
+        return _row_to_model(refreshed)
+
+
+async def copy_item_associations_for_upgrade(
+    *,
+    old_file_hash: str,
+    new_file_hash: str,
+    new_local_nsd_path: str,
+    associated_at: datetime,
+    associated_by: str,
+) -> int:
+    """For every DocumentItemAssociation on OLD file_hash, create a matching
+    row for NEW file_hash pointing at new_local_nsd_path.
+
+    Preserves per-association owner identity (4-field per FR-88) and PLM
+    linkage. Idempotent per (new_file_hash, delivery_item_id) pair — a repeat
+    call is a no-op for already-copied associations.
+
+    Returns the count of associations newly inserted (excludes idempotent skips).
+
+    The OLD associations are NOT deleted — they remain as the audit trail for
+    the pre-upgrade file. submit-to-carrier's REV-1 winner-selection ignores
+    them because the new row has higher rev_number in the same slug family.
+    """
+    async with _session() as session:
+        old_assocs = (await session.execute(
+            select(DocumentItemAssociationTable)
+            .where(DocumentItemAssociationTable.file_hash == old_file_hash)
+        )).scalars().all()
+        if not old_assocs:
+            return 0
+        inserted = 0
+        for old in old_assocs:
+            existing = await session.get(
+                DocumentItemAssociationTable,
+                (new_file_hash, old.delivery_item_id),
+            )
+            if existing is not None:
+                continue
+            session.add(
+                DocumentItemAssociationTable(
+                    file_hash=new_file_hash,
+                    delivery_item_id=old.delivery_item_id,
+                    milestone_id=old.milestone_id,
+                    local_nsd_path=new_local_nsd_path,
+                    nsd_path_type=old.nsd_path_type,
+                    owner_corp_id=old.owner_corp_id,
+                    owner_corp_usa_email=old.owner_corp_usa_email,
+                    owner_corp_email=old.owner_corp_email,
+                    owner_name=old.owner_name,
+                    plm_id=old.plm_id,
+                    plm_attachment_id=None,   # PLM re-upload is out of scope for this ingest
+                    upload_timestamp=None,
+                    associated_at=associated_at,
+                    associated_by=associated_by,
+                )
+            )
+            inserted += 1
+        await session.commit()
+        return inserted

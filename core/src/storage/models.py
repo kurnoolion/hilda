@@ -118,6 +118,11 @@ class RoutingResolution(str, Enum):
     # match) is bypassed; the yaml is authoritative. Dedup, doc_type
     # classification, revision numbering, and persist all still run.
     MNO_YAML_DIRECT = "MnoYamlDirect"
+    # DRM-UP-1 (2026-09-17) — TPM manual re-upload from the dashboard replaces
+    # an already-routed file (typically to unlock DRM or upgrade a legacy
+    # .doc/.xls/.ppt to a modern format). Associations are COPIED from the
+    # old file's routing; Fr52 pipeline does not run for this ingest.
+    DASHBOARD_UPLOAD = "DashboardUpload"
 
 
 class DocumentIndexRow(BaseModel):

@@ -1385,3 +1385,324 @@ class TestUnroutedRoutePost:
         assert r.status_code == 303
         assert "outcome=target_not_found" in r.headers["location"]
         assert "target=does-not-exist" in r.headers["location"]
+
+
+class TestDrmUploadReplacement:
+    """DRM-UP-1 (2026-09-17): TPM manual re-upload as replacement path for
+    legacy Office (.doc/.xls/.ppt) and DRM-wrapped files.
+
+    Same-extension re-upload uses save_view_document's per-path version bump.
+    Extension-family upgrade uses save_upgraded_document's two-row split and
+    (when a document_index row existed) wires new slug+rev+1 registration and
+    association copy so submit-to-carrier's REV-1 winner logic naturally ships
+    only the upgraded file.
+    """
+
+    _NASCA_BYTES = b"<## NASCA-WRAPPED-DOC\x00\x01\x02fake-encrypted-payload"
+    _CLEAN_DOC_BYTES = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 200
+    _CLEAN_DOCX_BYTES = b"PK\x03\x04clean-ooxml-modernized"
+    _NOW = None   # set in fixture
+
+    @pytest.fixture(autouse=True)
+    def _now(self):
+        from datetime import datetime, timezone
+        type(self)._NOW = datetime.now(timezone.utc)
+
+    def _upload_token(self, cfg, view_path, user="tpm"):
+        return _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="upload", user_id=user,
+        )
+
+    async def _seed_view_doc(self, filename, content=None, tg="hw_reports"):
+        """Save a file into the view tree at MMK/SM-S671U1/DRR/<tg>/<filename>
+        and return its view_relative_path."""
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name=tg, relative_parts=(filename,),
+            content=content or self._CLEAN_DOC_BYTES,
+            saved_by="router", source="router",
+        )
+        return f"view/MMK/SM-S671U1/DRR/{tg}/{filename}"
+
+    async def _seed_indexed_doc(self, filename, content, *, item_id="item-1"):
+        """Same as _seed_view_doc but also inserts a document_index row + one
+        item association keyed on the content's sha256. Returns (view_path,
+        file_hash)."""
+        import hashlib as _hl
+        view_path = await self._seed_view_doc(filename, content=content)
+        file_hash = _hl.sha256(content).hexdigest()
+        from core.src.storage.models import (
+            DocumentIndexRow, DocumentItemAssociation, NSDPathType,
+            RoutingResolution,
+        )
+        from core.src.storage import (
+            add_document_index_row, add_document_item_association,
+        )
+        from core.src.template_schema import DocType, IngestSource
+        from core.src.email_service.inbound.attachment_router import (
+            Fr52AttachmentRouter,
+        )
+        slug = Fr52AttachmentRouter._slug_from_filename(filename)
+        await add_document_index_row(DocumentIndexRow(
+            file_hash=file_hash, milestone_id="DRR",
+            customer_id="MMK", device_id="SM-S671U1",
+            doc_type=DocType.TEST_REPORT, doc_id_slug=slug, rev_number=1,
+            ingest_source=IngestSource.EMAIL, original_filename=filename,
+            routing_resolution=RoutingResolution.SUBSTRING_MATCH,
+            ingested_at=self._NOW,
+        ))
+        await add_document_item_association(DocumentItemAssociation(
+            file_hash=file_hash, delivery_item_id=item_id, milestone_id="DRR",
+            local_nsd_path=view_path, nsd_path_type=NSDPathType.CLASSIFIED,
+            owner_corp_id="owner-1", associated_at=self._NOW, associated_by="auto",
+        ))
+        return view_path, file_hash
+
+    # ---------------------------- GET upload_form ---------------------------
+
+    async def test_upload_form_renders_for_legacy(self, cfg):
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/upload_form/{tok}")
+        assert r.status_code == 200
+        assert "report.doc" in r.text
+        assert 'name="file"' in r.text
+        # Family accept attribute contains all three Word extensions.
+        assert ".doc" in r.text and ".docx" in r.text and ".docm" in r.text
+
+    async def test_upload_form_wrong_mode_403(self, cfg):
+        # Token minted as edit, not upload.
+        view_path = await self._seed_view_doc("report.doc")
+        edit_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="edit", user_id="tpm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/upload_form/{edit_tok}")
+        assert r.status_code == 403
+
+    async def test_upload_form_ineligible_extension_400(self, cfg):
+        # PDF is not upload-family eligible.
+        view_path = await self._seed_view_doc("report.pdf", content=b"%PDF-fake")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.get(f"/browse/upload_form/{tok}")
+        assert r.status_code == 400
+
+    # ---------------------------- POST /browse/upload -----------------------
+
+    async def test_upload_same_extension_bumps_version(self, cfg):
+        from core.src.storage import list_versions_for_file
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        new_bytes = b"\xd0\xcf\x11\xe0" + b"updated-doc-payload" * 10
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.doc", new_bytes, "application/msword")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        # version_num bumped at the SAME view_relative_path.
+        versions = await list_versions_for_file(view_path)
+        assert len(versions) == 2
+        current = [v for v in versions if v.is_current]
+        assert len(current) == 1 and current[0].version_num == 2
+        assert current[0].source == "tpm_dashboard_upload"
+
+    async def test_upload_family_upgrade_two_row_split(self, cfg):
+        from core.src.storage import get_current_version, list_versions_for_file
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303, r.text
+        # OLD row: still exists at old path, but is_current=False.
+        old_versions = await list_versions_for_file(view_path)
+        assert len(old_versions) == 1
+        assert old_versions[0].is_current is False
+        # NEW row: at new path, version_num=1, is_current=True.
+        new_path = "view/MMK/SM-S671U1/DRR/hw_reports/report.docx"
+        new_current = await get_current_version(new_path)
+        assert new_current is not None
+        assert new_current.version_num == 1
+        assert new_current.is_current is True
+        assert new_current.filename == "report.docx"
+
+    async def test_upload_family_upgrade_registers_index_and_copies_associations(self, cfg):
+        from core.src.storage import (
+            get_document_index_row_by_hash,
+            list_associations_for_file,
+        )
+        # Seed with document_index + association so upgrade path exercises
+        # register_upgraded_index_row + copy_item_associations_for_upgrade.
+        view_path, old_hash = await self._seed_indexed_doc(
+            "report_v2.doc", content=self._CLEAN_DOC_BYTES, item_id="item-42",
+        )
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report_v3.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        # New file_hash exists in document_index with same slug + rev+1.
+        import hashlib as _hl
+        new_hash = _hl.sha256(self._CLEAN_DOCX_BYTES).hexdigest()
+        new_idx = await get_document_index_row_by_hash(new_hash)
+        assert new_idx is not None
+        # REV-1 normalization strips _v3 and _v2 -> both slug to "report".
+        assert new_idx.doc_id_slug == "report"
+        assert new_idx.rev_number == 2   # old was 1
+        # Association copied to new_hash for item-42.
+        new_assocs = await list_associations_for_file(new_hash)
+        assert len(new_assocs) == 1
+        assert new_assocs[0].delivery_item_id == "item-42"
+        assert new_assocs[0].local_nsd_path.endswith("report_v3.docx")
+
+    async def test_upload_slug_mismatch_rejected(self, cfg):
+        view_path = await self._seed_view_doc("aaa.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("bbb.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+        assert "base-name mismatch" in r.text or "slug" in r.text
+
+    async def test_upload_cross_family_rejected(self, cfg):
+        # .doc source, .xlsx target -> 400.
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.xlsx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+
+    async def test_upload_non_family_rejected(self, cfg):
+        # .doc source, .pdf target -> 400.
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.pdf", b"%PDF-fake", "application/pdf")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 400
+
+    async def test_upload_nasca_wrapped_bytes_rejected(self, cfg):
+        view_path = await self._seed_view_doc("report.doc")
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.docx", self._NASCA_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 415
+        assert "DRM" in r.text or "wrapped" in r.text
+
+    async def test_upload_wrong_mode_token_403(self, cfg):
+        view_path = await self._seed_view_doc("report.doc")
+        edit_tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="edit", user_id="tpm",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{edit_tok}",
+            files={"file": ("report.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 403
+
+    async def test_upload_expired_token_401(self, cfg):
+        view_path = await self._seed_view_doc("report.doc")
+        tok = _make_scoped_token(
+            secret=cfg.wopi_jwt_secret, view_relative_path=view_path,
+            mode="upload", user_id="tpm", ttl_seconds=-1,
+        )
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("report.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 401
+
+    async def test_upload_v2_suffix_lands_in_same_family(self, cfg):
+        # aaa.doc -> aaa_v2.docx should succeed: _slug_from_filename strips
+        # `_v2` so both slug to "aaa". This is the canonical REV-1 case the
+        # feature is built to accept.
+        view_path, old_hash = await self._seed_indexed_doc(
+            "aaa.doc", content=self._CLEAN_DOC_BYTES, item_id="item-77",
+        )
+        tok = self._upload_token(cfg, view_path)
+        client = TestClient(build_app(cfg))
+        r = client.post(
+            f"/browse/upload/{tok}",
+            files={"file": ("aaa_v2.docx", self._CLEAN_DOCX_BYTES, "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        from core.src.storage import get_current_version
+        new_current = await get_current_version(
+            "view/MMK/SM-S671U1/DRR/hw_reports/aaa_v2.docx",
+        )
+        assert new_current is not None
+        assert new_current.filename == "aaa_v2.docx"
+
+    # ---------------------------- Browse listing surface ---------------------
+
+    async def test_browse_listing_shows_upload_link_for_drm(self, cfg):
+        # Wrapped .docx -> should show Upload link even though .docx is not
+        # legacy — is_drm_wrapped is the trigger.
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("wrapped.docx",),
+            content=self._NASCA_BYTES, saved_by="router", source="router",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        assert "/browse/upload_form/" in r.text
+        assert "Upload replacement" in r.text
+
+    async def test_browse_listing_shows_upload_link_for_legacy(self, cfg):
+        # Clean .doc (not DRM-wrapped) -> still shows Upload link because .doc
+        # is in the legacy trigger extension set.
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("legacy.doc",),
+            content=self._CLEAN_DOC_BYTES, saved_by="router", source="router",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        assert "/browse/upload_form/" in r.text
+
+    async def test_browse_listing_no_upload_link_for_clean_docx(self, cfg):
+        # Clean .docx: not DRM, not legacy -> no Upload link (Edit is
+        # available so no need for the manual round-trip).
+        await save_view_document(
+            customer_id="MMK", device_id="SM-S671U1", milestone_id="DRR",
+            tg_name="hw_reports", relative_parts=("clean.docx",),
+            content=self._CLEAN_DOCX_BYTES, saved_by="router", source="router",
+        )
+        client = TestClient(build_app(cfg))
+        r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
+        assert r.status_code == 200
+        assert "/browse/upload_form/" not in r.text

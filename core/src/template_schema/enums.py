@@ -90,6 +90,10 @@ class IngestSource(str, Enum):
     CORPORATE_PLM        = "CorporatePLM"
     NETWORK_SHARED_DRIVE = "NetworkSharedDrive"
     SHAREPOINT_UI        = "SharePointUI"         # PM-uploaded via SP UI per FR-62 (Ph-2)
+    # DRM-UP-1 (2026-09-17) — TPM re-upload from the HILDA dashboard as a
+    # replacement for a legacy or DRM-wrapped file. New file_hash, same
+    # revision family (slug + rev+1) as the file it replaces.
+    DASHBOARD_UPLOAD     = "DashboardUpload"
 
 
 class DocType(str, Enum):

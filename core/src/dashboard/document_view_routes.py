@@ -75,7 +75,7 @@ def _make_scoped_token(*, secret: str, view_relative_path: str, mode: str,
     """URL-safe token containing view_relative_path + mode + user_id + expires_at.
     HMAC-SHA256 signed with dashboard.wopi_jwt_secret so tampering is detected.
 
-    Modes: "view" | "edit" | "download" | "versions" | "history".
+    Modes: "view" | "edit" | "download" | "versions" | "history" | "upload".
 
     Optional `version_num`: when set on a "download" token, /browse/download
     streams the historical `.v<N>` sibling instead of the current bytes. Used
@@ -250,6 +250,25 @@ _DOWNLOAD_ONLY_EXTENSIONS = {
     ".db",   # SQLite database file — binary
 }
 
+# DRM-UP-1 (2026-09-17): extension families for TPM manual re-upload.
+# A row that shows the Upload action accepts a replacement whose extension
+# is in the SAME family as the original — TPM downloads .doc, saves-as .docx
+# in a NASCA-aware Office client, uploads back. Cross-family (.doc → .xlsx)
+# and non-family (.doc → .pdf) are rejected server-side.
+_UPLOAD_EXTENSION_FAMILIES = (
+    frozenset({".doc", ".docx", ".docm"}),
+    frozenset({".xls", ".xlsx", ".xlsm"}),
+    frozenset({".ppt", ".pptx", ".pptm"}),
+)
+# DRM-UP: extensions where a row is offered the Upload action. The Edit
+# button is hidden for these anyway (D-152 DRM policy + FT-4 legacy policy);
+# Upload replaces the "no in-browser round trip" dead-end with a manual one.
+_UPLOAD_LEGACY_TRIGGER_EXTENSIONS = frozenset({".doc", ".xls", ".ppt"})
+# 100 MB — matches WOPI's practical ceiling on OnlyOffice CE 8 and is well
+# below dashboard's inbound request-body cap. Uploads exceeding this land
+# 413.
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
 
 def _open_mode_for(filename: str) -> str:
     """Return 'editor' | 'native' | 'download' based on extension.
@@ -267,6 +286,52 @@ def _open_mode_for(filename: str) -> str:
     if ext in _NATIVE_VIEW_EXTENSIONS:
         return "native"
     return "download"
+
+
+# ---------------------------------------------------------------------------
+# DRM-UP-1 (2026-09-17): TPM manual re-upload — trigger + family helpers
+# ---------------------------------------------------------------------------
+
+
+def _should_offer_upload(filename: str, is_drm_wrapped: bool) -> bool:
+    """DRM-UP-1: rows where the TPM sees the [Upload replacement] action.
+
+    Predicate is the union of the two "can't edit in-browser" cases:
+      * D-152 NASCA-wrapped: OnlyOffice cannot decrypt.
+      * FT-4 legacy binary Office (.doc/.xls/.ppt): download-only by policy.
+
+    Centralized here so `list_files_in_tg` (which emits `upload_token` on
+    matching rows) and the POST route (which accepts uploads) use the
+    exact same rule. If they drift, a row can show an Upload button whose
+    route rejects it — or vice versa.
+    """
+    if is_drm_wrapped:
+        return True
+    return _ext(filename) in _UPLOAD_LEGACY_TRIGGER_EXTENSIONS
+
+
+def _upload_extension_family(ext: str) -> frozenset[str] | None:
+    """Return the family set containing `ext`, or None if `ext` is not part
+    of any upload-family. Callers use this to verify the new filename's
+    extension lives in the same family as the file being replaced.
+    """
+    e = ext.lower()
+    for family in _UPLOAD_EXTENSION_FAMILIES:
+        if e in family:
+            return family
+    return None
+
+
+def _slug_from_upload_filename(filename: str) -> str:
+    """Thin re-export of Fr52AttachmentRouter._slug_from_filename so the
+    dashboard doesn't reach into email_service internals at every call site.
+
+    The router owns the canonical normalization rules per REV-1 (trailing
+    `_v<N>` / `_rev<N>` / `(N)` stripping); the upload path reuses them so
+    the manual upgrade lands in the same revision family as owner resends.
+    """
+    from core.src.email_service.inbound.attachment_router import Fr52AttachmentRouter
+    return Fr52AttachmentRouter._slug_from_filename(filename)
 
 
 def _effective_open_mode(
@@ -842,6 +907,16 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 secret=secret, view_relative_path=f.view_relative_path,
                 mode="history", user_id=user_id,
             )
+            # DRM-UP-1 (2026-09-17): rows the TPM can replace via manual
+            # upload (DRM-wrapped OR legacy binary Office). Predicate is
+            # shared with POST /browse/upload's validation so a row that
+            # renders the [Upload] link is always acceptable to the route.
+            upload_tok = None
+            if _should_offer_upload(f.filename, f.is_drm_wrapped):
+                upload_tok = _make_scoped_token(
+                    secret=secret, view_relative_path=f.view_relative_path,
+                    mode="upload", user_id=user_id,
+                )
             rendered.append({
                 "filename":            f.filename,
                 "view_relative_path":  f.view_relative_path,
@@ -856,6 +931,9 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 "download_token":      download_tok,
                 "versions_token":      versions_tok,
                 "history_token":       history_tok,
+                # DRM-UP-1: None when row is not eligible; template renders
+                # the [Upload replacement] link when this is present.
+                "upload_token":        upload_tok,
                 "is_drm_wrapped":      f.is_drm_wrapped,
                 # MERGE-1 (2026-07-28): flag surfaced as red asterisk in
                 # view_tree_tg.html when an owner-authored version landed on
@@ -1627,6 +1705,280 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             media_type=_mime_for(filename),
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    # ----- DRM-UP-1 (2026-09-17): TPM manual re-upload -----
+
+    @app.get("/browse/upload_form/{token}", response_class=HTMLResponse)
+    async def browse_upload_form(token: str, request: Request):
+        """Server-rendered form for TPM to upload a replacement for a
+        legacy / DRM-wrapped file. Reachable from the [Upload replacement]
+        link on view_tree_tg.html.
+
+        Extension-family policy is enforced server-side by POST /browse/upload
+        — the `accept=` attribute here is a UX affordance, not a security
+        gate.
+        """
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "upload":
+            raise HTTPException(status_code=403, detail="token not an upload token")
+        view_relative_path = payload["p"]
+        old_filename = PurePosixPath(view_relative_path).name
+        old_ext = _ext(old_filename)
+        family = _upload_extension_family(old_ext)
+        # If someone forged a token for a non-family file, don't render the
+        # form; they'd only bounce off POST anyway.
+        if family is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"file extension {old_ext!r} not eligible for manual upload",
+            )
+        accept_attr = ",".join(sorted(family))
+        # Escape any exotic characters in the filename before embedding in HTML.
+        import html as _html
+        safe_name = _html.escape(old_filename)
+        post_url = _u(f"/browse/upload/{token}")
+        family_str = ", ".join(sorted(family))
+        return HTMLResponse(
+            "<html><body style=\"font-family:sans-serif; max-width:640px;\">"
+            f"<h1>Upload replacement for <code>{safe_name}</code></h1>"
+            "<p>Save the downloaded copy locally as a modern format "
+            f"({family_str}) in a NASCA-aware Office client, then upload it here.</p>"
+            "<ul><li>Same base name is required (trailing "
+            "<code>_v2</code> / <code>_rev3</code> / <code>(1)</code> tokens are allowed).</li>"
+            "<li>Uploaded file must not be DRM-wrapped — save as a cleartext copy first.</li>"
+            "<li>Extension must stay in the same family as the original.</li></ul>"
+            f"<form method=\"POST\" action=\"{post_url}\" enctype=\"multipart/form-data\">"
+            f"<input type=\"file\" name=\"file\" accept=\"{accept_attr}\" required>"
+            "<button type=\"submit\">Upload replacement</button>"
+            "</form>"
+            "</body></html>",
+        )
+
+    @app.post("/browse/upload/{token}")
+    async def browse_upload(token: str, request: Request):
+        """Accept a TPM-supplied replacement for the file addressed by the
+        upload token. Two behaviors depending on whether the extension changes:
+
+          * same filename -> save_view_document (same-path version bump).
+          * extension family upgrade -> save_upgraded_document (two-row split),
+            plus register_upgraded_index_row + copy_item_associations_for_upgrade
+            so submit-to-carrier's REV-1 winner selection ships only the new
+            file.
+
+        Validation ladder (rejects short-circuit; nothing lands on disk unless
+        every check passes):
+          1. Token mode == "upload"                           -> else 403
+          2. Old file has a current version                   -> else 404
+          3. Multipart `file` present + non-empty filename    -> else 400
+          4. New extension ∈ same family as old               -> else 400
+          5. Slug equality (REV-1-normalized base names match)-> else 400
+          6. Uploaded bytes not NASCA-wrapped                 -> else 415
+          7. Size <= _MAX_UPLOAD_BYTES                        -> else 413
+        """
+        payload = _resolve_scoped_token(secret=cfg.wopi_jwt_secret, token=token)
+        if payload["m"] != "upload":
+            raise HTTPException(status_code=403, detail="token not an upload token")
+        view_relative_path = payload["p"]
+        user_id = payload["u"]
+
+        # Multipart parse. FastAPI's Form(...) with UploadFile is a natural fit
+        # but we already have the request in hand and don't want a full dep
+        # signature refactor; grab the form directly.
+        try:
+            form = await request.form()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"multipart parse failed: {exc}") from exc
+        upload = form.get("file")
+        if upload is None or not getattr(upload, "filename", None):
+            raise HTTPException(status_code=400, detail="missing 'file' field")
+        new_filename_raw = upload.filename
+        # Strip any client-side path components (browsers may send just the basename,
+        # but defensive against tools that don't).
+        new_filename = PurePosixPath(new_filename_raw).name
+        try:
+            content: bytes = await upload.read()
+        finally:
+            # Release the SpooledTemporaryFile backing the UploadFile so pytest
+            # doesn't surface an unclosed-resource warning after the request
+            # returns. Best-effort — if the framework already closed it, that's
+            # fine.
+            try:
+                await upload.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        if len(content) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload exceeds {_MAX_UPLOAD_BYTES} bytes",
+            )
+
+        # Old file must exist as a current version.
+        from core.src.storage import (
+            get_current_version, save_view_document, save_upgraded_document,
+        )
+        old_current = await get_current_version(view_relative_path)
+        if old_current is None:
+            raise HTTPException(status_code=404, detail="original file no longer exists")
+        old_filename = old_current.filename
+        old_ext = _ext(old_filename)
+        new_ext = _ext(new_filename)
+
+        # Extension family: old must itself be family-eligible; new must live
+        # in the same family. Cross-family (.doc->.xlsx) and non-family
+        # (.doc->.pdf) both reject here.
+        family = _upload_extension_family(old_ext)
+        if family is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"file extension {old_ext!r} not eligible for manual upload",
+            )
+        if new_ext not in family:
+            raise HTTPException(
+                status_code=400,
+                detail=f"new extension {new_ext!r} not in family {sorted(family)}",
+            )
+
+        # Slug equality — REV-1 normalization must produce the same slug for
+        # both filenames. Enforces "same base name modulo allowed decorations"
+        # without a literal string compare (so `aaa.doc` / `aaa_v2.docx` both pass
+        # while `aaa.doc` / `bbb.docx` reject).
+        old_slug = _slug_from_upload_filename(old_filename)
+        new_slug = _slug_from_upload_filename(new_filename)
+        if old_slug != new_slug:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"base-name mismatch: uploaded {new_filename!r} normalizes to "
+                    f"slug {new_slug!r}; original normalizes to {old_slug!r}"
+                ),
+            )
+
+        # NASCA sniff — reject wrapped uploads outright. Otherwise the whole
+        # exercise of unlocking the file yields another locked file.
+        if content.startswith(b"<## "):
+            _audit(
+                request, "document_upload_blocked_drm", view_relative_path, user_id,
+                details={"new_filename": new_filename},
+            )
+            raise HTTPException(
+                status_code=415,
+                detail="uploaded file is DRM-wrapped; save as an unencrypted copy first",
+            )
+
+        # Parse the scope out of the old view path so we can call the storage
+        # helpers. WOPI save already does this — keep the shape identical so a
+        # future refactor can share the parser.
+        parts = view_relative_path.split("/")
+        if len(parts) < 6 or parts[0] != "view":
+            raise HTTPException(status_code=400, detail="malformed view path")
+        _, cust, dev, mile, tg, *rel = parts
+
+        same_name = (new_filename == old_filename)
+
+        if same_name:
+            # Existing path handles same-path version bump + archive to .v<N>.
+            new_version = await save_view_document(
+                customer_id=cust,
+                device_id=dev,
+                milestone_id=mile,
+                tg_name=tg,
+                relative_parts=tuple(rel),
+                content=content,
+                saved_by=user_id,
+                source="tpm_dashboard_upload",
+            )
+            _audit(
+                request, "document_uploaded_by_tpm", view_relative_path, user_id,
+                details={
+                    "new_filename":   new_filename,
+                    "new_version_num": new_version.version_num,
+                    "new_sha256":     new_version.sha256,
+                    "same_name":      True,
+                },
+            )
+            # Redirect back to the containing TG's file listing. Best-effort —
+            # if the scope parts aren't sufficient (they always are for real
+            # data) the fallback lands the TPM on the browse root.
+            back = _u(f"/browse/{cust}/{dev}/{mile}/tg/{tg}/")
+            return RedirectResponse(url=back, status_code=303)
+
+        # Extension family upgrade — two-row split path. Build the new view
+        # path (same folder structure, just the tail filename changes) so the
+        # UI shows the new file where the TPM expects it.
+        new_relative_parts = tuple(rel[:-1]) + (new_filename,)
+
+        # Compute file hashes before any writes so we can wire index +
+        # associations consistently.
+        old_sha = old_current.sha256
+        new_sha = hashlib.sha256(content).hexdigest()
+
+        # Locate the OLD document_index row (via file_hash of the old view
+        # bytes). We don't require the row to exist — some rows in the view
+        # tree came from `router`-less write paths that never registered a
+        # document_index row (dashboard-only saves). When the old row is
+        # missing, we skip the index/association wiring: the new file is a
+        # standalone view-tree entry, and submit-to-carrier's revision-family
+        # logic has nothing to relate to.
+        from core.src.storage.document_ops import (
+            copy_item_associations_for_upgrade,
+            get_document_index_row_by_hash,
+            register_upgraded_index_row,
+        )
+        old_index = await get_document_index_row_by_hash(old_sha)
+
+        # New view path (used both for save_upgraded_document and for the
+        # associations' local_nsd_path).
+        from core.src.storage.nsd import NSDPath as _NSDPath
+        new_nsd_path = _NSDPath.view_tree(cust, dev, mile, tg, *new_relative_parts)
+        new_local_nsd_path = new_nsd_path.to_relative()
+
+        # Save bytes + flip old current + insert new version row.
+        new_version = await save_upgraded_document(
+            old_view_relative_path=view_relative_path,
+            new_relative_parts=new_relative_parts,
+            customer_id=cust,
+            device_id=dev,
+            milestone_id=mile,
+            tg_name=tg,
+            content=content,
+            saved_by=user_id,
+            source="tpm_dashboard_upload",
+        )
+
+        associations_copied = 0
+        registered = False
+        if old_index is not None and old_index.doc_id_slug is not None:
+            # Register new index row (same slug, rev+1).
+            await register_upgraded_index_row(
+                new_file_hash=new_sha,
+                old_file_hash=old_sha,
+                new_filename=new_filename,
+                ingested_at=datetime.now(timezone.utc),
+            )
+            registered = True
+            associations_copied = await copy_item_associations_for_upgrade(
+                old_file_hash=old_sha,
+                new_file_hash=new_sha,
+                new_local_nsd_path=new_local_nsd_path,
+                associated_at=datetime.now(timezone.utc),
+                associated_by=user_id,
+            )
+
+        _audit(
+            request, "document_uploaded_by_tpm", view_relative_path, user_id,
+            details={
+                "new_filename":         new_filename,
+                "new_view_relative":    new_version.view_relative_path,
+                "old_sha256":           old_sha,
+                "new_sha256":           new_sha,
+                "same_name":            False,
+                "index_registered":     registered,
+                "associations_copied":  associations_copied,
+            },
+        )
+        back = _u(f"/browse/{cust}/{dev}/{mile}/tg/{tg}/")
+        return RedirectResponse(url=back, status_code=303)
 
     # ----- Chunk 5: OnlyOffice edit embed -----
 

@@ -46,6 +46,7 @@ __all__ = [
     "list_files_in_tg",
     "list_tg_names_for_scope",
     "list_versions_for_file",
+    "save_upgraded_document",
     "save_view_document",
 ]
 
@@ -347,6 +348,118 @@ async def _write_bytes(path: NSDPath, content: bytes) -> None:
     async def _one_chunk():
         yield content
     await write_file(path, _one_chunk())
+
+
+# ---------------------------------------------------------------------------
+# DRM-UP-1 (2026-09-17): TPM manual re-upload — two-row split for extension
+# family changes (e.g. .doc -> .docx)
+# ---------------------------------------------------------------------------
+
+
+async def save_upgraded_document(
+    *,
+    old_view_relative_path: str,
+    new_relative_parts: tuple[str, ...],
+    customer_id: str,
+    device_id: str,
+    milestone_id: str,
+    tg_name: str,
+    content: bytes,
+    saved_by: str,
+    source: str = "tpm_dashboard_upload",
+) -> DocumentVersionRow:
+    """Two-row split for an extension-family upgrade.
+
+    Preconditions the caller enforces upstream:
+      * `old_view_relative_path` currently has a current-version row.
+      * `_slug_from_filename(new_filename) == _slug_from_filename(old_filename)`
+        so the two files share a revision family for submit-to-carrier.
+      * `new_relative_parts` differs from the old filename (same-name
+        re-uploads go through save_view_document, not here).
+      * Uploaded bytes are NOT NASCA-wrapped (route sniffs and rejects
+        pre-call; we sniff again defensively).
+
+    Behavior:
+      * Flips the OLD current-version row's `is_current=False` in place.
+        The physical old file is left where it is on NSD — no rename to
+        `.v<N>` sibling, because the old file belongs to its own path and
+        was the current version there.
+      * Writes the new bytes at the new view path.
+      * Inserts a new DocumentVersionRow at the new path with
+        `version_num=1`, `is_current=True`, `source=<source>`. The new file
+        starts its own per-path version chain.
+      * Sniffs NASCA on the uploaded bytes and stamps `is_drm_wrapped`.
+        A wrapped upload will still land (caller was supposed to guard),
+        but the flag prevents future in-browser editing on the new row too.
+
+    Returns the newly-inserted DocumentVersionRow. Emits no CommunicationLog
+    row — the calling route is responsible for the `document_uploaded_by_tpm`
+    audit at the request boundary (so it can attach request-scoped attribution
+    like user_id + IP).
+    """
+    if not new_relative_parts:
+        raise PipelineError(
+            "STR-E004",
+            context={"reason": "save_upgraded_document requires non-empty new_relative_parts"},
+        )
+    new_filename = new_relative_parts[-1]
+    new_path = NSDPath.view_tree(
+        customer_id, device_id, milestone_id, tg_name, *new_relative_parts,
+    )
+    new_view_relative = new_path.to_relative()
+
+    async with _session() as session:
+        old_row = await _get_current_row(session, old_view_relative_path)
+        if old_row is None:
+            raise PipelineError(
+                "STR-E002",
+                context={"entity": "DocumentVersionRow(current)", "key": old_view_relative_path},
+            )
+        # New path must not already have a current row; if it does, the caller
+        # is trying to overwrite an unrelated file — the route's slug-equality
+        # check should have caught that, but defensive.
+        existing_new = await _get_current_row(session, new_view_relative)
+        if existing_new is not None:
+            raise PipelineError(
+                "STR-E004",
+                context={
+                    "reason": "save_upgraded_document target path already has a current version",
+                    "new_path": new_view_relative,
+                },
+            )
+
+        await _write_bytes(new_path, content)
+
+        # Flip OLD row to non-current; leave the physical file where it is.
+        await session.execute(
+            update(DocumentVersionTable)
+            .where(DocumentVersionTable.version_id == old_row.version_id)
+            .values(is_current=False)
+        )
+
+        now = datetime.now(timezone.utc)
+        sha = hashlib.sha256(content).hexdigest()
+        is_drm = content.startswith(_NASCA_MAGIC)
+        new_row = DocumentVersionRow(
+            version_id=uuid.uuid4().hex,
+            view_relative_path=new_view_relative,
+            customer_id=customer_id,
+            device_id=device_id,
+            milestone_id=milestone_id,
+            tg_name=tg_name,
+            filename=new_filename,
+            version_num=1,
+            is_current=True,
+            size_bytes=len(content),
+            sha256=sha,
+            saved_at=now,
+            saved_by=saved_by,
+            source=source,
+            is_drm_wrapped=is_drm,
+        )
+        session.add(_row_to_table(new_row))
+        await session.commit()
+        return new_row
 
 
 # ---------------------------------------------------------------------------

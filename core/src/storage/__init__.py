@@ -71,6 +71,7 @@ from core.src.storage.document_view_ops import (
     list_upload_files_for_item,
     read_current_version_bytes,
     read_version_bytes,
+    save_upgraded_document,
     save_view_document,
 )
 from core.src.storage.models import (
@@ -189,6 +190,7 @@ __all__ = [
     "reassign_document_to_workitem",
     "record_batch_idempotency",
     "resolve_download_token",
+    "save_upgraded_document",
     "save_view_document",
     "set_folder_routing_for_tg",
     "set_is_final",

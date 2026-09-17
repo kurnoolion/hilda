@@ -7068,3 +7068,136 @@ that pattern to "write both, in parallel, for plm_id specifically"
 rather than reversing it globally), `PLM-2` (SP field sync +
 IngestSource — the field sync path that this ADR sidesteps for the
 specific plm_id backfill loop).
+
+## D-215: TPM manual re-upload as replacement for legacy Office / DRM-wrapped documents (DRM-UP-1)
+
+**Date**: 2026-09-17. **Scope**: dashboard document view.
+
+**Context**: The view tree's browse UI supports in-browser editing
+via OnlyOffice for modern OOXML (`.docx`/`.xlsx`/`.pptx`) that arrives
+cleartext. Two categories of file are stuck at "Download only":
+
+1. **DRM-wrapped** files sniffed as NASCA at save time (D-152).
+   OnlyOffice has no NASCA agent in the container and cannot decrypt.
+2. **Legacy binary Office** (`.doc`/`.xls`/`.ppt`) per FT-4 policy.
+   Corp Exchange DLP wraps these in transit, and OnlyOffice CE 8 does
+   not reliably render them even when clean.
+
+Before this ADR, both categories dead-ended in the browse tree: a TPM
+could download the file and open it in a NASCA-aware Office client on
+their workstation, but any local edit lived only in that workstation
+copy. Nothing in HILDA registered the modernized file, and
+submit-to-carrier would still ship the old bytes on next run.
+
+**Decision**: Add a `POST /browse/upload/{token}` route + a companion
+`GET /browse/upload_form/{token}` form page. The [Upload replacement]
+action appears in `view_tree_tg.html` on every row where the Edit
+button is currently hidden — the predicate is
+`is_drm_wrapped OR extension ∈ {.doc, .xls, .ppt}`. The TPM downloads
+the file, opens it locally, saves-as a modern format (or a cleartext
+copy of the same extension), and uploads it back. HILDA treats the
+upload as either a same-path version bump or a two-row split
+depending on whether the filename extension changes:
+
+- **Same filename** (e.g. `report.doc` → `report.doc`): reuses
+  `save_view_document` — the existing per-path version chain bumps
+  `version_num` and archives the prior file as `.v<N>` sibling.
+- **Extension family upgrade** (e.g. `report.doc` → `report.docx`):
+  new `save_upgraded_document` helper flips the old row's
+  `is_current=False` in place (no rename to sibling; the old file
+  belongs to its own path) and writes the new file at the new view
+  path with `version_num=1`. When the old file had a
+  `document_index` row, the new upload also:
+  1. Registers a fresh `document_index` row via
+     `register_upgraded_index_row` — same `doc_id_slug` as the old
+     row, `rev_number = max(family) + 1`,
+     `ingest_source=DASHBOARD_UPLOAD`,
+     `routing_resolution=DASHBOARD_UPLOAD` (new enum values).
+  2. Copies every existing item association from the old `file_hash`
+     to the new `file_hash` via
+     `copy_item_associations_for_upgrade`, pointing at the new view
+     path.
+
+Validation ladder (all reject with a 4xx before anything lands on
+disk):
+1. Token mode == `"upload"` → else 403.
+2. Old file has a current version → else 404.
+3. `file` multipart field present with a non-empty filename → else 400.
+4. Old extension is family-eligible AND new extension is in the same
+   family (Word: `.doc`/`.docx`/`.docm`; Excel: `.xls`/`.xlsx`/`.xlsm`;
+   PowerPoint: `.ppt`/`.pptx`/`.pptm`) → else 400.
+5. `_slug_from_filename(new)` equals `_slug_from_filename(old)` —
+   REV-1's normalization strips trailing `_v<N>` / `_rev<N>` / `(N)`,
+   so `aaa.doc` / `aaa_v2.docx` / `aaa (1).docx` all pass while
+   `aaa.doc` / `bbb.docx` reject → else 400.
+6. Uploaded bytes do not start with `<## ` (NASCA magic) → else 415.
+7. Content ≤ 100 MB → else 413.
+
+Any authenticated dashboard user can upload; there is no per-role
+gate. The signed token TTL (30 min, matching edit tokens) is the
+authorization boundary.
+
+**Why this over the alternatives**:
+
+- **Do nothing / manual SharePoint uploads**: the TPM's local edits
+  never land in the view tree, so submit-to-carrier keeps shipping
+  the legacy or DRM-wrapped bytes. Every TG for VZW has at least one
+  legacy `.doc` at this point; the workflow gap is real.
+- **Server-side NASCA decryption / legacy-format conversion**:
+  requires deploying a NASCA agent + a headless Office converter
+  inside the container, both operationally expensive (corp NASCA
+  credentials, Office license, container size). Manual TPM workflow
+  is a one-line frontend gesture on top of storage helpers we
+  already needed.
+- **Accept the upload but treat every re-upload as a new document
+  entirely**: submit-to-carrier would then ship BOTH the old and the
+  new file (unless TPM manually deleted the old row). Reusing REV-1's
+  slug-family winner selection with the slug-equality guard means the
+  upgraded file naturally wins and the old row remains as audit
+  provenance.
+- **Rename in place (mutate `view_relative_path` on the old row)**:
+  cleaner one-linear-history UX, but the DB row's identity mutates on
+  disk — worse for audit provenance and the `saved_at` history stops
+  reading cleanly. Two-row split preserves append-only semantics.
+- **Restrict base-name changes strictly**: rejected in favor of
+  slug-equality. The REV-1 rule already defines what "same document"
+  means for the family; using it here means the manual path polices
+  identity by the same yardstick as owner resends.
+
+**Consequences**:
+
+- Two new `RoutingResolution` / `IngestSource` enum values
+  (`DASHBOARD_UPLOAD`) document the manual channel in the audit log
+  and let downstream analytics distinguish it from Fr52-router-driven
+  ingests.
+- `save_upgraded_document` is the first view-tree save path that
+  writes a new is_current row at a **different** path from the row
+  it supersedes. Callers of `list_versions_for_file` see the two
+  files as independent per-path chains; only the revision-family
+  layer knows they belong together.
+- `list_upload_files_for_item`'s existing REV-1 group-by-slug +
+  highest-rev-wins logic ships only the upgraded file to carrier.
+  The old-extension file remains browseable and audit-visible, at
+  `is_current=False`, and never uploads.
+- `_should_offer_upload` centralizes the predicate shared by the
+  template's [Upload] link and the POST route's acceptance check;
+  they cannot drift.
+- Route accepts uploads from any authenticated dashboard user —
+  suitable for Ph-1 (TPM-only deployment) but is a Ph-2 flag when
+  additional roles land.
+- Uploads are logged as `document_uploaded_by_tpm` with full
+  provenance (old + new sha, old + new path, index/association
+  wiring counts). Rejected NASCA uploads log
+  `document_upload_blocked_drm`.
+- No schema migration; enum values are stored as strings.
+- 16 new dashboard tests + 88 pass in
+  `test_dashboard_document_view.py`.
+
+**Anchors**: `DRM-UP-1`, `[D-152]` (NASCA sniff — the wrapped-file
+detection this ADR provides an unlock path for), `[D-155]` (7Z /
+archive semantics; upload path leaves archive containers alone),
+`FT-4` (legacy binary Office is download-only from the editor — this
+ADR complements it with a manual round-trip), `REV-1` (2026-08-30 —
+`_slug_from_filename` normalization that the slug-equality guard
+reuses), `[D-039]` (revision family model that the two-row split
+participates in).

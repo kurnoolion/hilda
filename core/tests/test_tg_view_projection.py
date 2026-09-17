@@ -188,6 +188,9 @@ def test_projection_matches_the_dataclass():
     derived = {
         "last_saved_at_pretty", "last_saved_by_pretty", "open_mode",
         "open_token", "download_token", "versions_token", "history_token",
+        # DRM-UP-1 (2026-09-17): route mints upload_token per row when the
+        # file is DRM-wrapped or legacy Office; None on other rows.
+        "upload_token",
     }
     unknown = sorted(_projection_keys() - fields - derived)
     assert not unknown, (
