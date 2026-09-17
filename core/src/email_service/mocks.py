@@ -86,6 +86,7 @@ class MockSmtpSender:
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
         if self.raise_on_send:
             raise RuntimeError("MockSmtpSender configured to raise")
@@ -97,6 +98,7 @@ class MockSmtpSender:
             "subject":     subject,
             "body":        body,
             "in_reply_to": in_reply_to,
+            "attachments": attachments,
         })
         return message_id
 
@@ -115,6 +117,7 @@ class MockEwsSender:
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
         if self.raise_on_send:
             raise RuntimeError("MockEwsSender configured to raise")
@@ -126,6 +129,7 @@ class MockEwsSender:
             "subject":     subject,
             "body":        body,
             "in_reply_to": in_reply_to,
+            "attachments": attachments,
         })
         return message_id
 

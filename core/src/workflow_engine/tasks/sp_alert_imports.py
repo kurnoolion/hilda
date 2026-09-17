@@ -940,6 +940,35 @@ def kickoff_collection_task(
         # a per-row value. plm_id preference: PLMKO-2 ensure map (freshest
         # after synchronous create) -> item's live attr (backup for
         # non-CorporatePLM rows or reused-existing rows).
+        # ATTACH-1 (2026-09-17): propagate outreach_attachment_path per row
+        # from template.yaml so _send_batch_outreach_email can attach static
+        # per-work-item files (e.g. a DRR checklist xlsx for VZW's APPS TG).
+        # template_lookup is the source of truth — template.yaml is
+        # authoritative for structural fields per D-141, and the path is
+        # ops-only config, never SP-editable. Missing template hit or
+        # missing key -> empty string; helper handles the actual file read.
+        from core.src.template_schema import template_lookup as _tl
+        def _lookup_attachment_path(_it) -> str:
+            _item_no = getattr(_it, "item_no", None)
+            _dev = (
+                device_id
+                or getattr(_it, "device_id", None)
+                or getattr(_it, "project_model", None)
+            )
+            if _item_no is None or not _dev:
+                return ""
+            try:
+                _tmpl = _tl.get_workitem(
+                    customer_id=customer_id, device_id=_dev,
+                    milestone_id=milestone_id, item_no=int(_item_no),
+                )
+            except Exception:  # noqa: BLE001
+                return ""
+            if not isinstance(_tmpl, dict):
+                return ""
+            _p = _tmpl.get("outreach_attachment_path")
+            return str(_p) if _p else ""
+
         item_dicts = []
         for it in group_items:
             iid = getattr(it, "item_id", None) or getattr(it, "delivery_item_id", None)
@@ -961,6 +990,10 @@ def kickoff_collection_task(
                 "tg_name":           getattr(it, "tg_name", None) or "",
                 "tracking_modality": getattr(it, "tracking_modality", None),
                 "plm_id":            resolved_plm_id,
+                # ATTACH-1: filesystem path (absolute) to a per-item static
+                # attachment to include in the kickoff outreach email. Empty
+                # string when the item's template row has no such config.
+                "outreach_attachment_path": _lookup_attachment_path(it),
             })
         # Deterministic batch_id from (correlation_id, tg_key) prefix so
         # inbound owner-reply parsing can still resolve BATCH -> group.

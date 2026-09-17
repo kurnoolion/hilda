@@ -280,6 +280,7 @@ class _FakeEmailSender:
         subject: str,
         body: str,
         in_reply_to: str | None = None,
+        attachments: list[tuple[str, bytes, str]] | None = None,
     ) -> str:
         if self._raise:
             raise RuntimeError("smtp down")

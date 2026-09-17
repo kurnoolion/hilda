@@ -578,8 +578,13 @@ class TestRoutingResolutionTasks:
 class _FakeAsyncEmailSender:
     def __init__(self):
         self.sent: list[dict] = []
-    async def send(self, to, cc, subject, body, in_reply_to=None):
-        self.sent.append({"to": to, "subject": subject})
+    async def send(self, to, cc, subject, body, in_reply_to=None, attachments=None):
+        # ATTACH-1 (2026-09-17): capture attachments for tests that assert on
+        # what was attached; older tests that inspect only to/subject stay
+        # green because the default is None.
+        self.sent.append({
+            "to": to, "subject": subject, "attachments": attachments,
+        })
         return "msg-id-test-001"
 
 
@@ -591,7 +596,7 @@ class _RaisingAsyncEmailSender:
         self.attempts = 0
         self._error_type = error_type
         self._message = message
-    async def send(self, to, cc, subject, body, in_reply_to=None):
+    async def send(self, to, cc, subject, body, in_reply_to=None, attachments=None):
         self.attempts += 1
         raise self._error_type(self._message)
 
@@ -2996,3 +3001,187 @@ class TestSubmitToCarrier:
             result = submit_to_carrier_task.apply_async(args=({}, _stc_ctx())).get()
         assert result["outcome"] == "skipped_no_adapter"
         assert any(a[0] == "submit_to_carrier_skipped" for a in deps.audit.logs)
+
+
+class TestOutreachAttachments:
+    """ATTACH-1 (2026-09-17): kickoff outreach can attach a static per-item file
+    (e.g. VZW's DRR checklist xlsx) sourced from template.yaml's
+    outreach_attachment_path field on the work item. Only kickoff paths
+    (SP-alert-triggered + reconciler sync-2) — reminders unaffected.
+    """
+
+    def _write_tmp(self, tmp_path, name: str, content: bytes) -> str:
+        p = tmp_path / name
+        p.write_bytes(content)
+        return str(p)
+
+    def test_load_outreach_attachments_reads_and_dedupes(self, tmp_path):
+        from core.src.workflow_engine.tasks.outreach import (
+            _load_outreach_attachments,
+        )
+        path_a = self._write_tmp(tmp_path, "checklist.xlsx", b"XLSX-bytes-a")
+        items = [
+            {"item_no": 42, "outreach_attachment_path": path_a},
+            # Same path on a second item -> should dedupe (one attachment out).
+            {"item_no": 43, "outreach_attachment_path": path_a},
+            # Empty / None path -> ignored.
+            {"item_no": 44, "outreach_attachment_path": ""},
+            {"item_no": 45},
+        ]
+        out = _load_outreach_attachments(items)
+        assert len(out) == 1
+        filename, content, mime = out[0]
+        assert filename == "checklist.xlsx"
+        assert content == b"XLSX-bytes-a"
+        # xlsx MIME mapping
+        assert mime == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    def test_load_outreach_attachments_missing_file_warns_and_skips(
+        self, tmp_path, caplog,
+    ):
+        from core.src.workflow_engine.tasks.outreach import (
+            _load_outreach_attachments,
+        )
+        good = self._write_tmp(tmp_path, "good.pdf", b"%PDF-good")
+        missing = str(tmp_path / "does_not_exist.xlsx")
+        items = [
+            {"item_no": 1, "outreach_attachment_path": missing},
+            {"item_no": 2, "outreach_attachment_path": good},
+        ]
+        import logging
+        with caplog.at_level(logging.WARNING):
+            out = _load_outreach_attachments(items)
+        # Missing file skipped; good file still attaches -> len == 1.
+        assert len(out) == 1
+        assert out[0][0] == "good.pdf"
+        assert any("outreach attachment missing" in r.message for r in caplog.records)
+
+    def test_load_outreach_attachments_multiple_distinct_paths(self, tmp_path):
+        from core.src.workflow_engine.tasks.outreach import (
+            _load_outreach_attachments,
+        )
+        a = self._write_tmp(tmp_path, "a.xlsx", b"AA")
+        b = self._write_tmp(tmp_path, "b.pdf", b"%PDF-b")
+        items = [
+            {"item_no": 1, "outreach_attachment_path": a},
+            {"item_no": 2, "outreach_attachment_path": b},
+        ]
+        out = _load_outreach_attachments(items)
+        assert [t[0] for t in out] == ["a.xlsx", "b.pdf"]
+        assert out[1][2] == "application/pdf"
+
+    def test_load_outreach_attachments_empty_when_no_field(self):
+        from core.src.workflow_engine.tasks.outreach import (
+            _load_outreach_attachments,
+        )
+        items = [{"item_no": 1}, {"item_no": 2}]
+        assert _load_outreach_attachments(items) == []
+
+    def _mk_deps_with_sender(self, sender):
+        return TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=sender,
+        )
+
+    def test_send_batch_outreach_email_forwards_attachments_to_sender(
+        self, tmp_path,
+    ):
+        """End-to-end: _send_batch_outreach_email calls _send_email which
+        threads attachments into deps.email_sender.send. Fake sender captures
+        the kwarg; assert one attachment tuple lands with the right filename
+        and byte payload."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _send_batch_outreach_email,
+        )
+        path = self._write_tmp(tmp_path, "VZW DRR Checklist.xlsx", b"VZW-checklist-content")
+
+        fake_sender = _FakeAsyncEmailSender()
+        deps = self._mk_deps_with_sender(fake_sender)
+
+        items = [
+            {
+                "item_no": 84,
+                "item_name": "APPS DRR final deliverable",
+                "customer_id": "VZW",
+                "device_id": "SM-A186U",
+                "milestone_id": "DRR",
+                "tg_name": "APPS",
+                "tracking_modality": ["Email"],
+                "plm_id": None,
+                "outreach_attachment_path": path,
+            },
+            # Second item in the same batch WITHOUT a path -> dedup keeps 1 attachment.
+            {
+                "item_no": 85,
+                "item_name": "APPS other",
+                "customer_id": "VZW",
+                "device_id": "SM-A186U",
+                "milestone_id": "DRR",
+                "tg_name": "APPS",
+                "tracking_modality": ["Email"],
+                "plm_id": None,
+                "outreach_attachment_path": "",
+            },
+        ]
+        msg_id = _send_batch_outreach_email(
+            deps=deps,
+            owner_identity={"owner_name": "Bob", "owner_corp_usa_email": "bob@corp"},
+            items=items,
+            batch_id="BATCH-attachtest",
+            recipient="bob@corp",
+        )
+        assert msg_id == "msg-id-test-001"
+        assert len(fake_sender.sent) == 1
+        atts = fake_sender.sent[0]["attachments"]
+        assert atts is not None
+        assert len(atts) == 1
+        fname, content, mime = atts[0]
+        assert fname == "VZW DRR Checklist.xlsx"
+        assert content == b"VZW-checklist-content"
+
+    def test_send_batch_outreach_email_no_field_no_attachments(self):
+        """No item in the batch has outreach_attachment_path -> sender
+        receives an empty attachments list (not a crash)."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _send_batch_outreach_email,
+        )
+        fake_sender = _FakeAsyncEmailSender()
+        deps = self._mk_deps_with_sender(fake_sender)
+        items = [{
+            "item_no": 10, "item_name": "x", "customer_id": "VZW",
+            "device_id": "SM-A186U", "milestone_id": "DRR", "tg_name": "APPS",
+            "tracking_modality": ["Email"], "plm_id": None,
+        }]
+        _send_batch_outreach_email(
+            deps=deps, owner_identity={"owner_name": "A"}, items=items,
+            batch_id="B", recipient="a@x",
+        )
+        assert fake_sender.sent[0]["attachments"] == []
+
+    def test_send_batch_outreach_email_missing_file_still_sends_without_attachment(
+        self, tmp_path, caplog,
+    ):
+        """Missing file -> WARN + attachments empty, email still goes."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _send_batch_outreach_email,
+        )
+        fake_sender = _FakeAsyncEmailSender()
+        deps = self._mk_deps_with_sender(fake_sender)
+        gone = str(tmp_path / "nope.xlsx")
+        items = [{
+            "item_no": 84, "item_name": "x", "customer_id": "VZW",
+            "device_id": "SM-A186U", "milestone_id": "DRR", "tg_name": "APPS",
+            "tracking_modality": ["Email"], "plm_id": None,
+            "outreach_attachment_path": gone,
+        }]
+        import logging
+        with caplog.at_level(logging.WARNING):
+            msg_id = _send_batch_outreach_email(
+                deps=deps, owner_identity={"owner_name": "A"}, items=items,
+                batch_id="B", recipient="a@x",
+            )
+        assert msg_id == "msg-id-test-001"
+        assert fake_sender.sent[0]["attachments"] == []
+        assert any("outreach attachment missing" in r.message for r in caplog.records)

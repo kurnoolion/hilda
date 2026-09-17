@@ -7201,3 +7201,129 @@ ADR complements it with a manual round-trip), `REV-1` (2026-08-30 —
 `_slug_from_filename` normalization that the slug-equality guard
 reuses), `[D-039]` (revision family model that the two-row split
 participates in).
+
+## D-216: Static per-item outreach attachment loaded from template.yaml on kickoff (ATTACH-1)
+
+**Date**: 2026-09-17. **Scope**: outreach.py + sp_alert_imports.py.
+
+**Context**: VZW's APPS TG owner needs the DRR Checklist xlsx
+delivered alongside every kickoff outreach so the owner knows the
+per-item deliverables before they reply. Historically outreach emails
+carried only the rendered HTML table + reply instructions — no
+attachments. The DRR-day-of `tpm_notification` send already knows how
+to attach files (via `email_sender.send(attachments=...)`); no such
+plumbing existed on the outreach path.
+
+Requirement per user 2026-09-17:
+1. Only the DRR milestone, only the APPS TG, only the initial
+   collection kickoff outreach (both the SP-alert-triggered path and
+   the reconciler sync-2 backstop that dispatches the same
+   `kickoff_collection_task`).
+2. Skip reminders / re-sends.
+3. If the file is missing at send time, WARN and send the email
+   without the attachment (never block outreach on a missing
+   supplementary file).
+4. Configure via `outreach_attachment_path` on the individual work
+   item in `customizations/template_schemas/VZW/template.yaml`
+   (item_no=84).
+
+**Decision**: Add `outreach_attachment_path: str` as an optional
+template-authoritative field on any work item. `kickoff_collection` in
+`sp_alert_imports.py` looks the value up per item via
+`template_lookup.get_workitem(...)` when it builds the batch's
+`item_dicts` (same pattern SUBJECT-TG-1 established for `tg_name`
+propagation), so `_send_batch_outreach_email` reads a normal dict key
+without new deps.
+
+New module-scope helper `_load_outreach_attachments(items)` in
+`outreach.py`:
+- Walks the batch, collects each item's `outreach_attachment_path`.
+- Dedupes by absolute path so the same file listed on multiple items
+  attaches once.
+- Reads bytes fresh on every send (no worker-lifetime cache) so an
+  ops-team edit to the checklist takes effect on the next kickoff
+  without a restart.
+- `FileNotFoundError` and `OSError` are caught individually — logs a
+  WARN with the path + item_no, skips that attachment, continues the
+  loop. Email always sends.
+- Returns `list[tuple[str, bytes, str]]` — the shape
+  `ews_sender.send`, `MockEwsSender.send`, and
+  `MockSmtpSender.send` already accept for the DRR-day-of path.
+
+MIME resolution: a small module-scope map covers the well-known
+office / office-adjacent extensions (`.xlsx`, `.xls`, `.docx`, `.doc`,
+`.pptx`, `.ppt`, `.pdf`, `.csv`, `.txt`, plus the `-m` macro
+variants); unknown extensions fall back to
+`application/octet-stream` so a well-meaning but exotic filename
+doesn't fail the send.
+
+`_send_email(...)` sync bridge grows a passthrough
+`attachments: list[tuple[str, bytes, str]] | None = None` kwarg that
+threads directly to `email_sender.send(...)`. Signature change is
+additive — every existing caller stays green.
+
+`_FakeAsyncEmailSender` / `_RaisingAsyncEmailSender` in the workflow
+task suite, `_FakeEmailSender` in ops_alerts tests, `_FakeSender` /
+`_BoomSender` in feedback-route tests, and
+`MockSmtpSender` / `MockEwsSender` in `email_service/mocks.py` all
+gain the `attachments=None` kwarg to match the real
+`ews_sender.send` signature; test that inspects the kwarg captures it
+into the `sent` records.
+
+**Why this over the alternatives**:
+
+- **Persist the field on `DeliveryItemBase` + a schema migration**:
+  the field is ops-only config (never SP-editable), so persisting it
+  buys nothing. Template-authoritative (D-141) is the correct
+  bucket. Skipping the migration also avoids a corp-box maintenance
+  step.
+- **Hardcode the path for APPS/VZW/DRR**: works today, breaks when a
+  second TG needs a checklist. `outreach_attachment_path` on any
+  work_item makes the feature reusable without a code change.
+- **Base directory + relative filename in config**: less flexible than
+  the absolute-path form. The corp-box path (`/opt/apps/VZW DRR
+  Checklist.xlsx`) can live anywhere the deploy chooses; keeping the
+  yaml value as an absolute filesystem path lets ops move it without
+  a code change.
+- **Cache bytes in memory at bootstrap**: masks the "ops edited the
+  file, restart the worker" story. Fresh-read-every-send is cheap
+  (one small xlsx per kickoff batch) and keeps the workflow
+  transparent.
+- **Fail loud on missing file**: rejected per requirement (3). The
+  outreach email itself is the primary deliverable; the checklist is
+  additive.
+- **Also attach to reminders / on the per-item send_initial_outreach
+  path**: rejected per requirement (2). Reminders are follow-ups on
+  an already-received email chain (D-138 in-reply-to threading); the
+  checklist doesn't need to re-send.
+
+**Consequences**:
+
+- Only kickoff_collection paths — `_send_batch_outreach_email` — pick
+  up attachments. Reminder task, notify_new_owner task, and
+  `send_initial_outreach_task` per-item path are unchanged.
+- Reconciler sync-2 (RECON-1 backstop that dispatches
+  `kickoff_collection_task` when the SP CHANGED alert was lost)
+  also benefits, because it routes through the same kickoff code —
+  the attachment travels whether the initial trigger came from the
+  alert or the sync backstop.
+- Missing / unreadable file logs a WARN, email still sends. Ops
+  monitor the warning stream for `outreach attachment missing`.
+- Fresh disk read per batch send is best-effort; if the file is a
+  slow NFS mount, this could add ~sub-second latency to the outreach
+  send. Unmeasured at this scale (single small xlsx); flag on
+  STATUS.md if we later see it.
+- No schema migration.
+- 7 new tests (`TestOutreachAttachments`) plus updates to 5 existing
+  fake senders to keep the sig compatible. 226/226 pass in the
+  focused sweep.
+
+**Anchors**: `ATTACH-1`, `[D-141]` (template.yaml as authoritative
+source for structural work-item fields — the bucket this new field
+belongs in), `SUBJECT-TG-1` (2026-09-15 — established the
+"kickoff_collection propagates per-batch fields via item_dicts, not
+via DeliveryItemBase" pattern this reuses), `RECON-1` (reconciler
+sync-2 backstop path that also benefits from the attachment routing
+via shared `kickoff_collection_task`), `DRR-V2-8g` (2026-08-07 — the
+tpm_notification DRR-day-of send's own attachment fetch, which the
+"missing file, still send, just WARN" policy mirrors).

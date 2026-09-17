@@ -559,6 +559,10 @@ def _send_batch_outreach_email(
 
     Architect Step 5 design 2026-06-28: one email per owner with all the
     owner's items in a single table, not one email per item.
+
+    ATTACH-1 (2026-09-17): also collects per-item `outreach_attachment_path`
+    (populated at item_dicts build time in kickoff_collection) and attaches
+    the resolved files to the email. See `_load_outreach_attachments`.
     """
     body_html = _render_outreach_table(
         owner_identity=owner_identity,
@@ -582,12 +586,14 @@ def _send_batch_outreach_email(
     _tg = _first.get("tg_name") or ""
     _ctx = " / ".join(p for p in (_cust, _dev, _mile, _tg) if p)
     _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
+    attachments = _load_outreach_attachments(items)
     try:
         return _send_email(
             deps,
             to=recipient,
             subject=f"{_subject_prefix} -- Status request -- {batch_id}",
             body_marker=body_html,
+            attachments=attachments,
         )
     except Exception as e:  # noqa: BLE001
         _log.warning(
@@ -595,6 +601,96 @@ def _send_batch_outreach_email(
             recipient, batch_id, len(items), type(e).__name__, str(e)[:120],
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# ATTACH-1 (2026-09-17): per-item static attachment loader for kickoff outreach
+# ---------------------------------------------------------------------------
+
+
+# Map of extension -> IANA media type for the outreach-attachment path. Only
+# the formats we actually expect (checklists, matrices) are enumerated;
+# unknown extensions fall through to a generic octet-stream so the send
+# doesn't fail on a well-meaning but exotic filename.
+_ATTACHMENT_MIME_BY_EXT: dict[str, str] = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".xls":  "application/vnd.ms-excel",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc":  "application/msword",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt":  "application/vnd.ms-powerpoint",
+    ".pdf":  "application/pdf",
+    ".csv":  "text/csv",
+    ".txt":  "text/plain",
+}
+
+
+def _mime_for_attachment(filename: str) -> str:
+    import os as _os
+    _ext = _os.path.splitext(filename)[1].lower()
+    return _ATTACHMENT_MIME_BY_EXT.get(_ext, "application/octet-stream")
+
+
+def _load_outreach_attachments(
+    items: list[dict[str, Any]],
+) -> list[tuple[str, bytes, str]]:
+    """Collect + dedupe filesystem paths from `items[*].outreach_attachment_path`
+    and read them into (filename, bytes, mime) tuples ready to hand to the
+    email sender.
+
+    Per user 2026-09-17: missing / unreadable files are best-effort — a WARN
+    is logged and the offending path is skipped, but the kickoff email is
+    still sent (option (a)). This matches the surrounding pattern in
+    tpm_notification's APPS-xlsx fetch (DRR-V2-8h) — a missing supplementary
+    file must never block outreach.
+
+    Dedupe is by resolved absolute path so the same checklist path listed on
+    two items in one batch attaches once. Order follows first-occurrence
+    among items.
+
+    Only same-batch state is consulted; the file is re-read on every send,
+    so an ops-team edit to the checklist takes effect on the next kickoff
+    without a worker restart.
+    """
+    import os as _os
+    seen: set[str] = set()
+    out: list[tuple[str, bytes, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        raw = (it.get("outreach_attachment_path") or "").strip()
+        if not raw:
+            continue
+        # Resolve to absolute for dedupe key; DO NOT resolve symlinks (a
+        # symlinked checklist is intentional).
+        try:
+            key = _os.path.abspath(raw)
+        except Exception:  # noqa: BLE001
+            key = raw
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            with open(raw, "rb") as _fh:
+                content = _fh.read()
+        except FileNotFoundError:
+            _log.warning(
+                "outreach attachment missing (skipping this file, still sending "
+                "email): path=%r item_no=%s",
+                raw, it.get("item_no"),
+            )
+            continue
+        except OSError as exc:
+            _log.warning(
+                "outreach attachment read failed (skipping this file, still "
+                "sending email): path=%r item_no=%s: %s: %s",
+                raw, it.get("item_no"), type(exc).__name__, str(exc)[:120],
+            )
+            continue
+        filename = _os.path.basename(raw) or "attachment"
+        out.append((filename, content, _mime_for_attachment(filename)))
+    return out
 
 
 def _render_outreach_table(
@@ -840,13 +936,20 @@ def notify_new_owner_task(
 # ---------------------------------------------------------------------------
 
 
-def _send_email(deps: Any, *, to: list[str] | str, subject: str, body_marker: str) -> str:
+def _send_email(
+    deps: Any, *, to: list[str] | str, subject: str, body_marker: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> str:
     """Sync-bridge to deps.email_sender.send(...). Returns Message-ID.
 
     OWNER-3 (2026-08-14): `to` accepts either a single string (backward compat
     for pre-migration callers) OR a list of strings (multi-owner outreach --
     all recipients in TO of ONE email; any owner can reply per architect
     direction). Single string is wrapped in a single-element list.
+
+    ATTACH-1 (2026-09-17): optional `attachments` list threads through to the
+    EWS sender's `attachments: list[tuple[str, bytes, str]]` kwarg (each tuple
+    is (filename, bytes, mime_type)). None or [] behaves exactly like before.
 
     Body composition Ph-1: minimal marker string. Real composer (Jinja2 templates
     + per-customer variables) lands when worker boot wires the full compose_*
@@ -860,6 +963,7 @@ def _send_email(deps: Any, *, to: list[str] | str, subject: str, body_marker: st
         cc=[],
         subject=subject,
         body=body_marker,
+        attachments=attachments,
     )
     try:
         loop = asyncio.get_event_loop()
