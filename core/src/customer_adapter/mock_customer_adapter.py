@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .protocol import CarrierUploadResult
+from .protocol import BatchDispatchResult, CarrierUploadResult, UploadTriplet
 
 __all__ = ["MockCustomerAdapter"]
 
@@ -35,6 +35,12 @@ class MockCustomerAdapter:
         self._default_success: bool = False
         # Call log for test assertions.
         self.calls: list[tuple[str, str, str, str]] = []
+        # CARRIER-BATCH-6 (2026-09-20): captures for the batch surface so
+        # tests can assert on what was dispatched (and simulate callbacks).
+        self.batch_calls: list[dict[str, Any]] = []
+        # If set to True, upload_attachments_batch returns dispatched=False
+        # with CAD-E004 for the whole batch (simulates uploader-side outage).
+        self._batch_dispatch_fails: bool = False
 
     def register_upload_result(
         self,
@@ -90,6 +96,54 @@ class MockCustomerAdapter:
             upload_completed_at=now,
             error_code=None if self._default_success else "CAD-E004",
             error_detail=None if self._default_success else "mock_unregistered",
+        )
+
+    def set_batch_dispatch_fails(self, fails: bool) -> None:
+        """Simulate an uploader-side dispatch failure for the batch path."""
+        self._batch_dispatch_fails = fails
+
+    async def upload_attachments_batch(
+        self,
+        *,
+        device_id: str,
+        milestone_name: str,
+        triplets: list[UploadTriplet],
+        customer_delivery_info: str = "drive.google.com",
+        callback_url: str = "",
+        batch_id: str | None = None,
+    ) -> BatchDispatchResult:
+        """CARRIER-BATCH-6: mock async batch. Captures the call for test
+        assertions and does NOT drive per-file callbacks -- tests that want to
+        exercise the callback endpoint POST to it directly."""
+        import uuid as _uuid
+        now = _utc_now()
+        if not batch_id:
+            batch_id = f"BATCH-{_uuid.uuid4().hex[:16]}"
+        if not customer_delivery_info:
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=now,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E010",
+                error_detail="customer_delivery_info_missing",
+            )
+        self.batch_calls.append({
+            "batch_id":               batch_id,
+            "device_id":              device_id,
+            "milestone_name":         milestone_name,
+            "triplets":               list(triplets),
+            "customer_delivery_info": customer_delivery_info,
+            "callback_url":           callback_url,
+        })
+        if self._batch_dispatch_fails:
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=now,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E004", error_detail="mock_dispatch_fail",
+            )
+        return BatchDispatchResult(
+            dispatched=True, batch_id=batch_id, dispatched_at=now,
+            expected_triplet_count=len(triplets),
+            jenkins_build_id=f"mock-build-{batch_id[-8:]}",
         )
 
     async def health(self) -> dict[str, Any]:

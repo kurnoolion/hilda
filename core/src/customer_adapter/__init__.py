@@ -17,19 +17,23 @@ from core.src.customer_adapter.google_drive_base import GoogleDriveBaseAdapter
 from core.src.customer_adapter.mock_customer_adapter import MockCustomerAdapter
 from core.src.customer_adapter.protocol import (
     AuditWriter,
+    BatchDispatchResult,
     CarrierUploadResult,
     CustomerAdapter,
+    UploadTriplet,
 )
 from core.src.customer_adapter.totp import current_totp, ntp_skew_seconds
 
 __all__ = [
     "AuditWriter",
+    "BatchDispatchResult",
     "CarrierUploadResult",
     "CustomerAdapter",
     "CustomerAdapterConfig",
     "CustomerCredEntry",
     "GoogleDriveBaseAdapter",
     "MockCustomerAdapter",
+    "UploadTriplet",
     "build_credential_service",
     "current_totp",
     "ntp_skew_seconds",

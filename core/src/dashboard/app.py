@@ -903,6 +903,12 @@ def build_app(
     from .document_view_routes import register_document_view_routes
     register_document_view_routes(app, cfg, templates)
 
+    # CARRIER-BATCH-7 (2026-09-20): async carrier-upload callback endpoint.
+    # Corp-side Jenkins POSTs per-file upload results here; HILDA transitions
+    # items RFS -> SubmittedToCustomer as batches drain. See D-217.
+    from .carrier_upload_routes import register_carrier_upload_routes
+    register_carrier_upload_routes(app, cfg)
+
     # FB-5 (2026-07-30): optional email sender for feedback submit
     # notifications. Best-effort wired at build_app so /feedback/*/submit can
     # await email_sender.send() directly. On failure (config missing, sops

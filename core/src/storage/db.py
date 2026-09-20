@@ -36,6 +36,8 @@ from core.src.diagnostics.error_codes import PipelineError
 __all__ = [
     "Base",
     "AutomationRuleOverrideTable",
+    "CarrierUploadBatchTable",
+    "CarrierUploadTripletTable",
     "CommunicationLogTable",
     "DeliveryItemTable",
     "DocumentIndexTable",
@@ -451,6 +453,86 @@ class FeedbackTicketTable(Base):
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# CARRIER-BATCH-3 (2026-09-20): async batch dispatch persistence
+# ---------------------------------------------------------------------------
+
+
+class CarrierUploadBatchTable(Base):
+    """One row per async batch dispatched via CustomerAdapter.upload_attachments_batch.
+
+    Scope: one batch per (customer, device, milestone) — the same scope
+    submit_to_carrier_task iterates. Batch lifecycle:
+      dispatched -> (per-file callbacks arrive, received_count climbs) ->
+        complete (received == expected) OR
+        timed_out (past timeout_at, some triplets unreported) OR
+        failed_dispatch (adapter never got the job to the uploader).
+
+    Retry/reconcile beats read `status` + `timeout_at` to decide what to do.
+    """
+
+    __tablename__ = "carrier_upload_batch"
+    __table_args__ = (
+        Index("ix_cub_scope", "customer_id", "device_id", "milestone_id"),
+        Index("ix_cub_status", "status"),
+        Index("ix_cub_timeout", "timeout_at"),
+    )
+
+    batch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    milestone_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expected_triplet_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_triplet_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Lifecycle: dispatched | complete | timed_out | failed_dispatch
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="dispatched")
+    # Wall-clock deadline for the uploader; past this the reconcile beat
+    # reclassifies unreported triplets as needs_retry.
+    timeout_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Optional cross-reference to the uploader's own job id, for ops debug.
+    jenkins_build_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # If dispatch itself failed, record why.
+    dispatch_error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dispatch_error_detail: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
+class CarrierUploadTripletTable(Base):
+    """One row per file dispatched in a batch. Callback endpoint + retry beat
+    both update this table; per-file audit rows live separately in
+    communication_log (append-only).
+
+    Lifecycle per triplet:
+      dispatched -> succeeded (callback success=True; also on retry success)
+                 -> failed    (callback success=False; retryable while retry_count < max)
+                 -> needs_retry (batch timed out with no callback for this row;
+                                 or per-file retry attempted and errored)
+                 -> exhausted (retry_count reached max; ops alert fires)
+    """
+
+    __tablename__ = "carrier_upload_triplet"
+    __table_args__ = (
+        Index("ix_cut_batch", "batch_id"),
+        Index("ix_cut_batch_item", "batch_id", "item_id"),
+        Index("ix_cut_status", "status"),
+        Index("ix_cut_status_retry", "status", "retry_count"),
+    )
+
+    triplet_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    target_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # Lifecycle: dispatched | succeeded | failed | needs_retry | exhausted
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="dispatched")
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

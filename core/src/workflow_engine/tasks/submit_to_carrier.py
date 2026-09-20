@@ -166,6 +166,28 @@ def submit_to_carrier_task(
     files_failed_migrated   = 0
     items_with_migrated     = 0
 
+    # CARRIER-BATCH-9 (2026-09-20): triplet accumulator for the single async
+    # batch dispatch that happens after the item loop. See D-217.
+    from core.src.customer_adapter import UploadTriplet as _UploadTriplet
+    import uuid as _uuid
+
+    def _new_triplet(*, item_id, file_hash, source_dir, filename, target_dir):
+        return _UploadTriplet(
+            triplet_id=f"TRIP-{_uuid.uuid4().hex[:16]}",
+            item_id=item_id,
+            file_hash=file_hash,
+            source_dir=source_dir,
+            filename=filename,
+            target_dir=target_dir,
+        )
+
+    _batch_triplets: list = []
+    _triplet_to_item_meta: list[dict[str, Any]] = []  # parallel index for audit
+    _batch_migrated_count: int = 0
+    _items_with_triplets: list[str] = []
+    _batch_item_device_id: str = ""
+    _batch_customer_delivery_info: str = ""
+
     for item in items:
         item_id       = getattr(item, "item_id", None) or getattr(item, "delivery_item_id", None)
         state         = getattr(item, "delivery_state", None) or ""
@@ -231,11 +253,15 @@ def submit_to_carrier_task(
             })
             continue
 
-        # -- Per-item upload loop ---------------------------------------------
-        all_ok       = True
-        files_ok     = 0
-        files_failed = 0
-        device_id    = getattr(item, "device_id", None) or event_context.get("device_id") or ""
+        # -- Per-item triplet accumulation (CARRIER-BATCH-9 refactor 2026-09-20)
+        # Was: per-file synchronous upload via _upload_one. Now: build one
+        # UploadTriplet per file, accumulate across ALL items, dispatch ONE
+        # batch after the outer loop. Per-file outcomes flow back via the
+        # HILDA callback endpoint; per-item transitions RFS -> SubmittedToCustomer
+        # happen in the callback endpoint (real-time) or the reconcile beat
+        # (catch-up). See D-217.
+        item_triplet_count = 0
+        item_device_id     = getattr(item, "device_id", None) or event_context.get("device_id") or ""
         customer_delivery_info = getattr(item, "customer_delivery_info", None) or ""
 
         for assoc in assocs:
@@ -255,10 +281,13 @@ def submit_to_carrier_task(
                     "migrated_from=%s",
                     item_id, local_path[:200], source_label or "-",
                 )
-                files_failed += 1
-                if is_migrated:
-                    files_failed_migrated += 1
-                all_ok = False
+                _audit(deps, "submit_to_carrier_bad_path", item_id, {
+                    "customer_id":     customer_id,
+                    "milestone_id":    milestone_id,
+                    "relative_path":   local_path[:200],
+                    "migrated_from":   source_label,
+                    "correlation_id":  correlation_id,
+                })
                 continue
 
             # Sub-folder structure under the carrier target folder.
@@ -336,144 +365,140 @@ def submit_to_carrier_task(
                 )
                 effective_target_dir = target_folder
 
-            try:
-                result = _upload_one(
-                    deps,
-                    device_id=device_id,
-                    milestone_id=milestone_id,
-                    source_dir=source_dir,
-                    target_dir=effective_target_dir,
-                    filename=filename,
-                    customer_delivery_info=customer_delivery_info,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Infra failure -- abort task per architect lock. Celery retry
-                # will pick up remaining items on the next attempt (already-
-                # submitted items skip on re-run via delivery_state check).
-                _log.warning(
-                    "submit_to_carrier_upload_raised: item=%s file=%s exc=%s",
-                    item_id, filename, type(exc).__name__,
-                )
-                _audit(deps, "submit_to_carrier_upload_raised", item_id, {
-                    "customer_id":    customer_id,
-                    "milestone_id":   milestone_id,
-                    "filename":       filename[:120],
-                    "error":          type(exc).__name__,
-                    "attempt":        self.request.retries + 1,
-                    "correlation_id": correlation_id,
-                })
-                raise  # Celery autoretry_for catches; final failure -> MaxRetriesExceededError
-
-            ok = bool(getattr(result, "success", False))
-            error_code = getattr(result, "error_code", None)
-            # DRRP1-1: migrated files get their own action_type so the audit
-            # trail shows plainly that a P1 folder received a DRR document,
-            # and both carry migrated_from for provenance.
-            _mig_details = (
-                {"migrated_from_milestone": mig_milestone,
-                 "migrated_from_item_no": mig_item_no}
-                if is_migrated else {}
-            )
-            if ok:
-                files_ok += 1
-                if is_migrated:
-                    files_uploaded_migrated += 1
-                _audit(
-                    deps,
-                    "submit_to_carrier_migrated_file_ok" if is_migrated
-                    else "submit_to_carrier_file_ok",
-                    item_id,
-                    {
-                        "customer_id":    customer_id,
-                        "milestone_id":   milestone_id,
-                        "filename":       filename[:120],
-                        "target_dir":     effective_target_dir[:120],
-                        "correlation_id": correlation_id,
-                        **_mig_details,
-                    },
-                )
-            else:
-                files_failed += 1
-                if is_migrated:
-                    files_failed_migrated += 1
-                all_ok = False
-                _audit(deps, "submit_to_carrier_file_post_verify_failed", item_id, {
-                    "customer_id":    customer_id,
-                    "milestone_id":   milestone_id,
-                    "filename":       filename[:120],
-                    "target_dir":     effective_target_dir[:120],
-                    "error_code":     error_code or "",
-                    "correlation_id": correlation_id,
-                    **_mig_details,
-                })
-
-        # SUBMIT-STATS-1: accumulate per-file counters into milestone totals
-        # BEFORE state-transition branch so partial items still contribute.
-        files_uploaded_total += files_ok
-        files_failed_total   += files_failed
-
-        # -- Per-item state transition on all-files-success -------------------
-        if all_ok and files_ok > 0:
-            transitioned = _transition_to_submitted(
-                deps,
+            # CARRIER-BATCH-9: accumulate one UploadTriplet per file into the
+            # batch list. Actual upload happens in a single async dispatch
+            # after the outer item loop; per-item state transitions happen
+            # in the callback endpoint / reconcile beat.
+            _batch_triplets.append(_new_triplet(
                 item_id=item_id,
-                customer_id=customer_id,
-                milestone_id=milestone_id,
-                correlation_id=correlation_id,
-            )
-            if transitioned:
-                uploaded_items += 1
-            else:
-                # Files uploaded but state didn't transition -- count as
-                # partial so the caller sees the truth. Item stays in RFS;
-                # next Submit click will retry the transition (uploads are
-                # idempotent per your binding contract).
-                partial_items += 1
-        else:
-            partial_items += 1
-            _log.info(
-                "submit_to_carrier_partial: item=%s files_ok=%d files_failed=%d "
-                "(item stays in %s; will retry on next Submit click)",
-                item_id, files_ok, files_failed, _REQUIRED_FROM_STATE,
-            )
+                file_hash=getattr(assoc, "file_hash", "") or "",
+                source_dir=source_dir,
+                filename=filename,
+                target_dir=effective_target_dir,
+            ))
+            _triplet_to_item_meta.append({
+                "item_id":                item_id,
+                "filename":               filename,
+                "is_migrated":            is_migrated,
+                "mig_milestone":          mig_milestone,
+                "mig_item_no":            mig_item_no,
+            })
+            item_triplet_count += 1
+            if is_migrated:
+                _batch_migrated_count += 1
+
+        if item_triplet_count > 0:
+            _items_with_triplets.append(item_id)
+        if _batch_item_device_id == "" and item_device_id:
+            _batch_item_device_id = item_device_id
+        if _batch_customer_delivery_info == "" and customer_delivery_info:
+            _batch_customer_delivery_info = customer_delivery_info
+
+    # CARRIER-BATCH-9 (2026-09-20): async batch dispatch. Zero-triplet is
+    # defensive (SP-UI enforces >=1 RFS item before submit is clickable) --
+    # skip the adapter call and return early.
+    if not _batch_triplets:
+        _log.info(
+            "submit_to_carrier: milestone=%s scanned=%d no eligible triplets "
+            "(skipped_already=%d skipped_state=%d skipped_upload=%d "
+            "skipped_no_files=%d)",
+            milestone_id, scanned,
+            skipped_already, skipped_state, skipped_upload, skipped_no_files,
+        )
+        return {
+            "outcome":          "no_files_to_upload",
+            "milestone_id":     milestone_id,
+            "customer_id":      customer_id,
+            "items_scanned":    scanned,
+            "batch_dispatched": False,
+            "skipped_already":  skipped_already,
+            "skipped_state":    skipped_state,
+            "skipped_upload":   skipped_upload,
+            "skipped_no_files": skipped_no_files,
+        }
+
+    # Build the callback URL HILDA-side + dispatch the batch.
+    from core.src.customer_adapter.config import CustomerAdapterConfig as _CACfg
+    from core.src.dashboard.carrier_upload_routes import mint_callback_url as _mint_cb
+    _ca_cfg = _CACfg.from_sources()
+    _dash_cfg = getattr(deps, "dashboard_config", None)
+    _wopi_secret = getattr(_dash_cfg, "wopi_jwt_secret", "") if _dash_cfg else ""
+    _reverse_origin = getattr(_dash_cfg, "reverse_proxy_origin", "") if _dash_cfg else ""
+    # Fallback -- if dashboard config isn't wired to task_deps (older deploys),
+    # read directly from environment so we still mint a valid URL. Ops must
+    # ensure REVERSE_PROXY_ORIGIN + WOPI_JWT_SECRET are visible to the worker
+    # process (they already are today for other reasons).
+    if not _wopi_secret:
+        _wopi_secret = os.environ.get("HILDA_WOPI_JWT_SECRET", "unset-secret")
+    if not _reverse_origin:
+        _reverse_origin = os.environ.get("HILDA_REVERSE_PROXY_ORIGIN", "http://localhost:8080")
+    _ttl = int(
+        _ca_cfg.batch_timeout_seconds
+        + _ca_cfg.batch_max_retry_count * _ca_cfg.batch_retry_interval_seconds
+        + _ca_cfg.batch_callback_grace_seconds
+    )
+    # batch_id is minted inside the adapter (mint_callback_url below is called
+    # AFTER dispatch, using the batch_id the adapter returns). Callback URL is
+    # passed IN, so we mint a placeholder ID first and rebuild post-dispatch.
+    # Cleaner: pre-mint a candidate id here, hand to adapter which uses it.
+    import uuid as _uuid_top
+    _batch_id_pre = f"BATCH-{_uuid_top.uuid4().hex[:16]}"
+    _callback_url = _mint_cb(
+        secret=_wopi_secret, reverse_proxy_origin=_reverse_origin,
+        batch_id=_batch_id_pre, ttl_seconds=_ttl,
+    )
+
+    dispatch_result = _dispatch_batch_sync(
+        adapter=deps.customer_adapter,
+        device_id=_batch_item_device_id or (device_id or ""),
+        milestone_name=milestone_id,
+        triplets=_batch_triplets,
+        customer_delivery_info=_batch_customer_delivery_info,
+        callback_url=_callback_url,
+        batch_id=_batch_id_pre,
+    )
+
+    _audit(deps, "submit_to_carrier_batch_dispatched", None, {
+        "customer_id":            customer_id,
+        "milestone_id":           milestone_id,
+        "device_id":              _batch_item_device_id or (device_id or ""),
+        "batch_id":               dispatch_result.batch_id,
+        "dispatched":             dispatch_result.dispatched,
+        "expected_triplet_count": dispatch_result.expected_triplet_count,
+        "items_in_batch":         len(_items_with_triplets),
+        "migrated_triplets":      _batch_migrated_count,
+        "jenkins_build_id":       dispatch_result.jenkins_build_id or "",
+        "error_code":             dispatch_result.error_code or "",
+        "error_detail":           dispatch_result.error_detail or "",
+        "correlation_id":         correlation_id,
+    })
 
     _log.info(
-        "submit_to_carrier: milestone=%s scanned=%d uploaded_items=%d "
-        "partial_items=%d skipped_already=%d skipped_state=%d "
-        "skipped_upload=%d skipped_no_files=%d files_uploaded=%d "
-        "files_failed=%d migrated_uploaded=%d migrated_failed=%d "
-        "items_with_migrated=%d",
-        milestone_id, scanned, uploaded_items, partial_items,
+        "submit_to_carrier: milestone=%s scanned=%d triplets_dispatched=%d "
+        "items_in_batch=%d migrated_triplets=%d batch_id=%s dispatched=%s "
+        "(skipped_already=%d skipped_state=%d skipped_upload=%d skipped_no_files=%d)",
+        milestone_id, scanned, len(_batch_triplets),
+        len(_items_with_triplets), _batch_migrated_count,
+        dispatch_result.batch_id, dispatch_result.dispatched,
         skipped_already, skipped_state, skipped_upload, skipped_no_files,
-        files_uploaded_total, files_failed_total,
-        files_uploaded_migrated, files_failed_migrated, items_with_migrated,
     )
     return {
-        "outcome":            "fired",
-        "milestone_id":       milestone_id,
-        "customer_id":        customer_id,
-        "items_scanned":      scanned,
-        "uploaded_items":     uploaded_items,
-        "partial_items":      partial_items,
-        "skipped_already":    skipped_already,
-        "skipped_state":      skipped_state,
-        "skipped_upload":     skipped_upload,
-        "skipped_no_files":   skipped_no_files,
-        # SUBMIT-STATS-1 (2026-08-28): per-file totals so the caller /
-        # operator can distinguish "5 work items with 12 files total" from
-        # "5 work items with 5 files total". uploaded_items counts items
-        # whose ALL files posted OK and whose state advanced; files_uploaded
-        # counts every individual file that hit the carrier (including
-        # files inside partial_items).
-        "files_uploaded":     files_uploaded_total,
-        "files_failed":       files_failed_total,
-        # DRRP1-1 chunk 3 (2026-09-01): the migrated subset of the above, so a
-        # broken mapping reads as "migrated_uploaded dropped to 0" rather than
-        # hiding inside a slightly smaller files_uploaded. Both are INCLUDED in
-        # files_uploaded / files_failed -- these are a breakdown, not an addend.
-        "files_uploaded_migrated": files_uploaded_migrated,
-        "files_failed_migrated":   files_failed_migrated,
-        "items_with_migrated":     items_with_migrated,
+        "outcome":               "batch_dispatched" if dispatch_result.dispatched else "batch_dispatch_failed",
+        "milestone_id":          milestone_id,
+        "customer_id":           customer_id,
+        "items_scanned":         scanned,
+        "batch_dispatched":      dispatch_result.dispatched,
+        "batch_id":              dispatch_result.batch_id,
+        "triplets_dispatched":   dispatch_result.expected_triplet_count,
+        "items_in_batch":        len(_items_with_triplets),
+        "migrated_triplets":     _batch_migrated_count,
+        "skipped_already":       skipped_already,
+        "skipped_state":         skipped_state,
+        "skipped_upload":        skipped_upload,
+        "skipped_no_files":      skipped_no_files,
+        "jenkins_build_id":      dispatch_result.jenkins_build_id,
+        "dispatch_error_code":   dispatch_result.error_code,
+        "dispatch_error_detail": dispatch_result.error_detail,
     }
 
 
@@ -654,6 +679,58 @@ def _list_classified(deps: Any, delivery_item_id: str) -> list[Any]:
         val = getattr(r, "nsd_path_type", None)
         return getattr(val, "value", val) == "classified"
     return [r for r in rows if _is_classified(r)]
+
+
+def _dispatch_batch_sync(
+    *,
+    adapter: Any,
+    device_id: str,
+    milestone_name: str,
+    triplets: list,
+    customer_delivery_info: str,
+    callback_url: str,
+    batch_id: str | None = None,
+) -> Any:
+    """CARRIER-BATCH-9 (2026-09-20): sync bridge for the async batch dispatch.
+
+    Adapter.upload_attachments_batch is async + non-blocking (returns after
+    the uploader accepts the job, not after uploads complete). This sync
+    wrapper matches the pattern used by _upload_one for the per-file path.
+
+    `batch_id` is pre-minted by the caller so the callback_url's HMAC-signed
+    id matches the persisted batch row. Adapters that receive it use it
+    verbatim; the MockCustomerAdapter mints its own for test isolation.
+    """
+    import asyncio
+    kwargs: dict[str, Any] = dict(
+        device_id=device_id,
+        milestone_name=milestone_name,
+        triplets=triplets,
+        customer_delivery_info=customer_delivery_info,
+        callback_url=callback_url,
+    )
+    # Only pass batch_id if the adapter's signature accepts it -- the
+    # MockCustomerAdapter and older third-party adapters may not.
+    import inspect as _inspect
+    sig = _inspect.signature(adapter.upload_attachments_batch)
+    if batch_id and "batch_id" in sig.parameters:
+        kwargs["batch_id"] = batch_id
+    coro = adapter.upload_attachments_batch(**kwargs)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(coro)
+            finally:
+                new_loop.close()
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
 
 
 def _upload_one(

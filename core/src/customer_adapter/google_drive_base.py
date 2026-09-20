@@ -27,7 +27,12 @@ from core.src.credential_service.protocol import (
 from core.src.diagnostics.error_codes import PipelineError
 
 from .config import CustomerAdapterConfig
-from .protocol import AuditWriter, CarrierUploadResult
+from .protocol import (
+    AuditWriter,
+    BatchDispatchResult,
+    CarrierUploadResult,
+    UploadTriplet,
+)
 from .totp import current_totp, ntp_skew_seconds
 
 __all__ = ["GoogleDriveBaseAdapter"]
@@ -288,6 +293,276 @@ class GoogleDriveBaseAdapter:
         raise NotImplementedError(
             f"per-customer subclass missing for '{self.customer_id}'"
         )
+
+    # ------------------------------------------------------------------
+    # CARRIER-BATCH-5 (2026-09-20): async batch orchestrator
+    # ------------------------------------------------------------------
+
+    async def upload_attachments_batch(
+        self,
+        *,
+        device_id: str,
+        milestone_name: str,
+        triplets: list[UploadTriplet],
+        customer_delivery_info: str,
+        callback_url: str,
+        batch_id: str | None = None,
+    ) -> BatchDispatchResult:
+        """See CustomerAdapter.upload_attachments_batch docstring.
+
+        Orchestrator:
+          1. Validate customer_delivery_info (CAD-E010 mirror per D-126).
+          2. Use caller-provided batch_id or mint one. Persist carrier_upload_batch row.
+          3. Persist one carrier_upload_triplet row per triplet.
+          4. Resolve credentials ONCE for the whole batch.
+          5. Generate TOTP ONCE. Best-effort NTP skew check.
+          6. Delegate to `_invoke_binding_batch` (subclass overrides for the
+             fast Jenkins-batch path; default loops per-triplet via
+             _invoke_binding).
+          7. On dispatch failure: mark batch failed_dispatch, return
+             BatchDispatchResult(dispatched=False, error_code=...).
+          8. Emit one CommunicationLog "carrier_upload_batch_dispatched" row.
+
+        `batch_id` is provided by the caller (submit_to_carrier_task) so
+        the HMAC-signed callback_url baked with that id matches the
+        persisted batch. Callers pre-mint the batch_id to build the URL,
+        pass both in. When None, the adapter mints its own (test fixture
+        path).
+
+        Per-file outcomes flow back via the callback endpoint or (for the
+        default fallback path) inline within _invoke_binding_batch.
+        """
+        import uuid as _uuid
+        from datetime import timedelta
+
+        started = _utc_now()
+        if not batch_id:
+            batch_id = f"BATCH-{_uuid.uuid4().hex[:16]}"
+        timeout_at = started + timedelta(seconds=self._config.batch_timeout_seconds)
+
+        if not customer_delivery_info:
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E010",
+                error_detail="customer_delivery_info_missing",
+            )
+
+        # -- Persist batch + triplet rows BEFORE calling the binding so a
+        # crashed dispatch still leaves durable state the reconcile beat can
+        # pick up.
+        from core.src.storage import carrier_upload_ops as _cu
+        await _cu.insert_batch(
+            batch_id=batch_id, customer_id=self.customer_id,
+            device_id=device_id, milestone_id=milestone_name,
+            dispatched_at=started, expected_triplet_count=len(triplets),
+            timeout_at=timeout_at,
+        )
+        await _cu.insert_triplets([
+            {
+                "triplet_id":  t.triplet_id,
+                "batch_id":    batch_id,
+                "item_id":     t.item_id,
+                "file_hash":   t.file_hash,
+                "filename":    t.filename,
+                "target_dir":  t.target_dir,
+                "source_dir":  t.source_dir,
+                "updated_at":  started,
+            }
+            for t in triplets
+        ])
+
+        if not triplets:
+            # Zero-triplet is defensive per user 2026-09-20 (SP UI enforces
+            # >= 1 RFS item before submit). Mark batch complete and return.
+            await _cu.mark_batch_status(batch_id, "complete")
+            return BatchDispatchResult(
+                dispatched=True, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=0,
+            )
+
+        # -- Resolve credentials + TOTP + NTP skew ONCE for the whole batch.
+        try:
+            cred: Credential = await self._credentials.get_credential(
+                self.pm_id, SystemType.CUSTOMER.value, customer_id=self.customer_id,
+            )
+        except PipelineError as exc:
+            await _cu.mark_batch_status(batch_id, "failed_dispatch")
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E008", error_detail=exc.code_id,
+            )
+        if cred.auth_type != "basic_totp" or not cred.totp_seed:
+            await _cu.mark_batch_status(batch_id, "failed_dispatch")
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E008", error_detail="auth_type_mismatch",
+            )
+        totp_code = current_totp(cred.totp_seed)
+        skew_warning: float | None = None
+        if self._config.diagnostic_ntp_check:
+            skew = await asyncio.to_thread(ntp_skew_seconds)
+            if skew is not None and skew > self._config.ntp_skew_warn_s:
+                skew_warning = skew
+
+        # -- Delegate to _invoke_binding_batch (subclass or default loop).
+        try:
+            jenkins_build_id = await self._invoke_binding_batch(
+                device_id=device_id,
+                milestone_name=milestone_name,
+                triplets=triplets,
+                pm_id=cred.username or self.pm_id,
+                pm_password=cred.password or "",
+                totp_code=totp_code,
+                customer_delivery_info=customer_delivery_info,
+                callback_url=callback_url,
+                batch_id=batch_id,
+            )
+            del totp_code
+        except NotImplementedError as exc:
+            del totp_code
+            await _cu.mark_batch_status(batch_id, "failed_dispatch")
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E009",
+                error_detail=(str(exc)[:64] or "binding_batch_not_implemented"),
+            )
+        except Exception:  # noqa: BLE001
+            del totp_code
+            await _cu.mark_batch_status(batch_id, "failed_dispatch")
+            return BatchDispatchResult(
+                dispatched=False, batch_id=batch_id, dispatched_at=started,
+                expected_triplet_count=len(triplets),
+                error_code="CAD-E004", error_detail="binding_batch_failure",
+            )
+
+        # -- Record jenkins_build_id if the binding returned one.
+        if jenkins_build_id:
+            await _cu.mark_batch_status(
+                batch_id, "dispatched", jenkins_build_id=jenkins_build_id,
+            )
+
+        # -- Emit one audit row for the batch (best-effort, NFR-2 compliant).
+        self._emit_batch_log(
+            batch_id=batch_id, device_id=device_id, milestone_name=milestone_name,
+            expected=len(triplets), latency_ms=_latency_ms(started, _utc_now()),
+            jenkins_build_id=jenkins_build_id, ntp_skew_warning_s=skew_warning,
+        )
+
+        return BatchDispatchResult(
+            dispatched=True, batch_id=batch_id, dispatched_at=started,
+            expected_triplet_count=len(triplets),
+            jenkins_build_id=jenkins_build_id,
+        )
+
+    async def _invoke_binding_batch(
+        self,
+        *,
+        device_id: str,
+        milestone_name: str,
+        triplets: list[UploadTriplet],
+        pm_id: str,
+        pm_password: str,
+        totp_code: str,
+        customer_delivery_info: str,
+        callback_url: str,
+        batch_id: str,
+    ) -> str | None:
+        """Dispatch the batch to the uploader. Returns Jenkins build id (or
+        None if the uploader doesn't provide one).
+
+        DEFAULT IMPLEMENTATION: safe correctness fallback for adapters that
+        haven't implemented a fast Jenkins-batch path. Loops per-triplet
+        calling `_invoke_binding` (the SLOW per-file path); on each result,
+        updates the triplet row via carrier_upload_ops.mark_triplet_result so
+        the reconcile beat can pick up per-item transitions on its next tick.
+
+        Same total wall-clock latency as today's per-file loop -- this
+        preserves correctness while corp-side rolls out the batch binding
+        (or for tests without a real Jenkins). The corp-side subclass
+        overrides this with a single Jenkins job dispatch.
+        """
+        from core.src.storage import carrier_upload_ops as _cu
+        from pathlib import Path
+
+        for t in triplets:
+            success = False
+            error: str | None = None
+            try:
+                ok = await self._invoke_binding(
+                    device_id=device_id,
+                    milestone_name=milestone_name,
+                    source_dir=Path(t.source_dir),
+                    target_dir=t.target_dir,
+                    filename=t.filename,
+                    pm_id=pm_id,
+                    pm_password=pm_password,
+                    totp_code=totp_code,
+                    customer_delivery_info=customer_delivery_info,
+                )
+                success = bool(ok)
+                if not success:
+                    error = "post_verify_failed"
+            except NotImplementedError as exc:
+                error = f"binding_not_implemented: {str(exc)[:64]}"
+            except TimeoutError:
+                error = "binding_timeout"
+            except FileNotFoundError:
+                error = "source_file_missing"
+            except Exception:  # noqa: BLE001
+                error = "binding_failure"
+            await _cu.mark_triplet_result(
+                triplet_id=t.triplet_id, success=success, error=error,
+            )
+
+        # After the loop, mark the batch complete.
+        await _cu.mark_batch_status(batch_id, "complete")
+        return None  # no Jenkins build id in the fallback path
+
+    def _emit_batch_log(
+        self,
+        *,
+        batch_id: str,
+        device_id: str,
+        milestone_name: str,
+        expected: int,
+        latency_ms: int,
+        jenkins_build_id: str | None,
+        ntp_skew_warning_s: float | None,
+    ) -> None:
+        """One CommunicationLog row per batch dispatch. Per-file rows are
+        written when callbacks arrive (dashboard route) or per-triplet during
+        the fallback loop (handled via mark_triplet_result caller).
+        """
+        if self._audit is None:
+            return
+        details: dict[str, Any] = {
+            "customer_id":            self.customer_id,
+            "device_id":              device_id,
+            "milestone_name":         milestone_name,
+            "batch_id":               batch_id,
+            "expected_triplet_count": expected,
+            "dispatch_latency_ms":    latency_ms,
+        }
+        if jenkins_build_id:
+            details["jenkins_build_id"] = jenkins_build_id
+        if ntp_skew_warning_s is not None:
+            details["ntp_skew_warning_s"] = round(ntp_skew_warning_s, 2)
+        try:
+            self._audit.write_communication_log(
+                action_type="carrier_upload_batch_dispatched",
+                delivery_item_id=None,
+                attribution={
+                    "pm_id":       self.pm_id,
+                    "customer_id": self.customer_id,
+                },
+                details=details,
+            )
+        except Exception:
+            pass
 
     async def health(self) -> dict[str, Any]:
         """Returns {ready: bool, customer_id: str, ntp_skew_s: float | None}.

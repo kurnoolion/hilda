@@ -7327,3 +7327,217 @@ sync-2 backstop path that also benefits from the attachment routing
 via shared `kickoff_collection_task`), `DRR-V2-8g` (2026-08-07 — the
 tpm_notification DRR-day-of send's own attachment fetch, which the
 "missing file, still send, just WARN" policy mirrors).
+
+## D-217: Async batch dispatch for submit_to_carrier with HMAC callback + reconcile retry (CARRIER-BATCH)
+
+**Date**: 2026-09-20. **Scope**: `customer_adapter` protocol +
+`GoogleDriveBaseAdapter` + `MockCustomerAdapter` + new
+`storage.carrier_upload_ops` + new
+`dashboard.carrier_upload_routes` callback endpoint + new
+`workflow_engine.tasks.carrier_upload_reconcile` beat +
+`workflow_engine.tasks.submit_to_carrier` refactor +
+`workflow_engine.celery_app` beat entry. Corp-side companion:
+`customizations/customer_adapter/binding.py` gains
+`uploadAttachmentsBatch(...)` and `vzw_adapter.py` gains
+`_invoke_binding_batch(...)` (handed off separately per D-027).
+
+**Context**: The per-file carrier upload path was taking ~4 minutes
+per file (Selenium login + Google Drive folder crawl + tiny actual
+transfer of ~1 MB). A milestone with ~300 files cost ~20 hours,
+which is not deployable. The 4-min cost is dominated by session
+setup, not by the upload itself — every file paid the same fixed
+cost via `CustomerAdapter.upload_attachment` → binding
+`uploadAttachment` → Jenkins → Selenium. Batching the upload with
+a single login + per-folder-navigation-once amortizes the fixed
+cost across all files sharing a target folder.
+
+**Decision**: Add an async batch path alongside the per-file one.
+
+**API surface**:
+- New `UploadTriplet(triplet_id, item_id, file_hash, source_dir,
+  filename, target_dir)` DTO — one per file to upload.
+- New `BatchDispatchResult(dispatched, batch_id, dispatched_at,
+  expected_triplet_count, error_code, error_detail,
+  jenkins_build_id)` — non-blocking dispatch result.
+- New `CustomerAdapter.upload_attachments_batch(*, device_id,
+  milestone_name, triplets, customer_delivery_info, callback_url,
+  batch_id=None)` — one call per (customer, device, milestone)
+  scope, non-blocking. The default `GoogleDriveBaseAdapter`
+  orchestrator persists batch + triplet rows, resolves creds/TOTP
+  once, and delegates to `_invoke_binding_batch(...)`.
+- Existing per-file `upload_attachment` retained — used verbatim as
+  the retry-fallback path by the reconcile beat.
+
+**Uploader contract (Variant X)** — the batch's triplet shape:
+`source_dir` is the corp-box absolute directory holding the file
+(a real filesystem path); `filename` is the file's basename
+(never prefixed); `target_dir` is the Drive-side folder tree
+beneath `<binding-root>/<Model_No>/<milestone_name>/` and MUST
+already include any archive-derived subdir when `from_zip=True`
+(HILDA composes this via existing UPLOAD-VIEW-1 `carrier_subdir()`).
+Uploader semantics: open `<source_dir>/<filename>` locally,
+navigate to `<target_dir>` on Drive (mkdir any missing segments
+in-session), upload. Source-side subdirs are opaque to the
+uploader; Drive-side subdirs come exclusively from `target_dir`.
+
+**Batch scope**: one call per (customer, device_id,
+milestone_name) — matches `submit_to_carrier_task`'s own scope.
+The uploader groups triplets by unique `target_dir` internally and
+pays the login+navigation cost once per unique Drive folder rather
+than per file. A 300-file batch across 25 distinct target_dirs
+pays that cost 25×, not 300×.
+
+**Async persistence**: two new tables.
+`carrier_upload_batch(batch_id, customer_id, device_id,
+milestone_id, dispatched_at, expected_triplet_count,
+received_triplet_count, status, timeout_at, jenkins_build_id,
+dispatch_error_code, dispatch_error_detail)` and
+`carrier_upload_triplet(triplet_id, batch_id, item_id, file_hash,
+filename, target_dir, source_dir, status, retry_count, last_error,
+completed_at, updated_at)`. Lifecycle:
+- Batch: `dispatched` → (`complete` | `timed_out` |
+  `failed_dispatch`).
+- Triplet: `dispatched` → (`succeeded` | `failed` | `needs_retry`
+  | `exhausted`).
+
+**HMAC callback endpoint**: new `POST /api/v1/carrier_upload/
+callback/<batch_id>?token=<hmac>`. HILDA generates the fully-formed
+URL — signed with `DashboardConfig.wopi_jwt_secret` (HMAC-SHA256,
+32-char hex), token body `<batch_id>|<expires_at_unix>` — and
+hands it to the uploader as part of the dispatch. Uploader treats
+the URL as an opaque capability token and POSTs
+`{batch_id, triplet_id, filename, target_dir, success, error_code,
+error_detail, elapsed_ms}` per file as uploads complete. HILDA
+never gives the uploader `wopi_jwt_secret`.
+
+**Callback handler**: validates HMAC + expiry, updates the triplet
+row via `mark_triplet_result`, writes one `communication_log` row
+per file (action_type=`carrier_upload`), checks per-item
+completion, and transitions the delivery item RFS →
+SubmittedToCustomer when every triplet for that (batch, item) is
+`succeeded`. When `received_triplet_count == expected_triplet_count`
+the batch flips to `complete`.
+
+**Reconcile beat** (`carrier_upload_reconcile_task`, every 15 min
+by default, tunable via `HILDA_CARRIER_UPLOAD_RECONCILE_INTERVAL_
+SEC`):
+1. Any batch past `timeout_at` with status still `dispatched` →
+   mark unreported triplets `needs_retry`, batch → `timed_out`.
+2. Any triplet in `needs_retry` or `failed` state with
+   `retry_count < max_retry_count` → call PER-FILE
+   `adapter.upload_attachment(...)` (existing slow-path). On
+   success: mark `succeeded` + check per-item completion +
+   transition. On failure: `retry_count++`.
+3. Any triplet with `retry_count >= max_retry_count` → mark
+   `exhausted`, emit
+   `carrier_upload_max_retries_exhausted` ops alert, item stays in
+   RFS for TPM intervention.
+
+**Retry timeline** (per user 2026-09-20): `batch_timeout_seconds`
+(1h default) is NOT the give-up point — it's when reconcile kicks
+in. Total window = `batch_timeout` + `max_retry_count` ×
+`retry_interval` = 60 + 3×15 = 105 min for defaults. HMAC token
+TTL = window + 5 min grace so late Jenkins POSTs still validate
+during the retry phase.
+
+**Config knobs** (new fields on `CustomerAdapterConfig`):
+- `batch_timeout_seconds` = 3600 (1 h)
+- `batch_retry_interval_seconds` = 900 (15 min)
+- `batch_max_retry_count` = 3
+- `batch_callback_grace_seconds` = 300 (5 min)
+
+All four env-overridable via `HILDA_CUSTOMER_ADAPTER_BATCH_*`.
+
+**submit_to_carrier_task refactor**: The task no longer uploads
+files itself. It preserves the item filter (state == RFS,
+no_customer_upload, target_folder, `list_upload_files_for_item`,
+migrated files), computes `effective_target_dir` per file via
+existing `carrier_subdir()` (UPLOAD-VIEW-1 unchanged), accumulates
+one `UploadTriplet` per file across ALL items in scope, and
+dispatches ONE `adapter.upload_attachments_batch(...)` after the
+outer loop. Returns quickly with `{outcome: "batch_dispatched",
+batch_id, triplets_dispatched, items_in_batch}`. Per-item
+transitions RFS → SubmittedToCustomer happen in the callback
+endpoint (real-time) or reconcile beat (retry catch-up).
+
+**Base adapter safe-loop fallback**: `_invoke_binding_batch`
+default implementation loops per-triplet calling the existing
+`_invoke_binding` (slow per-file path) and updates triplet rows
+via `mark_triplet_result` inline. Adapters that don't override
+`_invoke_binding_batch` for a fast Jenkins-batch path stay
+correct — just at today's slow speed. Corp-side overrides for
+the fast path.
+
+**Ph-1 note (user 2026-09-20)**: "no future Ph-2 anymore" for
+this feature — retry beat, batch timeout, ops alert on
+exhausted, per-file fallback all shipped in this pass. STATUS.md
+narrow-updated (this feature's Ph-2 flags removed; broad Ph-2
+audit deferred to its own session).
+
+**Why this over the alternatives**:
+
+- **Blocking sync batch call** (adapter blocks up to 1 h waiting
+  for Jenkins to finish, returns full per-file result): would tie
+  up a Celery worker slot for the entire batch window, and
+  requires no callback endpoint. Rejected because a stuck
+  worker slot blocks all other submits behind it, and 1 h HTTP
+  hold-open is fragile across corp firewalls / keep-alives.
+  Async + callback lets HILDA workers process other items
+  during the upload.
+- **Direct Postgres write from Jenkins** (uploader writes
+  `communication_log` rows directly): couples Jenkins to HILDA's
+  schema and requires distributing HILDA's DB credentials. HTTP
+  callback keeps HILDA the sole DB writer and confines the
+  contract to a single endpoint URL.
+- **Per-item batch scope** (one Jenkins call per work item): with
+  a milestone of 15 items × 20 files each, this still pays the
+  Selenium login+crawl cost 15×, dropping only from 20 h to ~1 h
+  — not the target. Per-milestone scope hits the ~15-25-min
+  actual-upload time.
+- **Retry via same batch API** (dispatch a small batch of just
+  the failed files): would work but re-negotiates the Jenkins
+  callback URL and adds another persistence layer for
+  retry-batches. Per-file fallback (existing proven
+  `upload_attachment` path) is simpler.
+- **No retry (leave failures for TPM to re-click Submit)**:
+  operational burden on TPMs. Auto-retry with a hard exhaust cap
+  respects TPM time.
+
+**Consequences**:
+
+- Only the batch-adapter API is new; per-file `upload_attachment`
+  remains fully functional for retry + adapters that haven't
+  implemented batch.
+- Corp side handles the Jenkins-batch implementation via a new
+  `uploadAttachmentsBatch(Model_No, milestone_name, triplets,
+  pm_id, pm_password, totp_code, callback_url)` in
+  `customizations/customer_adapter/binding.py` and
+  `_invoke_binding_batch(...)` in `vzw_adapter.py`. Handed off
+  as paste blocks per D-027 (public github never carries corp
+  binding code).
+- 17 existing per-file submit tests marked `@pytest.mark.skip`
+  with a pointer to the new `TestCarrierBatchDispatch` +
+  `TestCarrierUploadCallback` + `TestCarrierUploadOpsRoundtrip`
+  test classes. The old per-file per-item state-transition
+  contract is superseded, not deprecated; kept in the file as
+  reference until the follow-up test-cleanup session.
+- New tables `carrier_upload_batch` + `carrier_upload_triplet`
+  auto-create via `init_db()` (dev/test); production deploys
+  need an Alembic migration or `python -c "import asyncio; from
+  core.src.storage.db import init_db; asyncio.run(init_db())"`.
+- Guard 4 trust of `trigger_source='submit_to_carrier_task'`
+  (per D-140) preserved — the callback endpoint's transition
+  helper uses this trigger_source verbatim, so state-machine
+  guards behave identically.
+- One `communication_log` row per file (via callback endpoint)
+  matches today's per-file audit shape; one additional
+  `carrier_upload_batch_dispatched` row per batch adds no
+  per-item noise.
+
+**Anchors**: `CARRIER-BATCH-1..15`, `[D-116]` (thin-wrapper
+adapter shape this extends), `[D-027]` (Teacher/Student split —
+corp binding code stays out of public github), `[D-140]` (Guard 4
+trigger_source trust preserved), `UPLOAD-VIEW-1` (2026-08-30 —
+`carrier_subdir()` computation used verbatim to compose
+`target_dir`), `UPLOAD-FLAT-1` (2026-08-31 — from_zip
+discrimination for archive subdir vs NSD folder noise).

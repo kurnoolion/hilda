@@ -157,6 +157,25 @@ def build_celery_app(config: WorkflowEngineConfig | None = None) -> Celery:
             "schedule": float(os.environ.get("HILDA_PLM_POLL_INTERVAL_SEC") or 900.0),
             "options":  {"queue": "default", "expires": 850},
         },
+        # CARRIER-BATCH-10 (2026-09-20) -- async carrier-upload reconcile beat.
+        # Two responsibilities per tick: (1) mark unreported triplets of any
+        # batch past its timeout_at as needs_retry (flip batch to timed_out);
+        # (2) drain needs_retry/failed triplets via the per-file
+        # upload_attachment path; exhausted triplets after batch_max_retry_count
+        # attempts fire a carrier_upload_max_retries_exhausted ops alert.
+        # Default 900s (15 min) matches CustomerAdapterConfig.batch_retry_
+        # interval_seconds; tune via HILDA_CARRIER_UPLOAD_RECONCILE_INTERVAL_SEC.
+        # Task naturally no-ops when no batches are dispatched -- cheap to
+        # leave on. expires just under the interval.
+        "carrier_upload_reconcile_15min": {
+            "task":     "core.src.workflow_engine.tasks.carrier_upload_reconcile."
+                        "carrier_upload_reconcile",
+            "schedule": float(
+                os.environ.get("HILDA_CARRIER_UPLOAD_RECONCILE_INTERVAL_SEC")
+                or 900.0
+            ),
+            "options":  {"queue": "default", "expires": 850},
+        },
     }
     return app
 

@@ -37,6 +37,7 @@ from . import (  # noqa: F401
     ops_digest,   # UR-8 added 2026-08-01: weekly ops digest of unrouted files
     nsd2_poll,   # NSD2-3 added 2026-08-08: periodic NSD2 SMB share poller for tg_name='HW PL' documents
     plm_poll,    # PLM-3 added 2026-08-14: periodic PLM ticket create + download + ingest for MQL-FIT/MNO-SOLUTION items
+    carrier_upload_reconcile,  # CARRIER-BATCH-8 added 2026-09-20: async batch timeout + retry + max-exhausted beat
 )
 
 __all__ = [
@@ -59,4 +60,5 @@ __all__ = [
     "setup_complete_notification",
     "ops_digest",
     "plm_poll",
+    "carrier_upload_reconcile",
 ]
