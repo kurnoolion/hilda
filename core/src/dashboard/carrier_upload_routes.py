@@ -76,16 +76,32 @@ def mint_callback_url(
     reverse_proxy_origin: str,
     batch_id: str,
     ttl_seconds: int,
+    url_prefix: str = "",
 ) -> str:
     """Build the full URL the corp-side uploader POSTs to.
 
-    reverse_proxy_origin: e.g. "https://hilda.corp.example:8443"; produced
-    from DashboardConfig.reverse_proxy_origin.
+    URLPFX-1 (2026-09-07): corp nginx serves HILDA under `/hilda/*` and
+    strips the prefix before proxying to FastAPI, so route declarations
+    stay unprefixed but every emitted URL a browser or external service
+    hits must carry the prefix.
+
+    Args:
+      secret: HILDA's wopi_jwt_secret; used for HMAC signing.
+      reverse_proxy_origin: e.g. "https://hilda.corp.example:8443" from
+        DashboardConfig.reverse_proxy_origin.
+      batch_id: HILDA-minted batch id.
+      ttl_seconds: how long the HMAC token stays valid.
+      url_prefix: DashboardConfig.url_prefix (e.g. "/hilda"); empty for
+        deployments serving at root. Uses url_prefix.join() semantics so
+        double-prefixing is idempotent.
     """
+    from .url_prefix import join as _url_join
+
     expires_at = int(time.time()) + int(ttl_seconds)
     token = mint_callback_token(secret=secret, batch_id=batch_id, expires_at=expires_at)
     origin = reverse_proxy_origin.rstrip("/")
-    return f"{origin}/api/v1/carrier_upload/callback/{batch_id}?token={token}"
+    path = _url_join(url_prefix, f"/api/v1/carrier_upload/callback/{batch_id}")
+    return f"{origin}{path}?token={token}"
 
 
 def verify_callback_token(

@@ -424,28 +424,32 @@ def submit_to_carrier_task(
     _dash_cfg = getattr(deps, "dashboard_config", None)
     _wopi_secret = getattr(_dash_cfg, "wopi_jwt_secret", "") if _dash_cfg else ""
     _reverse_origin = getattr(_dash_cfg, "reverse_proxy_origin", "") if _dash_cfg else ""
+    _url_prefix = getattr(_dash_cfg, "url_prefix", "") if _dash_cfg else ""
     # Fallback -- if dashboard config isn't wired to task_deps (older deploys),
     # read directly from environment so we still mint a valid URL. Ops must
-    # ensure REVERSE_PROXY_ORIGIN + WOPI_JWT_SECRET are visible to the worker
-    # process (they already are today for other reasons).
+    # ensure REVERSE_PROXY_ORIGIN + WOPI_JWT_SECRET + URL_PREFIX are visible
+    # to the worker process (they already are today for other reasons).
     if not _wopi_secret:
         _wopi_secret = os.environ.get("HILDA_WOPI_JWT_SECRET", "unset-secret")
     if not _reverse_origin:
         _reverse_origin = os.environ.get("HILDA_REVERSE_PROXY_ORIGIN", "http://localhost:8080")
+    if not _url_prefix:
+        # URLPFX-1 default: corp nginx serves HILDA under /hilda/*.
+        _url_prefix = os.environ.get("HILDA_DASHBOARD_URL_PREFIX", "/hilda")
     _ttl = int(
         _ca_cfg.batch_timeout_seconds
         + _ca_cfg.batch_max_retry_count * _ca_cfg.batch_retry_interval_seconds
         + _ca_cfg.batch_callback_grace_seconds
     )
-    # batch_id is minted inside the adapter (mint_callback_url below is called
-    # AFTER dispatch, using the batch_id the adapter returns). Callback URL is
-    # passed IN, so we mint a placeholder ID first and rebuild post-dispatch.
-    # Cleaner: pre-mint a candidate id here, hand to adapter which uses it.
+    # HILDA pre-mints batch_id here so the callback URL's HMAC-signed id
+    # matches the batch row the adapter is about to persist. Adapter
+    # accepts batch_id kwarg and uses it verbatim.
     import uuid as _uuid_top
     _batch_id_pre = f"BATCH-{_uuid_top.uuid4().hex[:16]}"
     _callback_url = _mint_cb(
         secret=_wopi_secret, reverse_proxy_origin=_reverse_origin,
         batch_id=_batch_id_pre, ttl_seconds=_ttl,
+        url_prefix=_url_prefix,
     )
 
     dispatch_result = _dispatch_batch_sync(

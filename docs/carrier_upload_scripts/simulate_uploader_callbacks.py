@@ -77,13 +77,31 @@ def _hmac_hex(secret: str, body: str) -> str:
 
 def mint_callback_url(
     *, secret: str, reverse_proxy_origin: str, batch_id: str, ttl_seconds: int,
+    url_prefix: str = "/hilda",
 ) -> str:
+    """URLPFX-1 (2026-09-07): corp nginx serves HILDA under `/hilda/*` and
+    strips the prefix before proxying. Emitted URLs must carry the prefix
+    so nginx routes them.
+
+    Default url_prefix='/hilda' matches the corp deployment. Pass
+    url_prefix='' when HILDA serves at the root (dev / test rigs).
+    Do NOT include the prefix in reverse_proxy_origin -- that would
+    produce `/hilda/hilda/...`.
+    """
     expires_at = int(time.time()) + int(ttl_seconds)
     body = f"{batch_id}|{expires_at}"
     sig = _hmac_hex(secret, body)
     token = f"{expires_at}.{sig}"
     origin = reverse_proxy_origin.rstrip("/")
-    return f"{origin}/api/v1/carrier_upload/callback/{batch_id}?token={token}"
+    # Simple prefix join -- if url_prefix is empty, produces "/api/..."; otherwise
+    # produces "/hilda/api/..." (or whatever prefix). Idempotent if the path
+    # already starts with the prefix.
+    pfx = url_prefix.strip("/")
+    if pfx:
+        prefix = f"/{pfx}"
+    else:
+        prefix = ""
+    return f"{origin}{prefix}/api/v1/carrier_upload/callback/{batch_id}?token={token}"
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +274,11 @@ def _parse_args() -> argparse.Namespace:
         "--ttl-seconds", type=int, default=6600,   # 110 min (matches HILDA default)
         help="HMAC token TTL when minting URL",
     )
+    p.add_argument(
+        "--url-prefix", default="/hilda",
+        help="Dashboard URL prefix (URLPFX-1). Corp nginx serves HILDA under "
+             "/hilda/* by default; pass '' if HILDA serves at root.",
+    )
 
     # Triplet source: postgres OR json OR neither (empty).
     p.add_argument("--postgres-url", help="DB URL to auto-load triplets from")
@@ -327,6 +350,7 @@ def main() -> int:
             reverse_proxy_origin=args.reverse_proxy_origin,
             batch_id=args.batch_id,
             ttl_seconds=args.ttl_seconds,
+            url_prefix=args.url_prefix,
         )
 
     fail_ids = set(x.strip() for x in args.fail_triplet_ids.split(",") if x.strip())
