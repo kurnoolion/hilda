@@ -7541,3 +7541,131 @@ trigger_source trust preserved), `UPLOAD-VIEW-1` (2026-08-30 —
 `carrier_subdir()` computation used verbatim to compose
 `target_dir`), `UPLOAD-FLAT-1` (2026-08-31 — from_zip
 discrimination for archive subdir vs NSD folder noise).
+
+---
+
+## D-218: Carrier-upload retry is a batch re-dispatch, gated on Jenkins job completion (CARRIER-RETRY)
+
+**Date**: 2026-09-23. **Scope**: `customer_adapter.protocol`
+(two new methods + two new result dataclasses) +
+`GoogleDriveBaseAdapter` thin wrappers + `MockCustomerAdapter` +
+`storage.db` schema (3 batch columns, 1 triplet column, 1 new
+triplet status) + `storage.carrier_upload_ops` +
+`dashboard.carrier_upload_routes` callback contract +
+`workflow_engine.tasks.carrier_upload_reconcile` rewrite +
+`workflow_engine.task_deps` / `bootstrap` (ops_alerts +
+dashboard_config wiring) + `submit_to_carrier` deprecations.
+Corp-side companion: `binding.py` gains
+`is_jenkins_build_completed(...)` / `kill_jenkins_job(...)` and
+`vzw_adapter.py` gains `_invoke_binding_job_status(...)` /
+`_invoke_binding_kill_job(...)` (handed off separately per D-027).
+
+**Context**: D-217 shipped the batch dispatch but kept the
+per-file `upload_attachment` as the retry fallback. First live
+100+-file submission exposed three holes. (1) The fallback
+re-pays the 4-minute Selenium login for every stranded file —
+30 stragglers is 2 hours, reintroducing exactly the cost
+CARRIER-BATCH removed. (2) A batch passing `timeout_at` is not
+evidence the Jenkins job finished; a legitimately-slow large job
+would be re-dispatched on top of itself, duplicating uploads into
+the same Drive folder. (3) The callback's `success` boolean could
+not distinguish a transient failure from a permanent one (Drive
+login death), so HILDA burned all 3 retries on faults that could
+never succeed. Separately, a dispatch failure marked the batch
+`failed_dispatch` but left its triplets at `dispatched`, and the
+sweep only scanned `dispatched` BATCHES — those files were never
+retried and never alerted.
+
+**Decision**:
+
+1. **Retry = batch re-dispatch under the same `batch_id`.** The
+   reconcile beat builds the still-pending subset, mints a fresh
+   callback URL, and dispatches ONE new Jenkins job carrying only
+   those files. `upload_attachment` is deprecated (CARRIER-UNIFY):
+   a single-file upload is a batch of one on the same plumbing.
+2. **`error_code` (int) replaces `success` (bool)** on the
+   callback: 0 = uploaded, 1 = retryable, 2 = permanent. An
+   unrecognised code is treated as 1. A BATCH-level fault is
+   POSTed as `error_code=2` with `triplet_id`/`filename`/
+   `target_dir` empty, and drags every pending triplet in the
+   batch to `permanent_failure`.
+3. **Completion gate before every re-dispatch.**
+   `is_batch_job_completed()` wraps the corp
+   `is_jenkins_build_completed` API; only a 0 return authorises a
+   re-dispatch. Past `kill_at` (default `batch_timeout` + one
+   `retry_interval` = 75 min) a still-running job is torn down via
+   `kill_batch_job()` first. A failed kill blocks the re-dispatch
+   for that tick.
+4. **Give-up is batch-level.** `carrier_upload_batch.retry_count`
+   drives it, not per-triplet counters — one retry dispatches one
+   job for the whole pending subset, so the batch is the natural
+   unit. A REFUSED dispatch does not burn a retry slot.
+5. **One aggregated ops alert per dead batch**, covering both
+   `exhausted` and `permanent_failure`, made exactly-once by
+   `carrier_upload_batch.alerted_at`. `ops_alerts` (built under
+   D-127, zero call sites since) is wired into `TaskDeps` +
+   `bootstrap` to carry it.
+6. **Token TTL is per-attempt**, not per-chain: a fresh callback
+   URL is minted on every re-dispatch, so the HMAC token only has
+   to outlive one attempt's `kill_at` plus grace.
+
+**Why**:
+
+- **vs. keeping the per-file fallback**: it is the very cost the
+  batch API was built to remove, and it needs a second code path
+  (different adapter method, different result shape, different
+  audit rows) kept correct forever. Reusing the batch API means
+  one contract, one callback endpoint, one persistence model.
+- **vs. a NEW batch_id per retry**: reusing the id keeps the whole
+  retry history of a submission under one correlation id in
+  `communication_log`, and keeps `carrier_upload_triplet` rows
+  stable (no re-keying). Architect call 2026-09-23.
+- **vs. re-dispatching the full original set**: already-succeeded
+  files would be re-uploaded, producing duplicate Drive revisions.
+  The manifest carries only pending files.
+- **vs. trusting `timeout_at` alone to mean "job done"**: the
+  failure mode is silent duplicate uploads into a customer-visible
+  Drive folder — the most expensive mistake available here. One
+  API call per batch per tick is cheap insurance.
+- **vs. killing immediately at `timeout_at`**: a 300-file job that
+  is merely slow would be killed and restarted forever. The
+  separate `kill_at` gives one extra grace window before we pull
+  the plug.
+- **vs. per-file ops alerts**: a 300-file batch failure would
+  produce 300 emails. Architect call: one aggregated alert per
+  batch, file list capped at 25 in the payload.
+- **vs. alerting from the callback endpoint**: the dashboard
+  process would need an alert sink and would re-alert on every
+  late POST. The `alerted_at` sweep in the beat is one place, once.
+
+**Consequences**:
+
+- The `success` field is GONE from the callback contract. The
+  Jenkins/uploader spec must be re-issued with `error_code`; the
+  simulator (`docs/carrier_upload_scripts/`) is updated and gains
+  `--permanent-fail-triplet-ids` + `--batch-permanent-fault`.
+- Two new corp binding functions are REQUIRED for the retry path
+  to work against real Jenkins. Without them the base-class hooks
+  raise `NotImplementedError`, which the wrappers map to
+  "completed / killable" — correct for tests and the fallback
+  loop (no real job to collide with), but it means a corp deploy
+  missing the overrides silently loses the double-upload guard.
+- Schema change: `carrier_upload_batch` + `carrier_upload_triplet`
+  gain columns. Dev/test auto-create via `init_db()`; the corp
+  deploy needs the same `init_db()` run as D-217.
+- `_upload_one` in `submit_to_carrier` and
+  `update_triplet_retry_state` / `list_triplets_needing_retry` in
+  `carrier_upload_ops` are dead but retained one release as a
+  rollback surface for the corp binding.
+- Items with a `permanent_failure` file never reach
+  SubmittedToCustomer; they stay in ReadyForSubmission for the TPM,
+  which is the intended human-in-the-loop outcome.
+- `TaskDeps` gains `ops_alerts` + `dashboard_config`. Both default
+  None and degrade (audit-log-only alerts; env-var callback URLs),
+  so older deploys keep working.
+
+**Anchors**: `CARRIER-RETRY-1..11`, `[D-217]` (the batch dispatch
+this extends), `[D-127]` (ops_alerts, first wired here),
+`[D-027]` (corp binding bodies stay out of public github),
+`[D-140]` (Guard 4 trigger_source trust unchanged), `URLPFX-1`
+(callback URLs carry the `/hilda` prefix).
