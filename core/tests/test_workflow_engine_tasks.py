@@ -2422,6 +2422,7 @@ class _RichFakeAdapter:
                 device_id=device_id, milestone_id=milestone_name,
                 dispatched_at=now, expected_triplet_count=len(triplets),
                 timeout_at=now + timedelta(hours=1),
+                kill_at=now + timedelta(minutes=75),
             )
             await _cu.insert_triplets([
                 {
@@ -3171,23 +3172,28 @@ class TestCarrierUploadCallback:
     update + per-item RFS -> SubmittedToCustomer transition.
     """
 
-    async def _seed_batch(self, batch_id="BATCH-callbk", triplet_id="TRIP-01"):
+    async def _seed_batch(
+        self, batch_id="BATCH-callbk", triplet_id="TRIP-01", n_triplets=1,
+    ):
         from datetime import datetime, timezone, timedelta
         from core.src.storage import carrier_upload_ops as _cu
         now = datetime.now(timezone.utc)
         await _cu.insert_batch(
             batch_id=batch_id, customer_id="MMK",
             device_id="SM-S671U1", milestone_id="P1",
-            dispatched_at=now, expected_triplet_count=1,
+            dispatched_at=now, expected_triplet_count=n_triplets,
             timeout_at=now + timedelta(hours=1),
+            kill_at=now + timedelta(minutes=75),
         )
+        ids = [triplet_id] + [f"{triplet_id}-{i}" for i in range(1, n_triplets)]
         await _cu.insert_triplets([
             {
-                "triplet_id":  triplet_id, "batch_id": batch_id,
-                "item_id":     "ITEM-callback-1", "file_hash": "hcb",
-                "filename":    "cb.pdf", "target_dir": "Doc/A",
+                "triplet_id":  tid, "batch_id": batch_id,
+                "item_id":     "ITEM-callback-1", "file_hash": f"hcb{i}",
+                "filename":    f"cb{i}.pdf", "target_dir": "Doc/A",
                 "source_dir":  "/nsd/x", "updated_at": now,
             }
+            for i, tid in enumerate(ids)
         ])
         return batch_id, triplet_id
 
@@ -3210,38 +3216,84 @@ class TestCarrierUploadCallback:
         from core.src.storage import carrier_upload_ops as _cu
         bid, tid = await self._seed_batch()
         updated = await _cu.mark_triplet_result(
-            triplet_id=tid, success=True,
+            triplet_id=tid, error_code=0,
         )
         assert updated is not None
         assert updated.status == "succeeded"
+        assert updated.last_error_code == 0
         batch = await _cu.get_batch(bid)
         assert batch.received_triplet_count == 1
 
-    async def test_mark_triplet_failure_records_error_no_retry_increment(self, _batch_storage_env):
+    async def test_error_code_1_is_retryable_not_terminal(self, _batch_storage_env):
+        """CARRIER-RETRY-1: code 1 leaves the triplet PENDING so the batch's
+        next re-dispatch carries it; it must not count as reported-terminal."""
         from core.src.storage import carrier_upload_ops as _cu
         bid, tid = await self._seed_batch(batch_id="BATCH-fail", triplet_id="TRIP-fail")
         updated = await _cu.mark_triplet_result(
-            triplet_id=tid, success=False, error="post_verify_failed",
+            triplet_id=tid, error_code=1, error="post_verify_failed",
         )
         assert updated is not None
-        assert updated.status == "failed"
-        assert updated.retry_count == 0
+        assert updated.status == "needs_retry"
+        assert updated.last_error_code == 1
         assert updated.last_error == "post_verify_failed"
+        pending = await _cu.list_pending_triplets_for_batch(bid)
+        assert [t.triplet_id for t in pending] == [tid]
+        # Not terminal -> batch cannot settle yet.
+        assert await _cu.settle_batch_if_all_reported(bid) is None
 
-    async def test_retry_update_reaches_exhausted_after_max(self, _batch_storage_env):
+    async def test_error_code_2_is_terminal_and_never_retried(self, _batch_storage_env):
+        """CARRIER-RETRY-1: code 2 (e.g. Drive login died) is permanent --
+        excluded from the pending subset so no re-dispatch picks it up."""
         from core.src.storage import carrier_upload_ops as _cu
-        bid, tid = await self._seed_batch(batch_id="BATCH-exh", triplet_id="TRIP-exh")
-        # First mark as failed via callback path
-        await _cu.mark_triplet_result(triplet_id=tid, success=False, error="e0")
-        # Simulate reconcile retry loop: 3 attempts (max=3), all fail.
-        for _ in range(3):
-            await _cu.update_triplet_retry_state(
-                triplet_id=tid, success=False, error="still failing",
-                max_retry_count=3,
-            )
-        final = await _cu.get_triplet(tid)
-        assert final.status == "exhausted"
-        assert final.retry_count == 3
+        bid, tid = await self._seed_batch(batch_id="BATCH-perm", triplet_id="TRIP-perm")
+        updated = await _cu.mark_triplet_result(
+            triplet_id=tid, error_code=2, error="drive_login_failed",
+        )
+        assert updated.status == "permanent_failure"
+        assert await _cu.list_pending_triplets_for_batch(bid) == []
+        # All reported -> batch settles as permanent_failure, not complete.
+        assert await _cu.settle_batch_if_all_reported(bid) == "permanent_failure"
+
+    async def test_unknown_error_code_treated_as_retryable(self, _batch_storage_env):
+        """A code from a future uploader build should cost a retry, not a
+        silently dropped file."""
+        from core.src.storage import carrier_upload_ops as _cu
+        bid, tid = await self._seed_batch(batch_id="BATCH-unk", triplet_id="TRIP-unk")
+        updated = await _cu.mark_triplet_result(triplet_id=tid, error_code=99)
+        assert updated.status == "needs_retry"
+
+    async def test_batch_level_permanent_failure_drags_pending_triplets(
+        self, _batch_storage_env,
+    ):
+        """CARRIER-RETRY-1: the batch-level error_code=2 callback carries no
+        triplet_id -- every still-pending file in the batch dies with the job,
+        while already-succeeded files keep their result."""
+        from core.src.storage import carrier_upload_ops as _cu
+        bid, tid = await self._seed_batch(
+            batch_id="BATCH-bperm", triplet_id="TRIP-b", n_triplets=3,
+        )
+        await _cu.mark_triplet_result(triplet_id=tid, error_code=0)
+
+        moved = await _cu.mark_batch_permanent_failure(bid, detail="drive_login_failed")
+        assert moved == 2                      # the succeeded one is untouched
+
+        batch = await _cu.get_batch(bid)
+        assert batch.status == "permanent_failure"
+        assert await _cu.list_pending_triplets_for_batch(bid) == []
+        statuses = await _cu.count_batch_triplets_by_status(bid)
+        assert statuses == {"succeeded": 1, "permanent_failure": 2}
+
+    async def test_batch_settles_complete_only_when_all_succeeded(
+        self, _batch_storage_env,
+    ):
+        from core.src.storage import carrier_upload_ops as _cu
+        bid, tid = await self._seed_batch(
+            batch_id="BATCH-settle", triplet_id="TRIP-s", n_triplets=2,
+        )
+        await _cu.mark_triplet_result(triplet_id=tid, error_code=0)
+        assert await _cu.settle_batch_if_all_reported(bid) is None
+        await _cu.mark_triplet_result(triplet_id=f"{tid}-1", error_code=0)
+        assert await _cu.settle_batch_if_all_reported(bid) == "complete"
 
 
 class TestCarrierUploadOpsRoundtrip:
@@ -3256,6 +3308,7 @@ class TestCarrierUploadOpsRoundtrip:
             device_id="SM-S671U1", milestone_id="P1",
             dispatched_at=now, expected_triplet_count=3,
             timeout_at=now + timedelta(hours=1),
+            kill_at=now + timedelta(minutes=75),
         )
         await _cu.insert_triplets([
             {"triplet_id": f"T{i}", "batch_id": "B-rt", "item_id": "I",
@@ -3277,16 +3330,284 @@ class TestCarrierUploadOpsRoundtrip:
             dispatched_at=now - timedelta(hours=2),
             expected_triplet_count=0,
             timeout_at=now - timedelta(minutes=30),   # past
+            kill_at=now - timedelta(minutes=5),
         )
         await _cu.insert_batch(
             batch_id="B-new", customer_id="X", device_id="Y", milestone_id="Z",
             dispatched_at=now, expected_triplet_count=0,
             timeout_at=now + timedelta(hours=1),      # future
+            kill_at=now + timedelta(minutes=75),
         )
         past = await _cu.list_batches_past_timeout(now)
         ids = {b.batch_id for b in past}
         assert "B-old" in ids
         assert "B-new" not in ids
+
+    async def test_failed_dispatch_batch_is_admitted_regardless_of_timeout(
+        self, _batch_storage_env,
+    ):
+        """CARRIER-RETRY-4 regression: before D-218 a dispatch failure left the
+        batch at 'failed_dispatch' with its triplets still at 'dispatched'.
+        The sweep only scanned status='dispatched' BATCHES, so those files were
+        never retried and never alerted -- they just vanished."""
+        from datetime import datetime, timezone, timedelta
+        from core.src.storage import carrier_upload_ops as _cu
+        now = datetime.now(timezone.utc)
+        await _cu.insert_batch(
+            batch_id="B-orphan", customer_id="X", device_id="Y", milestone_id="Z",
+            dispatched_at=now, expected_triplet_count=1,
+            timeout_at=now + timedelta(hours=1),     # NOT past
+            kill_at=now + timedelta(minutes=75),
+            status="failed_dispatch",
+        )
+        await _cu.insert_triplets([
+            {"triplet_id": "T-orphan", "batch_id": "B-orphan", "item_id": "I",
+             "file_hash": "h", "filename": "f.pdf", "target_dir": "D",
+             "source_dir": "/s", "updated_at": now},
+        ])
+        admitted = {b.batch_id for b in await _cu.list_batches_past_timeout(now)}
+        assert "B-orphan" in admitted
+        pending = await _cu.list_pending_triplets_for_batch("B-orphan")
+        assert [t.triplet_id for t in pending] == ["T-orphan"]
+
+    async def test_redispatch_bumps_retry_and_resets_deadlines(self, _batch_storage_env):
+        from datetime import datetime, timezone, timedelta
+        from core.src.storage import carrier_upload_ops as _cu
+        now = datetime.now(timezone.utc)
+        await _cu.insert_batch(
+            batch_id="B-rd", customer_id="X", device_id="Y", milestone_id="Z",
+            dispatched_at=now - timedelta(hours=2), expected_triplet_count=1,
+            timeout_at=now - timedelta(minutes=30),
+            kill_at=now - timedelta(minutes=5),
+            status="timed_out_killed",
+        )
+        new_to = now + timedelta(hours=1)
+        new_kill = now + timedelta(minutes=75)
+        count = await _cu.begin_batch_redispatch(
+            batch_id="B-rd", new_timeout_at=new_to, new_kill_at=new_kill,
+            jenkins_build_id="build-42",
+        )
+        assert count == 1
+        batch = await _cu.get_batch("B-rd")
+        assert batch.status == "dispatched"
+        assert batch.retry_count == 1
+        assert batch.jenkins_build_id == "build-42"
+        # Deadlines moved forward -> the batch is no longer swept this tick.
+        assert "B-rd" not in {b.batch_id for b in await _cu.list_batches_past_timeout(now)}
+
+    async def test_alert_sweep_is_exactly_once_per_batch(self, _batch_storage_env):
+        """One aggregated alert per dead batch, and only one -- alerted_at
+        survives a beat restart."""
+        from datetime import datetime, timezone, timedelta
+        from core.src.storage import carrier_upload_ops as _cu
+        now = datetime.now(timezone.utc)
+        await _cu.insert_batch(
+            batch_id="B-alert", customer_id="X", device_id="Y", milestone_id="Z",
+            dispatched_at=now, expected_triplet_count=1,
+            timeout_at=now, kill_at=now, status="exhausted",
+        )
+        assert {b.batch_id for b in await _cu.list_batches_awaiting_alert()} == {"B-alert"}
+        await _cu.mark_batch_alerted("B-alert")
+        assert await _cu.list_batches_awaiting_alert() == []
+
+
+class _StubRetryAdapter:
+    """Minimal CustomerAdapter for the CARRIER-RETRY beat tests.
+
+    Records every job-status probe / kill / re-dispatch so the tests can
+    assert on ORDER as well as outcome -- the whole point of the design is
+    that a kill precedes a re-dispatch, never the other way round.
+    """
+
+    def __init__(self, *, job_completed=True, kill_ok=True, dispatch_ok=True):
+        self.job_completed = job_completed
+        self.kill_ok = kill_ok
+        self.dispatch_ok = dispatch_ok
+        self.trace: list[str] = []
+        self.dispatched_triplets: list[list] = []
+
+    async def is_batch_job_completed(self, *, batch_id, jenkins_build_id=None):
+        from core.src.customer_adapter.protocol import BatchJobStatus
+        self.trace.append("probe")
+        return BatchJobStatus(
+            completed=self.job_completed, raw_code=0 if self.job_completed else 7,
+        )
+
+    async def kill_batch_job(self, *, batch_id, jenkins_build_id=None):
+        from core.src.customer_adapter.protocol import BatchKillResult
+        self.trace.append("kill")
+        return BatchKillResult(killed=self.kill_ok, raw_code=0 if self.kill_ok else 3)
+
+    async def upload_attachments_batch(
+        self, *, device_id, milestone_name, triplets,
+        customer_delivery_info, callback_url, batch_id=None,
+    ):
+        from datetime import datetime, timezone
+        from core.src.customer_adapter.protocol import BatchDispatchResult
+        self.trace.append("dispatch")
+        self.dispatched_triplets.append(list(triplets))
+        return BatchDispatchResult(
+            dispatched=self.dispatch_ok, batch_id=batch_id or "B",
+            dispatched_at=datetime.now(timezone.utc),
+            expected_triplet_count=len(triplets),
+            error_code=None if self.dispatch_ok else "CAD-E004",
+            jenkins_build_id="build-next" if self.dispatch_ok else None,
+        )
+
+
+class _StubRetryDeps:
+    """TaskDeps stand-in -- only the attributes the beat actually reads."""
+
+    def __init__(self):
+        self.audit = None
+        self.ops_alerts = None
+        self.dashboard_config = None
+        self.storage = None
+        self.customer_adapter = None
+
+
+class TestCarrierUploadRetryBeat:
+    """CARRIER-RETRY-3 (2026-09-23, D-218): the reconcile beat's completion
+    gate -> kill-if-stalled -> re-dispatch-pending-subset state machine.
+    """
+
+    async def _seed(
+        self, *, batch_id, statuses, retry_count=0, status="dispatched",
+        kill_passed=True,
+    ):
+        """Seed one batch with one triplet per entry in `statuses`."""
+        from datetime import datetime, timezone, timedelta
+        from core.src.storage import carrier_upload_ops as _cu
+        now = datetime.now(timezone.utc)
+        await _cu.insert_batch(
+            batch_id=batch_id, customer_id="MMK",
+            device_id="SM-A186U", milestone_id="P1",
+            dispatched_at=now - timedelta(hours=2),
+            expected_triplet_count=len(statuses),
+            timeout_at=now - timedelta(minutes=30),
+            kill_at=now - timedelta(minutes=5) if kill_passed
+                    else now + timedelta(minutes=30),
+            status=status,
+        )
+        await _cu.insert_triplets([
+            {"triplet_id": f"{batch_id}-T{i}", "batch_id": batch_id,
+             "item_id": "ITEM-r1", "file_hash": f"h{i}",
+             "filename": f"f{i}.pdf", "target_dir": "Doc/A",
+             "source_dir": "/nsd/x", "status": st, "updated_at": now}
+            for i, st in enumerate(statuses)
+        ])
+        if retry_count:
+            from core.src.storage.db import CarrierUploadBatchTable, session_scope
+            async with session_scope() as session:
+                row = await session.get(CarrierUploadBatchTable, batch_id)
+                row.retry_count = retry_count
+                await session.commit()
+        return await _cu.get_batch(batch_id)
+
+    async def _run(self, batch, adapter, **overrides):
+        from core.src.customer_adapter.config import CustomerAdapterConfig
+        from core.src.workflow_engine.tasks.carrier_upload_reconcile import (
+            _reconcile_one_batch,
+        )
+        deps = _StubRetryDeps()
+        stats: dict[str, int] = {}
+        cfg = CustomerAdapterConfig()
+        await _reconcile_one_batch(
+            batch=batch, deps=deps, adapter=adapter, cfg=cfg,
+            max_retries=overrides.get("max_retries", 3),
+            stats=_DefaultingStats(stats),
+        )
+        return stats
+
+    async def test_running_job_is_not_redispatched(self, _batch_storage_env):
+        """A 300-file job can legitimately outrun batch_timeout. Before
+        kill_at we wait -- re-dispatching under a live job double-uploads."""
+        from core.src.storage import carrier_upload_ops as _cu
+        batch = await self._seed(
+            batch_id="B-running", statuses=["dispatched"], kill_passed=False,
+        )
+        adapter = _StubRetryAdapter(job_completed=False)
+        await self._run(batch, adapter)
+        assert adapter.trace == ["probe"]          # no kill, no dispatch
+        assert (await _cu.get_batch("B-running")).retry_count == 0
+
+    async def test_stalled_job_is_killed_before_redispatch(self, _batch_storage_env):
+        from core.src.storage import carrier_upload_ops as _cu
+        batch = await self._seed(batch_id="B-stall", statuses=["dispatched"])
+        adapter = _StubRetryAdapter(job_completed=False, kill_ok=True)
+        await self._run(batch, adapter)
+        assert adapter.trace == ["probe", "kill", "dispatch"]
+        assert (await _cu.get_batch("B-stall")).retry_count == 1
+
+    async def test_failed_kill_blocks_the_redispatch(self, _batch_storage_env):
+        """Two live jobs writing the same Drive folder is worse than a late
+        retry, so a kill we couldn't confirm stops the tick."""
+        from core.src.storage import carrier_upload_ops as _cu
+        batch = await self._seed(batch_id="B-killfail", statuses=["dispatched"])
+        adapter = _StubRetryAdapter(job_completed=False, kill_ok=False)
+        await self._run(batch, adapter)
+        assert adapter.trace == ["probe", "kill"]   # dispatch never reached
+        assert (await _cu.get_batch("B-killfail")).retry_count == 0
+
+    async def test_redispatch_carries_only_the_pending_subset(self, _batch_storage_env):
+        """Architect 2026-09-23: 'the .json file will have only entries of
+        files that are yet to be uploaded'."""
+        batch = await self._seed(
+            batch_id="B-subset",
+            statuses=["succeeded", "needs_retry", "permanent_failure", "dispatched"],
+        )
+        adapter = _StubRetryAdapter(job_completed=True)
+        await self._run(batch, adapter)
+        assert adapter.trace == ["probe", "dispatch"]   # completed -> no kill
+        sent = {t.triplet_id for t in adapter.dispatched_triplets[0]}
+        assert sent == {"B-subset-T1", "B-subset-T3"}
+
+    async def test_refused_redispatch_does_not_burn_a_retry_slot(self, _batch_storage_env):
+        from core.src.storage import carrier_upload_ops as _cu
+        batch = await self._seed(batch_id="B-refused", statuses=["dispatched"])
+        adapter = _StubRetryAdapter(job_completed=True, dispatch_ok=False)
+        await self._run(batch, adapter)
+        after = await _cu.get_batch("B-refused")
+        assert after.retry_count == 0
+        assert after.status == "failed_dispatch"
+
+    async def test_failed_dispatch_batch_skips_probe_and_kill(self, _batch_storage_env):
+        """No job was ever started, so there is nothing to wait on or kill."""
+        batch = await self._seed(
+            batch_id="B-nodispatch", statuses=["dispatched"],
+            status="failed_dispatch",
+        )
+        adapter = _StubRetryAdapter()
+        await self._run(batch, adapter)
+        assert adapter.trace == ["dispatch"]
+
+    async def test_retry_ceiling_exhausts_pending_triplets(self, _batch_storage_env):
+        from core.src.storage import carrier_upload_ops as _cu
+        batch = await self._seed(
+            batch_id="B-ceiling", statuses=["succeeded", "needs_retry"],
+            retry_count=3,
+        )
+        adapter = _StubRetryAdapter()
+        await self._run(batch, adapter, max_retries=3)
+        assert adapter.trace == []                  # gave up before probing
+        assert (await _cu.get_batch("B-ceiling")).status == "exhausted"
+        counts = await _cu.count_batch_triplets_by_status("B-ceiling")
+        assert counts == {"succeeded": 1, "exhausted": 1}
+        # ...and it is now queued for exactly one aggregated ops alert.
+        awaiting = {b.batch_id for b in await _cu.list_batches_awaiting_alert()}
+        assert "B-ceiling" in awaiting
+
+
+class _DefaultingStats(dict):
+    """dict that auto-zeroes unknown keys, so the beat's stats bumps don't
+    force every test to pre-declare the full counter set."""
+
+    def __init__(self, backing):
+        super().__init__(backing)
+
+    def __missing__(self, key):
+        self[key] = 0
+        return 0
 
 
 class TestOutreachAttachments:

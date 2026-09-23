@@ -36,6 +36,7 @@ _ENV_MAP = {
     "nsd_volume_prefix":             "HILDA_CUSTOMER_ADAPTER_NSD_VOLUME_PREFIX",
     # CARRIER-BATCH-2 (2026-09-20) — async batch dispatch knobs
     "batch_timeout_seconds":         "HILDA_CUSTOMER_ADAPTER_BATCH_TIMEOUT_SECONDS",
+    "batch_kill_after_seconds":      "HILDA_CUSTOMER_ADAPTER_BATCH_KILL_AFTER_SECONDS",
     "batch_retry_interval_seconds":  "HILDA_CUSTOMER_ADAPTER_BATCH_RETRY_INTERVAL_SECONDS",
     "batch_max_retry_count":         "HILDA_CUSTOMER_ADAPTER_BATCH_MAX_RETRY_COUNT",
     "batch_callback_grace_seconds":  "HILDA_CUSTOMER_ADAPTER_BATCH_CALLBACK_GRACE_SECONDS",
@@ -94,20 +95,28 @@ class CustomerAdapterConfig(BaseModel):
     # helper for the callback endpoint.
     #
     # batch_timeout_seconds: wall-clock ceiling for the uploader to POST
-    # per-file callbacks. Past this, the reconcile beat marks unreported
-    # triplets as needs_retry and hands them to the per-file retry path.
-    # NOT a give-up point — retry_count still determines final give-up.
+    # per-file callbacks. Past this the reconcile beat asks the uploader
+    # whether the Jenkins job actually finished (is_batch_job_completed).
+    # NOT a give-up point — batch_max_retry_count governs final give-up.
     batch_timeout_seconds:        int   = 3600      # 1 hour
-    # batch_retry_interval_seconds: reconcile beat cadence (also caps how
-    # often a single triplet retries).
+    # batch_kill_after_seconds: if the Jenkins job STILL reports
+    # not-completed at this point, the reconcile beat kills it
+    # (kill_batch_job) before re-dispatching the pending subset. Default is
+    # batch_timeout + one retry_interval, giving a legitimately-slow large
+    # batch one extra grace window before we pull the plug.
+    batch_kill_after_seconds:     int   = 4500      # 75 minutes
+    # batch_retry_interval_seconds: reconcile beat cadence.
     batch_retry_interval_seconds: int   = 900       # 15 minutes
-    # batch_max_retry_count: per-triplet retry ceiling. On the (N+1)-th
-    # failure the triplet lands at status=exhausted and an ops alert fires.
+    # batch_max_retry_count: per-BATCH re-dispatch ceiling. Each retry
+    # dispatches a fresh Jenkins job carrying only the still-pending
+    # triplets. On the (N+1)-th attempt the pending triplets land at
+    # status=exhausted and one aggregated ops alert fires.
     batch_max_retry_count:        int   = 3
-    # batch_callback_grace_seconds: HMAC-token TTL extension beyond
-    # batch_timeout + max_retry_count * retry_interval so late Jenkins
-    # POSTs (network re-transmit, clock skew) still validate. Buffer only —
-    # not a policy input.
+    # batch_callback_grace_seconds: HMAC-token TTL buffer beyond one
+    # attempt's kill deadline so late Jenkins POSTs (network re-transmit,
+    # clock skew) still validate. A FRESH callback URL is minted on every
+    # re-dispatch, so the TTL only has to cover a single attempt — not the
+    # whole retry chain.
     batch_callback_grace_seconds: int   = 300       # 5 minutes
 
     @classmethod

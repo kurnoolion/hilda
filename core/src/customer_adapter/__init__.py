@@ -18,6 +18,8 @@ from core.src.customer_adapter.mock_customer_adapter import MockCustomerAdapter
 from core.src.customer_adapter.protocol import (
     AuditWriter,
     BatchDispatchResult,
+    BatchJobStatus,
+    BatchKillResult,
     CarrierUploadResult,
     CustomerAdapter,
     UploadTriplet,
@@ -27,6 +29,8 @@ from core.src.customer_adapter.totp import current_totp, ntp_skew_seconds
 __all__ = [
     "AuditWriter",
     "BatchDispatchResult",
+    "BatchJobStatus",
+    "BatchKillResult",
     "CarrierUploadResult",
     "CustomerAdapter",
     "CustomerAdapterConfig",

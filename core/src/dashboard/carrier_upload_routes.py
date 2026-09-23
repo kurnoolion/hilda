@@ -18,7 +18,27 @@ Validation:
   * now() < expires_at
   * hmac_compare(expected_sig, sig)
 
-See D-217.
+POST body (CARRIER-RETRY-1, D-218 — `error_code` replaces the old `success`
+bool, because a bool can't say "don't bother retrying"):
+
+  {"triplet_id": "...", "error_code": 0, "error_detail": null, "elapsed_ms": 1234}
+
+    error_code = 0  file uploaded            -> triplet 'succeeded'
+                 1  transient failure        -> triplet 'needs_retry';
+                                                rides the batch's next
+                                                re-dispatch
+                 2  permanent fault          -> triplet 'permanent_failure';
+                                                never retried
+
+  A BATCH-level fault (Drive login died, job can't proceed at all) is POSTed
+  as error_code=2 with triplet_id / filename / target_dir empty. Every
+  still-pending triplet in the batch goes to permanent_failure and one
+  aggregated ops alert follows from the reconcile beat.
+
+A fresh callback URL is minted for every (re-)dispatch, so a token only has
+to outlive one attempt.
+
+See D-217, D-218.
 """
 from __future__ import annotations
 
@@ -34,6 +54,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 
 __all__ = [
+    "callback_ttl_seconds",
+    "mint_batch_callback_url",
     "mint_callback_token",
     "mint_callback_url",
     "register_carrier_upload_routes",
@@ -102,6 +124,49 @@ def mint_callback_url(
     origin = reverse_proxy_origin.rstrip("/")
     path = _url_join(url_prefix, f"/api/v1/carrier_upload/callback/{batch_id}")
     return f"{origin}{path}?token={token}"
+
+
+def callback_ttl_seconds(ca_cfg) -> int:
+    """TTL for ONE attempt's callback token.
+
+    CARRIER-RETRY-7 (D-218): a fresh URL is minted on every re-dispatch, so
+    the token only has to outlive a single attempt -- through its kill
+    deadline, plus grace for a late POST (network re-transmit, clock skew).
+    Before D-218 this spanned the whole retry chain, which meant one leaked
+    token stayed valid for hours.
+    """
+    return int(ca_cfg.batch_kill_after_seconds + ca_cfg.batch_callback_grace_seconds)
+
+
+def mint_batch_callback_url(*, deps: Any, batch_id: str, ca_cfg) -> str:
+    """Compose the callback URL for a (re-)dispatch of `batch_id`.
+
+    Shared by submit_to_carrier_task (first dispatch) and
+    carrier_upload_reconcile_task (re-dispatch) so both agree on origin,
+    prefix, secret and TTL -- a mismatch would mint URLs the callback
+    endpoint rejects, and the failure mode (all callbacks 401) is invisible
+    until the batch times out.
+
+    Reads DashboardConfig off task_deps when wired; otherwise falls back to
+    the worker's environment (older deploys don't attach dashboard_config).
+    """
+    import os
+
+    dash_cfg = getattr(deps, "dashboard_config", None)
+    secret = getattr(dash_cfg, "wopi_jwt_secret", "") if dash_cfg else ""
+    origin = getattr(dash_cfg, "reverse_proxy_origin", "") if dash_cfg else ""
+    prefix = getattr(dash_cfg, "url_prefix", "") if dash_cfg else ""
+    if not secret:
+        secret = os.environ.get("HILDA_WOPI_JWT_SECRET", "unset-secret")
+    if not origin:
+        origin = os.environ.get("HILDA_REVERSE_PROXY_ORIGIN", "http://localhost:8080")
+    if not prefix:
+        # URLPFX-1 default: corp nginx serves HILDA under /hilda/*.
+        prefix = os.environ.get("HILDA_DASHBOARD_URL_PREFIX", "/hilda")
+    return mint_callback_url(
+        secret=secret, reverse_proxy_origin=origin, batch_id=batch_id,
+        ttl_seconds=callback_ttl_seconds(ca_cfg), url_prefix=prefix,
+    )
 
 
 def verify_callback_token(
@@ -242,15 +307,17 @@ def register_carrier_upload_routes(app: FastAPI, cfg) -> None:
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be a JSON object")
 
-        # Required fields
-        triplet_id = body.get("triplet_id")
-        if not triplet_id or not isinstance(triplet_id, str):
-            raise HTTPException(status_code=400, detail="missing triplet_id")
-        success_raw = body.get("success")
-        if not isinstance(success_raw, bool):
-            raise HTTPException(status_code=400, detail="success must be boolean")
-        # Optional descriptive fields
-        error_code = body.get("error_code")
+        # -- error_code is the authoritative outcome (CARRIER-RETRY-1, D-218).
+        # 0 = success, 1 = retryable, 2 = permanent fault. The pre-D-218
+        # `success` bool is gone: it couldn't express "don't bother retrying".
+        error_code_raw = body.get("error_code")
+        if isinstance(error_code_raw, bool) or not isinstance(error_code_raw, (int, str)):
+            raise HTTPException(status_code=400, detail="error_code must be an integer")
+        try:
+            error_code = int(error_code_raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="error_code must be an integer") from exc
+
         error_detail = body.get("error_detail")
         elapsed_ms_raw = body.get("elapsed_ms")
         elapsed_ms = int(elapsed_ms_raw) if isinstance(elapsed_ms_raw, (int, float)) else None
@@ -260,12 +327,40 @@ def register_carrier_upload_routes(app: FastAPI, cfg) -> None:
         if body_batch_id and body_batch_id != batch_id:
             raise HTTPException(status_code=400, detail="batch_id path/body mismatch")
 
+        triplet_id = body.get("triplet_id")
+        if not isinstance(triplet_id, str):
+            triplet_id = ""
+
         from core.src.storage import carrier_upload_ops as _cu
         now = datetime.now(timezone.utc)
 
+        # -- BATCH-LEVEL permanent fault. Per the architect 2026-09-23: with
+        # error_code=2 the uploader may POST batch_id alone, leaving
+        # triplet_id / filename / target_dir empty -- the fault (e.g. Drive
+        # login failure) belongs to the job, not to any one file. Drag every
+        # still-pending triplet to permanent_failure and stop; the alert
+        # sweep in the reconcile beat sends one aggregated notice.
+        if error_code == 2 and not triplet_id:
+            moved = await _cu.mark_batch_permanent_failure(
+                batch_id,
+                detail=(error_detail if isinstance(error_detail, str) else None),
+                now=now,
+            )
+            _log.warning(
+                "carrier_upload_callback: batch-level permanent fault batch=%s "
+                "triplets_failed=%d detail=%s",
+                batch_id, moved, str(error_detail)[:120],
+            )
+            return {"ok": True, "batch_id": batch_id,
+                    "status": "permanent_failure", "triplets_failed": moved}
+
+        if not triplet_id:
+            raise HTTPException(status_code=400, detail="missing triplet_id")
+
         updated = await _cu.mark_triplet_result(
-            triplet_id=triplet_id, success=success_raw,
-            error=(error_detail or error_code) if not success_raw else None,
+            triplet_id=triplet_id,
+            error_code=error_code,
+            error=(error_detail or f"error_code={error_code}") if error_code else None,
             completed_at=now, now=now,
         )
         if updated is None:
@@ -277,6 +372,8 @@ def register_carrier_upload_routes(app: FastAPI, cfg) -> None:
             )
             raise HTTPException(status_code=404, detail="unknown triplet_id")
 
+        succeeded = error_code == 0
+
         # Audit + per-item transition. Access task_deps via app.state
         # (same pattern as HIST-INGEST-1 for document_view routes).
         deps = getattr(request.app.state, "task_deps", None)
@@ -284,24 +381,24 @@ def register_carrier_upload_routes(app: FastAPI, cfg) -> None:
             _audit_carrier_upload_file(
                 deps=deps, batch_id=batch_id, triplet_id=triplet_id,
                 item_id=updated.item_id, filename=updated.filename,
-                target_dir=updated.target_dir, success=success_raw,
-                error_code=error_code, error_detail=error_detail,
+                target_dir=updated.target_dir, success=succeeded,
+                error_code=str(error_code), error_detail=error_detail,
                 elapsed_ms=elapsed_ms,
             )
-            if success_raw:
+            if succeeded:
                 await _transition_item_if_all_succeeded(
                     deps=deps, batch_id=batch_id, item_id=updated.item_id,
                     correlation_id=batch_id,
                 )
 
-        # If the batch's received == expected, mark it complete so the
-        # reconcile beat's timeout sweep skips it.
-        batch = await _cu.get_batch(batch_id)
-        if batch is not None and batch.received_triplet_count >= batch.expected_triplet_count:
-            await _cu.mark_batch_status(batch_id, "complete")
+        # Close the batch out once nothing is pending. Note this is NOT
+        # received >= expected: a code-1 file counts as reported but is still
+        # owed a retry, so the batch must stay open for the reconcile beat.
+        settled = await _cu.settle_batch_if_all_reported(batch_id)
 
         return {
             "ok":       True,
+            "batch":    {"batch_id": batch_id, "settled_status": settled},
             "triplet":  {
                 "triplet_id":  updated.triplet_id,
                 "status":      updated.status,

@@ -35,11 +35,22 @@ Two ways to feed triplets in:
           {"triplet_id": "TRIP-2", "filename": "b.pdf", "target_dir": "Doc/A"}
         ]
 
+Callback contract (D-218): each POST carries an integer `error_code` --
+0 = uploaded, 1 = transient failure (HILDA re-dispatches it in the batch's
+next Jenkins job), 2 = permanent fault (never retried). The pre-D-218
+`success` boolean is gone.
+
 Failure simulation:
-  --success-rate 0.9         30% chance any given triplet returns success=false
-  --fail-triplet-ids A,B     these triplets explicitly fail
-  --stop-after-n 5           stop simulating after N POSTs (leaves the rest
-                             unreported -- exercises the reconcile timeout path)
+  --success-rate 0.9              10% chance a given triplet reports error_code=1
+  --fail-triplet-ids A,B          these triplets report error_code=1 (retryable)
+  --permanent-fail-triplet-ids C  these report error_code=2 (never retried)
+  --batch-permanent-fault         ONE batch-level error_code=2 POST with an
+                                  empty triplet_id -- simulates the uploader
+                                  losing its Drive login mid-job; every
+                                  pending triplet goes to permanent_failure
+  --stop-after-n 5                stop after N POSTs (leaves the rest
+                                  unreported -- exercises the reconcile
+                                  timeout -> kill -> re-dispatch path)
 
 The HMAC token is minted here using the same primitive HILDA uses
 (HMAC-SHA256, 32-char hex, body = "<batch_id>|<expires_at_unix>"). You
@@ -167,15 +178,16 @@ def simulate(
     triplets: list[dict[str, Any]],
     success_rate: float,
     fail_ids: set[str],
+    permanent_ids: set[str],
     delay_per_file: float,
     stop_after_n: int | None,
     verbose: bool,
 ) -> tuple[int, int]:
     """POST one callback per triplet. Returns (ok_count, fail_count).
 
-    A "fail" here is either the simulated business failure (success=false in
-    the payload) OR an HTTP error from the callback endpoint (non-2xx). Both
-    count against the ok_count.
+    A "fail" here is either the simulated business failure (a non-zero
+    error_code in the payload) OR an HTTP error from the callback endpoint
+    (non-2xx). Both count against the ok_count.
     """
     try:
         import requests
@@ -199,21 +211,29 @@ def simulate(
             break
 
         triplet_id = t["triplet_id"]
-        # Decide business success/failure
+        # Decide the outcome code. Per the D-218 callback contract:
+        #   0 = uploaded, 1 = transient failure (retried in the batch's next
+        #   re-dispatch), 2 = permanent fault (never retried).
         explicit_fail = triplet_id in fail_ids
         rng_fail = random.random() > success_rate
-        is_success = not (explicit_fail or rng_fail)
+        if triplet_id in permanent_ids:
+            error_code = 2
+            detail = "simulated_permanent_fault"
+        elif explicit_fail or rng_fail:
+            error_code = 1
+            detail = "explicit_fail" if explicit_fail else "random_fail"
+        else:
+            error_code = 0
+            detail = None
+        is_success = error_code == 0
 
         payload = {
             "batch_id":    batch_id,
             "triplet_id":  triplet_id,
             "filename":    t.get("filename", ""),
             "target_dir":  t.get("target_dir", ""),
-            "success":     is_success,
-            "error_code":  None if is_success else "SIM-E001",
-            "error_detail": None if is_success else (
-                "explicit_fail" if explicit_fail else "random_fail"
-            ),
+            "error_code":  error_code,
+            "error_detail": detail,
             "elapsed_ms":  int(delay_per_file * 1000),
         }
 
@@ -235,7 +255,7 @@ def simulate(
         if verbose or not http_ok:
             print(
                 f"[SIM] {marker} triplet={triplet_id} filename={payload['filename']!r} "
-                f"target={payload['target_dir']!r} biz_success={is_success} "
+                f"target={payload['target_dir']!r} error_code={error_code} "
                 f"http={status_str} elapsed_ms={elapsed_ms} body={body_preview}",
             )
 
@@ -287,11 +307,23 @@ def _parse_args() -> argparse.Namespace:
     # Simulation knobs
     p.add_argument(
         "--success-rate", type=float, default=1.0,
-        help="Fraction of triplets marked success=true (default 1.0)",
+        help="Fraction of triplets reported with error_code=0 (default 1.0)",
     )
     p.add_argument(
         "--fail-triplet-ids", default="",
-        help="Comma-separated triplet_ids to force success=false",
+        help="Comma-separated triplet_ids to force error_code=1 (retryable)",
+    )
+    p.add_argument(
+        "--permanent-fail-triplet-ids", default="",
+        help="Comma-separated triplet_ids to force error_code=2 (permanent; "
+             "HILDA never retries these)",
+    )
+    p.add_argument(
+        "--batch-permanent-fault", action="store_true",
+        help="Instead of per-file callbacks, POST ONE batch-level "
+             "error_code=2 (empty triplet_id) -- simulates the uploader "
+             "losing its Drive login. Every pending triplet in the batch "
+             "goes to permanent_failure.",
     )
     p.add_argument(
         "--delay-per-file", type=float, default=0.3,
@@ -308,6 +340,36 @@ def _parse_args() -> argparse.Namespace:
         help="Print the URL + payload plan and exit without POSTing",
     )
     return p.parse_args()
+
+
+def _post_batch_permanent_fault(*, callback_url: str, batch_id: str) -> int:
+    """Send the batch-level error_code=2 callback.
+
+    Per the D-218 contract this carries ONLY batch_id + error_code; the
+    triplet_id / filename / target_dir fields stay empty, because the fault
+    is the job's (Drive login died), not any one file's.
+    """
+    try:
+        import requests
+    except ImportError:
+        print("ERROR: requests not installed.", file=sys.stderr)
+        return 2
+    payload = {
+        "batch_id":     batch_id,
+        "triplet_id":   "",
+        "filename":     "",
+        "target_dir":   "",
+        "error_code":   2,
+        "error_detail": "simulated_drive_login_failure",
+    }
+    print(f"[SIM] POSTing BATCH-LEVEL permanent fault for batch={batch_id}")
+    try:
+        resp = requests.post(callback_url, json=payload, timeout=30)
+    except Exception as exc:
+        print(f"[SIM] ERR exception: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(f"[SIM] HTTP {resp.status_code} body={resp.text[:300]}")
+    return 0 if 200 <= resp.status_code < 300 else 1
 
 
 def main() -> int:
@@ -354,12 +416,17 @@ def main() -> int:
         )
 
     fail_ids = set(x.strip() for x in args.fail_triplet_ids.split(",") if x.strip())
+    permanent_ids = set(
+        x.strip() for x in args.permanent_fail_triplet_ids.split(",") if x.strip()
+    )
 
     print(f"[SIM] batch_id={args.batch_id}")
     print(f"[SIM] callback_url={callback_url}")
     print(f"[SIM] triplets_to_post={len(triplets)}")
     if fail_ids:
-        print(f"[SIM] explicit_fail_ids={sorted(fail_ids)}")
+        print(f"[SIM] retryable_fail_ids={sorted(fail_ids)}")
+    if permanent_ids:
+        print(f"[SIM] permanent_fail_ids={sorted(permanent_ids)}")
     print(f"[SIM] success_rate={args.success_rate}")
     print(f"[SIM] delay_per_file={args.delay_per_file}s")
     if args.stop_after_n is not None:
@@ -374,6 +441,11 @@ def main() -> int:
             )
         return 0
 
+    if args.batch_permanent_fault:
+        return _post_batch_permanent_fault(
+            callback_url=callback_url, batch_id=args.batch_id,
+        )
+
     started_at = datetime.now(timezone.utc)
     ok, fail = simulate(
         callback_url=callback_url,
@@ -381,6 +453,7 @@ def main() -> int:
         triplets=triplets,
         success_rate=args.success_rate,
         fail_ids=fail_ids,
+        permanent_ids=permanent_ids,
         delay_per_file=args.delay_per_file,
         stop_after_n=args.stop_after_n,
         verbose=args.verbose,

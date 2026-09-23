@@ -48,6 +48,8 @@ class BootstrapResult:
         self.customer_adapter_wired: bool = False
         self.messenger_wired: bool = False
         self.rule_engine_wired: bool = False
+        self.ops_alerts_wired: bool = False
+        self.dashboard_config_wired: bool = False
         self.warnings: list[str] = []
 
     def summary_line(self) -> str:
@@ -60,6 +62,8 @@ class BootstrapResult:
             ("customer_adapter", self.customer_adapter_wired),
             ("messenger", self.messenger_wired),
             ("rule_engine",  self.rule_engine_wired),
+            ("ops_alerts",   self.ops_alerts_wired),
+            ("dashboard_config", self.dashboard_config_wired),
         ]
         wired = [name for name, ok in bits if ok]
         skipped = [name for name, ok in bits if not ok]
@@ -77,6 +81,8 @@ def bootstrap_task_deps(
     audit: Any = None,
     customer_adapter: Any = None,
     messenger: Any = None,
+    ops_alerts: Any = None,
+    dashboard_config: Any = None,
     auto_storage: bool = True,
     auto_audit: bool = True,
     auto_sp_writer: bool = True,
@@ -173,6 +179,24 @@ def bootstrap_task_deps(
         customer_adapter = _build_customer_adapter(result, audit=audit)
     result.customer_adapter_wired = customer_adapter is not None
 
+    # -------- 3b. ops_alerts (CARRIER-RETRY-5, 2026-09-23) --------
+    # The ops_alerts module has existed since [D-127] with zero call sites.
+    # The carrier-upload reconciler is the first caller: when a batch gives
+    # up, somebody has to be told the files never reached Drive. Reuses the
+    # email_sender + messenger already built above, so no new credentials.
+    if ops_alerts is None:
+        ops_alerts = _build_ops_alerts(
+            result, email_sender=email_sender, messenger=messenger,
+        )
+    result.ops_alerts_wired = ops_alerts is not None
+
+    # -------- 3c. dashboard_config --------
+    # Needed by submit_to_carrier + the reconciler to mint callback URLs the
+    # corp uploader can actually reach (origin + /hilda prefix + HMAC secret).
+    if dashboard_config is None:
+        dashboard_config = _build_dashboard_config(result)
+    result.dashboard_config_wired = dashboard_config is not None
+
     # -------- 4. Install --------
     deps = TaskDeps(
         storage=storage,
@@ -182,6 +206,8 @@ def bootstrap_task_deps(
         messenger=messenger,
         customer_adapter=customer_adapter,
         dispatcher=dispatcher,
+        ops_alerts=ops_alerts,
+        dashboard_config=dashboard_config,
     )
     set_task_deps(deps)
     # 2026-07-01 architect live smoke: worker_init fires BEFORE celery's
@@ -389,6 +415,68 @@ def _build_email_sender(result: BootstrapResult) -> Any:
         return sender
     except Exception as exc:  # noqa: BLE001
         result.warnings.append(f"email_sender_skip_build: {type(exc).__name__}: {str(exc)[:120]}")
+        return None
+
+
+def _build_ops_alerts(
+    result: BootstrapResult, *, email_sender: Any = None, messenger: Any = None,
+) -> Any:
+    """CARRIER-RETRY-5 (2026-09-23): wire the ops_alerts service.
+
+    Recipients file is resolved from HILDA_OPS_ALERTS_RECIPIENTS, else
+    `customizations/ops_alerts/recipients.yaml` under the repo root. Per
+    [D-125] Point 3 the production file is LOCAL to the deployment box --
+    public github carries a sanitized placeholder -- so a missing file is a
+    normal condition on a fresh clone, not an error.
+
+    Best-effort: no recipients file, an unparseable one, or a missing
+    email_sender leaves the slot None. The reconciler then still writes its
+    communication_log row; only the email fan-out is lost.
+    """
+    import os
+    from pathlib import Path as _P
+
+    default_path = _P(__file__).resolve().parents[3] / "customizations" / "ops_alerts" / "recipients.yaml"
+    recipients_path = _P(os.environ.get("HILDA_OPS_ALERTS_RECIPIENTS", str(default_path)))
+    if not recipients_path.exists():
+        result.warnings.append(
+            f"ops_alerts: recipients file not found at {recipients_path} -- "
+            "alerts will be audit-log only"
+        )
+        return None
+    try:
+        from core.src.ops_alerts import (
+            OpsAlertsConfig, build_ops_alerts, load_recipients,
+        )
+        cfg = OpsAlertsConfig(recipients_yaml_path=recipients_path)
+        recipients = load_recipients(recipients_path)
+        return build_ops_alerts(
+            cfg, recipients, email_sender=email_sender, messenger=messenger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"ops_alerts: build failed ({type(exc).__name__}: {str(exc)[:80]}) -- "
+            "alerts will be audit-log only"
+        )
+        return None
+
+
+def _build_dashboard_config(result: BootstrapResult) -> Any:
+    """Load DashboardConfig for URL-minting tasks (CARRIER-RETRY-7).
+
+    The worker needs `reverse_proxy_origin`, `url_prefix` and
+    `wopi_jwt_secret` to mint carrier-upload callback URLs. Without this the
+    callers fall back to reading the same three values from the environment,
+    so a failure here is a degradation, not a break.
+    """
+    try:
+        from core.src.dashboard.config import DashboardConfig
+        return DashboardConfig.from_sources()
+    except Exception as exc:  # noqa: BLE001
+        result.warnings.append(
+            f"dashboard_config: load failed ({type(exc).__name__}: {str(exc)[:80]}) -- "
+            "callback URLs fall back to env vars"
+        )
         return None
 
 

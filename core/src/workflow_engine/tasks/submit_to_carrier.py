@@ -418,39 +418,23 @@ def submit_to_carrier_task(
         }
 
     # Build the callback URL HILDA-side + dispatch the batch.
+    #
+    # CARRIER-RETRY-7 (D-218): URL composition moved to
+    # carrier_upload_routes.mint_batch_callback_url so the reconcile beat's
+    # re-dispatch mints byte-identical URLs from the same config. The token
+    # TTL now covers ONE attempt (a fresh URL is minted per re-dispatch),
+    # not the whole retry chain.
     from core.src.customer_adapter.config import CustomerAdapterConfig as _CACfg
-    from core.src.dashboard.carrier_upload_routes import mint_callback_url as _mint_cb
-    _ca_cfg = _CACfg.from_sources()
-    _dash_cfg = getattr(deps, "dashboard_config", None)
-    _wopi_secret = getattr(_dash_cfg, "wopi_jwt_secret", "") if _dash_cfg else ""
-    _reverse_origin = getattr(_dash_cfg, "reverse_proxy_origin", "") if _dash_cfg else ""
-    _url_prefix = getattr(_dash_cfg, "url_prefix", "") if _dash_cfg else ""
-    # Fallback -- if dashboard config isn't wired to task_deps (older deploys),
-    # read directly from environment so we still mint a valid URL. Ops must
-    # ensure REVERSE_PROXY_ORIGIN + WOPI_JWT_SECRET + URL_PREFIX are visible
-    # to the worker process (they already are today for other reasons).
-    if not _wopi_secret:
-        _wopi_secret = os.environ.get("HILDA_WOPI_JWT_SECRET", "unset-secret")
-    if not _reverse_origin:
-        _reverse_origin = os.environ.get("HILDA_REVERSE_PROXY_ORIGIN", "http://localhost:8080")
-    if not _url_prefix:
-        # URLPFX-1 default: corp nginx serves HILDA under /hilda/*.
-        _url_prefix = os.environ.get("HILDA_DASHBOARD_URL_PREFIX", "/hilda")
-    _ttl = int(
-        _ca_cfg.batch_timeout_seconds
-        + _ca_cfg.batch_max_retry_count * _ca_cfg.batch_retry_interval_seconds
-        + _ca_cfg.batch_callback_grace_seconds
+    from core.src.dashboard.carrier_upload_routes import (
+        mint_batch_callback_url as _mint_cb,
     )
+    _ca_cfg = _CACfg.from_sources()
     # HILDA pre-mints batch_id here so the callback URL's HMAC-signed id
     # matches the batch row the adapter is about to persist. Adapter
     # accepts batch_id kwarg and uses it verbatim.
     import uuid as _uuid_top
     _batch_id_pre = f"BATCH-{_uuid_top.uuid4().hex[:16]}"
-    _callback_url = _mint_cb(
-        secret=_wopi_secret, reverse_proxy_origin=_reverse_origin,
-        batch_id=_batch_id_pre, ttl_seconds=_ttl,
-        url_prefix=_url_prefix,
-    )
+    _callback_url = _mint_cb(deps=deps, batch_id=_batch_id_pre, ca_cfg=_ca_cfg)
 
     dispatch_result = _dispatch_batch_sync(
         adapter=deps.customer_adapter,
@@ -747,9 +731,17 @@ def _upload_one(
     filename: str,
     customer_delivery_info: str,
 ) -> Any:
-    """Bridge the async CustomerAdapter.upload_attachment call into the sync
-    Celery task body. Uses a fresh event loop per call (matches the pattern
-    in submission._run_sync).
+    """DEPRECATED (CARRIER-UNIFY / D-218) -- no call sites remain.
+
+    Bridged the async per-file CustomerAdapter.upload_attachment into the
+    sync Celery task body. CARRIER-BATCH replaced the dispatch path and
+    CARRIER-RETRY replaced the retry path, so nothing calls this any more:
+    a single-file upload is now a batch of one, carrying the same
+    batch_id/triplet_id and reporting through the same callback URL.
+
+    Kept (not deleted) for one release so a corp-side rollback of the
+    batch binding has something to fall back on; delete once the corp
+    uploader ships the batch API.
     """
     import asyncio
     coro = deps.customer_adapter.upload_attachment(

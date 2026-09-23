@@ -465,13 +465,23 @@ class CarrierUploadBatchTable(Base):
     """One row per async batch dispatched via CustomerAdapter.upload_attachments_batch.
 
     Scope: one batch per (customer, device, milestone) — the same scope
-    submit_to_carrier_task iterates. Batch lifecycle:
-      dispatched -> (per-file callbacks arrive, received_count climbs) ->
-        complete (received == expected) OR
-        timed_out (past timeout_at, some triplets unreported) OR
-        failed_dispatch (adapter never got the job to the uploader).
+    submit_to_carrier_task iterates. The SAME batch_id is reused across
+    re-dispatches; `retry_count` tracks attempts (CARRIER-RETRY, D-218).
 
-    Retry/reconcile beats read `status` + `timeout_at` to decide what to do.
+    Lifecycle:
+      dispatched
+        -> complete            all triplets terminal (succeeded/permanent_failure)
+        -> timed_out           past timeout_at, Jenkins job reported completed,
+                               unreported triplets flipped to needs_retry
+        -> timed_out_killed    past kill_at with the job still not completed;
+                               kill_batch_job() fired before re-dispatch
+        -> permanent_failure   uploader POSTed a batch-level error_code=2
+                               (e.g. Drive login died) -- never retried
+        -> exhausted           retry_count hit batch_max_retry_count
+        -> failed_dispatch     adapter never got the job to the uploader
+
+    On re-dispatch the row flips back to `dispatched` with a fresh
+    timeout_at/kill_at and an incremented retry_count.
     """
 
     __tablename__ = "carrier_upload_batch"
@@ -479,6 +489,7 @@ class CarrierUploadBatchTable(Base):
         Index("ix_cub_scope", "customer_id", "device_id", "milestone_id"),
         Index("ix_cub_status", "status"),
         Index("ix_cub_timeout", "timeout_at"),
+        Index("ix_cub_status_retry", "status", "retry_count"),
     )
 
     batch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -488,16 +499,28 @@ class CarrierUploadBatchTable(Base):
     dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expected_triplet_count: Mapped[int] = mapped_column(Integer, nullable=False)
     received_triplet_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Lifecycle: dispatched | complete | timed_out | failed_dispatch
+    # See class docstring for the full lifecycle.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="dispatched")
-    # Wall-clock deadline for the uploader; past this the reconcile beat
-    # reclassifies unreported triplets as needs_retry.
+    # Deadline for the CURRENT attempt; reset on every re-dispatch. Past this
+    # the reconcile beat calls is_batch_job_completed().
     timeout_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Optional cross-reference to the uploader's own job id, for ops debug.
+    # Past this, a still-not-completed job is killed via kill_batch_job()
+    # before the pending subset is re-dispatched. Reset on every re-dispatch.
+    kill_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Re-dispatch attempts so far. 0 = original dispatch. Give up when this
+    # reaches CustomerAdapterConfig.batch_max_retry_count.
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Jenkins job id for the CURRENT attempt -- required for
+    # is_batch_job_completed() / kill_batch_job(). Overwritten on re-dispatch.
     jenkins_build_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # If dispatch itself failed, record why.
     dispatch_error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     dispatch_error_detail: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Set when the aggregated ops alert for this batch has gone out. The beat
+    # sweeps (status IN ('permanent_failure','exhausted') AND alerted_at IS
+    # NULL) so exactly ONE alert fires per batch no matter how the batch
+    # died, and a beat restart can't re-send it.
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CarrierUploadTripletTable(Base):
@@ -505,12 +528,21 @@ class CarrierUploadTripletTable(Base):
     both update this table; per-file audit rows live separately in
     communication_log (append-only).
 
-    Lifecycle per triplet:
-      dispatched -> succeeded (callback success=True; also on retry success)
-                 -> failed    (callback success=False; retryable while retry_count < max)
-                 -> needs_retry (batch timed out with no callback for this row;
-                                 or per-file retry attempted and errored)
-                 -> exhausted (retry_count reached max; ops alert fires)
+    Lifecycle per triplet (CARRIER-RETRY / D-218 — driven by the uploader's
+    `error_code`, not a success bool):
+      dispatched -> succeeded         error_code=0
+                 -> needs_retry       error_code=1 (transient); also set by the
+                                      timeout sweep for rows that never reported
+                 -> permanent_failure error_code=2 (e.g. Drive login died).
+                                      TERMINAL — never re-dispatched.
+                 -> exhausted         the owning batch hit batch_max_retry_count
+                                      with this row still pending; one aggregated
+                                      ops alert fires per batch.
+
+    `retry_count` here is informational (how many batches this file rode in);
+    the give-up decision is made at BATCH level via
+    CarrierUploadBatchTable.retry_count, because a retry re-dispatches one
+    Jenkins job carrying the whole still-pending subset.
     """
 
     __tablename__ = "carrier_upload_triplet"
@@ -528,9 +560,13 @@ class CarrierUploadTripletTable(Base):
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     target_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
     source_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
-    # Lifecycle: dispatched | succeeded | failed | needs_retry | exhausted
+    # dispatched | succeeded | needs_retry | permanent_failure | exhausted
+    # ("failed" retained as a legacy value read by older rows; no longer written)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="dispatched")
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Uploader-reported code for the most recent callback on this triplet:
+    # 0 = success, 1 = retryable, 2 = permanent. NULL until first callback.
+    last_error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

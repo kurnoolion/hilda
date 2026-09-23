@@ -55,6 +55,19 @@ class TaskDeps:
     # production unless wired at worker startup; tests inject MockDispatcher.
     dispatcher:      Any = None        # TriggerDispatcher (workflow_engine)
 
+    # CARRIER-RETRY-5 (2026-09-23, D-218): ops-alert sink. The ops_alerts
+    # module was built but had zero call sites until the carrier-upload
+    # reconciler needed to tell a human "these files never made it to Drive".
+    # None keeps the pre-D-218 behaviour -- the reconciler still writes its
+    # communication_log row, it just doesn't email anyone.
+    ops_alerts:      Any = None        # OpsAlertService (ops_alerts)
+
+    # DashboardConfig, for tasks that must mint URLs an external service will
+    # call back on (carrier-upload callback: origin + url_prefix + HMAC
+    # secret). Read via getattr with an env fallback, so leaving this None on
+    # older deploys degrades to environment lookup rather than breaking.
+    dashboard_config: Any = None       # DashboardConfig (dashboard)
+
 
 _deps: TaskDeps | None = None
 

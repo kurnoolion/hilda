@@ -16,6 +16,8 @@ from typing import Any, Protocol, runtime_checkable
 __all__ = [
     "AuditWriter",
     "BatchDispatchResult",
+    "BatchJobStatus",
+    "BatchKillResult",
     "CarrierUploadResult",
     "CustomerAdapter",
     "UploadTriplet",
@@ -111,6 +113,45 @@ class BatchDispatchResult:
     jenkins_build_id: str | None = None  # optional cross-ref to uploader's own job id
 
 
+@dataclass(frozen=True)
+class BatchJobStatus:
+    """Return shape from CustomerAdapter.is_batch_job_completed.
+
+    CARRIER-RETRY-2 (2026-09-23, D-218). Wraps the corp-side
+    `is_jenkins_build_completed` API, whose contract is an integer return:
+    0 = the build has finished (whatever its outcome), non-zero = still
+    running / unknown / probe failed. HILDA treats ONLY 0 as "safe to
+    re-dispatch"; every non-zero value means the job may still be holding a
+    Selenium session against the same Drive folder, and re-dispatching on top
+    of it risks duplicate uploads.
+
+    `probe_failed=True` distinguishes "the API answered non-zero" from "we
+    couldn't reach the API at all". Both block re-dispatch, but only the
+    latter is an adapter/network problem worth alerting on separately.
+    """
+
+    completed: bool                  # True iff the underlying API returned 0
+    raw_code: int | None             # verbatim API return; None when probe_failed
+    probe_failed: bool = False       # adapter/network error reaching the API
+    error_detail: str | None = None  # bounded token (NFR-2)
+
+
+@dataclass(frozen=True)
+class BatchKillResult:
+    """Return shape from CustomerAdapter.kill_batch_job.
+
+    Wraps the corp-side `kill_jenkins_job` API (0 = killed successfully).
+    HILDA calls this only when `is_batch_job_completed` still reports
+    not-completed at the batch's `kill_at` deadline — i.e. the job is
+    presumed stalled and must be torn down before the pending subset is
+    re-dispatched under the same batch_id.
+    """
+
+    killed: bool                     # True iff the underlying API returned 0
+    raw_code: int | None             # verbatim API return; None when the call raised
+    error_detail: str | None = None  # bounded token (NFR-2)
+
+
 @runtime_checkable
 class CustomerAdapter(Protocol):
     """All callers depend on this Protocol, not on a concrete subclass.
@@ -148,13 +189,18 @@ class CustomerAdapter(Protocol):
         filename: str,                   # basename only; e.g., "abc.report"
         customer_delivery_info: str,     # per-row from Deliverables SP list per D-126; e.g., "drive.google.com"
     ) -> CarrierUploadResult:
-        """Upload ONE file to the customer's Drive folder (slow per-file path).
+        """DEPRECATED (CARRIER-UNIFY / D-218) — upload ONE file, slow path.
 
-        Retained as the retry-fallback path for the async batch dispatched via
-        `upload_attachments_batch` — the reconcile beat calls this method
-        per-file for any triplet that timed out or failed under the batch.
-        Also the sole path used by adapters that don't override
-        `_invoke_binding_batch` for a fast Jenkins-batch job.
+        No longer called by any HILDA task. Until D-218 this was the
+        retry-fallback for triplets that timed out under a batch; retry is now
+        a re-dispatch of the batch's pending subset through
+        `upload_attachments_batch`, so a single-file upload is just a batch of
+        one — same batch_id/triplet_id plumbing, same callback path, one code
+        path to maintain instead of two.
+
+        Retained on the Protocol so existing per-customer subclasses under
+        `customizations/customer_adapter/` keep satisfying it without edits.
+        Implementations may keep it, or raise NotImplementedError.
         """
         ...
 
@@ -187,10 +233,59 @@ class CustomerAdapter(Protocol):
         to the binding as batch-scope args. Never per-triplet.
 
         On dispatch failure (cred error, network, binding raise), returns
-        BatchDispatchResult(dispatched=False, error_code=CAD-EXXX). The
-        caller (submit_to_carrier_task) marks every triplet as needing
-        per-file retry immediately; the reconcile beat picks them up on
-        the next tick.
+        BatchDispatchResult(dispatched=False, error_code=CAD-EXXX). HILDA
+        persists the batch as `failed_dispatch`; the reconcile beat admits
+        that state and re-dispatches on the next tick, up to
+        batch_max_retry_count.
+
+        RE-DISPATCH (CARRIER-RETRY-3): the beat calls this method again with
+        the SAME `batch_id` and only the still-pending triplets, plus a
+        freshly-minted `callback_url` (the old HMAC token has a per-attempt
+        TTL). Implementations must not assume `triplets` is the batch's
+        original full set.
+        """
+        ...
+
+    async def is_batch_job_completed(
+        self,
+        *,
+        batch_id: str,
+        jenkins_build_id: str | None = None,
+    ) -> "BatchJobStatus":
+        """Has the uploader's job for this batch finished?
+
+        CARRIER-RETRY-2 (D-218). Wraps the corp-side
+        `is_jenkins_build_completed` API. The reconcile beat calls this before
+        every re-dispatch: a batch passing `timeout_at` is NOT by itself proof
+        the job is done — with ~300 files a legitimately-slow job can outrun
+        the window, and re-dispatching under it would double-upload.
+
+        Only `completed=True` (API returned 0) authorises a re-dispatch. On
+        any non-zero code the beat waits; once the batch also passes
+        `kill_at` it calls `kill_batch_job` first.
+
+        Never raises — probe failures come back as
+        BatchJobStatus(completed=False, probe_failed=True).
+        """
+        ...
+
+    async def kill_batch_job(
+        self,
+        *,
+        batch_id: str,
+        jenkins_build_id: str | None = None,
+    ) -> "BatchKillResult":
+        """Tear down a stalled uploader job so the batch can be re-dispatched.
+
+        CARRIER-RETRY-2 (D-218). Wraps the corp-side `kill_jenkins_job` API.
+        Called only from the reconcile beat, only when
+        `is_batch_job_completed` still reports not-completed at the batch's
+        `kill_at` deadline.
+
+        Never raises — failures come back as
+        BatchKillResult(killed=False, error_detail=...). A failed kill blocks
+        the re-dispatch for that tick rather than risking two live jobs
+        writing to the same Drive folder.
         """
         ...
 

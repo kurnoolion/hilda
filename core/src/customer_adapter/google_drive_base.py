@@ -30,6 +30,8 @@ from .config import CustomerAdapterConfig
 from .protocol import (
     AuditWriter,
     BatchDispatchResult,
+    BatchJobStatus,
+    BatchKillResult,
     CarrierUploadResult,
     UploadTriplet,
 )
@@ -339,6 +341,7 @@ class GoogleDriveBaseAdapter:
         if not batch_id:
             batch_id = f"BATCH-{_uuid.uuid4().hex[:16]}"
         timeout_at = started + timedelta(seconds=self._config.batch_timeout_seconds)
+        kill_at = started + timedelta(seconds=self._config.batch_kill_after_seconds)
 
         if not customer_delivery_info:
             return BatchDispatchResult(
@@ -350,13 +353,16 @@ class GoogleDriveBaseAdapter:
 
         # -- Persist batch + triplet rows BEFORE calling the binding so a
         # crashed dispatch still leaves durable state the reconcile beat can
-        # pick up.
+        # pick up. Both inserts are idempotent on their primary keys, so a
+        # RE-dispatch under the same batch_id (CARRIER-RETRY-3) is a no-op
+        # here -- the beat owns the retry_count/deadline bump via
+        # begin_batch_redispatch once the dispatch is confirmed.
         from core.src.storage import carrier_upload_ops as _cu
         await _cu.insert_batch(
             batch_id=batch_id, customer_id=self.customer_id,
             device_id=device_id, milestone_id=milestone_name,
             dispatched_at=started, expected_triplet_count=len(triplets),
-            timeout_at=timeout_at,
+            timeout_at=timeout_at, kill_at=kill_at,
         )
         await _cu.insert_triplets([
             {
@@ -514,13 +520,130 @@ class GoogleDriveBaseAdapter:
                 error = "source_file_missing"
             except Exception:  # noqa: BLE001
                 error = "binding_failure"
+            # error_code 1 (retryable) on any fallback-loop failure -- this
+            # path has no way to distinguish a transient Drive hiccup from a
+            # permanent fault, and code 2 is terminal. The batch retry ceiling
+            # bounds the cost of guessing retryable.
             await _cu.mark_triplet_result(
-                triplet_id=t.triplet_id, success=success, error=error,
+                triplet_id=t.triplet_id,
+                error_code=0 if success else 1,
+                error=error,
             )
 
         # After the loop, mark the batch complete.
         await _cu.mark_batch_status(batch_id, "complete")
         return None  # no Jenkins build id in the fallback path
+
+    # ------------------------------------------------------------------
+    # CARRIER-RETRY-2 (2026-09-23): uploader job control. See D-218.
+    # ------------------------------------------------------------------
+
+    async def is_batch_job_completed(
+        self,
+        *,
+        batch_id: str,
+        jenkins_build_id: str | None = None,
+    ) -> BatchJobStatus:
+        """See CustomerAdapter.is_batch_job_completed.
+
+        Thin wrapper: delegates to `_invoke_binding_job_status`, maps the
+        integer return (0 = completed) onto BatchJobStatus, and swallows
+        everything so the reconcile beat never takes an exception from a
+        probe.
+
+        The DEFAULT hook raises NotImplementedError, which lands here as
+        `completed=True, probe_failed=False`. That is deliberate: adapters
+        without a real Jenkins (tests, the per-triplet fallback loop) have no
+        long-running job to collide with, so blocking their re-dispatch
+        forever would be the wrong default. Adapters that DO dispatch a real
+        job must override the hook -- corp-side subclasses do.
+        """
+        try:
+            raw = await self._invoke_binding_job_status(
+                batch_id=batch_id, jenkins_build_id=jenkins_build_id,
+            )
+        except NotImplementedError:
+            return BatchJobStatus(
+                completed=True, raw_code=None,
+                error_detail="job_status_probe_unsupported",
+            )
+        except Exception:  # noqa: BLE001
+            return BatchJobStatus(
+                completed=False, raw_code=None, probe_failed=True,
+                error_detail="job_status_probe_failure",
+            )
+        try:
+            code = int(raw)
+        except (TypeError, ValueError):
+            return BatchJobStatus(
+                completed=False, raw_code=None, probe_failed=True,
+                error_detail="job_status_non_integer",
+            )
+        return BatchJobStatus(completed=(code == 0), raw_code=code)
+
+    async def kill_batch_job(
+        self,
+        *,
+        batch_id: str,
+        jenkins_build_id: str | None = None,
+    ) -> BatchKillResult:
+        """See CustomerAdapter.kill_batch_job. Thin wrapper over
+        `_invoke_binding_kill_job`; 0 = killed. Never raises.
+
+        An unsupported hook returns killed=True for the same reason
+        is_batch_job_completed defaults to completed=True -- there is no real
+        job to tear down, so the re-dispatch should not be blocked.
+        """
+        try:
+            raw = await self._invoke_binding_kill_job(
+                batch_id=batch_id, jenkins_build_id=jenkins_build_id,
+            )
+        except NotImplementedError:
+            return BatchKillResult(
+                killed=True, raw_code=None, error_detail="kill_unsupported",
+            )
+        except Exception:  # noqa: BLE001
+            return BatchKillResult(
+                killed=False, raw_code=None, error_detail="kill_failure",
+            )
+        try:
+            code = int(raw)
+        except (TypeError, ValueError):
+            return BatchKillResult(
+                killed=False, raw_code=None, error_detail="kill_non_integer",
+            )
+        return BatchKillResult(killed=(code == 0), raw_code=code)
+
+    async def _invoke_binding_job_status(
+        self, *, batch_id: str, jenkins_build_id: str | None,
+    ) -> int:
+        """Call the corp-side `is_jenkins_build_completed` API. Returns its
+        raw integer (0 = build finished).
+
+        ABSTRACT per [D-027] -- the per-customer subclass under
+        `customizations/customer_adapter/` overrides this:
+        ```python
+        async def _invoke_binding_job_status(self, *, batch_id, jenkins_build_id):
+            from <binding_module> import is_jenkins_build_completed
+            return await asyncio.to_thread(is_jenkins_build_completed, jenkins_build_id)
+        ```
+        """
+        raise NotImplementedError(
+            f"job-status probe not implemented for '{self.customer_id}'"
+        )
+
+    async def _invoke_binding_kill_job(
+        self, *, batch_id: str, jenkins_build_id: str | None,
+    ) -> int:
+        """Call the corp-side `kill_jenkins_job` API. Returns its raw integer
+        (0 = killed).
+
+        ABSTRACT per [D-027] -- subclass pattern mirrors
+        `_invoke_binding_job_status`.
+        """
+        raise NotImplementedError(
+            f"job kill not implemented for '{self.customer_id}'"
+        )
 
     def _emit_batch_log(
         self,

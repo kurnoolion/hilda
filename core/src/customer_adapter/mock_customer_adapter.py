@@ -13,7 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .protocol import BatchDispatchResult, CarrierUploadResult, UploadTriplet
+from .protocol import (
+    BatchDispatchResult,
+    BatchJobStatus,
+    BatchKillResult,
+    CarrierUploadResult,
+    UploadTriplet,
+)
 
 __all__ = ["MockCustomerAdapter"]
 
@@ -41,6 +47,15 @@ class MockCustomerAdapter:
         # If set to True, upload_attachments_batch returns dispatched=False
         # with CAD-E004 for the whole batch (simulates uploader-side outage).
         self._batch_dispatch_fails: bool = False
+        # CARRIER-RETRY-2 (2026-09-23): job-control surface. Defaults mirror
+        # the base adapter's unsupported-hook behaviour (completed, killable)
+        # so existing tests see no change; retry tests flip them.
+        self._job_completed_code: int = 0
+        self._job_probe_raises: bool = False
+        self._kill_code: int = 0
+        # Call logs for retry-path assertions.
+        self.job_status_calls: list[dict[str, Any]] = []
+        self.kill_calls: list[dict[str, Any]] = []
 
     def register_upload_result(
         self,
@@ -145,6 +160,43 @@ class MockCustomerAdapter:
             expected_triplet_count=len(triplets),
             jenkins_build_id=f"mock-build-{batch_id[-8:]}",
         )
+
+    # -- CARRIER-RETRY-2 job control ------------------------------------
+
+    def set_job_completed_code(self, code: int) -> None:
+        """0 = job finished (re-dispatch allowed); non-zero = still running."""
+        self._job_completed_code = code
+
+    def set_job_probe_raises(self, raises: bool) -> None:
+        """Simulate an unreachable job-status API (probe_failed path)."""
+        self._job_probe_raises = raises
+
+    def set_kill_code(self, code: int) -> None:
+        """0 = kill succeeded; non-zero = kill failed."""
+        self._kill_code = code
+
+    async def is_batch_job_completed(
+        self, *, batch_id: str, jenkins_build_id: str | None = None,
+    ) -> BatchJobStatus:
+        self.job_status_calls.append(
+            {"batch_id": batch_id, "jenkins_build_id": jenkins_build_id}
+        )
+        if self._job_probe_raises:
+            return BatchJobStatus(
+                completed=False, raw_code=None, probe_failed=True,
+                error_detail="mock_probe_failure",
+            )
+        code = self._job_completed_code
+        return BatchJobStatus(completed=(code == 0), raw_code=code)
+
+    async def kill_batch_job(
+        self, *, batch_id: str, jenkins_build_id: str | None = None,
+    ) -> BatchKillResult:
+        self.kill_calls.append(
+            {"batch_id": batch_id, "jenkins_build_id": jenkins_build_id}
+        )
+        code = self._kill_code
+        return BatchKillResult(killed=(code == 0), raw_code=code)
 
     async def health(self) -> dict[str, Any]:
         return {
