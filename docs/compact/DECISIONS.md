@@ -7669,3 +7669,106 @@ this extends), `[D-127]` (ops_alerts, first wired here),
 `[D-027]` (corp binding bodies stay out of public github),
 `[D-140]` (Guard 4 trigger_source trust unchanged), `URLPFX-1`
 (callback URLs carry the `/hilda` prefix).
+
+---
+
+## D-219: TPM is a TO recipient on every kickoff outreach email (TPM-OUTREACH-1)
+
+**Date**: 2026-09-24. **Scope**:
+`workflow_engine.tasks.outreach._send_batch_outreach_email` (+ new
+`_merge_tpm_into_recipients`) and
+`workflow_engine.tasks.sp_alert_imports.kickoff_collection_task` (+ new
+`_resolve_tpm_email_cached`). No schema change, no SharePoint config
+change, no template.yaml change.
+
+**Context**: Outreach on trigger collection went only to the item owners.
+The TPM owns the milestone and is the one who chases owners when replies
+don't come, but had no copy of what was actually asked -- they were
+reconstructing it from the dashboard. Requirement from the architect
+2026-09-24: put the TPM on every outgoing outreach email, in the TO list.
+
+The address lives in the `TPM` column of `Projects_<customer_id>`, which
+is a SharePoint **person** field -- a composite object, not a string. Its
+shape depends on how SP expands it: the corp box returns a UserProfile
+blob (`Account` / `Name` / `Work email` / `Department` / `First name` /
+`Last name` / `User name`), a standard PersonOrGroup `$expand` returns
+`{Id, EMail, Title, LoginName}`, and a multi-user column returns a LIST of
+either.
+
+**Decision**:
+
+1. **Reuse `tpm_notification._read_tpm_email`** rather than writing a
+   second reader. It already issues the `$expand=TPM` +
+   `$select=TPM/EMail` pair that SP 2017 requires (bare `$expand` 400s --
+   see D-088 / the 2026-07-27 corp probe), and
+   `_extract_user_field_email_name` already walks every composite shape
+   above, preferring `Work email` -> `WorkEmail` -> `EMail` -> `Email` ->
+   `email` -> `mail` and recursing into lists.
+2. **TO, not CC** -- architect's call. The TPM is expected to act on owner
+   replies, so they are a direct addressee.
+3. **Resolve once per kickoff**, memoized per `device_id` in a dict owned
+   by `kickoff_collection_task`.
+4. **Inject inside `_send_batch_outreach_email`**, not at the `recipients`
+   build site, so the existing send gate (non-empty OWNER list) is
+   untouched.
+5. **Degrade silently to owners-only** on a missing `device_id`, a failed
+   Projects read, or an empty TPM column -- WARN and continue.
+6. **Audit as its own `tpm_recipient` key**, not concatenated into
+   `recipient`.
+
+**Why**:
+
+- **vs. a new TPM reader**: two readers of the same quirky person field
+  would drift, and the existing one is already proven in production
+  against the live `Projects_MMK` shape via `tpm_notification` and
+  `setup_complete_notification`. Reuse also means **zero SharePoint config
+  change** -- the `projects.tpm_email` column mapping those tasks depend on
+  is already deployed.
+- **vs. CC**: a CC reads as "informational, no action expected", which is
+  the opposite of the TPM's role here.
+- **vs. resolving per TG group**: kickoff loops TG groups, so a 12-TG
+  milestone would issue 12 identical Projects reads for one answer.
+- **vs. a module-level cache**: a celery worker lives for days. A
+  process-wide memo would pin a stale TPM after the SP row is reassigned,
+  and the staleness would be invisible. Task-scoped costs one read per
+  kickoff and cannot go stale.
+- **vs. injecting at the `recipients` build site** (`sp_alert_imports`
+  ~:919): `recipients` is also the send gate, so appending the TPM there
+  would start sending mail for TGs that have no owner -- today those
+  transition state silently with no email. That is a behaviour change the
+  requirement did not ask for.
+- **vs. failing the send when the TPM can't be resolved**: the owners'
+  outreach is the primary purpose of the email. A Projects hiccup must not
+  cost them their request.
+- **vs. folding the TPM into the audit `recipient` string**: the log would
+  stop being able to answer "who owns this item", which is what that field
+  is read for.
+
+**Consequences**:
+
+- One extra SP read per kickoff run (not per TG, not per item).
+- Kickoff emits `no TPM email resolved for customer=... device=...` at WARN
+  when the column is empty or unreadable. Expect this on any device whose
+  `Projects_<customer>` row has no TPM assigned -- it is the signal that
+  the SP row needs filling, not a code fault.
+- Reminders (`send_reminder_task`), the per-item
+  `send_initial_outreach_task`, and `notify_new_owner_task` are
+  **unchanged** -- `tpm_email` defaults to None and only kickoff passes it.
+  Scope matches the requirement ("on trigger collection"); widening it is a
+  separate decision.
+- A TPM who also owns items in a TG appears once, not twice -- the merge
+  dedupes case-insensitively because owner emails and the TPM come from
+  different SP columns with independent casing.
+- Two test doubles were widened to match the real signatures they stand in
+  for: `MockSp.get_items` now takes `**kwargs` (the real
+  `SpWriterImpl.get_items` accepts `expand` / `extra_select` /
+  `with_select`), and the two kickoff `fake_send` stubs accept `tpm_email`.
+  The first gap had been latent -- any test exercising an expanded person
+  column would have failed inside the double.
+
+**Anchors**: `TPM-OUTREACH-1`, `[D-088]` (Projects TPM 3-tuple + the
+`row["TPM"]["EMail"]` convention), `[D-012]` (per-owner-BATCH outbound
+consolidation -- one email per owner per TG, which the TPM now joins),
+`[D-206]` (kickoff regrouping by `tg_name`), `ATTACH-1` / `[D-216]` (the
+previous change to this same send path), `SETUP-6` (the DN-splitting in
+`_extract_user_field_email_name`).
