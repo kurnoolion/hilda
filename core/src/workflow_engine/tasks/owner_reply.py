@@ -208,6 +208,9 @@ async def _async_apply_owner_reply(msg_payload: dict[str, Any]) -> dict[str, Any
         await _maybe_send_unparseable_auto_reply(
             deps=deps, msg=msg, batch_id=batch_id,
             correlation_id=correlation_id,
+            # UNP-TPM-1 (2026-09-24): carries (customer_id, device_id) so the
+            # auto-reply can put the milestone's TPM on the TO line.
+            expected_items=expected_items,
         )
         return {"batch_id": batch_id, "rows_parsed": 0,
                 "error": "unparseable"}
@@ -607,16 +610,79 @@ items; re-attaching them just creates duplicate copies.</p>
   <li>Send -- table only, no attachments needed.</li>
 </ol>
 
-<p>Your original response is safe -- it has been recorded and your PM
-can process it manually if needed. This is an automated message; no
+<p>Your original response is safe -- it has been recorded and can be
+processed manually if needed.{pm_note} This is an automated message; no
 reply is required to this email.</p>
 
 <p>-- HILDA</p>
 """
 
+# UNP-TPM-1 (2026-09-24): the PM sentence is conditional on the TPM actually
+# being resolved and addressed. The pre-2026-09-24 copy asserted "your PM has
+# been copied" unconditionally while sending cc=[] to the owner alone -- an
+# owner could read that as "someone else will pick this up" and stop. Now the
+# claim is only made when it is true.
+_PM_NOTE_WITH_TPM = " Your PM is on this email."
+_PM_NOTE_NO_TPM = ""
+
+
+async def _resolve_tpm_for_batch(
+    deps: Any, expected_items: list[dict[str, Any]] | None,
+) -> str | None:
+    """UNP-TPM-1 (2026-09-24): the TPM address for this batch's device, for
+    the unparseable auto-reply's TO list.
+
+    Scope comes off the first expected_item (`_lookup_batch_items` carries
+    customer_id / device_id through from the delivery_item row). A batch is
+    one TG on one (customer, device, milestone) by construction in kickoff,
+    so the first entry speaks for the batch.
+
+    Reuses `tpm_notification._read_tpm_email`, which owns the reading of the
+    composite TPM person field on Projects_<customer_id> -- same resolver
+    kickoff outreach uses (TPM-OUTREACH-1), so the owner sees the same TPM on
+    the request and on this failure notice.
+
+    Run in a worker thread: `_read_tpm_email` is sync and reaches SharePoint
+    over the network. Calling it inline would block this task's event loop,
+    and `SpWriterImpl.get_items` would additionally take `run_async_sync`'s
+    slower spawn-a-thread-because-a-loop-is-running branch. Off-thread it
+    gets the plain `asyncio.run` fast path.
+
+    Never raises -- a TPM we can't resolve must not cost the owner their
+    notification.
+    """
+    first = (expected_items or [{}])[0] if expected_items else {}
+    customer_id = first.get("customer_id")
+    device_id = first.get("device_id")
+    if not customer_id or not device_id:
+        _log.info(
+            "unparseable_auto_reply: no (customer_id, device_id) on batch "
+            "items -- sending to owner only",
+        )
+        return None
+    try:
+        from core.src.workflow_engine.tasks.tpm_notification import _read_tpm_email
+        email, _name = await asyncio.to_thread(
+            _read_tpm_email, deps, customer_id, device_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "unparseable_auto_reply: TPM lookup failed customer=%s device=%s: "
+            "%s: %s -- sending to owner only",
+            customer_id, device_id, type(exc).__name__, str(exc)[:120],
+        )
+        return None
+    if not email:
+        _log.warning(
+            "unparseable_auto_reply: no TPM email resolved customer=%s "
+            "device=%s -- sending to owner only", customer_id, device_id,
+        )
+    return email or None
+
 
 async def _maybe_send_unparseable_auto_reply(
     *, deps: Any, msg: Any, batch_id: str, correlation_id: str,
+    expected_items: list[dict[str, Any]] | None = None,
 ) -> None:
     """Send a one-time auto-reply to the owner explaining the format
     requirement, then write an idempotency audit row keyed on message_id.
@@ -628,6 +694,12 @@ async def _maybe_send_unparseable_auto_reply(
     Idempotency: if a prior 'owner_reply_unparseable_notified' audit row
     exists for the same message_id, skip. Prevents Celery retries or
     duplicate-ingest replays from spamming the owner.
+
+    UNP-TPM-1 (2026-09-24): the milestone's TPM joins the TO list, so a
+    dropped reply is visible to the person chasing the milestone rather than
+    only to the owner whose reply failed to parse. `expected_items` supplies
+    the (customer_id, device_id) needed to resolve them; when absent or
+    unresolvable the mail still goes to the owner alone.
     """
     sender = (getattr(msg, "sender", "") or "").strip()
     message_id = getattr(msg, "message_id", "") or ""
@@ -701,15 +773,24 @@ async def _maybe_send_unparseable_auto_reply(
             )
             return
 
+    # Resolve the TPM only once we know we're actually going to send --
+    # every guard above short-circuits, and this costs a SharePoint round
+    # trip.
+    tpm_email = await _resolve_tpm_for_batch(deps, expected_items)
+    to_list = [sender]
+    if tpm_email and tpm_email.strip().lower() != sender.strip().lower():
+        to_list.append(tpm_email)
+
     body_html = _UNPARSEABLE_AUTO_REPLY_BODY.format(
         batch_id=batch_id,
         subject=(subject or "your HILDA request").replace("<", "&lt;").replace(">", "&gt;"),
+        pm_note=(_PM_NOTE_WITH_TPM if len(to_list) > 1 else _PM_NOTE_NO_TPM),
     )
     reply_subject = f"[HILDA] Reply not processed -- please re-reply from original ({batch_id})"
 
     try:
         await deps.email_sender.send(
-            to=[sender],
+            to=to_list,
             cc=[],
             subject=reply_subject,
             body=body_html,
@@ -718,7 +799,7 @@ async def _maybe_send_unparseable_auto_reply(
     except Exception as exc:  # noqa: BLE001
         _log.warning(
             "unparseable_auto_reply: send failed to=%s batch_id=%s: %s: %s",
-            sender, batch_id, type(exc).__name__, str(exc)[:120],
+            to_list, batch_id, type(exc).__name__, str(exc)[:120],
         )
         return
 
@@ -731,12 +812,15 @@ async def _maybe_send_unparseable_auto_reply(
             "message_id":     message_id,
             "sender":         sender,
             "subject":        subject,
+            # UNP-TPM-1: recorded so the log shows whether the TPM actually
+            # saw this failure or the owner was told alone.
+            "tpm_recipient":  tpm_email,
             "correlation_id": correlation_id,
         },
     )
     _log.info(
         "unparseable_auto_reply: sent to=%s batch_id=%s (idempotent per message_id)",
-        sender, batch_id,
+        to_list, batch_id,
     )
 
 
@@ -823,6 +907,16 @@ async def _lookup_batch_items(batch_id: str) -> list[dict[str, Any]]:
         matched.append({
             "item_no":                  item_no_val,
             "delivery_item_id":         delivery_item_id,
+            # UNP-TPM-1 (2026-09-24): scope carried so the unparseable
+            # auto-reply can look the device's TPM up in
+            # Projects_<customer_id>. Neither is a declared field on
+            # DeliveryItemBase -- they are denormalized columns on
+            # DeliveryItemTable that survive as Pydantic extras because
+            # _Base sets extra='allow'. Read here rather than by splitting
+            # the composite item_id, which is ambiguous (device ids contain
+            # hyphens: "MMK-SM-S671U1-P1-5").
+            "customer_id":              getattr(item, "customer_id", None),
+            "device_id":                getattr(item, "device_id", None),
             # OWNER-7 (2026-08-16, B-final-B): owner_corp_*_email are now
             # LIST-typed on DeliveryItemBase (unsuffixed = list post-rename).
             # resolve_sender_match reads these lists directly per OWNER-4

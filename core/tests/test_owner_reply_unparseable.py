@@ -27,8 +27,28 @@ def _mk_msg(sender="owner@corp.example", message_id="mid-abc-123",
     return SimpleNamespace(sender=sender, message_id=message_id, subject=subject)
 
 
-def _mk_deps(*, has_email_sender=True, prior_notified=False):
+def _mk_expected_items(customer_id="MMK", device_id="SM-S671U1"):
+    """UNP-TPM-1: the shape _lookup_batch_items returns, trimmed to the keys
+    the auto-reply reads."""
+    return [{
+        "item_no": 5,
+        "delivery_item_id": f"{customer_id}-{device_id}-DRR-5",
+        "customer_id": customer_id,
+        "device_id": device_id,
+    }]
+
+
+def _mk_deps(*, has_email_sender=True, prior_notified=False, tpm_email=None):
     deps = MagicMock()
+    # UNP-TPM-1: sp_writer stands in for the Projects_<customer_id> read.
+    # Returning [] (rather than leaving the MagicMock auto-attribute) makes
+    # "no TPM configured" the explicit default, so a test that wants a TPM
+    # has to say so.
+    def _get_items(*a, **kw):
+        if tpm_email is None:
+            return []
+        return [{"tpm_email": {"EMail": tpm_email, "Title": "The TPM"}}]
+    deps.sp_writer.get_items = MagicMock(side_effect=_get_items)
     if not has_email_sender:
         deps.email_sender = None
     else:
@@ -154,18 +174,95 @@ class TestUnparseableAutoReply:
         assert "only the status table needs re-sending" in body
         assert "no attachments needed" in body
 
+    # -- UNP-TPM-1 (2026-09-24) -----------------------------------------
+
     @pytest.mark.asyncio
-    async def test_body_does_not_claim_the_pm_was_copied(self):
-        """Regression guard on a factual claim: this auto-reply goes to the
-        owner alone (cc=[]), so the old 'your PM has been copied' line was
-        false and could lead an owner to assume someone else would pick the
-        reply up."""
-        deps = _mk_deps()
+    async def test_tpm_is_added_to_the_to_list(self):
+        deps = _mk_deps(tpm_email="tpm@corp.example")
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=_mk_expected_items(),
+        )
+        sent = deps._sends[0]
+        assert sent["to"] == ["owner@corp.example", "tpm@corp.example"]
+        assert sent["cc"] == []
+
+    @pytest.mark.asyncio
+    async def test_projects_is_queried_with_the_batch_scope(self):
+        deps = _mk_deps(tpm_email="tpm@corp.example")
         await _maybe_send_unparseable_auto_reply(
             deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
             correlation_id="corr-1",
+            expected_items=_mk_expected_items("VZW", "SM-A186U"),
         )
-        sent = deps._sends[0]
-        assert sent["cc"] == []
+        kw = deps.sp_writer.get_items.call_args.kwargs
+        assert kw["entity"] == "projects"
+        assert kw["canonical_filters"] == {"project_model": "SM-A186U"}
+
+    @pytest.mark.asyncio
+    async def test_owner_only_when_scope_is_unavailable(self):
+        """No expected_items (or a row missing customer/device) -> no TPM
+        lookup at all, and the owner still gets their notification."""
+        deps = _mk_deps(tpm_email="tpm@corp.example")
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=None,
+        )
+        assert deps._sends[0]["to"] == ["owner@corp.example"]
+        assert not deps.sp_writer.get_items.called
+
+    @pytest.mark.asyncio
+    async def test_tpm_lookup_failure_still_notifies_the_owner(self):
+        deps = _mk_deps(tpm_email="tpm@corp.example")
+        deps.sp_writer.get_items = MagicMock(side_effect=RuntimeError("SP down"))
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=_mk_expected_items(),
+        )
+        assert deps._sends[0]["to"] == ["owner@corp.example"]
+
+    @pytest.mark.asyncio
+    async def test_tpm_who_is_the_sender_is_not_duplicated(self):
+        """A TPM replying on an owner's behalf shouldn't be addressed twice."""
+        deps = _mk_deps(tpm_email="Owner@Corp.Example")
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(sender="owner@corp.example"),
+            batch_id="BATCH-abc", correlation_id="corr-1",
+            expected_items=_mk_expected_items(),
+        )
+        assert deps._sends[0]["to"] == ["owner@corp.example"]
+
+    @pytest.mark.asyncio
+    async def test_pm_sentence_appears_only_when_the_pm_is_actually_on_it(self):
+        """Regression guard on a factual claim. The pre-2026-09-24 copy said
+        'your PM has been copied' unconditionally while sending cc=[] to the
+        owner alone -- an owner could read that as 'someone else will handle
+        it' and stop. The claim must track reality."""
+        with_tpm = _mk_deps(tpm_email="tpm@corp.example")
+        await _maybe_send_unparseable_auto_reply(
+            deps=with_tpm, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=_mk_expected_items(),
+        )
+        body = " ".join(with_tpm._sends[0]["body"].lower().split())
+        assert "your pm is on this email" in body
+
+        without_tpm = _mk_deps(tpm_email=None)
+        await _maybe_send_unparseable_auto_reply(
+            deps=without_tpm, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=_mk_expected_items(),
+        )
+        sent = without_tpm._sends[0]
         body = " ".join(sent["body"].lower().split())
+        assert sent["to"] == ["owner@corp.example"]
+        assert "your pm is on this email" not in body
         assert "has been copied" not in body
+
+    @pytest.mark.asyncio
+    async def test_audit_records_whether_the_tpm_was_notified(self):
+        deps = _mk_deps(tpm_email="tpm@corp.example")
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1", expected_items=_mk_expected_items(),
+        )
+        details = deps.audit.write_communication_log.call_args.kwargs["details"]
+        assert details["tpm_recipient"] == "tpm@corp.example"
