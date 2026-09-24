@@ -109,6 +109,20 @@ class ReconcileConfig(BaseModel):
     sync_8_drr_mapping_promote: SyncTypeConfig = SyncTypeConfig(
         enabled=True, elapsed_threshold_sec=0
     )
+    # LATE-ITEM-1 (2026-09-24): outreach catch-up for deliverables added to a
+    # milestone AFTER its collection kickoff already ran. sync-2 deliberately
+    # won't fire once any item shows kickoff evidence, so without this a late
+    # arrival sits at Open with no outreach forever.
+    #
+    # elapsed_threshold_sec is a QUIET WINDOW over the straggler set, not a
+    # delay since import: sync-9 waits until no straggler has been touched for
+    # this long, because a TPM adding a deliverable is usually still filling in
+    # owner / tg_name / force_tracking, and outreach cannot be unsent. 900s
+    # matches sync-2, which was raised 300 -> 900 on 2026-07-30 for the same
+    # class of reason (give the human time to finish).
+    sync_9_late_item_outreach: SyncTypeConfig = SyncTypeConfig(
+        enabled=True, elapsed_threshold_sec=900
+    )
 
     @classmethod
     def from_sources(

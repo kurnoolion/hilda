@@ -29,6 +29,7 @@ from core.src.workflow_engine.tasks.reconcile import (
     _sync_5_close_all_items,
     _sync_6_close_in_progress,
     _sync_7_retry_unrouted,
+    _sync_9_late_item_outreach,
 )
 
 
@@ -889,3 +890,232 @@ class TestSync7RetryUnrouted:
         # No candidates fetched (early return on empty unrouted).
         us_mock.list_route_candidates.assert_not_called()
         assert stats["sync_7_routed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# sync-9 late-item outreach (LATE-ITEM-1)
+# ---------------------------------------------------------------------------
+
+
+def _mk_late_item(
+    item_no: int,
+    device_id: str = "SM-1",
+    delivery_state: str = "Open",
+    *,
+    force_tracking_enabled: bool = True,
+    item_type: str = "Document",
+    updated_ago_sec: int = 1000,
+) -> SimpleNamespace:
+    """Item shaped for sync-9's predicate: it reads force_tracking_enabled,
+    item_type and last_updated, none of which the shared _mk_item sets."""
+    return SimpleNamespace(
+        item_id=f"MMK-{device_id}-P1-{item_no}",
+        item_no=item_no,
+        device_id=device_id,
+        milestone_id="P1",
+        delivery_state=delivery_state,
+        force_tracking_enabled=force_tracking_enabled,
+        item_type=item_type,
+        last_updated=datetime.now(timezone.utc) - timedelta(seconds=updated_ago_sec),
+    )
+
+
+_SYNC9_STATS_KEYS = {
+    "sync_9_dispatched": 0, "sync_9_holding": 0, "sync_9_skipped": 0,
+}
+
+
+class TestSync9LateItemOutreach:
+    """LATE-ITEM-1 (2026-09-24): a deliverable added AFTER kickoff had no path
+    to outreach -- sync-1 imported it and D-144 advanced it to Open, but sync-2
+    refuses to fire once any item shows kickoff evidence, so it sat at Open
+    forever. sync-9 is the catch-up.
+    """
+
+    def _run(self, cfg, deps, sp_milestone):
+        stats = dict(_SYNC9_STATS_KEYS)
+        with patch(
+            "core.src.workflow_engine.tasks.sp_alert_imports.kickoff_collection_task"
+        ) as mock_kickoff:
+            _sync_9_late_item_outreach(
+                deps, cfg, stats, "cid", "MMK", "SM-1", "P1", sp_milestone,
+            )
+        return stats, mock_kickoff
+
+    def test_disabled_noop(self):
+        cfg = ReconcileConfig(sync_9_late_item_outreach=SyncTypeConfig(enabled=False))
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(2),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats == _SYNC9_STATS_KEYS
+        assert not mock_kickoff.apply.called
+
+    def test_collection_never_started_noop(self):
+        """Nothing to be late TO. sync-2 owns the never-kicked-off case."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[_mk_late_item(1)])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": None},
+        )
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_no_kickoff_evidence_defers_to_sync_2(self):
+        """This is the mutual-exclusion contract: with every item still at Open
+        the milestone has not kicked off, so sync-2 fires and sync-9 must not."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[_mk_late_item(1), _mk_late_item(2)])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_late_item_after_kickoff_fires(self):
+        """The headline case: 2 items already at OutreachSent, item 88 arrives
+        late and sits at Open."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(2, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Open"),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 1
+        assert mock_kickoff.apply.called
+        _args, kwargs = mock_kickoff.apply.call_args
+        event_ctx = kwargs["args"][1]
+        assert event_ctx["trigger_source"] == "sync_backfill_late_item"
+        assert event_ctx["milestone_id"] == "P1"
+        assert event_ctx["device_id"] == "SM-1"
+
+    def test_late_item_still_at_not_started_fires(self):
+        """D-144's NS->Open auto-advance at import is best-effort; if it failed
+        the item is at Not Started, and kickoff walks NS->Open->OutreachSent."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Not Started"),
+        ])
+        stats, _ = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 1
+
+    def test_nothing_pending_noop(self):
+        """Steady state -- every item already past Open. Must be silent, since
+        this runs every 300s against every milestone."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(2, delivery_state="ReadyForSubmission"),
+            _mk_late_item(3, delivery_state="Closed"),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats == _SYNC9_STATS_KEYS
+        assert not mock_kickoff.apply.called
+
+    def test_quiet_window_holds_a_freshly_touched_item(self):
+        """A TPM adding a deliverable is usually still filling in owner /
+        tg_name. Outreach cannot be unsent, so we wait for edits to settle."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Open", updated_ago_sec=60),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_holding"] == 1
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_quiet_window_measures_the_newest_straggler(self):
+        """One settled straggler must not drag a still-being-edited sibling
+        into outreach -- the window is over the whole straggler set."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Open", updated_ago_sec=5000),
+            _mk_late_item(89, delivery_state="Open", updated_ago_sec=30),
+        ])
+        stats, _ = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_holding"] == 1
+        assert stats["sync_9_dispatched"] == 0
+
+    def test_force_tracking_disabled_item_is_not_a_straggler(self):
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Open", force_tracking_enabled=False),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_default_item_is_not_a_straggler(self):
+        """FR-78: the Default work item never gets outreach."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, delivery_state="OutreachSent"),
+            _mk_late_item(88, delivery_state="Open", item_type="Default"),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_other_device_items_are_out_of_scope(self):
+        """The reconciler iterates per (customer, device, milestone); a
+        straggler on a different device belongs to that device's tick."""
+        cfg = ReconcileConfig()
+        deps = _mk_deps(pg_items=[
+            _mk_late_item(1, device_id="SM-1", delivery_state="OutreachSent"),
+            _mk_late_item(88, device_id="SM-2", delivery_state="Open"),
+        ])
+        stats, mock_kickoff = self._run(
+            cfg, deps, {"milestone_collection_started_at": _iso_ago(5000)},
+        )
+        assert stats["sync_9_dispatched"] == 0
+        assert not mock_kickoff.apply.called
+
+    def test_sync_2_and_sync_9_are_mutually_exclusive(self):
+        """Their predicates are one negation apart, so for any given scope at
+        most one of them may fire. Asserted directly because a future edit to
+        either predicate could silently double-dispatch kickoff."""
+        cfg = ReconcileConfig()
+        sp_milestone = {"milestone_collection_started_at": _iso_ago(5000)}
+        scenarios = [
+            ("pre-kickoff",  [_mk_late_item(1), _mk_late_item(2)]),
+            ("post-kickoff", [_mk_late_item(1, delivery_state="OutreachSent"),
+                              _mk_late_item(88)]),
+        ]
+        for label, pg_items in scenarios:
+            s2 = {"sync_2_dispatched": 0, "sync_2_skipped": 0}
+            s9 = dict(_SYNC9_STATS_KEYS)
+            with patch(
+                "core.src.workflow_engine.tasks.sp_alert_imports.kickoff_collection_task"
+            ):
+                _sync_2_start_collection(
+                    _mk_deps(pg_items=pg_items), cfg, s2, "cid",
+                    "MMK", "SM-1", "P1", sp_milestone,
+                )
+                _sync_9_late_item_outreach(
+                    _mk_deps(pg_items=pg_items), cfg, s9, "cid",
+                    "MMK", "SM-1", "P1", sp_milestone,
+                )
+            fired = s2["sync_2_dispatched"] + s9["sync_9_dispatched"]
+            assert fired == 1, f"{label}: expected exactly one sync to fire, got {fired}"

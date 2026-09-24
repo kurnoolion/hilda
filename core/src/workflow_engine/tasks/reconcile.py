@@ -1,16 +1,25 @@
-"""reconcile.py -- meta-reconciler + 5 sync sub-tasks for missed SP alert emails.
+"""reconcile.py -- meta-reconciler + 9 sync sub-tasks for missed SP alert emails.
 
 Anchors [D-142] 5-sync reconciliation architecture + [D-143] SP-alerts-are-best-effort.
+
+The reconciler is not merely a safety net any more: the corp deployment has
+SP alert emails BLOCKED outright (too much HILDA<->SP mail), so for those
+flows polling is the ONLY path, not the backstop. Treat every sync below as
+load-bearing.
 
 Design (strand `reconcile-sync-cascade`):
   - SINGLE Celery beat entry `reconcile_all_task` fires every N minutes (default 5).
   - Task iterates (customer x device x milestone) tuples SERIALLY (per user Q1).
-  - For each tuple, dispatches 5 sync sub-tasks IN ORDER:
+  - For each tuple, dispatches the sync sub-tasks IN ORDER:
       sync-1 delivery_item_count      -- backfill missing Deliverable rows
       sync-2 milestone-start-collection -- retry kickoff when all still NS
       sync-3 deliverable-approved      -- per-item PM-approval mirror
       sync-4 milestone-submit-to-carrier -- retry submit when all still RFS
       sync-5 milestone-close-all-items -- retry close when all still SubmittedToCustomer
+      sync-6 close-in-progress sweep   -- CIP-4 stuck-CloseInProgress advance
+      sync-7 retry-unrouted            -- SYNC7-1 promote unambiguous _unrouted files
+      sync-8 drr-mapping-promote       -- DRRP1-STATE-1 phase 3 target promotion
+      sync-9 late-item-outreach        -- LATE-ITEM-1 outreach for post-kickoff arrivals
   - No retry limits; task naturally no-ops per tick when predicates broken.
   - trigger_source="sync_backfill_*" so guards (D-140 pattern) trust the reconciler.
   - Terminate on convergence == task returns cleanly with all predicates unmet.
@@ -27,11 +36,22 @@ is a missed-EMAIL safety net, not a per-item catch-up.
 Sync-3 (per-item): PM approval is per-item; reconciler covers each item
 individually because approvals are staggered by definition.
 
+Sync-9 (per-item, LATE-ITEM-1 2026-09-24) is the deliberate exception to the
+sync-2/4/5 "all-or-nothing" rule above, and closes OQ-1: a deliverable added
+after kickoff is imported by sync-1 and auto-advanced to Open, but sync-2 will
+never touch it (kickoff evidence exists), so it had no path to outreach. sync-9
+keys on sync-2's predicate INVERTED, which makes the two mutually exclusive by
+construction, and re-dispatches kickoff -- whose own eligibility filter narrows
+it to exactly the pre-outreach stragglers.
+
 Open risks acknowledged for Ph-1 (see STRAND.md OQ-1, OQ-2):
-  - Late-arriving ADDED alert post-kickoff -> item stays in Not Started forever
-    (no sync-2b catch-up variant Ph-1).
+  - ~~Late-arriving ADDED alert post-kickoff -> item stays in Not Started
+    forever~~ CLOSED 2026-09-24 by sync-9 (LATE-ITEM-1).
   - Late-arriving CHANGED alert mid-batch on pm_approval / submit / close -> may
     leave one item asymmetric until TPM re-triggers.
+  - A deliverable added AFTER Submit-to-Carrier is clicked is still never
+    imported: sync-1 hard-returns on `milestone_submission_triggered_at` being
+    set ("count is frozen"), so sync-9 never sees such a row to chase.
 
 SP Milestones is GLOBAL per architect Q5 lock 2026-07-02; Deliverables + Projects
 are per-customer (Deliverables_<customer_id> / Projects_<customer_id>).
@@ -60,6 +80,24 @@ _STATE_UNDER_PM_REVIEW      = "UnderPMReview"
 _STATE_SUBMITTED_TO_CUSTOMER = "SubmittedToCustomer"
 _STATE_CLOSED               = "Closed"
 _STATE_CLOSE_IN_PROGRESS    = "CloseInProgress"
+
+# States reachable ONLY by having gone through kickoff -- i.e. proof that the
+# collection outreach for this milestone already ran. Closed is deliberately
+# absent: a TPM can close an item by hand before Start Collection is ever
+# clicked, and that is not evidence of kickoff (kickoff writes OutreachSent,
+# never Closed). Delayed/Blocked ARE evidence, being reachable only from
+# OutreachSent onwards.
+#
+# Two syncs key on this, in opposite directions, which is what keeps them
+# mutually exclusive:
+#   sync-2 fires when NO item is here  -> kickoff has not run yet
+#   sync-9 fires when SOME item is here -> kickoff HAS run, so any item still
+#                                          sitting pre-outreach arrived late
+_KICKOFF_EVIDENCE_STATES = frozenset({
+    "OutreachSent", "DocumentReceived", "OwnerClosed", "UnderPMReview",
+    "ReadyForSubmission", "SubmittedToCustomer", "CloseInProgress",
+    "Delayed", "Blocked",
+})
 
 
 @hilda_celery_app.task(
@@ -106,6 +144,9 @@ def reconcile_all_task(
         "sync_8_promoted":            0,   # DRRP1-STATE-1 phase 3 target promoted
         "sync_8_skipped_ineligible":  0,   # target already final / UnderPMReview / no mapping
         "sync_8_skipped":             0,   # sync-8 disabled or no source rfs items
+        "sync_9_dispatched":          0,   # LATE-ITEM-1 post-kickoff outreach catch-up
+        "sync_9_holding":             0,   # stragglers found but still inside the quiet window
+        "sync_9_skipped":             0,
     }
 
     correlation_id = f"reconcile-{uuid.uuid4().hex[:12]}"
@@ -179,6 +220,17 @@ def reconcile_all_task(
         except Exception as exc:  # noqa: BLE001
             _log.warning("sync_8_error: milestone=%s: %s", milestone_id, type(exc).__name__)
             stats["sync_8_skipped"] += 1
+        try:
+            # Runs AFTER sync-1 in the same tick on purpose: sync-1 may have
+            # just imported the late deliverable, and this is the sweep that
+            # then gets outreach out to it.
+            _sync_9_late_item_outreach(
+                deps, cfg, stats, correlation_id,
+                customer_id, device_id, milestone_id, sp_milestone,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("sync_9_error: milestone=%s: %s", milestone_id, type(exc).__name__)
+            stats["sync_9_skipped"] += 1
 
     _log.info("reconcile_all: %s", stats)
     return {"outcome": "fired", "correlation_id": correlation_id, **stats}
@@ -512,17 +564,11 @@ def _sync_2_start_collection(
     # so all-open predicate never matches and sync-2 doesn't fire. Manual
     # closure is not evidence of kickoff processing (kickoff writes
     # OutreachSent, not Closed). Correct predicate: no item is in a state
-    # reachable ONLY via kickoff (OutreachSent or later along the collection
-    # path, plus the owner-holding states Delayed/Blocked which are reachable
-    # only from OutreachSent onwards per DeliveryState.CLOSE_IN_PROGRESS
-    # docstring). Closed items are TPM-manual overrides and ignored. Requires
-    # at least one Open item so we don't fire on a milestone where every item
-    # is TPM-closed.
-    _KICKOFF_EVIDENCE_STATES = frozenset({
-        "OutreachSent", "DocumentReceived", "OwnerClosed", "UnderPMReview",
-        "ReadyForSubmission", "SubmittedToCustomer", "CloseInProgress",
-        "Delayed", "Blocked",
-    })
+    # reachable ONLY via kickoff. Closed items are TPM-manual overrides and
+    # ignored. Requires at least one Open item so we don't fire on a
+    # milestone where every item is TPM-closed.
+    # (_KICKOFF_EVIDENCE_STATES hoisted to module scope for sync-9, which
+    # keys on the SAME predicate inverted -- see LATE-ITEM-1.)
     states = [(getattr(it, "delivery_state", None) or "") for it in pg_items]
     if any(s in _KICKOFF_EVIDENCE_STATES for s in states):
         return  # kickoff email was received -- existing flow handles the rest
@@ -1227,3 +1273,142 @@ def _sync_8_drr_mapping_promote(
                 customer_id, device_id, milestone_id, item_no_int,
                 summary["promoted"],
             )
+
+
+# ---------------------------------------------------------------------------
+# sync-9: late-arriving deliverable outreach catch-up (LATE-ITEM-1)
+# ---------------------------------------------------------------------------
+
+
+def _sync_9_late_item_outreach(
+    deps: Any, cfg: ReconcileConfig, stats: dict[str, int], correlation_id: str,
+    customer_id: str, device_id: str, milestone_id: str,
+    sp_milestone: dict[str, Any] | None,
+) -> None:
+    """LATE-ITEM-1 (2026-09-24): send outreach for deliverables added AFTER
+    the milestone's collection kickoff already ran.
+
+    The gap this closes: sync-1 imports a newly-added SP deliverable at any
+    time, and import auto-advances it Not Started -> Open (D-144). But sync-2,
+    the kickoff backstop, returns early the moment ANY item shows kickoff
+    evidence -- correctly, since its job is the FIRST kickoff. So an item that
+    lands after kickoff sat at Open forever: no outreach, no owner email, and
+    no signal to anyone. Acknowledged as a known Ph-1 hole in this module's
+    docstring ("Late-arriving ADDED alert post-kickoff -> item stays in Not
+    Started forever (no sync-2b catch-up variant Ph-1)"); this is that
+    variant.
+
+    Fires when ALL of:
+      * SP `milestone_collection_started_at` is set (collection has begun at
+        all -- before that there is nothing to be late TO, and sync-2 owns it)
+      * at least one item in scope IS in _KICKOFF_EVIDENCE_STATES (kickoff
+        demonstrably ran -- this is sync-2's predicate inverted, which makes
+        the two mutually exclusive by construction)
+      * at least one item is a straggler: force_tracking_enabled, not a
+        Default item, and still at Not Started or Open
+      * the straggler set has been QUIET for elapsed_threshold_sec -- see below
+
+    Action is simply to re-dispatch `kickoff_collection_task`. That is not a
+    shortcut: kickoff's own eligibility filter is
+    `force_tracking_enabled AND delivery_state in (Not Started, Open) AND
+    item_type != Default`, which is exactly the straggler set -- every item
+    already past Open is filtered out, so a re-run touches only the late
+    arrivals. It also gets the whole outreach apparatus for free: TG batching,
+    the rendered item table, ATTACH-1 static attachments, the TPM on the TO
+    line (D-219), and the Not Started -> Open -> OutreachSent walk (both edges
+    legal and unguarded per state_machine.LEGAL_TRANSITIONS).
+
+    THE QUIET WINDOW is the one piece of real judgement here. A TPM adding a
+    deliverable is often mid-configuration -- owner fields, force_tracking,
+    tg_name may all still be in flight. Firing outreach 300s in would email
+    whoever happened to be in the owner column at that instant, and outreach
+    is not recallable. So we require that NO straggler has been touched within
+    the threshold: the window measures "the TPM has stopped editing", not
+    "enough time has passed since the first edit". Cost: one item being edited
+    repeatedly holds back its co-stragglers. That is the right trade (a
+    delayed email beats a wrong one), but it is silent, so the hold is logged.
+    """
+    sub_cfg = cfg.sync_9_late_item_outreach
+    if not sub_cfg.enabled or sp_milestone is None:
+        return
+    if not sp_milestone.get("milestone_collection_started_at"):
+        return  # collection never started -- nothing to be late to
+
+    pg_items = deps.storage.list_items_for_milestone(milestone_id, None) or []
+    pg_items = [it for it in pg_items if getattr(it, "device_id", None) == device_id]
+    if not pg_items:
+        return
+
+    states = [(getattr(it, "delivery_state", None) or "") for it in pg_items]
+    if not any(s in _KICKOFF_EVIDENCE_STATES for s in states):
+        return  # kickoff hasn't run yet -- sync-2's territory, not ours
+
+    stragglers = [
+        it for it in pg_items
+        if getattr(it, "force_tracking_enabled", False) is True
+        and (getattr(it, "delivery_state", None) or "") in (
+            _STATE_NOT_STARTED, _STATE_OPEN,
+        )
+        and (getattr(it, "item_type", None) or "") != "Default"
+    ]
+    if not stragglers:
+        return
+
+    # Quiet-window gate. `last_updated` is HILDA-side (set on create and on
+    # every update), so "recently touched" covers both a fresh import and a
+    # TPM still editing a row HILDA has re-read.
+    now = datetime.now(timezone.utc)
+    newest_age: float | None = None
+    for it in stragglers:
+        lu = getattr(it, "last_updated", None)
+        if lu is None:
+            continue
+        if lu.tzinfo is None:
+            lu = lu.replace(tzinfo=timezone.utc)
+        age = (now - lu).total_seconds()
+        if newest_age is None or age < newest_age:
+            newest_age = age
+    if newest_age is not None and newest_age < sub_cfg.elapsed_threshold_sec:
+        _log.info(
+            "sync_9_holding: customer=%s device=%s milestone=%s stragglers=%d "
+            "newest_age=%ds < threshold=%ds -- waiting for edits to settle",
+            customer_id, device_id, milestone_id, len(stragglers),
+            int(newest_age), sub_cfg.elapsed_threshold_sec,
+        )
+        stats["sync_9_holding"] += 1
+        return
+
+    from core.src.workflow_engine.tasks.sp_alert_imports import (
+        kickoff_collection_task,
+    )
+    event_ctx = {
+        "customer_id":    customer_id,
+        "device_id":      device_id,
+        "milestone_id":   milestone_id,
+        "correlation_id": correlation_id,
+        "trigger_source": "sync_backfill_late_item",
+    }
+    straggler_item_nos = sorted(
+        int(getattr(it, "item_no", 0) or 0) for it in stragglers
+    )
+    try:
+        kickoff_collection_task.apply(args=({}, event_ctx), throw=False)
+        stats["sync_9_dispatched"] += 1
+        _log.warning(
+            "sync_9_dispatched: customer=%s device=%s milestone=%s "
+            "late_item_nos=%s -- outreach catch-up for items added after kickoff",
+            customer_id, device_id, milestone_id, straggler_item_nos,
+        )
+        _audit(deps, "sync_9_dispatched", None, {
+            "customer_id":    customer_id,
+            "device_id":      device_id,
+            "milestone_id":   milestone_id,
+            "late_item_nos":  straggler_item_nos,
+            "correlation_id": correlation_id,
+        })
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "sync_9_dispatch_failed: customer=%s milestone=%s: %s",
+            customer_id, milestone_id, type(exc).__name__,
+        )
+        stats["sync_9_skipped"] += 1

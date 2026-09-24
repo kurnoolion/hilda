@@ -5,5 +5,6 @@
     "sync_2_start_collection":     {"enabled": true, "elapsed_threshold_sec": 900},
     "sync_3_pm_approval":          {"enabled": true, "elapsed_threshold_sec": 300},
     "sync_4_submit_to_carrier":    {"enabled": true, "elapsed_threshold_sec": 300},
-    "sync_5_close_all_items":      {"enabled": true, "elapsed_threshold_sec": 300}
+    "sync_5_close_all_items":      {"enabled": true, "elapsed_threshold_sec": 300},
+    "sync_9_late_item_outreach":   {"enabled": true, "elapsed_threshold_sec": 900}
 }
