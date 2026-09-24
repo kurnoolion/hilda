@@ -7772,3 +7772,114 @@ consolidation -- one email per owner per TG, which the TPM now joins),
 `[D-206]` (kickoff regrouping by `tg_name`), `ATTACH-1` / `[D-216]` (the
 previous change to this same send path), `SETUP-6` (the DN-splitting in
 `_extract_user_field_email_name`).
+
+---
+
+## D-220: Reconcile sync-9 -- per-item outreach catch-up for deliverables added after kickoff (LATE-ITEM-1)
+
+**Date**: 2026-09-24. **Scope**:
+`workflow_engine.tasks.reconcile` (new `_sync_9_late_item_outreach`,
+`_KICKOFF_EVIDENCE_STATES` hoisted to module scope, stats keys, call
+block, docstring), `workflow_engine.reconcile_config` (new
+`sync_9_late_item_outreach` field -- REQUIRED, `SyncTypeConfig` sets
+`extra="forbid"` so the JSON key alone would raise), `config/reconcile.json`.
+
+**Context**: The corp deployment has SP alert emails **blocked outright**
+(too much HILDA<->SP mail), so for the flows they carried, the reconciler
+is not a safety net -- it is the only path. Adding a deliverable mid-flight
+exposed a gap in that path.
+
+sync-1 already covers the *import* half and needs no change: it polls
+`Deliverables_<customer>` directly, diffs `item_no` against Postgres, and
+re-dispatches `import_deliverable_tracker_task` for anything missing. It
+never depended on the alert email.
+
+The *outreach* half was missing. Import lands the row at Not Started and
+D-144 auto-advances it to Open. `_sync_2_start_collection` -- the kickoff
+backstop -- then refuses to fire, because it returns early the moment ANY
+item in scope is in `_KICKOFF_EVIDENCE_STATES`. That early return is
+correct for sync-2, whose job is the FIRST kickoff. The consequence was
+that an item arriving after kickoff sat at Open indefinitely: no outreach,
+no owner email, and no operator signal beyond the row itself. The hole was
+already known and recorded in `reconcile.py`'s own docstring as OQ-1
+("Late-arriving ADDED alert post-kickoff -> item stays in Not Started
+forever (no sync-2b catch-up variant Ph-1)").
+
+**Decision**:
+
+1. **New sync-9**, keyed on **sync-2's predicate inverted**: fire when
+   `milestone_collection_started_at` is set AND at least one item IS in
+   `_KICKOFF_EVIDENCE_STATES` (kickoff demonstrably ran) AND at least one
+   item is a straggler (`force_tracking_enabled`, `item_type != Default`,
+   still at Not Started or Open).
+2. **Action is to re-dispatch `kickoff_collection_task`**, unchanged.
+3. **`elapsed_threshold_sec` is a QUIET WINDOW over the straggler set**,
+   not a delay measured from import: sync-9 holds until NO straggler has
+   been touched (`last_updated`) within the threshold. Default 900s,
+   matching sync-2.
+4. **`_KICKOFF_EVIDENCE_STATES` hoisted** from inside sync-2's body to
+   module scope, shared by both.
+5. **Per-item, not all-or-nothing** -- the deliberate exception to the
+   sync-2/4/5 rule that a reconciler fires only when every item is still
+   in the pre-transition state.
+
+**Why**:
+
+- **vs. relaxing sync-2's predicate**: sync-2's early return is what stops
+  it re-kicking a milestone that is already underway. Loosening it to cover
+  late items would make the first-kickoff case ambiguous and risk repeat
+  outreach to owners who already replied. Two predicates that are exact
+  negations of each other are provably non-overlapping, and cheap to test
+  as an invariant -- which the test suite now does directly, because a
+  future edit to either could silently double-dispatch kickoff.
+- **vs. a bespoke per-item outreach path**: `kickoff_collection_task`'s
+  eligibility filter is *already* exactly the straggler predicate, so
+  re-running it touches only late arrivals -- every item past Open is
+  filtered out. Reusing it inherits TG batching, the rendered item table,
+  ATTACH-1 static attachments, the TPM on the TO line (D-219), the
+  deterministic per-TG `batch_id` that inbound reply parsing resolves
+  against, and the Not Started -> Open -> OutreachSent walk (both edges
+  legal and unguarded). A parallel path would have to re-implement all of
+  it and would drift.
+- **vs. no quiet window (fire as soon as the item appears)**: a TPM adding
+  a deliverable is usually mid-configuration -- owner, tg_name and
+  force_tracking may all still be in flight. Firing 300s in would email
+  whoever happened to occupy the owner column at that instant, and an
+  outreach email cannot be recalled. The window measures "the TPM has
+  stopped editing", which is the actual precondition.
+- **vs. a per-straggler window (fire for whichever item has settled)**:
+  kickoff processes every eligible item in the scope, so a settled item
+  would drag a still-being-edited sibling into the same email. Gating on
+  the newest straggler keeps the batch honest.
+- **vs. gating on SP `Modified` instead of Postgres `last_updated`**: an
+  extra SP read per tick per milestone, for a weaker signal -- `Modified`
+  also moves on edits HILDA does not care about.
+
+**Consequences**:
+
+- One repeatedly-edited straggler holds back its co-stragglers
+  indefinitely. Accepted (a late email beats a wrong one) but **silent**,
+  so the hold is logged at INFO with the ages and counted as
+  `sync_9_holding`. Watch that counter if outreach seems stuck.
+- sync-9 runs LAST in the tick, after sync-1, so a deliverable imported by
+  sync-1 on tick N becomes a sync-9 candidate on the same tick -- and then
+  waits out the quiet window before outreach actually goes.
+- Adding `sync_9_late_item_outreach` to `config/reconcile.json` REQUIRES
+  the matching field on `ReconcileConfig`; `SyncTypeConfig` uses
+  `extra="forbid"`, so a JSON-only addition raises at load and takes the
+  whole reconciler down. Both landed together.
+- **Still open, and NOT closed by this**: a deliverable added after
+  Submit-to-Carrier is clicked is never imported at all. sync-1 hard-returns
+  on `milestone_submission_triggered_at` being set ("count is frozen"), so
+  sync-9 never sees such a row to chase. Recorded in the docstring's open
+  risks and in STATUS Flags.
+- Corp deploy needs the new `config/reconcile.json` key or the default
+  (enabled, 900s) applies -- either is fine; the file is bind-mounted.
+
+**Anchors**: `LATE-ITEM-1`, `[D-142]` (the sync architecture this extends),
+`[D-143]` (SP alerts are best-effort -- now, on corp, absent entirely),
+`[D-144]` (import auto-advances Not Started -> Open, which is why stragglers
+present as Open), `RECON-4` (sync-2's evidence predicate, now shared),
+`[D-219]` (TPM on the outreach TO line, inherited by the catch-up email),
+`FR-78` (Default items never get outreach), OQ-1 in the
+`reconcile-sync-cascade` strand.
