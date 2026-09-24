@@ -575,6 +575,14 @@ async def _audit(
 
 _UNPARSEABLE_AUTO_REPLY_AUDIT = "owner_reply_unparseable_notified"
 
+# UNP-ATTACH-1 (2026-09-24): the "documents are already in" paragraph.
+# Safe to state unconditionally: email_polling._enqueue_owner_reply chains
+# process_inbound_attachments_task -> apply_owner_reply_task, and the chain
+# is sequential, so attachment ingest has already SUCCEEDED by the time the
+# table parse runs and fails. If ingest had failed, link 2 would never fire
+# and this email would never be sent. Owners were re-sending whole document
+# sets on every re-reply, producing duplicate revisions HILDA then had to
+# collapse through the REV-1 family winner.
 _UNPARSEABLE_AUTO_REPLY_BODY = """\
 <p>Hi,</p>
 
@@ -584,6 +592,11 @@ message -- most often this happens when the response table is copied
 from another email or edited in a way that changes its underlying
 formatting.</p>
 
+<p><b>If you attached documents, they came through fine -- please do
+not send them again.</b> Only the status table needs re-sending. Your
+files have already been received and filed against the right work
+items; re-attaching them just creates duplicate copies.</p>
+
 <p><b>How to reply so HILDA can process it automatically:</b></p>
 <ol>
   <li>Open the original HILDA email (subject: "{subject}").</li>
@@ -591,12 +604,12 @@ formatting.</p>
   <li>Fill in the <b>Status</b> / <b>Notes</b> cells directly in the
       table Outlook keeps at the top of the reply -- please don't paste
       or move cells around.</li>
-  <li>Send.</li>
+  <li>Send -- table only, no attachments needed.</li>
 </ol>
 
-<p>Your original response is safe -- your PM has been copied and can
-process it manually if needed. This is an automated message; no reply
-is required to this email.</p>
+<p>Your original response is safe -- it has been recorded and your PM
+can process it manually if needed. This is an automated message; no
+reply is required to this email.</p>
 
 <p>-- HILDA</p>
 """

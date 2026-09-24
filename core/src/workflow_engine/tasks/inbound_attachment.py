@@ -16,13 +16,27 @@ Architect direction 2026-06-29 design pass:
   doc_count increment + AttachmentReceived event.
 
 Wiring:
-- email_polling.py classifier branch enqueues this task alongside
-  apply_owner_reply_task for OWNER_REPLY messages with len(attachments)>0.
-- Both tasks run in parallel (Celery; no chain dependency).
-- Race: owner reply Closed may guard-deny first because doc_count_not_reached;
-  apply_owner_reply persists owner_intent_closed_at; this task increments
-  doc_count_received + fires AttachmentReceived; reconcile_owner_intent_on_doc_count_reached
-  rule catches the intent + advances state.
+- email_polling.py classifier branch enqueues this task for OWNER_REPLY
+  messages with len(attachments)>0.
+- SUPERSEDED 2026-06-30: the two tasks no longer run in parallel. The
+  parallel design lost a race (this task's state advance could land AFTER
+  owner_reply's, leaving local UnderPMReview vs SP DocumentReceived), so
+  email_polling._enqueue_owner_reply now uses
+  `chain(process_inbound_attachments_task, apply_owner_reply_task)` and this
+  task INLINES the OutreachSent -> DocumentReceived advance. apply_owner_reply
+  starts only on this task's SUCCESS; if this task fails it never fires at all
+  (architect direction: the owner resends and the next email re-processes
+  both). See the design note at email_polling.py:331-345.
+- Ordering guarantee relied on elsewhere: UNP-ATTACH-1 (2026-09-24) tells the
+  owner, in the unparseable-table auto-reply, that their attachments are
+  already filed and must not be re-sent. That claim is only true because of
+  this chain -- if the ordering is ever reverted to parallel, that email copy
+  in owner_reply.py becomes a lie.
+- Race (retained for the partial-doc case): owner reply Closed may guard-deny
+  because doc_count_not_reached; apply_owner_reply persists
+  owner_intent_closed_at; a later attachment increments doc_count_received +
+  fires AttachmentReceived; reconcile_owner_intent_on_doc_count_reached
+  catches the intent + advances state.
 """
 from __future__ import annotations
 

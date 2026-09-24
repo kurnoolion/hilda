@@ -34,7 +34,10 @@ def _mk_deps(*, has_email_sender=True, prior_notified=False):
     else:
         sends = []
         async def _send(*, to, cc, subject, body, attachments):
-            sends.append({"to": list(to), "subject": subject, "body": body})
+            sends.append({
+                "to": list(to), "cc": list(cc), "subject": subject,
+                "body": body, "attachments": attachments,
+            })
             return "<msg-id@hilda.local>"
         deps.email_sender.send = _send
         deps._sends = sends
@@ -130,3 +133,39 @@ class TestUnparseableAutoReply:
         body = deps._sends[0]["body"]
         assert "&lt;b&gt;bad&lt;/b&gt;" in body
         assert "<b>bad</b>" not in body
+
+    # -- UNP-ATTACH-1 (2026-09-24) --------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_body_tells_owner_not_to_resend_attachments(self):
+        """Owners were re-sending their whole document set on every
+        re-reply, creating duplicate revisions HILDA then had to collapse.
+        The copy must say, unambiguously, that attachments already landed
+        and only the table needs sending again."""
+        deps = _mk_deps()
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1",
+        )
+        # The body is hand-wrapped HTML, so collapse whitespace before
+        # matching -- otherwise a purely cosmetic re-wrap breaks the test.
+        body = " ".join(deps._sends[0]["body"].lower().split())
+        assert "do not send them again" in body
+        assert "only the status table needs re-sending" in body
+        assert "no attachments needed" in body
+
+    @pytest.mark.asyncio
+    async def test_body_does_not_claim_the_pm_was_copied(self):
+        """Regression guard on a factual claim: this auto-reply goes to the
+        owner alone (cc=[]), so the old 'your PM has been copied' line was
+        false and could lead an owner to assume someone else would pick the
+        reply up."""
+        deps = _mk_deps()
+        await _maybe_send_unparseable_auto_reply(
+            deps=deps, msg=_mk_msg(), batch_id="BATCH-abc",
+            correlation_id="corr-1",
+        )
+        sent = deps._sends[0]
+        assert sent["cc"] == []
+        body = " ".join(sent["body"].lower().split())
+        assert "has been copied" not in body
