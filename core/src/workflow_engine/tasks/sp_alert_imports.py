@@ -887,6 +887,10 @@ def kickoff_collection_task(
         )
         plm_ids_by_item_id = {}
 
+    # TPM-OUTREACH-1 (2026-09-24): per-run memo for the Projects_<customer>
+    # TPM lookup, keyed by device_id. See _resolve_tpm_email_cached.
+    tpm_email_cache: dict[str, str | None] = {}
+
     for tg_key, group_items in tg_groups.items():
         # OUTREACH-SORT-1 (2026-09-12): render items in item_no ascending
         # order so the outreach table matches the TPM's mental model
@@ -1028,8 +1032,24 @@ def kickoff_collection_task(
                 items_failed += 1
 
         # Step 2: send the batch email (skipped when owner list is empty).
+        #
+        # TPM-OUTREACH-1 (2026-09-24): the TPM joins the TO list. The gate
+        # below is deliberately still `recipients` (the OWNER list) -- a TG
+        # with no owner sends no email today, and adding the TPM must not
+        # turn that silence into mail. Device key mirrors the item_dicts
+        # fallback chain so a task-level device_id of None (multi-device
+        # milestone alert) still resolves per group.
+        _tg_device_id = (
+            device_id
+            or getattr(group_items[0], "device_id", None)
+            or getattr(group_items[0], "project_model", None)
+        )
         message_id: str | None = None
+        tpm_email: str | None = None
         if recipients and deps.email_sender is not None:
+            tpm_email = _resolve_tpm_email_cached(
+                deps, customer_id, _tg_device_id, tpm_email_cache,
+            )
             try:
                 message_id = _send_batch_outreach_email(
                     deps=deps,
@@ -1037,6 +1057,7 @@ def kickoff_collection_task(
                     items=item_dicts,
                     batch_id=batch_id,
                     recipient=recipients,
+                    tpm_email=tpm_email,
                 )
                 if message_id:
                     emails_sent += 1
@@ -1063,6 +1084,12 @@ def kickoff_collection_task(
                     "template":     "outreach_table",
                     "channel":      "email",
                     "recipient":    (";".join(recipients) if recipients else None),
+                    # TPM-OUTREACH-1 (2026-09-24): kept SEPARATE from
+                    # `recipient` rather than concatenated into it, so the
+                    # log still answers "who owns this item" distinctly from
+                    # "who else was on the mail". Both were genuinely in the
+                    # TO header.
+                    "tpm_recipient": tpm_email,
                     "tg_name":      tg_key if tg_key != "__no_tg__" else None,
                     "batch_id":     batch_id,
                     "batch_size":   len(group_items),
@@ -1138,6 +1165,57 @@ def kickoff_collection_task(
         "items_transitioned": items_transitioned,
         "items_failed":       items_failed,
     }
+
+
+def _resolve_tpm_email_cached(
+    deps, customer_id: str, device_id: str | None, cache: dict[str, str | None],
+) -> str | None:
+    """TPM-OUTREACH-1 (2026-09-24): resolve the milestone's TPM address for
+    inclusion in the kickoff outreach TO list.
+
+    Delegates to `tpm_notification._read_tpm_email`, which is the single
+    place that knows how to read the TPM column out of
+    `Projects_<customer_id>`. That column is a SharePoint person field, so
+    it arrives as a COMPOSITE object -- on the corp box it expands to a
+    UserProfile dict carrying Account / Name / Work email / Department /
+    First name / Last name, and on a standard PersonOrGroup expand to
+    {Id, EMail, Title, LoginName}; multi-user columns arrive as a LIST of
+    either. `_extract_user_field_email_name` already picks the address out
+    of all of those shapes, so this requires no new parsing.
+
+    `cache` is a caller-owned dict scoped to ONE kickoff run, keyed by
+    device_id. kickoff iterates TG groups and every group in a run normally
+    shares a device, so without it a 12-TG milestone would issue 12
+    identical SP reads. Task-scoped rather than module-level on purpose: a
+    long-lived celery worker must not pin a stale TPM after the row is
+    reassigned in SP.
+
+    Returns None on a missing device_id, a lookup failure, or an empty TPM
+    column -- every one of which must leave outreach to the owners intact.
+    """
+    if not device_id:
+        return None
+    if device_id in cache:
+        return cache[device_id]
+    email: str | None = None
+    try:
+        from core.src.workflow_engine.tasks.tpm_notification import _read_tpm_email
+        email, _name = _read_tpm_email(deps, customer_id, device_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "kickoff_collection: TPM lookup failed customer=%s device=%s: %s: %s "
+            "-- outreach proceeds to owners only",
+            customer_id, device_id, type(exc).__name__, str(exc)[:120],
+        )
+        email = None
+    if not email:
+        logger.warning(
+            "kickoff_collection: no TPM email resolved for customer=%s device=%s "
+            "-- outreach proceeds to owners only",
+            customer_id, device_id,
+        )
+    cache[device_id] = email
+    return email
 
 
 def _resolve_owners_for_eligible(

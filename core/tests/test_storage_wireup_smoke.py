@@ -123,9 +123,12 @@ def test_full_chain_import_then_kickoff(tmp_path, monkeypatch):
         lambda deps, customer_id, milestone_id, eligible: owner_map,
     )
     sent_batches: list[dict] = []
-    def _fake_send(*, deps, owner_identity, items, batch_id, recipient):
+    def _fake_send(
+        *, deps, owner_identity, items, batch_id, recipient, tpm_email=None,
+    ):
         sent_batches.append({
             "recipient": recipient, "batch_id": batch_id, "n_items": len(items),
+            "tpm_email": tpm_email,
         })
         return "SMOKE-MID-1"
     monkeypatch.setattr(

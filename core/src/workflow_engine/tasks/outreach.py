@@ -541,6 +541,34 @@ def _fetch_template_inputs(
     return owner_identity, item_for_template
 
 
+def _merge_tpm_into_recipients(
+    recipient: str | list[str], tpm_email: str | None,
+) -> list[str]:
+    """Append the TPM's address to an owner recipient list, case-insensitively
+    deduped, preserving owner order with the TPM last.
+
+    TPM-OUTREACH-1 (2026-09-24): the TPM is a TO recipient, not CC -- the
+    architect's call. They own the milestone and are expected to act on
+    owner replies, so the thread should land in their inbox as a direct
+    addressee rather than as a carbon copy.
+
+    Dedupe is case-insensitive on the whole address because SP hands back
+    whatever casing the person record carries, while owner emails come from
+    a different SP column entirely -- a TPM who also owns items in the TG
+    would otherwise appear twice in the header.
+    """
+    to_list = [recipient] if isinstance(recipient, str) else list(recipient)
+    if not tpm_email:
+        return to_list
+    tpm = str(tpm_email).strip()
+    if not tpm:
+        return to_list
+    seen = {addr.strip().lower() for addr in to_list if isinstance(addr, str)}
+    if tpm.lower() in seen:
+        return to_list
+    return to_list + [tpm]
+
+
 def _send_batch_outreach_email(
     *,
     deps,
@@ -548,6 +576,7 @@ def _send_batch_outreach_email(
     items: list[dict[str, Any]],
     batch_id: str,
     recipient: str | list[str],
+    tpm_email: str | None = None,
 ) -> str | None:
     """Render outreach_table.j2 with N item rows and send ONE email to the
     owner. Returns the EWS Message-ID on success, None on send failure.
@@ -563,6 +592,14 @@ def _send_batch_outreach_email(
     ATTACH-1 (2026-09-17): also collects per-item `outreach_attachment_path`
     (populated at item_dicts build time in kickoff_collection) and attaches
     the resolved files to the email. See `_load_outreach_attachments`.
+
+    TPM-OUTREACH-1 (2026-09-24): `tpm_email` (resolved by the caller from
+    the Projects_<customer> TPM person field) joins the TO list. Optional and
+    defaulted so the per-item and reminder senders -- which are out of scope
+    for this change -- keep working untouched. Note this ADDS the TPM to an
+    email that was going out anyway; it does not cause an email to be sent
+    for a TG that has no owner, because kickoff still gates the send on a
+    non-empty owner list.
     """
     body_html = _render_outreach_table(
         owner_identity=owner_identity,
@@ -587,10 +624,11 @@ def _send_batch_outreach_email(
     _ctx = " / ".join(p for p in (_cust, _dev, _mile, _tg) if p)
     _subject_prefix = f"[HILDA] {_ctx}" if _ctx else "[HILDA]"
     attachments = _load_outreach_attachments(items)
+    to_list = _merge_tpm_into_recipients(recipient, tpm_email)
     try:
         return _send_email(
             deps,
-            to=recipient,
+            to=to_list,
             subject=f"{_subject_prefix} -- Status request -- {batch_id}",
             body_marker=body_html,
             attachments=attachments,

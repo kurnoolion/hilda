@@ -166,7 +166,11 @@ class MockSp:
         self.writes.append(("create", entity, new_id, dict(canonical_fields)))
         return new_id
 
-    def get_items(self, entity, scope, canonical_filters=None):
+    def get_items(self, entity, scope, canonical_filters=None, **kwargs):
+        # **kwargs mirrors the real SpWriterImpl.get_items, which also takes
+        # `expand` / `extra_select` / `with_select`. Without it, any caller
+        # that expands a person column (TPM-OUTREACH-1's Projects read) blows
+        # up inside the double rather than exercising the code under test.
         key = frozenset((canonical_filters or {}).items())
         return self.get_items_responses.get(key, [])
 
@@ -1517,12 +1521,17 @@ class TestKickoffCollection:
         def fake_resolve(deps, customer_id, milestone_id, eligible):
             return resolved
 
-        def fake_send(*, deps, owner_identity, items, batch_id, recipient):
+        def fake_send(
+            *, deps, owner_identity, items, batch_id, recipient, tpm_email=None,
+        ):
             emails_sent_recorder.append({
                 "owner_identity": owner_identity,
                 "items":          [dict(i) for i in items],
                 "batch_id":       batch_id,
                 "recipient":      recipient,
+                # TPM-OUTREACH-1: recorded so kickoff tests can assert the
+                # TPM was threaded through, not just that a send happened.
+                "tpm_email":      tpm_email,
             })
             return message_id
 
@@ -3686,6 +3695,7 @@ class TestOutreachAttachments:
         items = [{"item_no": 1}, {"item_no": 2}]
         assert _load_outreach_attachments(items) == []
 
+
     def _mk_deps_with_sender(self, sender):
         return TaskDeps(
             storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
@@ -3792,3 +3802,203 @@ class TestOutreachAttachments:
         assert msg_id == "msg-id-test-001"
         assert fake_sender.sent[0]["attachments"] == []
         assert any("outreach attachment missing" in r.message for r in caplog.records)
+
+
+class TestTpmInOutreachToList:
+    """TPM-OUTREACH-1 (2026-09-24): the milestone's TPM joins the TO list on
+    every kickoff outreach email, sourced from the composite TPM person
+    field on Projects_<customer_id>.
+    """
+
+    def test_tpm_appended_to_owner_list(self):
+        from core.src.workflow_engine.tasks.outreach import (
+            _merge_tpm_into_recipients,
+        )
+        assert _merge_tpm_into_recipients(
+            ["bob@corp", "carol@corp"], "tpm@corp",
+        ) == ["bob@corp", "carol@corp", "tpm@corp"]
+
+    def test_single_string_recipient_is_normalised_to_a_list(self):
+        from core.src.workflow_engine.tasks.outreach import (
+            _merge_tpm_into_recipients,
+        )
+        assert _merge_tpm_into_recipients("bob@corp", "tpm@corp") == [
+            "bob@corp", "tpm@corp",
+        ]
+
+    def test_tpm_who_is_also_an_owner_is_not_duplicated(self):
+        """Owner emails and the TPM come from different SP columns, so the
+        same person can legitimately arrive twice with different casing."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _merge_tpm_into_recipients,
+        )
+        assert _merge_tpm_into_recipients(
+            ["Bob@Corp.com", "carol@corp"], "  bob@corp.com ",
+        ) == ["Bob@Corp.com", "carol@corp"]
+
+    def test_missing_tpm_leaves_owner_list_untouched(self):
+        """A failed Projects lookup or an empty TPM column must never cost
+        the owners their outreach."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _merge_tpm_into_recipients,
+        )
+        for empty in (None, "", "   "):
+            assert _merge_tpm_into_recipients(["bob@corp"], empty) == ["bob@corp"]
+
+    def _items(self):
+        return [{
+            "item_no": 84, "item_name": "APPS DRR final deliverable",
+            "customer_id": "VZW", "device_id": "SM-A186U",
+            "milestone_id": "DRR", "tg_name": "APPS",
+            "tracking_modality": ["Email"], "plm_id": None,
+        }]
+
+    def test_send_batch_outreach_email_puts_tpm_in_the_to_header(self):
+        from core.src.workflow_engine.tasks.outreach import (
+            _send_batch_outreach_email,
+        )
+        fake_sender = _FakeAsyncEmailSender()
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=fake_sender,
+        )
+        _send_batch_outreach_email(
+            deps=deps,
+            owner_identity={"owner_name": "Bob", "owner_corp_usa_email": "bob@corp"},
+            items=self._items(),
+            batch_id="BATCH-tpmtest",
+            recipient=["bob@corp"],
+            tpm_email="tpm@corp",
+        )
+        assert fake_sender.sent[0]["to"] == ["bob@corp", "tpm@corp"]
+
+    def test_send_batch_outreach_email_without_tpm_is_unchanged(self):
+        """Back-compat: the reminder / per-item senders don't pass tpm_email."""
+        from core.src.workflow_engine.tasks.outreach import (
+            _send_batch_outreach_email,
+        )
+        fake_sender = _FakeAsyncEmailSender()
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=MockSp(), audit=MockAudit(),
+            email_sender=fake_sender,
+        )
+        _send_batch_outreach_email(
+            deps=deps,
+            owner_identity={"owner_name": "Bob", "owner_corp_usa_email": "bob@corp"},
+            items=self._items(),
+            batch_id="BATCH-notpm",
+            recipient=["bob@corp"],
+        )
+        assert fake_sender.sent[0]["to"] == ["bob@corp"]
+
+    # -- resolver: composite-field shapes + caching + failure posture ------
+
+    class _SpWithTpm:
+        """Stands in for deps.sp_writer, returning one Projects row whose TPM
+        column carries whatever composite shape the test is exercising."""
+
+        def __init__(self, tpm_field):
+            self._tpm_field = tpm_field
+            self.calls: list[dict] = []
+
+        def get_items(self, *, entity, scope, canonical_filters=None, **kw):
+            self.calls.append({
+                "entity": entity, "filters": canonical_filters, **kw,
+            })
+            return [{"tpm_email": self._tpm_field}]
+
+    def _resolve(self, tpm_field, device_id="SM-A186U", cache=None):
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            _resolve_tpm_email_cached,
+        )
+        sp = self._SpWithTpm(tpm_field)
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=sp, audit=MockAudit(),
+        )
+        email = _resolve_tpm_email_cached(
+            deps, "VZW", device_id, {} if cache is None else cache,
+        )
+        return email, sp
+
+    def test_resolves_standard_person_or_group_expand(self):
+        """{Id, EMail, Title, LoginName} -- the shape a standard SP
+        PersonOrGroup $expand returns."""
+        email, _ = self._resolve({
+            "Id": 12, "EMail": "t.arasu@samsung.com",
+            "Title": "Tarasu Arasu", "LoginName": "i:0#.w|corp\\tarasu",
+        })
+        assert email == "t.arasu@samsung.com"
+
+    def test_resolves_corp_userprofile_composite(self):
+        """The real corp Projects_<customer> shape: a many-valued profile
+        blob where the address hides behind 'Work email', NOT 'EMail'."""
+        email, _ = self._resolve({
+            "Account": "i:0#.w|corp\\t.arasu",
+            "Name": "Thendral Arasu Panneer Selvam/Device Management /MNOs Lab.",
+            "Work email": "t.arasu@samsung.com",
+            "Department": "Device Management",
+            "Title": "",
+            "First name": "Thendral Arasu", "Last name": "Panneer Selvam",
+            "User name": "t.arasu",
+        })
+        assert email == "t.arasu@samsung.com"
+
+    def test_resolves_multi_user_column_skipping_entries_without_an_email(self):
+        email, _ = self._resolve([
+            {"EMail": None, "Title": "No Email User"},
+            {"EMail": "real.tpm@corp.com", "Title": "Real TPM"},
+        ])
+        assert email == "real.tpm@corp.com"
+
+    def test_caches_per_device_across_tg_groups(self):
+        """kickoff loops TG groups; a 12-TG milestone must not issue 12
+        identical Projects reads."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            _resolve_tpm_email_cached,
+        )
+        sp = self._SpWithTpm({"EMail": "tpm@corp"})
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=sp, audit=MockAudit(),
+        )
+        cache: dict[str, str | None] = {}
+        for _ in range(5):
+            assert _resolve_tpm_email_cached(
+                deps, "VZW", "SM-A186U", cache,
+            ) == "tpm@corp"
+        assert len(sp.calls) == 1
+        assert sp.calls[0]["entity"] == "projects"
+        assert sp.calls[0]["filters"] == {"project_model": "SM-A186U"}
+
+    def test_missing_device_id_returns_none_without_an_sp_read(self):
+        email, sp = self._resolve({"EMail": "tpm@corp"}, device_id=None)
+        assert email is None
+        assert sp.calls == []
+
+    def test_sp_failure_degrades_to_none_rather_than_raising(self):
+        """Outreach to owners must survive a Projects lookup failure."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            _resolve_tpm_email_cached,
+        )
+
+        class _BoomSp:
+            def get_items(self, **kw):
+                raise RuntimeError("SP down")
+
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=_BoomSp(), audit=MockAudit(),
+        )
+        assert _resolve_tpm_email_cached(deps, "VZW", "SM-A186U", {}) is None
+
+    def test_empty_tpm_column_caches_the_miss(self):
+        """A blank TPM column shouldn't be re-queried once per TG either."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            _resolve_tpm_email_cached,
+        )
+        sp = self._SpWithTpm(None)
+        deps = TaskDeps(
+            storage=MockStorage(), sp_writer=sp, audit=MockAudit(),
+        )
+        cache: dict[str, str | None] = {}
+        assert _resolve_tpm_email_cached(deps, "VZW", "SM-A186U", cache) is None
+        assert _resolve_tpm_email_cached(deps, "VZW", "SM-A186U", cache) is None
+        assert len(sp.calls) == 1
