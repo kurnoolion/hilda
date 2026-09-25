@@ -1440,6 +1440,119 @@ class TestImportDeliverableTracker:
         # Final Postgres state is Open, not Not Started.
         assert item.delivery_state == "Open"
 
+    # -- CLOSED-SEED-1 (2026-09-25, D-222) -------------------------------
+
+    def _closed_body(self, **overrides):
+        """body_kvs that would otherwise flow default -- overrides let a test
+        drop delivery_state or set it to something specific."""
+        body = {
+            "Title": "Not applicable for this device",
+            "carrier": "MMK",
+            "project_id": "2350",
+            "project_model": "SM-S671U1",
+            "milestone_name": "P1",
+            "milestone_id": "201",
+            "item_no": "5",
+            "item_type": "test_tech_waiver_report",
+            "delivery_state": "Not Started",
+            "owner_name": "Test Owner",
+            "tg_name": "MNO-ETM",
+            "tracking_modality": "Email",
+            "force_tracking_enabled": "Yes",
+            "no_customer_upload": "No",
+            "review_required": "No",
+            "milestone_gating": "Yes",
+            "doc_count": "1",
+            "sort_order": "5",
+        }
+        for k, v in overrides.items():
+            if v is None:
+                body.pop(k, None)
+            else:
+                body[k] = v
+        return body
+
+    def test_template_seeds_closed_state_at_import(self, deps, monkeypatch):
+        """template.yaml declaring delivery_state: closed wins over
+        body_kvs='Not Started' and lands the row at Closed. The
+        auto-transition MUST NOT fire -- previously it fired and produced an
+        `illegal_transition` audit row every closed import."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        from core.src.template_schema import template_lookup as tl
+
+        monkeypatch.setattr(
+            tl, "get_workitem",
+            lambda **kw: {
+                "delivery_state": "Closed",
+                "item_type": "test_tech_waiver_report",
+            },
+        )
+
+        with override_task_deps(deps):
+            result = import_deliverable_tracker_task({}, _mk_import_event_context())
+        assert result["outcome"] == "imported"
+        item = deps.storage.items[result["delivery_item_id"]]
+        assert item.delivery_state == "Closed"
+        # Guard is real: no illegal_transition audit row from a rejected
+        # NS -> Open attempt.
+        action_types = [log[0] for log in deps.audit.logs]
+        assert "illegal_transition" not in action_types
+
+    def test_body_kvs_closed_state_at_import(self, deps):
+        """SP alert body carrying delivery_state=Closed lands at Closed and
+        the auto-transition is skipped rather than attempted-and-rejected."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context(
+                body_kvs=self._closed_body(delivery_state="Closed"),
+            )
+            result = import_deliverable_tracker_task({}, ctx)
+        assert result["outcome"] == "imported"
+        item = deps.storage.items[result["delivery_item_id"]]
+        assert item.delivery_state == "Closed"
+        action_types = [log[0] for log in deps.audit.logs]
+        assert "illegal_transition" not in action_types
+
+    def test_template_wins_over_body_kvs(self, deps, monkeypatch):
+        """Both channels populated -> template wins. Otherwise a stale
+        template.yaml 'closed' declaration would be silently overridden by
+        SP's default 'Not Started' in the ADDED body, and the whole
+        template-as-source-of-scope pattern collapses."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        from core.src.template_schema import template_lookup as tl
+        monkeypatch.setattr(
+            tl, "get_workitem",
+            lambda **kw: {"delivery_state": "Closed"},
+        )
+        with override_task_deps(deps):
+            # body_kvs says NS explicitly; template MUST override.
+            ctx = _mk_import_event_context(
+                body_kvs=self._closed_body(delivery_state="Not Started"),
+            )
+            result = import_deliverable_tracker_task({}, ctx)
+        item = deps.storage.items[result["delivery_item_id"]]
+        assert item.delivery_state == "Closed"
+
+    def test_missing_delivery_state_still_advances_to_open(self, deps):
+        """D-144 regression guard: when neither channel declares state, we
+        still walk NS -> Open exactly as before."""
+        from core.src.workflow_engine.tasks.sp_alert_imports import (
+            import_deliverable_tracker_task,
+        )
+        with override_task_deps(deps):
+            ctx = _mk_import_event_context(
+                body_kvs=self._closed_body(delivery_state=None),  # drop the field
+            )
+            result = import_deliverable_tracker_task({}, ctx)
+        item = deps.storage.items[result["delivery_item_id"]]
+        assert item.delivery_state == "Open"
+
 
 # ===========================================================================
 # TestKickoffCollection -- [D-118] Chunk 4

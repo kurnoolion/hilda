@@ -187,6 +187,14 @@ def _build_delivery_item(
       - SP-only fields (delivery_state, owner_*, tg_* identity fields,
         owner_status_note, pm_approval_*): sourced from body_kvs; no template
         involvement.
+      - CLOSED-SEED-1 (2026-09-25, D-222): `delivery_state` is a NARROW
+        exception -- template.yaml MAY declare it at first-import time and
+        that value wins over body_kvs. Runtime state changes still flow via
+        SP CHANGED alerts + HILDA state machine; template only seeds
+        initial state. Motivating case: template declaring
+        delivery_state: Closed for work items that don't apply in this
+        (customer, device, milestone) scope, so HILDA never runs an
+        outreach cycle for them.
 
     Graceful degradation: if template lookup misses (customer without a
     template file, template load failure, milestone/item not in template),
@@ -263,8 +271,19 @@ def _build_delivery_item(
         # -- Template-authoritative: item_type, item_description, tracking_modality,
         #    milestone_gating, tg_path_id, item_path_id, form-factor flags. --
         item_type=(tmpl.get("item_type") if tmpl else None) or body_kvs.get("item_type") or "Default",
-        # -- SP-only state fields (dynamic; never in template) --
-        delivery_state=body_kvs.get("delivery_state", "Not Started"),
+        # -- delivery_state: template seeds first-import value (CLOSED-SEED-1,
+        # D-222); body_kvs is the runtime source everywhere else, and SP
+        # CHANGED alerts + HILDA's state machine own transitions after
+        # creation. Precedence template -> body_kvs -> default so an ops
+        # decision like "this work item is closed by default in this
+        # milestone" can be encoded in template.yaml without touching SP.
+        # Import-time only: existing rows aren't re-imported (natural-key
+        # guard above), so template edits don't back-propagate.
+        delivery_state=(
+            (tmpl.get("delivery_state") if tmpl else None)
+            or body_kvs.get("delivery_state")
+            or "Not Started"
+        ),
         item_completion_pct=_to_int(body_kvs.get("item_completion_pct"), 0),
         # Owner identity per [D-105] 4-field -- SP-authoritative (TPM reassignable).
         # OWNER-7 (2026-08-16): unsuffixed fields are LIST-TYPED (per B-final-B
@@ -586,32 +605,48 @@ def import_deliverable_tracker_task(
     # Best-effort: transition failure logs a warning but does NOT roll back
     # the import. Postgres row exists at delivery_state=Not Started; a manual
     # bump / reconcile can recover.
-    try:
-        from core.src.tracker import DeliveryState as _DS
-        from core.src.tracker.transitions import update_delivery_state as _uds
-        _uds(
-            delivery_item_id=new_id,
-            target_state=_DS.OPEN,
-            params={},
-            event_context={
-                "correlation_id":  event_context.get("correlation_id", "?"),
-                "customer_id":     customer_id,
-                "milestone_id":    milestone_id,
-                "delivery_item_id": new_id,
-                "trigger_source":  "automated",
-                "rule_id":         "import_deliverable_tracker",
-            },
-            storage=deps.storage,
-            sp_writer=deps.sp_writer,
-            audit=deps.audit,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "import_deliverable_tracker: NS->Open transition failed for "
-            "item_id=%s: %s: %s (postgres row remains at Not Started; "
-            "kickoff filter accepts both states as of 2026-07-15 so this "
-            "does not block the milestone cascade)",
-            new_id, type(exc).__name__, str(exc)[:120],
+    #
+    # CLOSED-SEED-1 (2026-09-25, D-222): guarded to only fire when the row
+    # was actually created at Not Started. Template.yaml (or SP body_kvs) can
+    # seed a different initial state -- typically Closed for work items that
+    # do not apply in this scope. The prior unconditional call still worked
+    # for a Closed seed (state-machine legality would reject Closed -> Open),
+    # but the reject path wrote a spurious `illegal_transition` audit row per
+    # import and misled log-grepping ops. Explicit skip is clearer.
+    if item.delivery_state == "Not Started":
+        try:
+            from core.src.tracker import DeliveryState as _DS
+            from core.src.tracker.transitions import update_delivery_state as _uds
+            _uds(
+                delivery_item_id=new_id,
+                target_state=_DS.OPEN,
+                params={},
+                event_context={
+                    "correlation_id":  event_context.get("correlation_id", "?"),
+                    "customer_id":     customer_id,
+                    "milestone_id":    milestone_id,
+                    "delivery_item_id": new_id,
+                    "trigger_source":  "automated",
+                    "rule_id":         "import_deliverable_tracker",
+                },
+                storage=deps.storage,
+                sp_writer=deps.sp_writer,
+                audit=deps.audit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "import_deliverable_tracker: NS->Open transition failed for "
+                "item_id=%s: %s: %s (postgres row remains at Not Started; "
+                "kickoff filter accepts both states as of 2026-07-15 so this "
+                "does not block the milestone cascade)",
+                new_id, type(exc).__name__, str(exc)[:120],
+            )
+    else:
+        logger.info(
+            "import_deliverable_tracker: seeded delivery_state=%s "
+            "(template/body_kvs override) -- skipping NS->Open auto-transition "
+            "item_id=%s",
+            item.delivery_state, new_id,
         )
 
     deps.audit.write_communication_log(
