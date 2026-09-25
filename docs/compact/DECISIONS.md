@@ -7984,3 +7984,114 @@ closes -- this ADR is its mirror on the out-of-CLOSED side), `DEF-20`
 (CLOSED = frozenset()), `guards.py:179` (legality-first ordering),
 `transitions.py:385` (bypass_guards is locked to
 manual_tpm_override -- TRK-E004).
+
+---
+
+## D-222: template.yaml seeds `delivery_state` at first import (CLOSED-SEED-1)
+
+**Date**: 2026-09-25. **Scope**:
+`workflow_engine.tasks.sp_alert_imports._build_delivery_item` (source
+`delivery_state` from template first, then body_kvs, then default) +
+`import_deliverable_tracker_task`'s post-create D-144 auto-transition
+(now guarded to fire only when the created row is at Not Started). Docs
+carry the D-141 narrowing.
+
+**Context**: A TPM had `delivery_state: closed` set on a work item in
+the corp template.yaml (intent: "this work item does not apply in this
+milestone; HILDA should never chase owners for it") AND the same value
+in SP's Deliverables row. Items still landed at Not Started and
+auto-advanced to Open on import, so HILDA ran the full outreach cycle
+against a work item that ops had explicitly marked out of scope.
+
+Two causes surfaced on review:
+
+- `_build_delivery_item` sourced `delivery_state` only from body_kvs
+  per D-141's field bucketing ("SP-only, body_kvs authoritative"). The
+  template declaration was silently ignored.
+- The D-144 post-create NS -> Open auto-transition ran unconditionally.
+  When body_kvs itself carried `delivery_state=Closed`, the row was
+  created at Closed but `update_delivery_state(target=OPEN)` still
+  fired, hit `LEGAL_TRANSITIONS[CLOSED] = frozenset()` in
+  `state_machine.py:182`, was rejected as `illegal_transition`, and
+  the row stayed Closed. Behaviour was correct but every closed
+  import produced an `illegal_transition` audit row that misled
+  log-grepping ops and looked, at a glance, like a bug.
+
+**Decision**:
+
+1. **`delivery_state` becomes a template-SEEDED field at first import.**
+   Precedence: `template.yaml` -> `body_kvs` -> default `"Not Started"`.
+   Template wins when explicitly set. Only applied at row creation.
+   Existing rows are not re-imported (`find_items_by_natural_key`
+   short-circuits), so template edits do not back-propagate.
+2. **Runtime state changes still flow via body_kvs + HILDA's state
+   machine.** SP CHANGED alerts continue to override, `update_delivery_state`
+   remains the sole runtime authority, guards still gate every write.
+   D-141's runtime rule is unchanged for `delivery_state`; only the
+   import seed grows a template-first source.
+3. **The D-144 auto-transition is guarded.** It fires only when
+   `item.delivery_state == "Not Started"`. If template or body_kvs
+   seeded any other state, the auto-transition is skipped (with an
+   INFO log naming the seeded state).
+
+**Why**:
+
+- **vs. keeping D-141 strict**: forcing the SP row to be the only
+  channel means TPMs must configure "does not apply here" twice, once
+  in the template and once again through the SP UI, per device, per
+  milestone. Template is where structural scope belongs; SP is where
+  runtime state belongs; letting template seed initial state at
+  creation is the clean assignment. Runtime authority stays with SP.
+- **vs. dropping the D-144 auto-transition entirely**: D-144 exists so
+  kickoff sees consistent state and so items don't sit at Not Started
+  waiting for a second SP alert that never comes. Removing it costs
+  the whole ADDED-alert cascade. Guarding it is one condition
+  (`item.delivery_state == "Not Started"`) with no downside -- when
+  the seeded state IS Not Started we behave exactly as before.
+- **vs. leaving the illegal-transition-audit noise in place**: even
+  when the outcome was correct (Closed stayed Closed via legality
+  reject), an audit row per closed import misled anyone grepping for
+  real failures. Explicit skip is honest.
+- **vs. letting body_kvs win over template**: template is where the
+  ops-authored "does not apply here" declaration lives; body_kvs
+  carries whatever the ADDED alert happened to include (which may be
+  "Not Started" as an SP default even when the SP row is not yet
+  configured). A stale SP default silently overriding the template
+  declaration would defeat the whole point.
+
+**Consequences**:
+
+- template.yaml can now carry `delivery_state: Closed` on a work item
+  and HILDA will land the row at Closed with no state transitions
+  fired. D-221 then keeps it there (Closed is terminal). Combined
+  effect: template can encode "this item is out of scope in this
+  milestone; leave the owner alone" at first import.
+- Same mechanism accepts other seed values (`Open`, `SubmittedToCustomer`,
+  etc.) if a future need arises. Model-side validation
+  (`DeliveryItemBase.delivery_state` field validator) rejects unknown
+  states at creation.
+- **D-141's field-bucketing table needs a footnote for `delivery_state`
+  reading "template-seeded at first import; body_kvs-authoritative at
+  runtime"**. The runtime rule is unchanged; only the import seed
+  grew a template channel. Docs update to `template_schema/MODULE.md`
+  can happen on the next full curation pass; the pointer is this ADR.
+- Import-only: template.yaml edits do not back-propagate to existing
+  rows. If a TPM decides mid-flight that a work item should be
+  Closed, they close it in SP (or via HILDA dashboard); a template
+  edit alone changes nothing for imported rows. Deliberate -- template
+  is the seed, not the truth.
+- Kickoff's own eligibility filter `("Not Started", "Open")` still
+  excludes seeded-Closed items naturally; no filter change needed.
+- The corresponding STATUS Flags entry captures the operational note
+  that template.yaml is now the authoritative "does not apply here"
+  channel for delivery_state.
+
+**Anchors**: `CLOSED-SEED-1`, `[D-141]` (template-yaml authoritative
+for structural fields; this ADR extends its scope for `delivery_state`
+at import only), `[D-144]` (NS -> Open auto-transition at import
+-- now guarded but still fires on default seed), `[D-221]` (Closed is
+terminal -- pairs with this ADR: template can put an item at Closed,
+D-221 keeps it there), `state_machine.py:182`
+(`LEGAL_TRANSITIONS[CLOSED] = frozenset()`),
+`sp_alert_imports.py:267` (delivery_state source),
+`sp_alert_imports.py:589` (D-144 auto-transition, now guarded).
