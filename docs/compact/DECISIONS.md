@@ -7883,3 +7883,104 @@ present as Open), `RECON-4` (sync-2's evidence predicate, now shared),
 `[D-219]` (TPM on the outreach TO line, inherited by the catch-up email),
 `FR-78` (Default items never get outreach), OQ-1 in the
 `reconcile-sync-cascade` strand.
+
+---
+
+## D-221: TPM-initiated reopen of a Closed item is handled entirely in SP; HILDA stays terminal
+
+**Date**: 2026-09-25. **Scope**: none — documentation of standing
+behaviour surfaced by a new requirement. No code touched.
+
+**Context**: Carriers occasionally ask a TPM to reopen a specific
+deliverable after HILDA has already closed it. Under that arrangement
+the TPM tracks the item manually (talks to the owner, collects the
+resend, closes the item in SP again when the carrier is satisfied) and
+expects HILDA to stay out of the way: no fresh outreach, no reminders,
+no automated close. Reviewed 2026-09-25; the question was whether HILDA
+needs a new `MANUAL_TRACKING` state to model this window.
+
+**Decision**: **No code change.** Closed remains terminal
+(`LEGAL_TRANSITIONS[DeliveryState.CLOSED] = frozenset()` at
+`state_machine.py:182`). The TPM manages the reopen entirely in SP;
+HILDA never learns of it; HILDA's Postgres row stays at Closed for the
+whole window; inbound owner traffic on the old outreach thread ingests
+normally but cannot advance state.
+
+**Why**:
+
+- **Every requested guarantee falls out of Closed being terminal**, no
+  new code needed:
+  - `check_transition_guards` runs `transition_legal` FIRST
+    (`guards.py:179`), before any policy guard, before the bypass path.
+    An inbound `Closed → X` transition — from any trigger, any caller —
+    returns `illegal_transition`. Automated rules that would advance
+    the item on owner-reply or attachment-received are rejected at the
+    state-machine gate.
+  - `bypass_guards=True` does NOT override this. The bypass path lives
+    *after* the legality check (`guards.py:186-189`); it only skips
+    policy guards. And `bypass_guards=True` is itself locked to
+    `trigger_source='manual_tpm_override'` -- other trigger_sources
+    raise TRK-E004 in `update_delivery_state` (`transitions.py:385`).
+    HILDA's state machine is authoritative; SP is not.
+  - SP alert emails are blocked on the corp deployment, so an SP-side
+    Closed → anything change does not reach HILDA in the first place.
+    Even if that channel came back, HILDA would still reject on
+    legality.
+  - The eligibility filters of every autonomous task already exclude
+    Closed by state: kickoff (`Not Started` / `Open`), reminders
+    (`OutreachSent`), submit-to-carrier (`ReadyForSubmission`),
+    close-all-items (`SubmittedToCustomer`), sync-2/4/5/6/8/9. Nothing
+    to suppress because nothing runs.
+- **Inbound owner traffic during the window ingests normally.**
+  Attachments still write bytes to NSD and persist
+  `document_index` + `document_item_association` rows. Owner replies
+  parse and audit. The state-advance rules those side effects would
+  otherwise trigger get rejected at the guard as illegal, so state
+  stays Closed. Nothing is silently dropped; the audit trail is intact.
+- **vs. modelling a `MANUAL_TRACKING` state**: would require a new
+  `DeliveryState` value, entries in `LEGAL_TRANSITIONS` for
+  `Closed → MANUAL_TRACKING → Closed`, a Guard-5-analog for entry
+  gated on `tpm_button` / `manual_tpm_override`, a shared
+  `is_hilda_passive(item)` predicate consulted from kickoff /
+  reminders / submit / close-all / sync-2/4/5/6/8/9, and — because
+  alerts are blocked — a new reconciler helper to mirror SP's state
+  into Postgres. That is real work whose only benefit is making the
+  HILDA dashboard reflect a state during which HILDA is by design
+  doing nothing. Bad code-vs-benefit ratio.
+- **vs. relaxing `Closed`'s out-edges to allow `Closed → Open`**:
+  would break DEF-20's structural guarantee that closed items don't
+  spontaneously re-enter the collection ladder, and would demand a
+  carve-out on every rule that filters by "not terminal". Same code
+  footprint as the full state approach, none of the audit clarity.
+
+**Consequences**:
+
+- The HILDA dashboard shows `Closed` for an item throughout the
+  reopened window. The TPM is the source of truth for the actual
+  status; the SP row reflects reality, HILDA's row does not. Accepted
+  trade-off — HILDA is passive on this item by policy, so a UI that
+  says "closed and inert" is honest about HILDA even if it lags SP.
+- **No HILDA audit trail of the reopen event itself.** There is no
+  `owner_status_note` update, no state-transition audit row, no
+  `communication_log` line marking "carrier requested reopen". If
+  forensics later need to answer "when did this item get reopened by
+  carrier?", the answer lives in SP's audit trail, not HILDA's. Owner
+  emails on the old thread continue to log
+  `owner_reply_unparseable` / `owner_reply_illegal_transition` /
+  attachment audit rows as appropriate.
+- **Future reversal path is mechanical**: if the dashboard-truthfulness
+  cost becomes real, add the `MANUAL_TRACKING` state described above
+  (Guard 5 pattern for entry, one shared `is_hilda_passive` predicate,
+  one reconciler mirror sync). Anchor points are already in place;
+  it is an additive change rather than an architectural one.
+- **Pin against future edits**: adding a `Closed → X` edge to
+  `LEGAL_TRANSITIONS` reverses this ADR. Any such change is a code
+  change AND a supersedes-D-221 ADR — not a silent widening.
+
+**Anchors**: `[D-149]` (NS → CLOSED, Guard 5 pattern for TPM-attributed
+closes -- this ADR is its mirror on the out-of-CLOSED side), `DEF-20`
+(CLOSED requires TPM attribution -- same policy discipline), `CLOSE-1`
+(2026-07-28 broadening of into-CLOSED edges), `state_machine.py:182`
+(CLOSED = frozenset()), `guards.py:179` (legality-first ordering),
+`transitions.py:385` (bypass_guards is locked to
+manual_tpm_override -- TRK-E004).
