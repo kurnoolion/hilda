@@ -8098,7 +8098,7 @@ D-221 keeps it there), `state_machine.py:182`
 
 ---
 
-## D-223: Staging-first CL flow -- `git pull` gets `podman-compose down; up -d` on staging BEFORE prod, always
+## D-223: Staging-first CL flow -- corp/main writes happen on STAGING (cherry-pick + push), prod pulls corp/main and restarts, never cherry-picks
 
 **Date**: 2026-09-28. **Scope**: operational discipline, no code
 change. Establishes the deploy pattern that emerged from the
@@ -8128,26 +8128,32 @@ this class of drift before prod ever sees it.
 
 **Decision**:
 
-Every commit landing on corp/main -- code, config, or both -- goes
-through STAGING first:
+**Corp/main writes happen on STAGING, never on prod.** Staging is where
+cherry-picks from origin land, get pushed to corp, and get validated
+by a real container recreate. Prod's role collapses to "fast-forward
+pull from corp/main + restart" -- a pure consumer, never an author of
+corp/main history.
+
+**Staging flow** (development + validation, per CL):
 
 ```
 cd ~/hilda
-git pull corp main
+git fetch origin
+git cherry-pick <sha> [<sha2> ...]        # or reject if it doesn't apply cleanly
+git push corp main
 podman-compose -f deploy/docker-compose.yml down
 podman-compose -f deploy/docker-compose.yml up -d
 sleep 15
 podman ps
 podman logs --tail 40 hilda-worker | grep -iE "error|traceback|validation"
-podman logs --tail 40 hilda-beat | grep -iE "error|traceback|validation"
+podman logs --tail 40 hilda-beat   | grep -iE "error|traceback|validation"
 ```
 
-Only after staging is proven clean does prod get the same treatment:
+**Prod flow** (consumer only, after staging validates):
 
 ```
-# On prod, some time later:
 cd ~/hilda
-git pull corp main
+git pull corp main                        # fast-forward only; never cherry-picks here
 podman-compose -f deploy/docker-compose.yml down
 podman-compose -f deploy/docker-compose.yml up -d
 ```
@@ -8156,6 +8162,14 @@ podman-compose -f deploy/docker-compose.yml up -d
 image + fresh `.env`, which is the only way env var changes propagate.
 `restart` reuses the existing container's env, which will silently
 carry stale values.
+
+**Prod's `~/hilda` git remote setup** can drop `origin` entirely --
+since prod never fetches origin or cherry-picks, having only `corp`
+as a remote gives push-safety in the environment where it matters
+most. Not required (current prod has both `corp` and `origin`), but
+a cleaner separation of duties: staging is dev, prod is consumer.
+Staging keeps both remotes because it needs `git fetch origin` to
+source the commits it's about to cherry-pick.
 
 **Why**:
 
@@ -8177,6 +8191,15 @@ carry stale values.
   the "what if the restart brings up a broken worker" case --
   staging catches THAT too. Every restart is a deploy, and every
   deploy should have been validated somewhere first.
+- **vs. cherry-picking on prod (the pre-2026-09-28 pattern)**:
+  cherry-pick conflicts, patch-id drift and hand-resolution mistakes
+  live in prod's git state until fixed, and split the "get code
+  onto prod" event from "restart prod" (Sep 25 cherry-pick + Sep 27
+  restart -- the exact 2-day gap that made LATE-ITEM-1 silent for so
+  long). Cherry-picking on staging keeps prod's `~/hilda` a clean
+  linear history of corp/main pulls, and forces cherry-pick + restart
+  into one workflow on one box, closing the drift gap by
+  construction.
 
 **Consequences**:
 
@@ -8202,6 +8225,18 @@ carry stale values.
   reload) is the closest off-the-shelf answer, but every consumer of
   `ReconcileConfig` would need to re-fetch the object on each
   invocation rather than caching at import time.
+- **Prod's `~/hilda-public` becomes optional** -- it was originally
+  a manual-cherry-pick review workspace when prod was where
+  cherry-picks landed. With cherry-picks moving to staging, prod
+  doesn't need a public github checkout at all. Leaving it in place
+  is harmless; removing it removes one directory that could carry
+  stale state.
+- **Push credentials scope**: staging's `omadm` needs push access to
+  the corp github enterprise remote (currently the same corp LDAP
+  creds prod uses for its clone). Prod's `omadm` no longer needs push
+  access if `origin` is removed from its `~/hilda` -- pull-only
+  suffices. Corp git admin can tighten prod's account permissions if
+  desired.
 
 **Anchors**: `LATE-ITEM-1` / `[D-220]` (the drift that motivated
 this), `[D-130]` (the bind-mounted source pattern that makes restart
