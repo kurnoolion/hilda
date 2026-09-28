@@ -118,8 +118,21 @@ def create_item(
     return r.json()["d"]
 
 
+def _is_deferred(v) -> bool:
+    """SP returns nav-property stubs as {'__deferred': {'uri': ...}}.
+    These are expandable references (Author, Editor, FieldValuesAsText,
+    AttachmentFiles, ParentList, File, etc.), not scalar data, and SP
+    rejects them on POST with:
+      "The property '__deferred' does not exist on type 'SP.SecurableObject'."
+    """
+    return isinstance(v, dict) and "__deferred" in v
+
+
 def strip_system_fields(row: dict) -> dict:
-    return {k: v for k, v in row.items() if k not in SYSTEM_FIELDS}
+    return {
+        k: v for k, v in row.items()
+        if k not in SYSTEM_FIELDS and not _is_deferred(v)
+    }
 
 
 def main() -> int:
