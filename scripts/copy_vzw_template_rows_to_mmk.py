@@ -46,7 +46,7 @@ from requests_ntlm import HttpNtlmAuth
 
 
 SYSTEM_FIELDS = frozenset({
-    "__metadata", "Id", "ID", "GUID", "Title",
+    "__metadata", "Id", "ID", "GUID",
     "Author", "Editor", "AuthorId", "EditorId",
     "Created", "Modified",
     "ContentType", "ContentTypeId", "FileSystemObjectType",
@@ -55,6 +55,10 @@ SYSTEM_FIELDS = frozenset({
     "ComplianceAssetId",
     "ServerRedirectedEmbedUri", "ServerRedirectedEmbedUrl",
     "OwshiddenversionField",  # SP-2013-ish
+    # NOTE: "Title" is intentionally NOT stripped. On some SP lists it's an
+    # auto-generated system field, but on Deliverables_Template it's a real
+    # data field (carries per-row content). If you reuse this script against
+    # a list where Title is auto-populated, add it back here.
 })
 
 
