@@ -8095,3 +8095,120 @@ D-221 keeps it there), `state_machine.py:182`
 (`LEGAL_TRANSITIONS[CLOSED] = frozenset()`),
 `sp_alert_imports.py:267` (delivery_state source),
 `sp_alert_imports.py:589` (D-144 auto-transition, now guarded).
+
+---
+
+## D-223: Staging-first CL flow -- `git pull` gets `podman-compose down; up -d` on staging BEFORE prod, always
+
+**Date**: 2026-09-28. **Scope**: operational discipline, no code
+change. Establishes the deploy pattern that emerged from the
+LATE-ITEM-1 config-vs-code drift on prod 2026-09-27.
+
+**Context**: Sep 25 the cherry-pick chain landed seven code commits on
+corp/main on prod, but no `podman restart` followed -- a deliberate
+hold so behavior changes wouldn't hit prod before staging validation.
+What that hold DIDN'T account for: `config/reconcile.json` had been
+pulled with the new `sync_9_late_item_outreach` key (LATE-ITEM-1 /
+D-220), and the running worker's Python interpreter still had the
+pre-D-220 `ReconcileConfig` model in memory (`extra="forbid"`). Every
+reconcile tick from Sep 25 onward raised `pydantic.ValidationError`.
+Not surfaced until Sep 27 when the log tail was checked.
+
+The failure class: **bind-mounted config is live on every task tick,
+bind-mounted Python code is only re-read on container restart**. Any
+commit that evolves a Pydantic config schema and the JSON it validates
+against creates a runtime mismatch until the container restarts and
+Python re-imports. There is no way to hold code-behavior back while
+letting config move -- config keeps advancing whether restart happens
+or not.
+
+Staging PC (`omadm-z640-149`) was brought up 2026-09-26 to 2026-09-28
+as a full mirror of prod's 7-container runtime specifically to catch
+this class of drift before prod ever sees it.
+
+**Decision**:
+
+Every commit landing on corp/main -- code, config, or both -- goes
+through STAGING first:
+
+```
+cd ~/hilda
+git pull corp main
+podman-compose -f deploy/docker-compose.yml down
+podman-compose -f deploy/docker-compose.yml up -d
+sleep 15
+podman ps
+podman logs --tail 40 hilda-worker | grep -iE "error|traceback|validation"
+podman logs --tail 40 hilda-beat | grep -iE "error|traceback|validation"
+```
+
+Only after staging is proven clean does prod get the same treatment:
+
+```
+# On prod, some time later:
+cd ~/hilda
+git pull corp main
+podman-compose -f deploy/docker-compose.yml down
+podman-compose -f deploy/docker-compose.yml up -d
+```
+
+**Not** `podman restart` -- `down; up -d` recreates the container from
+image + fresh `.env`, which is the only way env var changes propagate.
+`restart` reuses the existing container's env, which will silently
+carry stale values.
+
+**Why**:
+
+- **vs. relying on `podman restart` alone**: `restart` doesn't reload
+  `.env` values, doesn't detect volume mount changes, doesn't clear
+  Python's module-level state from a fresh interpreter. Only
+  `down; up -d` does all three.
+- **vs. testing on prod directly**: LATE-ITEM-1 shows the failure
+  mode is silent -- the ValidationError logs to WARN and the
+  reconciler keeps running (Celery retries), so the error surfaces
+  only when someone greps the log. On staging, ValidationError is
+  what you're looking for; on prod, it's what breaks the beat
+  schedule invisibly.
+- **vs. adding a hot-reload mechanism to HILDA**: would require
+  making every Pydantic model live-reloadable and re-instantiating
+  the entire task-deps graph on config change. Weeks of work to
+  solve a problem that a five-minute discipline solves.
+- **vs. always restarting on `git pull`** (no staging): still leaves
+  the "what if the restart brings up a broken worker" case --
+  staging catches THAT too. Every restart is a deploy, and every
+  deploy should have been validated somewhere first.
+
+**Consequences**:
+
+- **5-15 minutes per CL added to the deploy lifecycle**. Cheap
+  compared to the LATE-ITEM-1 fire-drill (2 days of silent errors
+  before anyone noticed).
+- **Staging must stay reasonably in sync with prod's data shape**.
+  Currently uses `MMK` customer_id with fake devices/milestones and
+  the user as owner -- keeps SP hygiene clean and outreach in the
+  user's inbox, but means staging tests behavior only, not
+  data-shape-driven bugs. That trade-off is acceptable for now.
+- **Every commit adds one more `podman-compose down; up -d` cycle to
+  perform**. `~/hilda-deploy` wrapper script recommended -- one
+  command per box: `cd ~/hilda && git pull corp main && podman-compose
+  down && podman-compose up -d && sleep 15 && podman ps`. Not built
+  yet.
+- **Rollback discipline is the same as before**: `git checkout
+  <last-good-sha>` then `podman-compose down; up -d`. Staging tests
+  the rollback path too if you ever need to rehearse it.
+- **The Ph-2 fork of adding a hot-reload mechanism** remains a valid
+  future decision if the volume of CLs grows to where 5 minutes per
+  CL is a real cost. Anchors: `pydantic_settings` (env-based config
+  reload) is the closest off-the-shelf answer, but every consumer of
+  `ReconcileConfig` would need to re-fetch the object on each
+  invocation rather than caching at import time.
+
+**Anchors**: `LATE-ITEM-1` / `[D-220]` (the drift that motivated
+this), `[D-130]` (the bind-mounted source pattern that makes restart
+sufficient for pure-Python changes but NOT for config-schema
+changes), `[D-141]` (bind-mounted config files are read live per task
+tick), `[D-222]` (`delivery_state` seed is another example of code +
+config co-evolving that would silently break without this
+discipline), `reconcile_config.py` (the file whose evolution first
+exposed the class of issue).
+
