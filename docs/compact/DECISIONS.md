@@ -8247,3 +8247,203 @@ config co-evolving that would silently break without this
 discipline), `reconcile_config.py` (the file whose evolution first
 exposed the class of issue).
 
+## D-224: Shared OMADM_BOT inbox -- env-scoped BATCH-id + ownership-gated mark-processed (SHARED-INBOX-1)
+
+**Date**: 2026-09-29. **Scope**:
+`workflow_engine.tasks._batch_id` (new module),
+`workflow_engine.tasks.outreach` (initial + reminder outreach BATCH-id
+generation), `workflow_engine.tasks.sp_alert_imports.kickoff_collection_task`
+(per-TG BATCH-id generation), `workflow_engine.tasks.email_polling`
+(ownership check + explicit mark_processed calls),
+`email_service.inbound.ews_receiver.EwsReceiver.fetch_once` (mark-read
+removed from receiver), `storage.audit_ops.is_outbound_batch_here`
+(persistent Postgres ownership fallback).
+
+### Context
+
+Staging (`omadm-z640-149`, brought up 2026-09-28) and production HILDA
+workers both poll the same OMADM_BOT Exchange mailbox for owner
+replies to outreach emails. `EwsReceiver.fetch_once` marked every
+fetched message read (`msg.is_read = True; msg.save(update_fields=["is_read"])`)
+inside its inner loop, immediately after copying message fields into a
+dict but before any downstream decision was made. The server-side
+filter that gates fetch is `folder.filter(is_read=False)` -- once a
+message is flipped to read by any client, HILDA no longer sees it on
+subsequent polls.
+
+Consequences observed this session:
+
+- The first poller of either env to touch a message "claimed" it,
+  regardless of which env had sent the batch that owner was replying
+  to.
+- The other env would never see the reply. Owners' status responses to
+  the wrong-env batch simply vanished from HILDA's fetch window.
+- User symptom: owner replies visible as read in Outlook but absent
+  from the `poll_ews_inbox: messages_fetched=... sp_alerts=... ...`
+  summary log line for the poll cycle they would have belonged to.
+  Marking the message unread manually re-qualified it for the next 60s
+  poll, at which point the correct env usually won the race and
+  processed it.
+- The RCA also surfaced a second bug in the ownership signal:
+  `BatchIdempotencyKey` per `[D-012]` has a 24-hour Redis TTL, but the
+  production outreach->reply cycle spans ~2 weeks (initial outreach is
+  sent 2 weeks before the DRR/P1 deadline; owners typically reply
+  within one week). Redis was unusable as a persistent ownership
+  signal even before the shared-inbox topology was introduced.
+
+The original design rationale of the eager mark in `fetch_once` (per
+the receiver's own comment at the removed lines): treat mark-read as a
+"we saw the message" seen-bit; a downstream failure would be caught by
+the parser's `_LruTtlSet` de-dup on `message_id + content_hash` when
+the message is refetched. Two flaws: (a) the LRU forgets, so a
+permanent-failure message could re-enter processing after eviction
+and (b) the parser LRU doesn't fire at all if the message isn't
+refetched -- which is exactly the shared-inbox case (marked read by
+the wrong env, never refetched by anyone). The
+seen-bit-as-idempotency argument assumed ONE poller per mailbox.
+
+### Decision
+
+Three coordinated changes:
+
+**1. Env-scoped BATCH-id.** New `_batch_id.make_batch_id(seed)` reads
+`HILDA_ENV` (defaults to `prd` when unset) and emits
+`BATCH-<env>-<10hex>` where `<10hex>` is the first 10 characters of the
+seed with dashes stripped (seed = correlation_id string or
+`uuid5.hex`). All three outbound-outreach BATCH-id generation sites
+converted:
+
+- `outreach.py` initial outreach (`send_initial_outreach_task`).
+- `outreach.py` reminder (`send_reminder_task`).
+- `sp_alert_imports.py` per-TG kickoff (`kickoff_collection_task`).
+
+Inbound owner-reply ownership resolves from the subject alone via a
+regex match on the extracted BATCH token: matches own env -> ours,
+matches other env -> not ours, no env prefix -> legacy fallback (see
+2).
+
+**2. Persistent Postgres ownership fallback.** New
+`storage.audit_ops.is_outbound_batch_here(batch_id) -> bool` runs SQL
+LIKE against `communication_log.summary` (JSON blob) for
+`direction='outbound'` rows carrying the batch_id token (both compact
+and spaced JSON tolerated per the writer's JSON separators).
+`communication_log` is append-only per NFR-6 so the outbound row
+proving THIS HILDA sent this batch_id survives arbitrarily long --
+unlike Redis's 24h window. Called only when the batch_id lacks an env
+prefix (i.e. batches sent before this CL); becomes dead code once the
+current outreach queue drains (estimated ~2-3 weeks). No dedicated
+column, no schema migration, no jsonb operator dependency -- kept
+intentionally simple; if `communication_log` grows to the point where
+a full-table scan on LIKE becomes slow, an indexed column is a
+follow-up.
+
+**3. Mark-processed moved out of `EwsReceiver.fetch_once`.** The
+receiver no longer marks any message read. `email_polling` calls
+`recv.mark_processed(message_id)` explicitly at each "ours + handled"
+exit. `MockEwsReceiver` already implemented the correct semantics
+(fetch returns without marking, `mark_processed` records the call), so
+this change aligned the production receiver with the mock contract
+that was already there. Complete case matrix:
+
+| Path | Marked? |
+|---|---|
+| Owner reply, ownership confirmed, enqueue succeeded | Yes |
+| Owner reply, subject `BATCH-<other-env>-` | No -- leave unread for the owning env |
+| Owner reply, legacy BATCH (no env), Postgres says ours | Yes |
+| Owner reply, legacy BATCH, Postgres says not ours | No |
+| Owner reply, subject matched marker but NO BATCH token | Yes -- dead-letter, prevents loop |
+| Owner reply, enqueue raised | No -- retry next poll |
+| SP alert, dispatched | Yes |
+| SP alert, DEVICE_FILTER drop | Yes -- legitimately ours-but-ignore |
+| SP alert, parser returned None (silent no-op SP CHANGE) | Yes -- ours, nothing to do |
+| SP alert, parse raised | No -- retry next poll |
+| SP alert, dispatch raised | No -- retry next poll |
+| `deps.dispatcher is None` | No -- retry once wired |
+| Non-classifiable, matched HILDA subject filter | Yes -- dead-letter |
+
+### Why (not alternatives)
+
+- **Separate inboxes per env** (`omadm_bot_staging@...`,
+  `omadm_bot@...`) is the eventual permanent fix and eliminates this
+  entire class of bug. Requires an Exchange/IT ticket; queued but not
+  landed. This decision is the code-side mitigation that lets HILDA
+  operate correctly on the shared topology until the mailbox split
+  arrives.
+- **Env-scoped BATCH-id alone** (no receiver change) would still race:
+  first poller flips `is_read=True` before reading the subject to
+  check the env prefix. The receiver change is load-bearing.
+- **Receiver change alone** (no env-scoped ids) would require every
+  ownership check to hit Postgres, adding a DB round trip per message
+  on the hot path. The env prefix is a subject-only fast path with
+  zero I/O.
+- **Persistent ownership via a real `batch_id` column + index** rather
+  than LIKE-on-summary is the "cleaner" answer but adds a schema
+  migration + backfill for a fallback path that goes dead within
+  weeks. Deferred; the LIKE query is fast enough for the observed row
+  volume, and if it ever isn't, adding an index (functional or on a
+  new column) is a mechanical follow-up.
+- **Claim lock via Redis SETNX** on each `message_id` before
+  processing would harden against a residual race (two envs both
+  decide "mine" due to config drift). Skipped because natural-key
+  idempotency at `sp_alert_imports._build_delivery_item` (per DEDUP-1,
+  2026-08-18) already prevents duplicate `delivery_item` rows, so the
+  practical worst-case is a duplicate outbound audit row, not data
+  corruption. Belt-and-suspenders candidate for later if we see it.
+- **Retry-count cap** on the leave-unread paths (a permanently-broken
+  message could loop every 60s forever) was considered inline but
+  scoped out to keep this CL narrow. Failure log lines are noisy
+  enough that ops will notice a stuck message; adding a Redis-backed
+  per-message-id counter is a mechanical follow-up flagged in STATUS.
+
+### Consequences
+
+- **Deploy dependency**: both `deploy/docker-compose.yml` on staging
+  and production must set `HILDA_ENV` (`stg` and `prd` respectively)
+  before this CL takes effect. Missing var defaults to `prd` in code,
+  so an unconfigured staging container would send prod-shaped
+  batch_ids on the wire, and ownership discrimination would degrade
+  to the slower Postgres fallback -- correct but wasteful of the fast
+  path. Verified with `podman exec hilda-worker env | grep HILDA_ENV`.
+- **Backward compat**: batches sent before this CL landed (subjects
+  carry `BATCH-<hex>` with no env token) are handled correctly via
+  the Postgres fallback. No data migration, no in-flight batch
+  orphaning. The fallback path is dead code within ~2-3 weeks as the
+  current outreach queue drains.
+- **Behavior change on failure paths**: previously, an SP-alert parse
+  or dispatch failure marked the message read and lost it silently.
+  Now the message stays unread and re-processes on the next 60s poll.
+  For transient failures (DB blip, dispatcher briefly unwired during
+  bootstrap) this is strictly better -- the message eventually
+  succeeds. For permanent failures (malformed body that will never
+  parse) this becomes a periodic warning loop; ops should watch for
+  repeat `message_id`s in `poll_ews_inbox parse failed` warnings and
+  investigate the underlying cause (which the old silent-drop path
+  hid from them entirely).
+- **`_LruTtlSet` de-dup at the parser stops being load-bearing**. It
+  was there as a safety net against the old always-mark path's
+  self-inflicted re-fetches (mark_processed failed but the message
+  was still processed -- next poll would refetch, parser LRU would
+  catch the duplicate). With mark_processed only called on success,
+  a re-fetch means "we didn't successfully process yet," so the
+  parser should not de-dup it. The LRU still runs for
+  defense-in-depth but is no longer preventing double-processing
+  under normal operation.
+- **`_last_fetched_at` field** in `EwsReceiver` remains dead code (its
+  own comment says "no longer consulted on filter"); left in place --
+  removing it is orthogonal cleanup.
+- **When separate mailboxes eventually land**: the env-scoped BATCH-id
+  and the Postgres fallback become defense-in-depth rather than the
+  primary correctness mechanism. Both are cheap enough to keep
+  regardless; the env token is nice for log grepping even without the
+  race concern.
+
+**Anchors**: `[D-012]` (`BatchIdempotencyKey` Redis TTL, the
+insufficiency of which this decision addresses), NFR-6 (append-only
+`communication_log` -- the persistence guarantee that makes
+`is_outbound_batch_here` durable), FR-24 (BATCH-id token uniqueness
+within outreach window -- this decision preserves that and adds env
+uniqueness), `[D-141]` (bind-mounted config live per tick -- staging's
+`HILDA_ENV=stg` in `.env` requires a `podman-compose down; up -d` to
+take effect, not just restart), `[D-223]` (staging-first CL flow --
+this D-224 CL should hit staging first per that discipline).
+
