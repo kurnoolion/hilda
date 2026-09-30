@@ -114,6 +114,12 @@ def poll_ews_inbox_task(self) -> dict[str, Any]:
       - dispatched: events successfully dispatched through dispatcher
       - skipped_no_dispatcher: if deps.dispatcher is None
       - parse_failures: messages that failed parse/dispatch
+      - owner_reply_skipped_not_ours: owner replies whose BATCH-<id> belongs
+        to a different HILDA env (shared OMADM_BOT inbox). Left unread so
+        the owning env's next poll can claim them (SHARED-INBOX-1).
+      - dead_lettered: messages that matched HILDA's subject filter but
+        classify said non-alert-non-reply; marked processed to prevent
+        infinite re-fetch loops.
     """
     try:
         return asyncio.run(_async_poll_and_dispatch())
@@ -158,13 +164,21 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
     # --- Pre-flight deps check ---
     deps = get_task_deps()
     if deps.dispatcher is None:
-        _log.warning("poll_ews_inbox: deps.dispatcher is None; messages fetched but not dispatched")
+        _log.warning(
+            "poll_ews_inbox: deps.dispatcher is None; messages fetched but "
+            "not dispatched (leaving unread for retry once dispatcher wires)"
+        )
         return {
-            "messages_fetched": len(msgs),
-            "sp_alerts": 0,
-            "dispatched": 0,
-            "skipped_no_dispatcher": True,
-            "parse_failures": 0,
+            "messages_fetched":              len(msgs),
+            "sp_alerts":                     0,
+            "audited":                       0,
+            "dispatched":                    0,
+            "owner_replies":                 0,
+            "owner_reply_enqueued":          0,
+            "owner_reply_skipped_not_ours":  0,
+            "dead_lettered":                 0,
+            "skipped_no_dispatcher":         True,
+            "parse_failures":                0,
         }
 
     # --- Parse + dispatch ---
@@ -181,37 +195,88 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
     parse_failures = 0
     owner_replies = 0
     owner_reply_enqueued = 0
+    owner_reply_skipped_not_ours = 0
+    dead_lettered = 0
+
+    async def _mark(msg: Any) -> None:
+        """SHARED-INBOX-1: explicit mark_processed at each 'ours + handled'
+        exit. Replaces the removed eager mark inside EwsReceiver.fetch_once.
+        Best-effort -- a mark failure logs a warning but does not fail the
+        poll; the message will be re-fetched next tick (parser + import
+        idempotency guards downstream)."""
+        mid = msg.get("message_id") if isinstance(msg, dict) else getattr(msg, "message_id", None)
+        if not mid:
+            return
+        try:
+            await recv.mark_processed(mid)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning(
+                "poll_ews_inbox mark_processed failed: mid=%s: %s: %s",
+                str(mid)[:80], type(exc).__name__, str(exc)[:120],
+            )
 
     for m in msgs:
         try:
             kind = classify(m)
         except Exception:  # noqa: BLE001
             kind = None
+
         if kind == EmailKind.OWNER_REPLY:
             owner_replies += 1
+            # SHARED-INBOX-1: ownership gate. Only mark_processed + enqueue
+            # when THIS HILDA sent this batch. Non-owned replies stay unread
+            # so the owning env's next poll can claim them.
+            is_ours, batch_id = await _own_owner_reply(m)
+            if not is_ours:
+                owner_reply_skipped_not_ours += 1
+                _log.info(
+                    "poll_ews_inbox owner-reply not ours: batch_id=%s "
+                    "subject=%r -- left unread for other env",
+                    batch_id or "?",
+                    (getattr(m, "subject", "") or "")[:120],
+                )
+                continue
             try:
                 _enqueue_owner_reply(m)
                 owner_reply_enqueued += 1
+                await _mark(m)
             except Exception as exc:  # noqa: BLE001
                 _log.warning(
-                    "poll_ews_inbox owner-reply enqueue failed: %s: %s",
+                    "poll_ews_inbox owner-reply enqueue failed: %s: %s "
+                    "(leaving unread for retry next poll)",
                     type(exc).__name__, str(exc)[:120],
                 )
+                # Do NOT mark -- retry next poll.
             continue
+
         if kind != EmailKind.SP_ALERT:
+            # Matched HILDA's subject filter but classify says non-alert-non-
+            # reply. Dead-letter: mark processed to prevent infinite re-fetch
+            # (server-side filter is is_read=False + subject-prefix, so an
+            # un-marked non-classifiable message would re-appear every 60s).
+            dead_lettered += 1
+            await _mark(m)
             continue
         sp_alerts += 1
 
         try:
             parsed = parser.parse(m)
         except Exception as exc:  # noqa: BLE001
-            _log.warning("poll_ews_inbox parse failed for msg %r: %s",
-                         getattr(m, "message_id", "?"), str(exc)[:120])
+            _log.warning(
+                "poll_ews_inbox parse failed for msg %r: %s "
+                "(leaving unread for retry next poll)",
+                getattr(m, "message_id", "?"), str(exc)[:120],
+            )
             parse_failures += 1
+            # Leave unread: parse failure could be transient (e.g. body
+            # arrived truncated). Retry cap deferred (STATUS flag).
             continue
 
         if parsed is None:
-            # Silent drop (no-op SP CHANGE or Projects Ph-2)
+            # Silent drop (no-op SP CHANGE or Projects Ph-2). Message shape
+            # was valid -- parser deliberately returned None. Mark processed
+            # so it doesn't loop.
+            await _mark(m)
             continue
 
         # DEV-FILTER-1 (2026-08-06): drop SP alerts whose project_model
@@ -241,6 +306,9 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
                     getattr(m, "message_id", "?"),
                     (getattr(m, "subject", "") or "")[:120],
                 )
+                # Legitimate 'ours but ignore' -- customer wired here but
+                # device is test pollution. Mark processed so it doesn't loop.
+                await _mark(m)
                 continue
 
         # Write inbound-audit row BEFORE dispatch -- captures unmatched events too.
@@ -300,27 +368,94 @@ async def _async_poll_and_dispatch() -> dict[str, Any]:
             )
             deps.dispatcher.dispatch(event)
             dispatched += 1
+            await _mark(m)
         except Exception as exc:  # noqa: BLE001
-            _log.warning("poll_ews_inbox dispatch failed: %s", str(exc)[:120])
+            _log.warning(
+                "poll_ews_inbox dispatch failed: %s "
+                "(leaving unread for retry next poll)",
+                str(exc)[:120],
+            )
             parse_failures += 1
+            # Leave unread -- retry next poll.
 
     _log.info(
         "poll_ews_inbox: messages_fetched=%d sp_alerts=%d audited=%d "
         "dispatched=%d owner_replies=%d owner_reply_enqueued=%d "
-        "parse_failures=%d",
+        "owner_reply_skipped_not_ours=%d dead_lettered=%d parse_failures=%d",
         len(msgs), sp_alerts, audited, dispatched,
-        owner_replies, owner_reply_enqueued, parse_failures,
+        owner_replies, owner_reply_enqueued,
+        owner_reply_skipped_not_ours, dead_lettered, parse_failures,
     )
     return {
-        "messages_fetched":       len(msgs),
-        "sp_alerts":              sp_alerts,
-        "audited":                audited,
-        "dispatched":             dispatched,
-        "owner_replies":          owner_replies,
-        "owner_reply_enqueued":   owner_reply_enqueued,
-        "skipped_no_dispatcher":  False,
-        "parse_failures":         parse_failures,
+        "messages_fetched":              len(msgs),
+        "sp_alerts":                     sp_alerts,
+        "audited":                       audited,
+        "dispatched":                    dispatched,
+        "owner_replies":                 owner_replies,
+        "owner_reply_enqueued":          owner_reply_enqueued,
+        "owner_reply_skipped_not_ours":  owner_reply_skipped_not_ours,
+        "dead_lettered":                 dead_lettered,
+        "skipped_no_dispatcher":         False,
+        "parse_failures":                parse_failures,
     }
+
+
+# --- SHARED-INBOX-1: owner-reply ownership -----------------------------------
+
+# Any hex-token BATCH-id we generated. Matches both env-scoped
+# (BATCH-prd-abc123def0, BATCH-stg-...) and legacy (BATCH-abc123def0) shapes.
+import re as _re
+_BATCH_RE = _re.compile(r"BATCH-[A-Za-z0-9-]+")
+_ENV_SCOPED_BATCH_RE = _re.compile(r"^BATCH-(prd|stg)-[A-Za-z0-9]+$")
+
+
+async def _own_owner_reply(msg: Any) -> tuple[bool, str | None]:
+    """Return (is_ours, batch_id) for an OWNER_REPLY message.
+
+    Ownership decision order:
+      1. Extract BATCH-<id> from subject. If missing -> (True, None) treated
+         as "ours" so we mark it processed as a dead-letter (subject matched
+         the OWNER_REPLY marker but contained no BATCH token; nobody's going
+         to be able to route it).
+      2. If BATCH-<env>-<hex> and <env> matches HILDA_ENV -> (True, batch).
+      3. If BATCH-<env>-<hex> and <env> != HILDA_ENV -> (False, batch).
+         Other env owns it.
+      4. Legacy shape (no env token) -> Postgres lookup via
+         storage.audit_ops.is_outbound_batch_here. True iff THIS instance's
+         communication_log carries an outbound row for this batch_id.
+    """
+    import os
+    subject = ""
+    if isinstance(msg, dict):
+        subject = msg.get("subject", "") or ""
+    else:
+        subject = getattr(msg, "subject", "") or ""
+
+    match = _BATCH_RE.search(subject)
+    if not match:
+        # No BATCH token -> dead-letter as "ours" so we mark it processed.
+        return True, None
+    batch_id = match.group(0)
+
+    env_match = _ENV_SCOPED_BATCH_RE.match(batch_id)
+    if env_match:
+        own_env = (os.environ.get("HILDA_ENV") or "prd").strip().lower()
+        return env_match.group(1) == own_env, batch_id
+
+    # Legacy pre-env-scoped batch_id: Postgres lookup.
+    from core.src.storage.audit_ops import is_outbound_batch_here
+    try:
+        is_ours = await is_outbound_batch_here(batch_id)
+    except Exception as exc:  # noqa: BLE001
+        # DB blip -- err on the side of leaving unread (other env may try;
+        # our next poll will retry).
+        _log.warning(
+            "poll_ews_inbox owner-reply ownership lookup failed: "
+            "batch_id=%s: %s: %s -- treating as not-ours (leave unread)",
+            batch_id, type(exc).__name__, str(exc)[:120],
+        )
+        return False, batch_id
+    return is_ours, batch_id
 
 
 def _enqueue_owner_reply(msg: Any) -> None:

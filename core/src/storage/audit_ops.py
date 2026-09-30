@@ -31,6 +31,7 @@ __all__ = [
     "get_active_overrides",
     "get_folder_routing_for_tg",
     "get_tag_catalog",
+    "is_outbound_batch_here",
     "list_active_overrides",
     "list_all_override_rule_ids",
     "list_tag_catalog_entries",
@@ -53,6 +54,52 @@ def _utcnow() -> datetime:
 
 
 # --- CommunicationLog ------------------------------------------------------------
+
+
+async def is_outbound_batch_here(batch_id: str) -> bool:
+    """True if THIS HILDA instance has an outbound communication_log row for
+    `batch_id`.
+
+    Owner replies land in a shared inbox (OMADM_BOT) when staging + production
+    both poll the same mailbox. Redis-backed BatchIdempotencyKey has a 24h TTL
+    (per [D-012]) which is much shorter than the ~2-week outreach->reply
+    window used in production (initial outreach sent 2 weeks before the
+    milestone deadline; owners typically reply within a week). Redis is
+    therefore useless as a persistent ownership signal.
+
+    communication_log is append-only (NFR-6) so an outbound row proving THIS
+    HILDA sent this batch_id survives arbitrarily long. Lookup is a SQL LIKE
+    on the summary JSON blob -- no dedicated column, no migration, no jsonb
+    operator dependency. Matches both compact JSON (no spaces, current writer
+    format) and spaced JSON (defensive), same needle shape as
+    PostgresAuditWriter.query_communications.
+
+    Used by email_polling.poll_ews_inbox_task on OWNER_REPLY messages whose
+    subject BATCH-<id> token lacks an env prefix (legacy pre-D-XXX batches)
+    -- env-prefixed batch_ids resolve ownership from the subject alone
+    without a Postgres round-trip.
+    """
+    if not batch_id:
+        return False
+    from sqlalchemy import func, or_
+    # JSON separators used by PostgresAuditWriter.write_communication_log are
+    # compact (`,:` -- no spaces); tolerate spaced form defensively.
+    needle_compact = f'%"batch_id":"{batch_id}"%'
+    needle_spaced  = f'%"batch_id": "{batch_id}"%'
+    async with _session() as session:
+        stmt = (
+            select(func.count())
+            .select_from(CommunicationLogTable)
+            .where(
+                CommunicationLogTable.direction == Direction.OUTBOUND.value,
+                or_(
+                    CommunicationLogTable.summary.like(needle_compact),
+                    CommunicationLogTable.summary.like(needle_spaced),
+                ),
+            )
+        )
+        count = (await session.execute(stmt)).scalar_one_or_none() or 0
+        return count > 0
 
 
 async def log_communication(row: CommunicationLogRow) -> None:

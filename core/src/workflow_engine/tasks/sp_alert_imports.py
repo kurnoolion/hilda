@@ -1036,8 +1036,11 @@ def kickoff_collection_task(
             })
         # Deterministic batch_id from (correlation_id, tg_key) prefix so
         # inbound owner-reply parsing can still resolve BATCH -> group.
+        # Env-scoped (BATCH-<env>-<10-hex>) per _batch_id.make_batch_id for
+        # shared-OMADM_BOT-inbox ownership discrimination.
+        from core.src.workflow_engine.tasks._batch_id import make_batch_id
         batch_seed = f"{correlation_id}-{tg_key}"
-        batch_id = f"BATCH-{_uuid.uuid5(_uuid.NAMESPACE_URL, batch_seed).hex[:10]}"
+        batch_id = make_batch_id(_uuid.uuid5(_uuid.NAMESPACE_URL, batch_seed).hex)
 
         # Step 1: transition each item NS -> Open.
         for item in group_items:

@@ -332,22 +332,23 @@ class EwsReceiver:
                 "received_at": msg.datetime_received,
                 "attachments": attachments,
             })
-            # Mark read AFTER successful data extraction so a transient EWS
-            # blip on .save() at worst causes one re-fetch on the next poll
-            # (parser-side _LruTtlSet de-dups by message_id + content_hash so
-            # downstream is idempotent). A blip during data extraction leaves
-            # the message unread + retryable.
-            try:
-                msg.is_read = True
-                msg.save(update_fields=["is_read"])
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "ews_receiver: mark-as-read failed for message_id=%s: %s",
-                    str(msg.message_id or msg.item_id or "?")[:80],
-                    str(exc)[:120],
-                )
-                # Don't fail the whole fetch; downstream dedup handles the
-                # next poll's re-read gracefully.
+            # NO mark-as-read here (SHARED-INBOX-1). Marking read at fetch
+            # time is optimistic: OMADM_BOT is polled by BOTH staging and
+            # production HILDA workers, so whichever poller reaches a message
+            # first would "claim" it (is_read=True) before knowing whether it
+            # owns the batch. The other env then never sees its own owner
+            # reply -- silent loss.
+            #
+            # Ownership is now decided in the caller (email_polling) per
+            # message: subject BATCH-<env>- prefix, or a Postgres lookup for
+            # legacy batches, then an explicit self.mark_processed(message_id)
+            # (MOVE to processed folder) only when this HILDA owns it.
+            # Non-owned messages stay unread + in INBOX for the other poller.
+            #
+            # A message that classifies as ours but fails downstream also
+            # stays unread -- retries next poll. That's better than silent
+            # loss and matches the LATE-ITEM-1 "prefer noisy backfill over
+            # missed outreach" stance.
 
         # Advance instance high-water mark (no longer consulted on filter --
         # is_read is the authoritative seen-bit -- kept for diagnostics).

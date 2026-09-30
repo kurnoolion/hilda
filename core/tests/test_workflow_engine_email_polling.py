@@ -158,9 +158,12 @@ async def test_poll_enqueues_owner_replies(base_deps):
     def _msg(i):
         m = MagicMock()
         m.message_id = f"msg-{i}"
-        m.subject = f"Re: [HILDA] Status request -- BATCH-test{i}"
+        # SHARED-INBOX-1: BATCH-<env>-<10hex> shape. HILDA_ENV defaults to
+        # 'prd' when unset, so the env-scoped ownership fast path treats
+        # these as owned-by-this-poller without a Postgres lookup.
+        m.subject = f"Re: [HILDA] Status request -- BATCH-prd-abcdef0{i}00"
         m.body_text = ""
-        m.body_html = "<p>HILDA-BATCH-ID: BATCH-testX</p>"
+        m.body_html = "<p>HILDA-BATCH-ID: BATCH-prd-abcdef0X00</p>"
         m.sender = "owner@corp.example"
         m.to_addrs = ()
         m.cc_addrs = ()
@@ -170,6 +173,7 @@ async def test_poll_enqueues_owner_replies(base_deps):
     msgs = [_msg(i) for i in range(3)]
     fake_receiver = MagicMock()
     fake_receiver.fetch_once = AsyncMock(return_value=msgs)
+    fake_receiver.mark_processed = AsyncMock()
 
     from core.src.email_service.protocol import EmailKind
     with override_task_deps(deps_with_dispatcher), \
@@ -372,6 +376,294 @@ async def test_dev_filter_passes_when_project_model_empty(base_deps):
     )
     # No project_model -> filter skips -> dispatch proceeds.
     assert result["dispatched"] == 1
+
+
+# ---------------------------------------------------------------------------
+# SHARED-INBOX-1: owner-reply ownership + mark-processed gate
+# ---------------------------------------------------------------------------
+
+
+async def test_owner_reply_env_scoped_other_env_left_unread(base_deps):
+    """A BATCH-<other-env>-<hex> owner reply is left unread (not enqueued,
+    not marked). Ownership fast-path skips other env's traffic on the shared
+    OMADM_BOT inbox."""
+    from datetime import datetime, timezone
+
+    fake_dispatcher = MagicMock()
+    deps_with_dispatcher = TaskDeps(
+        storage=base_deps.storage,
+        sp_writer=base_deps.sp_writer,
+        audit=base_deps.audit,
+        dispatcher=fake_dispatcher,
+    )
+    m = MagicMock()
+    m.message_id = "msg-other-env"
+    m.subject = "Re: [HILDA] Status request -- BATCH-stg-abcdef0123"
+    m.body_text = ""
+    m.body_html = ""
+    m.sender = "owner@corp.example"
+    m.to_addrs = ()
+    m.cc_addrs = ()
+    m.received_at = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    m.attachments = ()
+    fake_receiver = MagicMock()
+    fake_receiver.fetch_once = AsyncMock(return_value=[m])
+    fake_receiver.mark_processed = AsyncMock()
+
+    from core.src.email_service.protocol import EmailKind
+    import os
+    prev_env = os.environ.get("HILDA_ENV")
+    os.environ["HILDA_ENV"] = "prd"  # this poller is production
+    try:
+        with override_task_deps(deps_with_dispatcher), \
+             patch("core.src.email_service.build_receiver", return_value=fake_receiver), \
+             patch(
+                 "core.src.email_service.config.EmailServiceConfig.from_sources",
+                 return_value=MagicMock(),
+             ), \
+             patch("core.src.credential_service.service.SopsCredentialService") as mock_cred_cls, \
+             patch(
+                 "core.src.email_service.inbound.classifier.classify",
+                 return_value=EmailKind.OWNER_REPLY,
+             ), \
+             patch(
+                 "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.delay"
+             ) as mock_delay:
+            mock_cred = MagicMock()
+            mock_cred.load = AsyncMock()
+            mock_cred_cls.return_value = mock_cred
+            result = await _run_poll()
+    finally:
+        if prev_env is None:
+            os.environ.pop("HILDA_ENV", None)
+        else:
+            os.environ["HILDA_ENV"] = prev_env
+
+    assert result["owner_replies"] == 1
+    assert result["owner_reply_enqueued"] == 0
+    assert result["owner_reply_skipped_not_ours"] == 1
+    assert mock_delay.call_count == 0
+    # Critical: mark_processed NOT called -- message must remain unread so
+    # the staging poller can claim it.
+    assert fake_receiver.mark_processed.call_count == 0
+
+
+async def test_owner_reply_env_scoped_own_env_marked(base_deps):
+    """A BATCH-<own-env>-<hex> owner reply is enqueued and marked."""
+    from datetime import datetime, timezone
+
+    fake_dispatcher = MagicMock()
+    deps_with_dispatcher = TaskDeps(
+        storage=base_deps.storage,
+        sp_writer=base_deps.sp_writer,
+        audit=base_deps.audit,
+        dispatcher=fake_dispatcher,
+    )
+    m = MagicMock()
+    m.message_id = "msg-own-env"
+    m.subject = "Re: [HILDA] Status request -- BATCH-stg-abcdef0123"
+    m.body_text = ""
+    m.body_html = ""
+    m.sender = "owner@corp.example"
+    m.to_addrs = ()
+    m.cc_addrs = ()
+    m.received_at = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    m.attachments = ()
+    fake_receiver = MagicMock()
+    fake_receiver.fetch_once = AsyncMock(return_value=[m])
+    fake_receiver.mark_processed = AsyncMock()
+
+    from core.src.email_service.protocol import EmailKind
+    import os
+    prev_env = os.environ.get("HILDA_ENV")
+    os.environ["HILDA_ENV"] = "stg"  # this poller is staging (matches BATCH-stg-)
+    try:
+        with override_task_deps(deps_with_dispatcher), \
+             patch("core.src.email_service.build_receiver", return_value=fake_receiver), \
+             patch(
+                 "core.src.email_service.config.EmailServiceConfig.from_sources",
+                 return_value=MagicMock(),
+             ), \
+             patch("core.src.credential_service.service.SopsCredentialService") as mock_cred_cls, \
+             patch(
+                 "core.src.email_service.inbound.classifier.classify",
+                 return_value=EmailKind.OWNER_REPLY,
+             ), \
+             patch(
+                 "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.delay"
+             ) as mock_delay:
+            mock_cred = MagicMock()
+            mock_cred.load = AsyncMock()
+            mock_cred_cls.return_value = mock_cred
+            result = await _run_poll()
+    finally:
+        if prev_env is None:
+            os.environ.pop("HILDA_ENV", None)
+        else:
+            os.environ["HILDA_ENV"] = prev_env
+
+    assert result["owner_replies"] == 1
+    assert result["owner_reply_enqueued"] == 1
+    assert result["owner_reply_skipped_not_ours"] == 0
+    assert mock_delay.call_count == 1
+    assert fake_receiver.mark_processed.call_count == 1
+    assert fake_receiver.mark_processed.call_args.args[0] == "msg-own-env"
+
+
+async def test_owner_reply_legacy_batch_id_uses_postgres_lookup(base_deps):
+    """Pre-env-scoped legacy BATCH-<hex> falls back to
+    audit_ops.is_outbound_batch_here; True -> enqueue + mark, False -> skip."""
+    from datetime import datetime, timezone
+
+    fake_dispatcher = MagicMock()
+    deps_with_dispatcher = TaskDeps(
+        storage=base_deps.storage,
+        sp_writer=base_deps.sp_writer,
+        audit=base_deps.audit,
+        dispatcher=fake_dispatcher,
+    )
+    m = MagicMock()
+    m.message_id = "msg-legacy"
+    m.subject = "Re: [HILDA] Status request -- BATCH-abcdef0123"  # no env token
+    m.body_text = ""
+    m.body_html = ""
+    m.sender = "owner@corp.example"
+    m.to_addrs = ()
+    m.cc_addrs = ()
+    m.received_at = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    m.attachments = ()
+    fake_receiver = MagicMock()
+    fake_receiver.fetch_once = AsyncMock(return_value=[m])
+    fake_receiver.mark_processed = AsyncMock()
+
+    from core.src.email_service.protocol import EmailKind
+    with override_task_deps(deps_with_dispatcher), \
+         patch("core.src.email_service.build_receiver", return_value=fake_receiver), \
+         patch(
+             "core.src.email_service.config.EmailServiceConfig.from_sources",
+             return_value=MagicMock(),
+         ), \
+         patch("core.src.credential_service.service.SopsCredentialService") as mock_cred_cls, \
+         patch(
+             "core.src.email_service.inbound.classifier.classify",
+             return_value=EmailKind.OWNER_REPLY,
+         ), \
+         patch(
+             "core.src.storage.audit_ops.is_outbound_batch_here",
+             new=AsyncMock(return_value=True),
+         ) as mock_lookup, \
+         patch(
+             "core.src.workflow_engine.tasks.owner_reply.apply_owner_reply_task.delay"
+         ) as mock_delay:
+        mock_cred = MagicMock()
+        mock_cred.load = AsyncMock()
+        mock_cred_cls.return_value = mock_cred
+        result = await _run_poll()
+
+    assert result["owner_reply_enqueued"] == 1
+    assert result["owner_reply_skipped_not_ours"] == 0
+    assert mock_lookup.await_count == 1
+    assert mock_lookup.await_args.args[0] == "BATCH-abcdef0123"
+    assert mock_delay.call_count == 1
+    assert fake_receiver.mark_processed.call_count == 1
+
+
+async def test_sp_alert_dispatch_failure_leaves_unread(base_deps):
+    """Dispatch raises -> mark_processed NOT called -> message re-fetched
+    next poll. Prevents silent loss on transient dispatch errors."""
+    from datetime import datetime, timezone
+
+    fake_dispatcher = MagicMock()
+    fake_dispatcher.dispatch.side_effect = RuntimeError("bang")
+    deps_with_dispatcher = TaskDeps(
+        storage=base_deps.storage,
+        sp_writer=base_deps.sp_writer,
+        audit=base_deps.audit,
+        dispatcher=fake_dispatcher,
+    )
+    m = MagicMock()
+    m.message_id = "msg-boom"
+    m.subject = "Deliverables_MMK - foo added"
+    m.body_text = ""
+    m.body_html = ""
+    m.sender = "sp@example.com"
+    m.to_addrs = ()
+    m.cc_addrs = ()
+    m.received_at = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    m.attachments = ()
+    fake_receiver = MagicMock()
+    fake_receiver.fetch_once = AsyncMock(return_value=[m])
+    fake_receiver.mark_processed = AsyncMock()
+
+    parsed_ok = MagicMock()
+    parsed_ok.action_type = "added"
+    parsed_ok.item_title = "foo"
+    parsed_ok.field_deltas = None
+    parsed_ok.body_kvs = {"project_model": "SM-A999U", "item_no": "1"}
+    parsed_ok.routing_key = SimpleNamespace(
+        list_name="Deliverables", list_suffix="MMK",
+        milestone_name="DRR", item_number=1, project_id="p1",
+    )
+
+    from core.src.email_service.protocol import EmailKind
+    with override_task_deps(deps_with_dispatcher), \
+         patch("core.src.email_service.build_receiver", return_value=fake_receiver), \
+         patch(
+             "core.src.email_service.config.EmailServiceConfig.from_sources",
+             return_value=MagicMock(),
+         ), \
+         patch("core.src.credential_service.service.SopsCredentialService") as mock_cred_cls, \
+         patch(
+             "core.src.email_service.inbound.classifier.classify",
+             return_value=EmailKind.SP_ALERT,
+         ), \
+         patch(
+             "core.src.email_service.sp_alert_parser.SpAlertParser.parse",
+             return_value=parsed_ok,
+         ), \
+         patch(
+             "core.src.workflow_engine.tasks.email_polling._audit_inbound_sp_alert",
+             new=AsyncMock(),
+         ), \
+         patch(
+             "core.src.template_schema.template_lookup.list_known_devices",
+             return_value=None,
+         ):
+        mock_cred = MagicMock()
+        mock_cred.load = AsyncMock()
+        mock_cred_cls.return_value = mock_cred
+        result = await _run_poll()
+
+    assert result["sp_alerts"] == 1
+    assert result["dispatched"] == 0
+    assert result["parse_failures"] == 1
+    # Critical: not marked -> next poll retries.
+    assert fake_receiver.mark_processed.call_count == 0
+
+
+def test_batch_id_helper_env_scoped():
+    """make_batch_id embeds HILDA_ENV; env_token defaults to 'prd'."""
+    import os
+    from core.src.workflow_engine.tasks._batch_id import env_token, make_batch_id
+
+    prev = os.environ.get("HILDA_ENV")
+    try:
+        os.environ["HILDA_ENV"] = "stg"
+        assert env_token() == "stg"
+        assert make_batch_id("aa-bb-cc-dd-ee") == "BATCH-stg-aabbccddee"
+
+        os.environ["HILDA_ENV"] = "PRD"  # case-insensitive
+        assert env_token() == "prd"
+        assert make_batch_id("1234567890abcdef") == "BATCH-prd-1234567890"
+
+        os.environ.pop("HILDA_ENV", None)
+        assert env_token() == "prd"   # default when unset
+        assert make_batch_id("ff-ee-dd").startswith("BATCH-prd-ffeedd")
+    finally:
+        if prev is None:
+            os.environ.pop("HILDA_ENV", None)
+        else:
+            os.environ["HILDA_ENV"] = prev
 
 
 def test_beat_schedule_includes_poll_ews_inbox():

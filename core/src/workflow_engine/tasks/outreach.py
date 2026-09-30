@@ -18,6 +18,7 @@ from core.src.rule_engine import ActionKind
 from core.src.workflow_engine.celery_app import hilda_celery_app
 from core.src.workflow_engine.registry import TaskBinding, register_task_binding
 from core.src.workflow_engine.task_deps import get_task_deps
+from core.src.workflow_engine.tasks._batch_id import make_batch_id
 
 __all__ = [
     "send_initial_outreach_task",
@@ -322,9 +323,11 @@ def send_initial_outreach_task(
     # reply parser can correlate the reply back to delivery_item_id via the
     # communication_log audit row. Uses the first 10 hex chars of correlation
     # (sufficient entropy for FR-24 BATCH-id token uniqueness within a
-    # milestone's outreach window).
+    # milestone's outreach window). Env-scoped since shared OMADM_BOT inbox
+    # requires per-env ownership discrimination on inbound owner replies
+    # (see _batch_id.env_token for the shape).
     correlation_id = event_context.get("correlation_id", "")
-    batch_id = f"BATCH-{correlation_id.replace('-', '')[:10]}"
+    batch_id = make_batch_id(correlation_id)
 
     # Resolve owner identity for template rendering (owner_name) AND fetch the
     # current SP-side item row for item_name. Best-effort -- on any failure,
@@ -813,7 +816,7 @@ def send_reminder_task(
             message_id = _send_email(
                 deps,
                 to=recipients,
-                subject=f"[HILDA] Reminder #{reminder_count} -- BATCH-{event_context.get('correlation_id', '')[:8]}",
+                subject=f"[HILDA] Reminder #{reminder_count} -- {make_batch_id(event_context.get('correlation_id', ''))}",
                 body_marker=f"send_reminder: template={template} count={reminder_count}",
             )
         except Exception as e:  # noqa: BLE001
