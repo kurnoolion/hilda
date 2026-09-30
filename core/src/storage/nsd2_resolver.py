@@ -297,6 +297,17 @@ EXCLUSION_CARRIERS: frozenset[str] = frozenset({"VZW"})
 # so 'VZW SE' -- a genuinely different carrier scope -- does not qualify.
 CARRIER_ALLOWED_ROOT_FOLDERS: dict[str, tuple[str, ...]] = {
     "VZW": ("VZW", "Verizon"),
+    # STAGE-MMK-ALIAS-1 (2026-09-30): MMK is the customer_id used on the
+    # staging PC (revived pre-VZW placeholder, per Sep 28 staging bring-up
+    # STATUS entry). Its NSD subtree is a copy of VZW's -- files under
+    # VZW/ and Verizon/ -- so the same allowlist anchor set applies.
+    # Without this entry, NSD-STRICT-CARRIER-SHORTCIRCUIT-1 fires the
+    # strict pre-check at nsd2_poll.py and any file with a dynamic
+    # sub-folder name (Skylo NTN, Power Management, ...) is skipped
+    # with NSD_SKIP_NO_ITEM. Staging then can't exercise the router's
+    # default-catch-all path that prod uses. Failing test that guards
+    # this: test_nsd_strict.py::test_mmk_is_carrier_allowlist_customer.
+    "MMK": ("VZW", "Verizon"),
 }
 
 
