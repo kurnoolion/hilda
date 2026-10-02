@@ -281,8 +281,8 @@ auto-extracted preserving folder structure; every save creates a new version.</p
              legacy Office formats. upload_token is None on other rows. #}
           {% if f.upload_token %}
             &nbsp;<a href="{{ url_prefix }}/browse/upload_form/{{ f.upload_token }}"
-                     title="Download, save-as modern format locally, upload back as a new revision"
-                     >Upload replacement</a>
+                     title="Upload a non-encrypted copy of this document as a new revision"
+                     >Upload</a>
           {% endif %}
         </td>
         <td>

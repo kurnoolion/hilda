@@ -1679,7 +1679,7 @@ class TestDrmUploadReplacement:
         r = client.get("/browse/MMK/SM-S671U1/DRR/tg/hw_reports/")
         assert r.status_code == 200
         assert "/browse/upload_form/" in r.text
-        assert "Upload replacement" in r.text
+        assert ">Upload</a>" in r.text
 
     async def test_browse_listing_shows_upload_link_for_legacy(self, cfg):
         # Clean .doc (not DRM-wrapped) -> still shows Upload link because .doc

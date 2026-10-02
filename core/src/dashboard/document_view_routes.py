@@ -1740,7 +1740,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
         family_str = ", ".join(sorted(family))
         return HTMLResponse(
             "<html><body style=\"font-family:sans-serif; max-width:640px;\">"
-            f"<h1>Upload replacement for <code>{safe_name}</code></h1>"
+            f"<h1>Upload for <code>{safe_name}</code></h1>"
             "<p>Save the downloaded copy locally as a modern format "
             f"({family_str}) in a NASCA-aware Office client, then upload it here.</p>"
             "<ul><li>Same base name is required (trailing "
@@ -1749,7 +1749,7 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
             "<li>Extension must stay in the same family as the original.</li></ul>"
             f"<form method=\"POST\" action=\"{post_url}\" enctype=\"multipart/form-data\">"
             f"<input type=\"file\" name=\"file\" accept=\"{accept_attr}\" required>"
-            "<button type=\"submit\">Upload replacement</button>"
+            "<button type=\"submit\">Upload</button>"
             "</form>"
             "</body></html>",
         )
