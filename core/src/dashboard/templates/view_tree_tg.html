@@ -101,6 +101,14 @@ auto-extracted preserving folder structure; every save creates a new version.</p
           {% if f.is_superseded %}
             <span title="An older revision — a newer one has arrived. Read-only: only the latest revision is submitted to the carrier. Use this copy for reference while merging."
                   style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #888; color:#666; border-radius:3px; font-size:0.85em;">superseded</span>
+            {% if f.superseded_winner_hint %}
+              {# SUPERSEDED-HINT-1 (2026-10-02): points the TPM at where the
+                 winner lives (tg_name + item_no) so they don't scan every TG
+                 by hand. Non-clickable text; empty when the winner's
+                 location can't be derived. #}
+              <span style="margin-left:0.4em; color:#666; font-size:0.85em; font-style:italic;"
+                    title="The latest revision of this file lives here.">winner at {{ f.superseded_winner_hint }}</span>
+            {% endif %}
           {% endif %}
           {% if f.is_drm_wrapped %}
             <span title="Wrapped by corp IRM (NASCA) in transit. In-browser edit unavailable — download and open locally in a NASCA-aware Office client." style="margin-left:0.5em; padding:0.1em 0.4em; border:1px solid #a55; color:#a55; border-radius:3px; font-size:0.85em;">🔒 DRM</span>

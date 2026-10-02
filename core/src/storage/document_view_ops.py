@@ -136,6 +136,13 @@ class TgFileEntry:
     # stale revision (`/browse/edit` enforces the same rule server-side).
     # Always False for single-path families and for family-less paths.
     is_superseded: bool = False
+    # SUPERSEDED-HINT-1 (2026-10-02): on a superseded row, a short label
+    # pointing the TPM at where the winning revision of this family lives --
+    # e.g. "TG=HW PL, item=5". Lets the TPM find the active copy without
+    # scanning other TGs or items by hand. Empty when the row is not
+    # superseded or when the winner's location can't be derived (missing
+    # tg_name segment / item_id without a trailing item_no).
+    superseded_winner_hint: str = ""
     # RECLASS-1 (2026-08-24): doc_type + file_hash + is_staged surfaced to the
     # TG-view template so TPM can spot Unresolved rows and click Reclassify.
     # `doc_type` values include "" / "unresolved" (classification miss) +
@@ -879,6 +886,43 @@ async def list_files_in_tg(
         r.view_relative_path: _merge_flags(r.view_relative_path, r.saved_by or "")
         for r in current_rows
     }
+
+    # SUPERSEDED-HINT-1 (2026-10-02): per-path short label naming WHERE the
+    # family's winner lives (tg_name + item_no), so the TG view can tell the
+    # TPM "winner at TG=HW PL, item=5" alongside the superseded badge instead
+    # of making them hunt. Empty for non-superseded paths; empty when the
+    # winner's view_relative_path doesn't parse to a tg_name segment or the
+    # fam's item_id doesn't carry a trailing item_no.
+    def _winner_hint(path: str) -> str:
+        fam = family_by_path.get(path)
+        if fam is None:
+            return ""
+        winner_path = winner_by_family.get(fam)
+        if not winner_path or winner_path == path:
+            return ""
+        # view_relative_path shape per NSDPath.view_tree:
+        #   view/<customer>/<device>/<milestone>/<tg_name>/<...>
+        segs = winner_path.split("/")
+        winner_tg = segs[4] if len(segs) >= 5 else ""
+        # fam = (item_id, slug). item_id's trailing hyphen-delimited token is
+        # item_no (set at delivery_item create: f"{cust}-{dev}-{ms}-{item_no}").
+        # device_id can contain hyphens so split from the RIGHT.
+        item_id = fam[0] or ""
+        item_no = item_id.rsplit("-", 1)[-1] if "-" in item_id else ""
+        parts: list[str] = []
+        if winner_tg:
+            parts.append(f"TG={winner_tg}")
+        if item_no:
+            parts.append(f"item={item_no}")
+        return ", ".join(parts)
+
+    winner_hint_by_path = {
+        r.view_relative_path: (
+            _winner_hint(r.view_relative_path)
+            if merge_flags_by_path[r.view_relative_path][1] else ""
+        )
+        for r in current_rows
+    }
     indexed_hash_by_path = {
         r.view_relative_path: _indexed_hash(r.view_relative_path)
         for r in current_rows
@@ -916,6 +960,7 @@ async def list_files_in_tg(
             is_drm_wrapped=bool(r.is_drm_wrapped),
             needs_merge=merge_flags_by_path[r.view_relative_path][0],
             is_superseded=merge_flags_by_path[r.view_relative_path][1],
+            superseded_winner_hint=winner_hint_by_path[r.view_relative_path],
             doc_type=doc_meta_by_hash.get(
                 indexed_hash_by_path[r.view_relative_path], ("", 0)
             )[0],

@@ -942,6 +942,10 @@ def register_document_view_routes(app: FastAPI, cfg, templates) -> None:
                 # MERGE-2 (2026-08-30): older revision of a family -- template
                 # badges it and shows Download only (no Edit link).
                 "is_superseded":       f.is_superseded,
+                # SUPERSEDED-HINT-1 (2026-10-02): short label naming WHERE the
+                # family's winner lives (e.g. "TG=HW PL, item=5"), rendered
+                # beside the superseded badge so the TPM doesn't hunt.
+                "superseded_winner_hint": f.superseded_winner_hint,
                 # RECLASS-2 (2026-08-24): pass reclassify inputs to template
                 # so it can render Reclassify button + doc_type dropdown on
                 # is_staged rows. Template posts (file_hash, new_doc_type)
