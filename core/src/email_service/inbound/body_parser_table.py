@@ -52,7 +52,7 @@ _log = logging.getLogger(__name__)
 # Matches the body anchor emitted by outreach_table.j2:
 #   <p>HILDA-BATCH-ID: BATCH-<id></p>
 # Tolerant to surrounding tags / whitespace -- only the literal token matters.
-_BATCH_ANCHOR_RE = re.compile(r"HILDA-BATCH-ID:\s*(BATCH-[A-Za-z0-9]+)", re.IGNORECASE)
+_BATCH_ANCHOR_RE = re.compile(r"HILDA-BATCH-ID:\s*(BATCH-[A-Za-z0-9-]+)", re.IGNORECASE)
 
 # Header cell text -> canonical column name. Owners shouldn't edit the header
 # row, but be tolerant to case + whitespace + surrounding HTML entities.

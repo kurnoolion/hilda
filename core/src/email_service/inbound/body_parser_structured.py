@@ -32,7 +32,7 @@ __all__ = ["parse_structured_block", "resolve_sender_match"]
 
 
 _HEADER_RE = re.compile(r"HILDA\s+STATUS\s+BLOCK", re.IGNORECASE)
-_BATCH_LINE_RE = re.compile(r"(BATCH-[a-zA-Z0-9]+)")
+_BATCH_LINE_RE = re.compile(r"(BATCH-[a-zA-Z0-9-]+)")
 # ITEM line: "ITEM-<n> <STATUS>: <note>"
 _ITEM_LINE_RE = re.compile(
     r"^ITEM-(?P<n>\d+)\s+(?P<status>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<note>.*)$",

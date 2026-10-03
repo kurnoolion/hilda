@@ -45,7 +45,7 @@ SP_ALERT_SUBJECT_RE = re.compile(
 )
 
 # FR-24 BATCH-id token -- per outbound composer convention `BATCH-<alphanumeric>`
-BATCH_ID_RE = re.compile(r"BATCH-[a-zA-Z0-9]+")
+BATCH_ID_RE = re.compile(r"BATCH-[a-zA-Z0-9-]+")
 
 # BOUNCE-LOOP-STOP-1 (2026-09-12): common NDR / DSN subject prefixes across
 # corp Exchange, Office 365, Postfix, Sendmail. Case-insensitive. Matches
